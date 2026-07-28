@@ -16,9 +16,6 @@ func TestProviderEnvForClaudeCodeUsesAnthropicCompatibleVars(t *testing.T) {
 
 	env := ProviderEnvForModel(provider, entity.ModelClaudeCode)
 
-	if env["ANTHROPIC_AUTH_TOKEN"] != "secret-key" {
-		t.Fatalf("ANTHROPIC_AUTH_TOKEN=%q", env["ANTHROPIC_AUTH_TOKEN"])
-	}
 	if env["ANTHROPIC_API_KEY"] != "secret-key" {
 		t.Fatalf("ANTHROPIC_API_KEY=%q", env["ANTHROPIC_API_KEY"])
 	}

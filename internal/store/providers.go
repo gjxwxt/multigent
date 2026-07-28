@@ -285,11 +285,11 @@ func ProviderEnvForModel(p entity.APIProvider, model entity.AgentModel) map[stri
 
 func applyClaudeCodeProviderEnv(env map[string]string, p entity.APIProvider) {
 	if p.APIKey != "" {
-		// Claude Code compatible gateways commonly use ANTHROPIC_AUTH_TOKEN,
-		// while official Anthropic SDK-style clients use ANTHROPIC_API_KEY.
-		// Set both so users do not need to understand that distinction.
-		env["ANTHROPIC_AUTH_TOKEN"] = p.APIKey
 		env["ANTHROPIC_API_KEY"] = p.APIKey
+	}
+	if token, ok := p.Env["ANTHROPIC_AUTH_TOKEN"]; ok && strings.TrimSpace(token) != "" {
+		env["ANTHROPIC_AUTH_TOKEN"] = token
+		delete(env, "ANTHROPIC_API_KEY")
 	}
 	if p.BaseURL != "" {
 		env["ANTHROPIC_BASE_URL"] = p.BaseURL

@@ -585,11 +585,9 @@ func buildRuntimeReadinessWithOptions(meta *entity.AgentMeta, opts runtimeReadin
 	}
 
 	var checks []setupCheck
-	provider := entity.SandboxDocker
+	provider := entity.SandboxNone
 	if meta.Sandbox != nil && meta.Sandbox.Provider != "" {
 		provider = meta.Sandbox.Provider
-	} else if strings.TrimSpace(meta.RuntimeNodeID) != "" {
-		provider = entity.SandboxNone
 	}
 	isDocker := provider == entity.SandboxDocker
 	if provider == entity.SandboxNone {
@@ -600,9 +598,8 @@ func buildRuntimeReadinessWithOptions(meta *entity.AgentMeta, opts runtimeReadin
 			})
 		} else {
 			checks = append(checks, setupCheck{
-				Key: "sandbox", Label: "Sandbox", Status: "error", Blocking: true,
-				Detail: "No sandbox runtime is configured. Multigent requires an isolated runtime before agents can run.",
-				Action: "Configure Docker or another supported sandbox provider.",
+				Key: "sandbox", Label: "Sandbox", Status: "ok",
+				Detail: "Direct host execution (un-sandboxed local run).",
 			})
 		}
 	} else if provider == entity.SandboxE2B {
