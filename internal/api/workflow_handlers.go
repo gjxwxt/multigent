@@ -441,7 +441,7 @@ func (s *Server) activeWorkflowTaskView(workspaceID, project, taskID string, tas
 		}
 		out.Agent = actorID
 		out.Assignee = project + "/" + actorID
-		if taskStatus == entity.TaskStatusInProgress || s.hasActiveRuntimeRun(workspaceID, project, actorID, taskID) {
+		if taskStatus == entity.TaskStatusInProgress || s.hasActiveRuntimeRun(workspaceID, project, actorID, "") || s.hasActiveRuntimeRun(workspaceID, project, actorID, taskID) || workflowStepInstanceOpen(inst.Status) || run.Status == "active" {
 			out.Status = string(entity.TaskStatusInProgress)
 		} else {
 			out.Status = string(entity.TaskStatusPending)

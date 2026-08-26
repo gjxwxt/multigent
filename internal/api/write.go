@@ -273,6 +273,14 @@ func (s *Server) createProjectTaskFromBody(w http.ResponseWriter, r *http.Reques
 			s.serverError(w, err)
 			return
 		}
+		if startStep, _, ok := workflowStartActor(workflowDef, body.WorkflowActorBindings); ok {
+			if startStep.Type == "human_review" {
+				t.Status = entity.TaskStatusAwaitingConfirmation
+			} else {
+				t.Status = entity.TaskStatusInProgress
+			}
+			_ = s.ts.PersistTask(name, agentName, t)
+		}
 	}
 	if body.AutoStart {
 		if _, _, err := s.startProjectTaskDirect(workspaceID, name, agentName, t, r); err != nil {
