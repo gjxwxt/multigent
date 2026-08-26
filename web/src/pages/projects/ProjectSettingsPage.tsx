@@ -19,6 +19,7 @@ import {
   Sparkles,
   Trash2,
   Unlock,
+  Users,
   X,
   Zap,
 } from 'lucide-react'
@@ -357,7 +358,7 @@ function InitializeProjectModal({
   const [selectedAgent, setSelectedAgent] = useState<string>('')
   const [loadingAgents, setLoadingAgents] = useState(false)
 
-  // Sync localPath & fetch agents whenever modal opens
+  // Sync localPath & fetch project member agents whenever modal opens
   useEffect(() => {
     if (isOpen) {
       if (currentRepo.trim()) {
@@ -366,25 +367,24 @@ function InitializeProjectModal({
       setError(null)
       setLoadingAgents(true)
 
-      Promise.all([
-        apiFetch<Array<{ name?: string; model?: string }>>(`/api/v1/projects/${encodeURIComponent(projectId)}/agents`).catch(() => []),
-        apiFetch<{ agents?: Array<{ name?: string; displayName?: string; model?: string }> }>('/api/v1/agents').catch(() => ({ agents: [] })),
-      ]).then(([projAgentsRes, wsAgentsRes]) => {
-        const wsList = Array.isArray(wsAgentsRes) ? wsAgentsRes : wsAgentsRes?.agents || []
-        const availableWorkers = wsList.filter((w) => w.name && w.model !== 'human')
-        setAgents(availableWorkers)
-
-        // Preselect: existing project member first, or first workspace worker
-        const projList = Array.isArray(projAgentsRes) ? projAgentsRes : []
-        const existingProjAgent = projList.find((a) => a.name && a.model !== 'human')
-        if (existingProjAgent?.name) {
-          setSelectedAgent(existingProjAgent.name)
-        } else if (availableWorkers.length > 0) {
-          setSelectedAgent(availableWorkers[0].name)
-        }
-      }).finally(() => {
-        setLoadingAgents(false)
-      })
+      apiFetch<Array<{ name?: string; displayName?: string; model?: string }>>(`/api/v1/projects/${encodeURIComponent(projectId)}/agents`)
+        .then((projAgentsRes) => {
+          const projList = Array.isArray(projAgentsRes) ? projAgentsRes : []
+          const availableWorkers = projList.filter((w) => w.name && w.model !== 'human')
+          setAgents(availableWorkers as Array<{ name: string; displayName?: string; model?: string }>)
+          if (availableWorkers.length > 0) {
+            setSelectedAgent(availableWorkers[0].name)
+          } else {
+            setSelectedAgent('')
+          }
+        })
+        .catch(() => {
+          setAgents([])
+          setSelectedAgent('')
+        })
+        .finally(() => {
+          setLoadingAgents(false)
+        })
     }
   }, [isOpen, currentRepo, projectId])
 
@@ -673,13 +673,23 @@ function InitializeProjectModal({
 
           {/* Assigned Agent Selector & Validation */}
           {!loadingAgents && agents.length === 0 ? (
-            <div className="flex items-start gap-2.5 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+            <div className="flex items-start gap-2.5 rounded-lg border border-amber-300 bg-amber-50 p-3.5 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
               <AlertTriangle className="size-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
-              <div>
+              <div className="flex-1 min-w-0">
                 <p className="font-semibold">{t('projectSettings.noAgentWarningTitle')}</p>
-                <p className="mt-0.5 text-[11px] text-amber-700 dark:text-amber-300 leading-relaxed">
+                <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-300 leading-relaxed">
                   {t('projectSettings.noAgentWarningDesc')}
                 </p>
+                <div className="mt-3">
+                  <Link
+                    to={`/projects/${encodeURIComponent(projectId)}/members`}
+                    onClick={onClose}
+                    className="inline-flex items-center gap-1.5 rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium text-white shadow-xs hover:bg-amber-700 transition-colors"
+                  >
+                    <Users className="size-3.5" />
+                    <span>{t('projectSettings.goToMembers')}</span>
+                  </Link>
+                </div>
               </div>
             </div>
           ) : (
