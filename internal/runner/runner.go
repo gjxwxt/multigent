@@ -1380,6 +1380,35 @@ func (r *Runner) workspaceFilesEnv(path string) map[string]string {
 	return map[string]string{runtimeFilesDirEnv: path}
 }
 
+func (r *Runner) resolveHTTPAgentConfig(meta *entity.AgentMeta) (*entity.HTTPAgentConfig, error) {
+	if meta == nil {
+		return nil, fmt.Errorf("agent metadata is nil")
+	}
+	if meta.HTTPAgent != nil {
+		return meta.HTTPAgent, nil
+	}
+	if strings.TrimSpace(meta.Provider) != "" {
+		ps := store.NewProviderStore(r.root)
+		provider, err := ps.Get(meta.Provider)
+		if err == nil && provider != nil {
+			targetURL := provider.BaseURL
+			if targetURL != "" && !strings.HasSuffix(targetURL, "/chat/completions") {
+				targetURL = strings.TrimRight(targetURL, "/") + "/chat/completions"
+			}
+			modelName := provider.Model
+			if strings.TrimSpace(meta.RuntimeModel) != "" {
+				modelName = strings.TrimSpace(meta.RuntimeModel)
+			}
+			return &entity.HTTPAgentConfig{
+				URL:    targetURL,
+				Model:  modelName,
+				APIKey: provider.APIKey,
+			}, nil
+		}
+	}
+	return nil, fmt.Errorf("http-agent: no http_agent config in .multigent-agent.yaml or bound model provider")
+}
+
 func hasRuntimeMountTarget(mounts []entity.RuntimeMount, target string) bool {
 	target = strings.TrimSpace(target)
 	for _, mount := range mounts {
@@ -1416,8 +1445,9 @@ func (r *Runner) addRuntimeDockerSystemMounts(runtimeCfg *entity.SandboxConfig) 
 // endpoint. The agent's context.md is sent as the system message; the task
 // prompt + system meta footer become the user message.
 func (r *Runner) runTaskHTTP(project, agentName, agentDir string, meta *entity.AgentMeta, task *entity.Task) (*RunResult, error) {
-	if meta.HTTPAgent == nil {
-		return nil, fmt.Errorf("http-agent: no http_agent config in .multigent-agent.yaml (re-hire with --http-url)")
+	httpCfg, err := r.resolveHTTPAgentConfig(meta)
+	if err != nil {
+		return nil, err
 	}
 
 	userPrompt := r.taskPromptWithWorkflowContext(project, agentName, task) + fmt.Sprintf(systemMetaFooter,
@@ -1436,18 +1466,18 @@ func (r *Runner) runTaskHTTP(project, agentName, agentDir string, meta *entity.A
 	defer logFile.Close()
 
 	fmt.Fprintf(logFile, "=== multigent run: %s/%s task=%s model=http-agent url=%s ===\n",
-		project, agentName, task.ID, meta.HTTPAgent.URL)
+		project, agentName, task.ID, httpCfg.URL)
 	fmt.Fprintf(logFile, "Started: %s\n\n", time.Now().UTC().Format(time.RFC3339))
 
 	systemPrompt := readAgentContextFile(agentDir)
 	runStarted := time.Now()
-	output, httpErr := httpExec(meta.HTTPAgent, systemPrompt, userPrompt, logFile, false)
+	output, httpErr := httpExec(httpCfg, systemPrompt, userPrompt, logFile, false)
 	runFinished := time.Now()
 
 	fmt.Fprintf(logFile, "\n=== finished: %s ===\n", time.Now().UTC().Format(time.RFC3339))
 
 	result := &RunResult{LogPath: logPath}
-	httpSummary := httpCommandSummary(meta.HTTPAgent.URL)
+	httpSummary := httpCommandSummary(httpCfg.URL)
 	modelNorm := string(entity.ModelHTTPAgent)
 	sandboxLabel := "host"
 	if meta.Sandbox != nil && meta.Sandbox.Provider != entity.SandboxNone {
@@ -1489,8 +1519,9 @@ func (r *Runner) runTaskHTTP(project, agentName, agentDir string, meta *entity.A
 // execPromptHTTP handles ExecPrompt for http-agent: sends the raw prompt to
 // the HTTP endpoint and streams the response to stdout + log file.
 func (r *Runner) execPromptHTTP(agentDir string, meta *entity.AgentMeta, prompt string) (*RunResult, error) {
-	if meta.HTTPAgent == nil {
-		return nil, fmt.Errorf("http-agent: no http_agent config in .multigent-agent.yaml (re-hire with --http-url)")
+	httpCfg, err := r.resolveHTTPAgentConfig(meta)
+	if err != nil {
+		return nil, err
 	}
 
 	logDir, err := r.ts.RunLogDir(meta.Project, meta.Name)
@@ -1506,12 +1537,12 @@ func (r *Runner) execPromptHTTP(agentDir string, meta *entity.AgentMeta, prompt 
 	defer logFile.Close()
 
 	fmt.Fprintf(logFile, "=== multigent exec: %s/%s model=http-agent url=%s ===\n",
-		meta.Project, meta.Name, meta.HTTPAgent.URL)
+		meta.Project, meta.Name, httpCfg.URL)
 	fmt.Fprintf(logFile, "Started: %s\n\n", time.Now().UTC().Format(time.RFC3339))
 
 	systemPrompt := readAgentContextFile(agentDir)
 	runStarted := time.Now()
-	output, httpErr := httpExec(meta.HTTPAgent, systemPrompt, prompt, logFile, true)
+	output, httpErr := httpExec(httpCfg, systemPrompt, prompt, logFile, true)
 	runFinished := time.Now()
 
 	fmt.Fprintf(logFile, "\n=== finished: %s ===\n", time.Now().UTC().Format(time.RFC3339))
