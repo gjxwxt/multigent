@@ -353,14 +353,40 @@ function InitializeProjectModal({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Sync localPath whenever modal opens or currentRepo changes
+  const [agents, setAgents] = useState<Array<{ name: string; displayName?: string; model?: string }>>([])
+  const [selectedAgent, setSelectedAgent] = useState<string>('')
+  const [loadingAgents, setLoadingAgents] = useState(false)
+
+  // Sync localPath & fetch agents whenever modal opens
   useEffect(() => {
     if (isOpen) {
       if (currentRepo.trim()) {
         setLocalPath(currentRepo.trim())
       }
+      setError(null)
+      setLoadingAgents(true)
+
+      Promise.all([
+        apiFetch<Array<{ name?: string; model?: string }>>(`/api/v1/projects/${encodeURIComponent(projectId)}/agents`).catch(() => []),
+        apiFetch<{ agents?: Array<{ name?: string; displayName?: string; model?: string }> }>('/api/v1/agents').catch(() => ({ agents: [] })),
+      ]).then(([projAgentsRes, wsAgentsRes]) => {
+        const wsList = Array.isArray(wsAgentsRes) ? wsAgentsRes : wsAgentsRes?.agents || []
+        const availableWorkers = wsList.filter((w) => w.name && w.model !== 'human')
+        setAgents(availableWorkers)
+
+        // Preselect: existing project member first, or first workspace worker
+        const projList = Array.isArray(projAgentsRes) ? projAgentsRes : []
+        const existingProjAgent = projList.find((a) => a.name && a.model !== 'human')
+        if (existingProjAgent?.name) {
+          setSelectedAgent(existingProjAgent.name)
+        } else if (availableWorkers.length > 0) {
+          setSelectedAgent(availableWorkers[0].name)
+        }
+      }).finally(() => {
+        setLoadingAgents(false)
+      })
     }
-  }, [isOpen, currentRepo])
+  }, [isOpen, currentRepo, projectId])
 
   if (!isOpen) return null
 
@@ -368,6 +394,12 @@ function InitializeProjectModal({
     setBusy(true)
     setError(null)
     try {
+      if (!selectedAgent) {
+        setError(t('projectSettings.noAgentWarningTitle'))
+        setBusy(false)
+        return
+      }
+
       const defaultProjectWorkspace = currentRepo.trim() || `/opt/multigent/data/projects/${projectId}/workspace`
       const targetRepo =
         activeTab === 'bind_existing' && existingType === 'local' && localPath.trim()
@@ -380,83 +412,57 @@ function InitializeProjectModal({
         repo: targetRepo,
       })
 
-      // 2. Discover or allocate target agent in project
-      let targetAgent: string | null = null
+      // 2. Ensure agent is bound to project memberships
       try {
-        const projectAgents = await apiFetch<Array<{ name?: string; model?: string }>>(
-          `/api/v1/projects/${encodeURIComponent(projectId)}/agents`
+        await apiPost(
+          `/api/v1/projects/${encodeURIComponent(projectId)}/memberships`,
+          { workerName: selectedAgent }
         )
-        if (Array.isArray(projectAgents) && projectAgents.length > 0) {
-          const nonHuman = projectAgents.find((a) => a.model !== 'human' && a.name)
-          targetAgent = nonHuman?.name || projectAgents[0].name || null
+      } catch {
+        // non-blocking if already member
+      }
+
+      // 3. Prepare task payload & dispatch
+      let taskTitle = ''
+      let taskPrompt = ''
+
+      if (activeTab === 'bind_existing') {
+        if (existingType === 'remote') {
+          const url = remoteUrl.trim() || 'git@gitlab.internal:group/repo.git'
+          taskTitle = `【工程初始化】克隆远程仓库并检查就绪`
+          taskPrompt = `请使用配置好的 Git SSH 凭据或 GitLab 访问令牌，在项目工作区目录 (${targetRepo}) 中克隆远程仓库 "${url}"。\n\n克隆完成后：\n1. 检查工程目录结构与分支信息；\n2. 安装项目依赖（如 npm install / go mod download 等）；\n3. 执行一次语法或单测检查；\n4. 输出初始化就绪报告，说明工程已就绪可开始后续任务。`
+        } else {
+          taskTitle = `【工程初始化】绑定并校验本地工作区`
+          taskPrompt = `项目工作区已绑定到本地路径 "${targetRepo}"。\n\n请进入该目录：\n1. 检查现有代码结构与 Git 状态；\n2. 确认开发环境与依赖就绪情况；\n3. 输出环境健康检查报告。`
         }
+      } else {
+        // Create new
+        if (useTemplate) {
+          const tpl = TEMPLATES.find((x) => x.id === selectedTemplate)
+          const tplName = tpl ? t(tpl.label) : selectedTemplate
+          taskTitle = `【工程初始化】构建 ${tplName} 模板脚手架`
+          taskPrompt = `请在当前项目工作区 (${targetRepo}) 初始化 "${tplName}" 工程骨架：\n\n1. 初始化 Git 仓库并创建符合最佳实践的完整工程目录；\n2. 生成基础依赖配置（package.json、go.mod、requirements.txt 等）与入口文件；\n3. 添加标准的 .gitignore 和详细的 README.md 开发说明；\n4. 进行一次基础构建与语法校验，确保工程可一键启动；\n5. 输出初始化完成报告，列出目录架构与启动命令。`
+        } else {
+          taskTitle = `【工程初始化】初始化空白代码工程`
+          taskPrompt = `请在当前项目工作区 (${targetRepo}) 初始化基础 Git 仓库，创建标准的 README.md 和 .gitignore 文件，并输出初始化完成说明。`
+        }
+      }
+
+      // 4. Create and dispatch initialization task
+      await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks`, {
+        agent: selectedAgent,
+        title: taskTitle,
+        description: `自动化工程初始化 (${activeTab === 'bind_existing' ? '已有仓库' : '从零新建'})`,
+        prompt: taskPrompt,
+        type: 'chore',
+        priority: 3,
+      })
+
+      // 5. Wake up the agent
+      try {
+        await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(selectedAgent)}/wakeup`, {})
       } catch {
         // non-blocking
-      }
-
-      // If no agent is attached to this project yet, try to bind an existing workspace worker
-      if (!targetAgent) {
-        try {
-          const wsAgentsRes = await apiFetch<{ agents?: Array<{ name?: string; model?: string }> }>(
-            '/api/v1/agents'
-          )
-          const wsAgents = Array.isArray(wsAgentsRes) ? wsAgentsRes : wsAgentsRes?.agents || []
-          const availableWorker = wsAgents.find((w) => w.model !== 'human' && w.name) || wsAgents[0]
-          if (availableWorker?.name) {
-            await apiPost(
-              `/api/v1/projects/${encodeURIComponent(projectId)}/memberships`,
-              { workerName: availableWorker.name }
-            )
-            targetAgent = availableWorker.name
-          }
-        } catch {
-          // non-blocking
-        }
-      }
-
-      // 3. Prepare task payload & dispatch if agent is available
-      if (targetAgent) {
-        let taskTitle = ''
-        let taskPrompt = ''
-
-        if (activeTab === 'bind_existing') {
-          if (existingType === 'remote') {
-            const url = remoteUrl.trim() || 'git@gitlab.internal:group/repo.git'
-            taskTitle = `【工程初始化】克隆远程仓库并检查就绪`
-            taskPrompt = `请使用配置好的 Git SSH 凭据或 GitLab 访问令牌，在项目工作区目录 (${targetRepo}) 中克隆远程仓库 "${url}"。\n\n克隆完成后：\n1. 检查工程目录结构与分支信息；\n2. 安装项目依赖（如 npm install / go mod download 等）；\n3. 执行一次语法或单测检查；\n4. 输出初始化就绪报告，说明工程已就绪可开始后续任务。`
-          } else {
-            taskTitle = `【工程初始化】绑定并校验本地工作区`
-            taskPrompt = `项目工作区已绑定到本地路径 "${targetRepo}"。\n\n请进入该目录：\n1. 检查现有代码结构与 Git 状态；\n2. 确认开发环境与依赖就绪情况；\n3. 输出环境健康检查报告。`
-          }
-        } else {
-          // Create new
-          if (useTemplate) {
-            const tpl = TEMPLATES.find((x) => x.id === selectedTemplate)
-            const tplName = tpl ? t(tpl.label) : selectedTemplate
-            taskTitle = `【工程初始化】构建 ${tplName} 模板脚手架`
-            taskPrompt = `请在当前项目工作区 (${targetRepo}) 初始化 "${tplName}" 工程骨架：\n\n1. 初始化 Git 仓库并创建符合最佳实践的完整工程目录；\n2. 生成基础依赖配置（package.json、go.mod、requirements.txt 等）与入口文件；\n3. 添加标准的 .gitignore 和详细的 README.md 开发说明；\n4. 进行一次基础构建与语法校验，确保工程可一键启动；\n5. 输出初始化完成报告，列出目录架构与启动命令。`
-          } else {
-            taskTitle = `【工程初始化】初始化空白代码工程`
-            taskPrompt = `请在当前项目工作区 (${targetRepo}) 初始化基础 Git 仓库，创建标准的 README.md 和 .gitignore 文件，并输出初始化完成说明。`
-          }
-        }
-
-        // 4. Create and dispatch initialization task
-        await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks`, {
-          agent: targetAgent,
-          title: taskTitle,
-          description: `自动化工程初始化 (${activeTab === 'bind_existing' ? '已有仓库' : '从零新建'})`,
-          prompt: taskPrompt,
-          type: 'chore',
-          priority: 3,
-        })
-
-        // 5. Wake up the agent
-        try {
-          await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(targetAgent)}/wakeup`, {})
-        } catch {
-          // non-blocking
-        }
       }
 
       onSuccess(targetRepo)
@@ -664,6 +670,36 @@ function InitializeProjectModal({
               )}
             </div>
           )}
+
+          {/* Assigned Agent Selector & Validation */}
+          {!loadingAgents && agents.length === 0 ? (
+            <div className="flex items-start gap-2.5 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+              <AlertTriangle className="size-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-semibold">{t('projectSettings.noAgentWarningTitle')}</p>
+                <p className="mt-0.5 text-[11px] text-amber-700 dark:text-amber-300 leading-relaxed">
+                  {t('projectSettings.noAgentWarningDesc')}
+                </p>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-1.5 pt-2 border-t border-neutral-100 dark:border-zinc-800">
+              <label className="block text-xs font-medium text-neutral-700 dark:text-zinc-300">
+                {t('projectSettings.assignedAgentLabel')}
+              </label>
+              <select
+                value={selectedAgent}
+                onChange={(e) => setSelectedAgent(e.target.value)}
+                className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-xs text-neutral-900 outline-none transition-colors focus:border-sky-400 focus:ring-1 focus:ring-sky-400/30 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+              >
+                {agents.map((a) => (
+                  <option key={a.name} value={a.name}>
+                    {a.displayName ? `${a.displayName} (${a.name})` : a.name} - {a.model || 'claudecode'}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
 
         {/* Footer */}
@@ -679,10 +715,16 @@ function InitializeProjectModal({
           <button
             type="button"
             onClick={() => void handleConfirm()}
-            disabled={busy || (activeTab === 'bind_existing' && existingType === 'remote' && !remoteUrl.trim())}
+            disabled={busy || agents.length === 0 || (activeTab === 'bind_existing' && existingType === 'remote' && !remoteUrl.trim())}
             className="rounded-lg bg-sky-600 px-4 py-1.5 text-xs font-medium text-white shadow-sm hover:bg-sky-700 disabled:opacity-50 transition-colors cursor-pointer"
           >
-            <span>{busy ? t('projectSettings.initializing') : t('projectSettings.confirmInit')}</span>
+            <span>
+              {agents.length === 0 && !loadingAgents
+                ? t('projectSettings.pleaseConfigureAgentFirst')
+                : busy
+                ? t('projectSettings.initializing')
+                : t('projectSettings.confirmInit')}
+            </span>
           </button>
         </div>
       </div>
