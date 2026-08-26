@@ -287,12 +287,18 @@ export default function ProjectTaskFollowPage() {
     setStartBusy(true)
     setOptimisticStartedAt(new Date().toISOString())
     try {
-      await apiPost(`/api/v1/projects/${encodeURIComponent(displayTask.project)}/tasks/${encodeURIComponent(displayTask.id)}/start`, {})
+      await apiPost(`/api/v1/projects/${encodeURIComponent(displayTask.project)}/tasks/${encodeURIComponent(displayTask.id)}/start`, {}, { suppressToast: true })
       refresh()
       window.setTimeout(refresh, 1000)
-    } catch {
+    } catch (err) {
       setOptimisticStartedAt(null)
-      // Toast handled by API layer.
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('already running') || msg.includes('scheduler_wakeup_failed') || msg.includes('conflict') || msg.includes('忙碌') || msg.includes('正在')) {
+        showToast(t('tasks.agentAlreadyRunning', { defaultValue: '智能体已在后台执行该任务中，正在处理…' }), 'info')
+        refresh()
+      } else {
+        showToast(msg || t('apiErrors.bad_request'), 'error')
+      }
     } finally {
       setStartBusy(false)
     }
