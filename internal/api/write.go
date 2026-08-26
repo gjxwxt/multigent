@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -70,6 +71,7 @@ type postTaskBody struct {
 	WorkflowDefinitionID  string                                 `json:"workflowDefinitionId"`
 	WorkflowActorBindings map[string]entity.WorkflowActorBinding `json:"workflowActorBindings"`
 	Vars                  map[string]string                      `json:"vars"`
+	AutoStart             bool                                   `json:"autoStart"`
 }
 
 func (s *Server) handlePostProjectTask(w http.ResponseWriter, r *http.Request) {
@@ -272,7 +274,13 @@ func (s *Server) createProjectTaskFromBody(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
-	if strings.Contains(assignee, "/") {
+	if body.AutoStart {
+		if _, _, err := s.startProjectTaskDirect(workspaceID, name, agentName, t, r); err != nil {
+			log.Printf("[task-autostart] direct start failed for %s/%s task=%s: %v, fallback to attention", name, agentName, t.ID, err)
+			signalID := s.recordTaskAttentionSignal(workspaceID, name, agentName, t, "task_assigned")
+			s.requestTaskAttentionWakeup(workspaceID, name, agentName, t, "task_assigned", signalID)
+		}
+	} else if strings.Contains(assignee, "/") {
 		reason := "task_assigned"
 		if workflowID != "" {
 			reason = string(entity.TriggerOnWorkflowStepAssigned)

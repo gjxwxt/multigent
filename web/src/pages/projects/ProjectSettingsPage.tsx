@@ -27,6 +27,7 @@ import { cn } from '../../lib/cn'
 import { useApiJson } from '../../lib/use-api'
 import { apiDelete, apiFetch, apiPost, apiPut } from '../../lib/api'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
+import { showToast } from '../../components/ui/Toast'
 
 type ProjectDetail = { name: string; description: string; repo: string }
 type PromptData = { content: string }
@@ -345,6 +346,7 @@ function InitializeProjectModal({
   onSuccess: (newRepo: string) => void
 }) {
   const { t } = useTranslation()
+  const navigate = useNavigate()
   const [activeTab, setActiveTab] = useState<'bind_existing' | 'create_new'>('bind_existing')
   const [existingType, setExistingType] = useState<'local' | 'remote'>('remote')
   const [localPath, setLocalPath] = useState(currentRepo.trim() || `/opt/multigent/data/projects/${projectId}/workspace`)
@@ -448,7 +450,7 @@ function InitializeProjectModal({
         }
       }
 
-      // 4. Create and dispatch initialization task (backend automatically triggers agent attention wakeup)
+      // 4. Create and directly start initialization task
       await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks`, {
         agent: selectedAgent,
         title: taskTitle,
@@ -456,9 +458,12 @@ function InitializeProjectModal({
         prompt: taskPrompt,
         type: 'chore',
         priority: 3,
+        autoStart: true,
       })
 
+      showToast(t('projectSettings.initSuccess', { defaultValue: '工程初始化任务已创建并启动！' }), 'success')
       onSuccess(targetRepo)
+      navigate(`/projects/${encodeURIComponent(projectId)}/tasks`)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {

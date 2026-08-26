@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -711,38 +712,54 @@ func (s *Server) handleStartProjectTask(w http.ResponseWriter, r *http.Request) 
 		s.jsonErrorCode(w, http.StatusConflict, ErrCodeValidationFailed, "current assignee is not an agent")
 		return
 	}
+	pid, runID, err := s.startProjectTaskDirect(workspaceID, project, agent, task, r)
+	if err != nil {
+		if errors.Is(err, errAgentAlreadyRunning) {
+			s.jsonErrorCode(w, http.StatusConflict, ErrCodeSchedulerWakeupFailed, err.Error())
+			return
+		}
+		if errors.Is(err, errRuntimeNotReady) {
+			s.jsonErrorCode(w, http.StatusConflict, ErrCodeRuntimeNotReady, err.Error())
+			return
+		}
+		s.jsonErrorCode(w, http.StatusInternalServerError, ErrCodeSchedulerWakeupFailed, err.Error())
+		return
+	}
+	if runID != "" {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "status": "queued", "runtimeRunId": runID, "taskId": task.ID, "agent": agent})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "pid": pid, "status": "started", "taskId": task.ID, "agent": agent})
+}
+
+var (
+	errAgentAlreadyRunning = errors.New("agent is already running")
+	errRuntimeNotReady     = errors.New("runtime not ready")
+)
+
+func (s *Server) startProjectTaskDirect(workspaceID, project, agent string, task *entity.Task, r *http.Request) (int, string, error) {
 	target := s.runtimeSchedulerTargetForProjectAgent(workspaceID, project, agent)
 	hb, err := s.loadSchedulerTargetHeartbeat(workspaceID, target)
 	if err != nil || hb == nil {
-		s.jsonErrorCode(w, http.StatusNotFound, ErrCodeValidationFailed, "heartbeat not found")
-		return
+		return 0, "", fmt.Errorf("heartbeat not found")
 	}
 	if hb.PID > 0 && hb.LastWakeupStatus == "running" && processAlive(hb.PID) {
-		s.jsonErrorCode(w, http.StatusConflict, ErrCodeSchedulerWakeupFailed, fmt.Sprintf("agent %s/%s is already running", project, agent))
-		return
+		return 0, "", fmt.Errorf("%w: agent %s/%s is already running", errAgentAlreadyRunning, project, agent)
 	}
 	meta, err := s.agentMetaForProjectMember(workspaceID, project, agent)
 	if err != nil {
-		if isNotFoundErr(err) {
-			s.jsonErrorCode(w, http.StatusNotFound, ErrCodeAgentNotFound, "agent not found")
-			return
-		}
-		s.serverError(w, err)
-		return
+		return 0, "", err
 	}
 	if readiness := s.runtimeReadinessForExecution(workspaceID, meta); readiness.Blocking {
-		s.jsonErrorCode(w, http.StatusConflict, ErrCodeRuntimeNotReady, runtimeReadinessErrorMessage(readiness))
-		return
+		return 0, "", fmt.Errorf("%w: %s", errRuntimeNotReady, runtimeReadinessErrorMessage(readiness))
 	}
 	if s.usesAssignedRuntimeNode(workspaceID, meta) {
 		if s.hasActiveRuntimeRun(workspaceID, project, agent, "") {
-			s.jsonErrorCode(w, http.StatusConflict, ErrCodeSchedulerWakeupFailed, fmt.Sprintf("agent %s/%s is already running", project, agent))
-			return
+			return 0, "", fmt.Errorf("%w: agent %s/%s is already running", errAgentAlreadyRunning, project, agent)
 		}
 		run, err := s.enqueueSpecificRuntimeTaskRunFromRequest(workspaceID, project, agent, task, hb, externalServerURL(r), requestUsername(r))
 		if err != nil {
-			s.jsonErrorCode(w, http.StatusInternalServerError, ErrCodeSchedulerWakeupFailed, fmt.Sprintf("queue task run failed: %v", err))
-			return
+			return 0, "", fmt.Errorf("queue task run failed: %w", err)
 		}
 		_ = s.saveSchedulerTargetHeartbeat(workspaceID, target, hb)
 		s.auditLog(auditLogInput{
@@ -759,8 +776,7 @@ func (s *Server) handleStartProjectTask(w http.ResponseWriter, r *http.Request) 
 			},
 			Request: r,
 		})
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "status": "queued", "runtimeRunId": run.ID, "taskId": task.ID, "agent": agent})
-		return
+		return 0, run.ID, nil
 	}
 
 	args := []string{"--dir", s.sched.root, "run", "--project", project, "--agent", agent, "--task", task.ID}
@@ -771,8 +787,7 @@ func (s *Server) handleStartProjectTask(w http.ResponseWriter, r *http.Request) 
 	procKey := fmt.Sprintf("manual-task/%s/%s/%s", project, agent, task.ID)
 	pid, err := s.sched.StartManagedCommand(procKey, project, agent, schedulerModeManualTask, cmd)
 	if err != nil {
-		s.jsonErrorCode(w, http.StatusInternalServerError, ErrCodeSchedulerWakeupFailed, fmt.Sprintf("start task run failed: %v", err))
-		return
+		return 0, "", fmt.Errorf("start task run failed: %w", err)
 	}
 	now := time.Now().UTC()
 	hb.LastWakeup = &now
@@ -804,7 +819,7 @@ func (s *Server) handleStartProjectTask(w http.ResponseWriter, r *http.Request) 
 		},
 		Request: r,
 	})
-	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "pid": pid, "status": "started", "taskId": task.ID, "agent": agent})
+	return pid, "", nil
 }
 
 func (s *Server) reconcileWorkflowTaskBeforeManualStart(workspaceID, project, taskID string, r *http.Request) error {
