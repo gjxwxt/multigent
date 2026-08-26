@@ -448,8 +448,8 @@ function InitializeProjectModal({
         }
       }
 
-      // 4. Create initialization task
-      const createdTask = await apiPost<{ id?: string }>(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks`, {
+      // 4. Create and dispatch initialization task (backend automatically triggers agent attention wakeup)
+      await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks`, {
         agent: selectedAgent,
         title: taskTitle,
         description: `自动化工程初始化 (${activeTab === 'bind_existing' ? '已有仓库' : '从零新建'})`,
@@ -457,19 +457,6 @@ function InitializeProjectModal({
         type: 'chore',
         priority: 3,
       })
-
-      // 5. Directly start this exact initialization task
-      if (createdTask?.id) {
-        try {
-          await apiPost(
-            `/api/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(createdTask.id)}/start`,
-            {},
-            { suppressToast: true }
-          )
-        } catch {
-          // non-blocking
-        }
-      }
 
       onSuccess(targetRepo)
     } catch (err) {

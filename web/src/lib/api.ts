@@ -100,35 +100,35 @@ export async function apiFetch<T>(path: string, init?: APIRequestInit): Promise<
   return handleResponse<T>(res, init)
 }
 
-export async function apiPost<T>(path: string, body: unknown): Promise<T> {
+export async function apiPost<T>(path: string, body: unknown, options?: Pick<APIRequestInit, 'suppressToast' | 'silentStatuses'>): Promise<T> {
   const headers = authHeaders()
   headers.set('Content-Type', 'application/json')
   headers.set('Accept', 'application/json')
   const res = await fetch(apiUrl(path), { method: 'POST', headers, body: JSON.stringify(body) })
-  return handleResponse<T>(res)
+  return handleResponse<T>(res, options)
 }
 
-export async function apiPatch<T>(path: string, body: unknown): Promise<T> {
+export async function apiPatch<T>(path: string, body: unknown, options?: Pick<APIRequestInit, 'suppressToast' | 'silentStatuses'>): Promise<T> {
   const headers = authHeaders()
   headers.set('Content-Type', 'application/json')
   headers.set('Accept', 'application/json')
   const res = await fetch(apiUrl(path), { method: 'PATCH', headers, body: JSON.stringify(body) })
-  return handleResponse<T>(res)
+  return handleResponse<T>(res, options)
 }
 
-export async function apiPut<T>(path: string, body: unknown): Promise<T> {
+export async function apiPut<T>(path: string, body: unknown, options?: Pick<APIRequestInit, 'suppressToast' | 'silentStatuses'>): Promise<T> {
   const headers = authHeaders()
   headers.set('Content-Type', 'application/json')
   headers.set('Accept', 'application/json')
   const res = await fetch(apiUrl(path), { method: 'PUT', headers, body: JSON.stringify(body) })
-  return handleResponse<T>(res)
+  return handleResponse<T>(res, options)
 }
 
-export async function apiDelete(path: string): Promise<void> {
+export async function apiDelete(path: string, options?: Pick<APIRequestInit, 'suppressToast' | 'silentStatuses'>): Promise<void> {
   const headers = authHeaders()
   headers.set('Accept', 'application/json')
   const res = await fetch(apiUrl(path), { method: 'DELETE', headers })
-  await handleResponse<void>(res)
+  await handleResponse<void>(res, options)
 }
 
 /** No-auth POST for login */
