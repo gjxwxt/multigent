@@ -964,15 +964,25 @@ func validateRuntimeActionBaseURL(raw string) error {
 }
 
 func buildRuntimeActionURL(baseURL, endpoint string, query map[string]string) (string, error) {
-	base, err := url.Parse(strings.TrimRight(strings.TrimSpace(baseURL), "/"))
+	base, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil {
 		return "", err
 	}
-	rel, err := url.Parse(strings.TrimSpace(endpoint))
-	if err != nil {
-		return "", err
+	endpoint = strings.TrimSpace(endpoint)
+	var target *url.URL
+	if base.Path != "" && base.Path != "/" {
+		target = &url.URL{
+			Scheme: base.Scheme,
+			Host:   base.Host,
+			Path:   strings.TrimRight(base.Path, "/") + "/" + strings.TrimLeft(endpoint, "/"),
+		}
+	} else {
+		rel, err := url.Parse(endpoint)
+		if err != nil {
+			return "", err
+		}
+		target = base.ResolveReference(rel)
 	}
-	target := base.ResolveReference(rel)
 	q := target.Query()
 	for key, value := range query {
 		key = strings.TrimSpace(key)
