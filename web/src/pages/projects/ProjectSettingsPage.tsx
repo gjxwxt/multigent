@@ -310,6 +310,7 @@ function BasicInfoEditor({
       <InitializeProjectModal
         projectId={projectId}
         currentDescription={description}
+        currentRepo={repo}
         isOpen={initModalOpen}
         onClose={() => setInitModalOpen(false)}
         onSuccess={handleInitSuccess}
@@ -330,12 +331,14 @@ const TEMPLATES = [
 function InitializeProjectModal({
   projectId,
   currentDescription,
+  currentRepo,
   isOpen,
   onClose,
   onSuccess,
 }: {
   projectId: string
   currentDescription: string
+  currentRepo: string
   isOpen: boolean
   onClose: () => void
   onSuccess: (newRepo: string) => void
@@ -343,12 +346,21 @@ function InitializeProjectModal({
   const { t } = useTranslation()
   const [activeTab, setActiveTab] = useState<'bind_existing' | 'create_new'>('bind_existing')
   const [existingType, setExistingType] = useState<'local' | 'remote'>('remote')
-  const [localPath, setLocalPath] = useState(`/opt/multigent/data/projects/${projectId}/workspace`)
+  const [localPath, setLocalPath] = useState(currentRepo.trim() || `/opt/multigent/data/projects/${projectId}/workspace`)
   const [remoteUrl, setRemoteUrl] = useState('')
   const [useTemplate, setUseTemplate] = useState(true)
   const [selectedTemplate, setSelectedTemplate] = useState('react_go_fullstack')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Sync localPath whenever modal opens or currentRepo changes
+  useEffect(() => {
+    if (isOpen) {
+      if (currentRepo.trim()) {
+        setLocalPath(currentRepo.trim())
+      }
+    }
+  }, [isOpen, currentRepo])
 
   if (!isOpen) return null
 
@@ -356,10 +368,11 @@ function InitializeProjectModal({
     setBusy(true)
     setError(null)
     try {
+      const defaultProjectWorkspace = currentRepo.trim() || `/opt/multigent/data/projects/${projectId}/workspace`
       const targetRepo =
         activeTab === 'bind_existing' && existingType === 'local' && localPath.trim()
           ? localPath.trim()
-          : `/opt/multigent/data/projects/${projectId}/workspace`
+          : defaultProjectWorkspace
 
       // 1. Update project repo in backend
       await apiPut(`/api/v1/projects/${encodeURIComponent(projectId)}`, {
