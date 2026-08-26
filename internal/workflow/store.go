@@ -1583,7 +1583,9 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 	}
 	edge, hasNext := chooseNextEdge(def.Edges, currentStep.ID, values, output)
 	if !hasNext && workflowHasOutgoingEdges(def.Edges, currentStep.ID) {
-		return result, fmt.Errorf("workflow step %q output did not match any outgoing route", currentStep.Title)
+		if !isTerminalReviewApproval(currentStep, def.Edges, values) {
+			return result, fmt.Errorf("workflow step %q output did not match any outgoing route", currentStep.Title)
+		}
 	}
 	for i := range instances {
 		if instances[i].StepID != run.ActiveStepID {
@@ -1693,6 +1695,22 @@ func workflowHasOutgoingEdges(edges []entity.WorkflowEdge, from string) bool {
 		if strings.TrimSpace(edge.From) == from {
 			return true
 		}
+	}
+	return false
+}
+
+func isTerminalReviewApproval(step entity.WorkflowStep, edges []entity.WorkflowEdge, values map[string]string) bool {
+	if step.Type != "human_review" {
+		return false
+	}
+	dec := strings.ToLower(strings.TrimSpace(values["decision"]))
+	if dec == "" || dec == "approve" || dec == "approved" || dec == "pass" || dec == "ok" || dec == "yes" {
+		for _, e := range edges {
+			if strings.TrimSpace(e.From) == strings.TrimSpace(step.ID) && (e.IsDefault || e.Condition == nil) {
+				return false
+			}
+		}
+		return true
 	}
 	return false
 }
