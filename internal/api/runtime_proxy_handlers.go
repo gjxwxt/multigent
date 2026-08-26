@@ -411,6 +411,11 @@ func (s *Server) runtimeHTTPActionConfig(connection controldb.Connection) (runti
 	case "gitlab":
 		if cfg.BaseURL == "" {
 			cfg.BaseURL = "https://gitlab.com/api/v4"
+		} else {
+			cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
+			if !strings.HasSuffix(cfg.BaseURL, "/api/v4") {
+				cfg.BaseURL += "/api/v4"
+			}
 		}
 		cfg.AuthHeader = "PRIVATE-TOKEN"
 		if apiKey != "" {

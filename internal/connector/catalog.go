@@ -175,7 +175,22 @@ func Defaults() []Provider {
 			},
 			Enabled: true,
 		},
-		staticPATProvider("gitlab", "GitLab", "Developer Tools", "Use GitLab repositories, merge requests, issues, and CI/CD context.", "Personal access token", "Create a personal access token from GitLab preferences. Prefer project-scoped tokens for production workspaces.", "GitLab access tokens", "https://docs.gitlab.com/user/profile/personal_access_tokens/", gitLabActions()),
+		{
+			Provider:    "gitlab",
+			DisplayName: "GitLab",
+			Description: "Use GitLab repositories, merge requests, issues, and CI/CD context.",
+			Category:    "Developer Tools",
+			AuthTypes:   []string{AuthAPIKey},
+			Fields: []ProviderField{
+				{Key: "baseUrl", Label: "GitLab instance URL (e.g. https://gitlab.com or http://gitlab.internal:8080)", InputType: "url", Required: false, Secret: false},
+				{Key: "apiKey", Label: "Personal access token", InputType: "password", Required: true, Secret: true},
+			},
+			Guides: []ProviderGuide{
+				credentialGuide("Personal access token", "Create a personal access token from GitLab preferences. Prefer project-scoped tokens for production workspaces.", "GitLab access tokens", "https://docs.gitlab.com/user/profile/personal_access_tokens/"),
+			},
+			Actions: gitLabActions(),
+			Enabled: true,
+		},
 		{
 			Provider:    "gitee",
 			DisplayName: "Gitee",

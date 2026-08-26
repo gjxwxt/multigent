@@ -855,6 +855,9 @@ func (s *Server) runtimeNotifyDocAttachment(docID, fileName, mimeType string) ([
 	}
 	if mimeType == "" {
 		mimeType = mime.TypeByExtension(filepath.Ext(fileName))
+		if mimeType == "" && filepath.Ext(fileName) == ".md" {
+			mimeType = "text/markdown; charset=utf-8"
+		}
 	}
 	return []byte(content), fileName, mimeType, nil
 }

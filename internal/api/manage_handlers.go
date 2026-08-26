@@ -274,13 +274,17 @@ func (s *Server) hireAgent(project, agentName, team, role, model string) (string
 				}
 			}
 		}
+		var repoAbs string
 		if projMeta, err := s.st.Project(project); err == nil && strings.TrimSpace(projMeta.Repo) != "" {
-			repoAbs := strings.TrimSpace(projMeta.Repo)
+			repoAbs = strings.TrimSpace(projMeta.Repo)
 			if !filepath.IsAbs(repoAbs) {
 				repoAbs = filepath.Join(s.root, repoAbs)
 			}
-			meta.AddDirs = []string{repoAbs}
+		} else {
+			repoAbs = filepath.Join(s.root, "projects", project, "workspace")
 		}
+		_ = os.MkdirAll(repoAbs, 0o755)
+		meta.AddDirs = []string{repoAbs}
 	}
 
 	workspaceID, err := s.currentWorkspaceID()
