@@ -317,7 +317,7 @@ func agentMetaFromWorkerMembership(project string, worker controldb.AgentWorker,
 	if parsed, err := time.Parse(time.RFC3339, worker.CreatedAt); err == nil {
 		createdAt = parsed
 	}
-	return &entity.AgentMeta{
+	meta := &entity.AgentMeta{
 		Name:          name,
 		Project:       strings.TrimSpace(project),
 		Role:          strings.TrimSpace(membership.Role),
@@ -329,6 +329,33 @@ func agentMetaFromWorkerMembership(project string, worker controldb.AgentWorker,
 		Avatar:        strings.TrimSpace(worker.Avatar),
 		HiredAt:       createdAt,
 	}
+	if raw := strings.TrimSpace(worker.RuntimeConfigJSON); raw != "" {
+		var cfg struct {
+			Env        map[string]string       `json:"env,omitempty"`
+			Sandbox    *entity.SandboxConfig   `json:"sandbox,omitempty"`
+			AddDirs    []string                `json:"addDirs,omitempty"`
+			RunCommand string                  `json:"runCommand,omitempty"`
+			HTTPAgent  *entity.HTTPAgentConfig `json:"httpAgent,omitempty"`
+		}
+		if err := json.Unmarshal([]byte(raw), &cfg); err == nil {
+			if cfg.Env != nil {
+				meta.Env = cfg.Env
+			}
+			if cfg.Sandbox != nil {
+				meta.Sandbox = cfg.Sandbox
+			}
+			if cfg.AddDirs != nil {
+				meta.AddDirs = cfg.AddDirs
+			}
+			if strings.TrimSpace(cfg.RunCommand) != "" {
+				meta.RunCommand = strings.TrimSpace(cfg.RunCommand)
+			}
+			if cfg.HTTPAgent != nil {
+				meta.HTTPAgent = cfg.HTTPAgent
+			}
+		}
+	}
+	return meta
 }
 
 func (s *dbStore) AgentWorkerContext(projectName, agentName string) (AgentWorkerContext, error) {
