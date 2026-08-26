@@ -367,61 +367,83 @@ function InitializeProjectModal({
         repo: targetRepo,
       })
 
-      // 2. Discover target agent in project
-      let targetAgent = 'dev'
+      // 2. Discover or allocate target agent in project
+      let targetAgent: string | null = null
       try {
-        const res = await apiFetch<{ agents?: Array<{ name: string; role?: string }> }>(
+        const projectAgents = await apiFetch<Array<{ name?: string; model?: string }>>(
           `/api/v1/projects/${encodeURIComponent(projectId)}/agents`
         )
-        if (res.agents && res.agents.length > 0) {
-          const found = res.agents.find((a) => a.name === 'dev' || a.role === 'dev')
-          targetAgent = found ? found.name : res.agents[0].name
+        if (Array.isArray(projectAgents) && projectAgents.length > 0) {
+          const nonHuman = projectAgents.find((a) => a.model !== 'human' && a.name)
+          targetAgent = nonHuman?.name || projectAgents[0].name || null
         }
-      } catch {
-        // fallback to dev
-      }
-
-      // 3. Prepare task payload
-      let taskTitle = ''
-      let taskPrompt = ''
-
-      if (activeTab === 'bind_existing') {
-        if (existingType === 'remote') {
-          const url = remoteUrl.trim() || 'git@gitlab.internal:group/repo.git'
-          taskTitle = `【工程初始化】克隆远程仓库并检查就绪`
-          taskPrompt = `请使用配置好的 Git SSH 凭据或 GitLab 访问令牌，在项目工作区目录 (${targetRepo}) 中克隆远程仓库 "${url}"。\n\n克隆完成后：\n1. 检查工程目录结构与分支信息；\n2. 安装项目依赖（如 npm install / go mod download 等）；\n3. 执行一次语法或单测检查；\n4. 输出初始化就绪报告，说明工程已就绪可开始后续任务。`
-        } else {
-          taskTitle = `【工程初始化】绑定并校验本地工作区`
-          taskPrompt = `项目工作区已绑定到本地路径 "${targetRepo}"。\n\n请进入该目录：\n1. 检查现有代码结构与 Git 状态；\n2. 确认开发环境与依赖就绪情况；\n3. 输出环境健康检查报告。`
-        }
-      } else {
-        // Create new
-        if (useTemplate) {
-          const tpl = TEMPLATES.find((x) => x.id === selectedTemplate)
-          const tplName = tpl ? t(tpl.label) : selectedTemplate
-          taskTitle = `【工程初始化】构建 ${tplName} 模板脚手架`
-          taskPrompt = `请在当前项目工作区 (${targetRepo}) 初始化 "${tplName}" 工程骨架：\n\n1. 初始化 Git 仓库并创建符合最佳实践的完整工程目录；\n2. 生成基础依赖配置（package.json、go.mod、requirements.txt 等）与入口文件；\n3. 添加标准的 .gitignore 和详细的 README.md 开发说明；\n4. 进行一次基础构建与语法校验，确保工程可一键启动；\n5. 输出初始化完成报告，列出目录架构与启动命令。`
-        } else {
-          taskTitle = `【工程初始化】初始化空白代码工程`
-          taskPrompt = `请在当前项目工作区 (${targetRepo}) 初始化基础 Git 仓库，创建标准的 README.md 和 .gitignore 文件，并输出初始化完成说明。`
-        }
-      }
-
-      // 4. Create and dispatch initialization task
-      await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks`, {
-        agent: targetAgent,
-        title: taskTitle,
-        description: `自动化工程初始化 (${activeTab === 'bind_existing' ? '已有仓库' : '从零新建'})`,
-        prompt: taskPrompt,
-        type: 'chore',
-        priority: 3,
-      })
-
-      // 5. Wake up the agent
-      try {
-        await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(targetAgent)}/wakeup`, {})
       } catch {
         // non-blocking
+      }
+
+      // If no agent is attached to this project yet, try to bind an existing workspace worker
+      if (!targetAgent) {
+        try {
+          const wsAgentsRes = await apiFetch<{ agents?: Array<{ name?: string; model?: string }> }>(
+            '/api/v1/agents'
+          )
+          const wsAgents = Array.isArray(wsAgentsRes) ? wsAgentsRes : wsAgentsRes?.agents || []
+          const availableWorker = wsAgents.find((w) => w.model !== 'human' && w.name) || wsAgents[0]
+          if (availableWorker?.name) {
+            await apiPost(
+              `/api/v1/projects/${encodeURIComponent(projectId)}/memberships`,
+              { workerName: availableWorker.name }
+            )
+            targetAgent = availableWorker.name
+          }
+        } catch {
+          // non-blocking
+        }
+      }
+
+      // 3. Prepare task payload & dispatch if agent is available
+      if (targetAgent) {
+        let taskTitle = ''
+        let taskPrompt = ''
+
+        if (activeTab === 'bind_existing') {
+          if (existingType === 'remote') {
+            const url = remoteUrl.trim() || 'git@gitlab.internal:group/repo.git'
+            taskTitle = `【工程初始化】克隆远程仓库并检查就绪`
+            taskPrompt = `请使用配置好的 Git SSH 凭据或 GitLab 访问令牌，在项目工作区目录 (${targetRepo}) 中克隆远程仓库 "${url}"。\n\n克隆完成后：\n1. 检查工程目录结构与分支信息；\n2. 安装项目依赖（如 npm install / go mod download 等）；\n3. 执行一次语法或单测检查；\n4. 输出初始化就绪报告，说明工程已就绪可开始后续任务。`
+          } else {
+            taskTitle = `【工程初始化】绑定并校验本地工作区`
+            taskPrompt = `项目工作区已绑定到本地路径 "${targetRepo}"。\n\n请进入该目录：\n1. 检查现有代码结构与 Git 状态；\n2. 确认开发环境与依赖就绪情况；\n3. 输出环境健康检查报告。`
+          }
+        } else {
+          // Create new
+          if (useTemplate) {
+            const tpl = TEMPLATES.find((x) => x.id === selectedTemplate)
+            const tplName = tpl ? t(tpl.label) : selectedTemplate
+            taskTitle = `【工程初始化】构建 ${tplName} 模板脚手架`
+            taskPrompt = `请在当前项目工作区 (${targetRepo}) 初始化 "${tplName}" 工程骨架：\n\n1. 初始化 Git 仓库并创建符合最佳实践的完整工程目录；\n2. 生成基础依赖配置（package.json、go.mod、requirements.txt 等）与入口文件；\n3. 添加标准的 .gitignore 和详细的 README.md 开发说明；\n4. 进行一次基础构建与语法校验，确保工程可一键启动；\n5. 输出初始化完成报告，列出目录架构与启动命令。`
+          } else {
+            taskTitle = `【工程初始化】初始化空白代码工程`
+            taskPrompt = `请在当前项目工作区 (${targetRepo}) 初始化基础 Git 仓库，创建标准的 README.md 和 .gitignore 文件，并输出初始化完成说明。`
+          }
+        }
+
+        // 4. Create and dispatch initialization task
+        await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks`, {
+          agent: targetAgent,
+          title: taskTitle,
+          description: `自动化工程初始化 (${activeTab === 'bind_existing' ? '已有仓库' : '从零新建'})`,
+          prompt: taskPrompt,
+          type: 'chore',
+          priority: 3,
+        })
+
+        // 5. Wake up the agent
+        try {
+          await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(targetAgent)}/wakeup`, {})
+        } catch {
+          // non-blocking
+        }
       }
 
       onSuccess(targetRepo)
