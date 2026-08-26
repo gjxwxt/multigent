@@ -410,11 +410,16 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
     if (!startAgentName || isTerminal(task.status)) return
     setStartBusy(true)
     try {
-      await apiPost(`/api/v1/projects/${encodeURIComponent(task.project)}/tasks/${encodeURIComponent(task.id)}/start`, {})
+      await apiPost(`/api/v1/projects/${encodeURIComponent(task.project)}/tasks/${encodeURIComponent(task.id)}/start`, {}, { suppressToast: true })
       onMutated?.()
       window.setTimeout(() => onMutated?.(), 800)
-    } catch {
-      // Toast handled by API layer.
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('already running') || msg.includes('scheduler_wakeup_failed') || msg.includes('conflict') || msg.includes('忙碌') || msg.includes('正在')) {
+        showToast(t('tasks.agentAlreadyRunning', { defaultValue: '智能体已在后台执行该任务中，正在处理…' }), 'info')
+      } else {
+        showToast(msg || t('apiErrors.bad_request'), 'error')
+      }
     } finally {
       setStartBusy(false)
     }
