@@ -9,11 +9,12 @@ import {
   CheckCircle2,
   FileText,
   FolderGit2,
+  GitBranch,
   Globe,
+  HardDrive,
   Laptop,
   Layers,
   Lock,
-  Rocket,
   Save,
   Sparkles,
   Trash2,
@@ -207,14 +208,6 @@ function BasicInfoEditor({
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => setInitModalOpen(true)}
-            className="flex items-center gap-1.5 rounded-md border border-sky-200 bg-sky-50 px-2.5 py-1 text-[11px] font-medium text-sky-700 transition-colors hover:bg-sky-100 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-300 dark:hover:bg-sky-900/40"
-          >
-            <Rocket className="size-3 text-sky-600 dark:text-sky-400" />
-            {t('projectSettings.initWorkspace')}
-          </button>
-          <button
-            type="button"
             onClick={save}
             disabled={saving || !dirty}
             className="flex items-center gap-1 rounded-md bg-sky-600 px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-sky-700 disabled:opacity-50"
@@ -272,7 +265,7 @@ function BasicInfoEditor({
                   onChange={(e) => change(setRepo)(e.target.value)}
                   placeholder={t('projectSettings.localPathPlaceholder', { name: projectId })}
                   className={cn(
-                    'w-full rounded-md border px-2.5 py-1 font-mono text-sm outline-none transition-colors',
+                    'w-full rounded-md border px-2.5 py-1.5 font-mono text-xs outline-none transition-colors',
                     locked
                       ? 'border-neutral-200 bg-neutral-50 text-neutral-600 cursor-not-allowed dark:border-zinc-700 dark:bg-zinc-800/60 dark:text-zinc-400'
                       : 'border-neutral-200 bg-transparent text-neutral-800 placeholder:text-neutral-400 focus:border-sky-400 focus:ring-1 focus:ring-sky-400/30 dark:border-zinc-700 dark:text-zinc-200 dark:placeholder:text-zinc-600 dark:focus:border-sky-500'
@@ -281,8 +274,8 @@ function BasicInfoEditor({
               </div>
               {locked ? (
                 <div className="flex items-center gap-2 shrink-0">
-                  <span className="inline-flex items-center gap-1 rounded bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
-                    <Lock className="size-3" />
+                  <span className="inline-flex items-center gap-1 rounded bg-neutral-100 dark:bg-zinc-800 px-2.5 py-1 text-xs font-medium text-neutral-600 dark:text-zinc-300">
+                    <Lock className="size-3 text-neutral-500" />
                     {t('projectSettings.repoLocked')}
                   </span>
                   <button
@@ -299,7 +292,7 @@ function BasicInfoEditor({
                 <button
                   type="button"
                   onClick={() => setInitModalOpen(true)}
-                  className="shrink-0 rounded-md bg-sky-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-sky-700 transition-colors"
+                  className="shrink-0 rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700 transition-colors shadow-xs"
                 >
                   {t('projectSettings.initWorkspace')}
                 </button>
@@ -446,7 +439,7 @@ function InitializeProjectModal({
         <div className="flex items-center justify-between border-b border-neutral-100 px-6 py-4 dark:border-zinc-800">
           <div className="flex items-center gap-2.5">
             <div className="flex size-8 items-center justify-center rounded-lg bg-sky-100 text-sky-600 dark:bg-sky-950/60 dark:text-sky-400">
-              <Rocket className="size-4" />
+              <FolderGit2 className="size-4" />
             </div>
             <div>
               <h2 className="text-base font-semibold text-neutral-900 dark:text-zinc-100">
@@ -506,51 +499,33 @@ function InitializeProjectModal({
 
           {activeTab === 'bind_existing' && (
             <div className="space-y-4">
-              {/* Sliding switch */}
-              <div className="flex items-center justify-center gap-4 rounded-lg bg-neutral-50 p-2.5 dark:bg-zinc-950/40 border border-neutral-100 dark:border-zinc-800">
+              {/* Equal Segmented Control */}
+              <div className="grid grid-cols-2 gap-1 rounded-lg bg-neutral-100 p-1 dark:bg-zinc-800/80 border border-neutral-200/60 dark:border-zinc-700/60">
                 <button
                   type="button"
                   onClick={() => setExistingType('local')}
                   className={cn(
-                    'cursor-pointer text-xs font-medium transition-colors',
+                    'flex items-center justify-center gap-2 rounded-md py-2 text-xs font-medium transition-all cursor-pointer',
                     existingType === 'local'
-                      ? 'font-semibold text-sky-600 dark:text-sky-400'
-                      : 'text-neutral-500 hover:text-neutral-700 dark:text-zinc-400'
+                      ? 'bg-white text-sky-600 shadow-sm dark:bg-zinc-900 dark:text-sky-400 font-semibold'
+                      : 'text-neutral-500 hover:text-neutral-800 dark:text-zinc-400 dark:hover:text-zinc-200'
                   )}
                 >
-                  {t('projectSettings.switchLocal')}
+                  <HardDrive className="size-3.5" />
+                  <span>{t('projectSettings.switchLocal')}</span>
                 </button>
-
-                {/* Sliding pill switch */}
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={existingType === 'remote'}
-                  onClick={() => setExistingType((prev) => (prev === 'local' ? 'remote' : 'local'))}
-                  className={cn(
-                    'relative inline-flex h-6 w-12 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none',
-                    existingType === 'remote' ? 'bg-sky-600' : 'bg-neutral-300 dark:bg-zinc-700'
-                  )}
-                >
-                  <span
-                    className={cn(
-                      'pointer-events-none inline-block size-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
-                      existingType === 'remote' ? 'translate-x-6' : 'translate-x-0'
-                    )}
-                  />
-                </button>
-
                 <button
                   type="button"
                   onClick={() => setExistingType('remote')}
                   className={cn(
-                    'cursor-pointer text-xs font-medium transition-colors',
+                    'flex items-center justify-center gap-2 rounded-md py-2 text-xs font-medium transition-all cursor-pointer',
                     existingType === 'remote'
-                      ? 'font-semibold text-sky-600 dark:text-sky-400'
-                      : 'text-neutral-500 hover:text-neutral-700 dark:text-zinc-400'
+                      ? 'bg-white text-sky-600 shadow-sm dark:bg-zinc-900 dark:text-sky-400 font-semibold'
+                      : 'text-neutral-500 hover:text-neutral-800 dark:text-zinc-400 dark:hover:text-zinc-200'
                   )}
                 >
-                  {t('projectSettings.switchRemote')}
+                  <GitBranch className="size-3.5" />
+                  <span>{t('projectSettings.switchRemote')}</span>
                 </button>
               </div>
 
@@ -629,7 +604,7 @@ function InitializeProjectModal({
                           type="button"
                           onClick={() => setSelectedTemplate(tpl.id)}
                           className={cn(
-                            'flex items-start gap-2.5 rounded-lg border p-3 text-left transition-all',
+                            'flex items-start gap-2.5 rounded-lg border p-3 text-left transition-all cursor-pointer',
                             isSelected
                               ? 'border-sky-500 bg-sky-50/60 shadow-sm dark:border-sky-500 dark:bg-sky-950/30 ring-1 ring-sky-500'
                               : 'border-neutral-200 bg-white hover:border-neutral-300 dark:border-zinc-700 dark:bg-zinc-950 dark:hover:border-zinc-600'
@@ -662,7 +637,7 @@ function InitializeProjectModal({
             type="button"
             onClick={onClose}
             disabled={busy}
-            className="rounded-lg border border-neutral-200 bg-white px-3.5 py-1.5 text-xs font-medium text-neutral-700 hover:bg-neutral-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            className="rounded-lg border border-neutral-200 bg-white px-3.5 py-1.5 text-xs font-medium text-neutral-700 hover:bg-neutral-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 cursor-pointer"
           >
             {t('common.cancel')}
           </button>
@@ -670,9 +645,8 @@ function InitializeProjectModal({
             type="button"
             onClick={() => void handleConfirm()}
             disabled={busy || (activeTab === 'bind_existing' && existingType === 'remote' && !remoteUrl.trim())}
-            className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-4 py-1.5 text-xs font-medium text-white shadow-sm hover:bg-sky-700 disabled:opacity-50 transition-colors"
+            className="rounded-lg bg-sky-600 px-4 py-1.5 text-xs font-medium text-white shadow-sm hover:bg-sky-700 disabled:opacity-50 transition-colors cursor-pointer"
           >
-            <Rocket className="size-3.5" />
             <span>{busy ? t('projectSettings.initializing') : t('projectSettings.confirmInit')}</span>
           </button>
         </div>
@@ -759,3 +733,4 @@ function PromptEditor({ label, apiPath, initialContent }: { label: string; apiPa
     </section>
   )
 }
+
