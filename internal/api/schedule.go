@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -618,9 +619,13 @@ func (s *Server) handleAgentLiveLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	content := string(data)
-	const maxBytes = 1024 * 1024
+	const maxBytes = 8 * 1024 * 1024
 	if len(data) > maxBytes {
-		content = string(data[len(data)-maxBytes:])
+		start := len(data) - maxBytes
+		if idx := bytes.IndexByte(data[start:], '\n'); idx != -1 {
+			start += idx + 1
+		}
+		content = string(data[start:])
 	}
 	finished := liveLogFinished(content)
 	_ = json.NewEncoder(w).Encode(map[string]any{

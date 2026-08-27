@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -72,6 +74,8 @@ type postTaskBody struct {
 	WorkflowActorBindings map[string]entity.WorkflowActorBinding `json:"workflowActorBindings"`
 	Vars                  map[string]string                      `json:"vars"`
 	AutoStart             bool                                   `json:"autoStart"`
+	BaseBranch            string                                 `json:"baseBranch"`
+	BranchName            string                                 `json:"branchName"`
 }
 
 func (s *Server) handlePostProjectTask(w http.ResponseWriter, r *http.Request) {
@@ -162,8 +166,25 @@ func (s *Server) createProjectTaskFromBody(w http.ResponseWriter, r *http.Reques
 		Labels:      body.Labels,
 		ParentID:    strings.TrimSpace(body.ParentID),
 		Vars:        sanitizeTaskVars(body.Vars),
+		BaseBranch:  strings.TrimSpace(body.BaseBranch),
+		BranchName:  strings.TrimSpace(body.BranchName),
 		CreatedAt:   now,
 		UpdatedAt:   now,
+	}
+
+	if t.BaseBranch != "" || t.BranchName != "" {
+		projectRoot := s.st.ProjectDir(name)
+		wsDir := filepath.Join(projectRoot, "workspace")
+		gitRoot := projectRoot
+		if _, err := os.Stat(filepath.Join(wsDir, ".git")); err == nil {
+			gitRoot = wsDir
+		}
+		if s.worktreeMgr != nil {
+			t.BaseCommit = s.worktreeMgr.GetCommitHash(gitRoot, t.BaseBranch)
+			if wtDir, err := s.worktreeMgr.EnsureWorktree(gitRoot, t.ID, t.BaseBranch, t.BranchName); err == nil {
+				t.WorktreeDir = wtDir
+			}
+		}
 	}
 	if est, err := entity.NormalizeEstimateDuration(body.EstimateDuration); err != nil {
 		s.jsonError(w, http.StatusBadRequest, err.Error())

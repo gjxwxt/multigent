@@ -12,6 +12,7 @@ import { useFormatDateTime } from '../../lib/format-datetime'
 import { useApiJson } from '../../lib/use-api'
 import { useAuth } from '../../lib/auth'
 import { formatGoDuration, taskElapsedLabel } from '../../lib/task-duration'
+import { showToast } from '../ui/Toast'
 import { WorkflowBoard, type WorkflowBranchInstance, type WorkflowDefinition, type WorkflowField, type WorkflowRun, type WorkflowStep, type WorkflowStepEvent, type WorkflowStepInstance } from '../workflow/WorkflowBoard'
 
 export type TaskRow = {
@@ -41,6 +42,10 @@ export type TaskRow = {
   dueDate?: string
   estimateDuration?: string
   hasWorkflow?: boolean
+  baseBranch?: string
+  baseCommit?: string
+  branchName?: string
+  worktreeDir?: string
 }
 
 export type TaskOption = { id: string; title: string; project?: string }

@@ -7,6 +7,7 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -189,9 +190,20 @@ func newSPAHandler(apiHandler http.Handler) http.Handler {
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") {
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/preview/") {
 			apiHandler.ServeHTTP(w, r)
 			return
+		}
+
+		// If a subresource is requested from a preview page (via Referer), redirect to preview path
+		if ref := r.Header.Get("Referer"); ref != "" && !strings.HasPrefix(r.URL.Path, "/_multigent_preview/") {
+			if u, err := url.Parse(ref); err == nil && strings.HasPrefix(u.Path, "/preview/") {
+				parts := strings.Split(strings.TrimPrefix(u.Path, "/preview/"), "/")
+				if len(parts) > 0 && parts[0] != "" {
+					http.Redirect(w, r, fmt.Sprintf("/preview/%s%s", parts[0], r.URL.RequestURI()), http.StatusTemporaryRedirect)
+					return
+				}
+			}
 		}
 
 		path := strings.TrimPrefix(r.URL.Path, "/")

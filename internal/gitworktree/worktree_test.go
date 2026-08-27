@@ -1,0 +1,88 @@
+package gitworktree
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+)
+
+func TestGitWorktreeLifecycle(t *testing.T) {
+	// Create a temporary git repository
+	tempDir, err := os.MkdirTemp("", "gitworktree-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Init git repo
+	runGit(t, tempDir, "init", "-b", "main")
+	runGit(t, tempDir, "config", "user.email", "test@multigent.ai")
+	runGit(t, tempDir, "config", "user.name", "Multigent Tester")
+
+	// Create initial commit
+	readme := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readme, []byte("# Test Repo\n"), 0644); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	runGit(t, tempDir, "add", "README.md")
+	runGit(t, tempDir, "commit", "-m", "initial commit")
+
+	mgr := NewManager()
+	taskID := "task-test-123"
+
+	// 1. Ensure worktree
+	wtDir, err := mgr.EnsureWorktree(tempDir, taskID, "main", "feature/task-test-123")
+	if err != nil {
+		t.Fatalf("EnsureWorktree failed: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(wtDir, "README.md")); err != nil {
+		t.Fatalf("worktree README.md not found: %v", err)
+	}
+
+	// 2. Modify file in worktree
+	newFile := filepath.Join(wtDir, "feature.txt")
+	if err := os.WriteFile(newFile, []byte("feature content\n"), 0644); err != nil {
+		t.Fatalf("write feature file: %v", err)
+	}
+	runGit(t, wtDir, "add", "feature.txt")
+	runGit(t, wtDir, "commit", "-m", "add feature")
+
+	// 3. Ensure worktree idempotent
+	wtDir2, err := mgr.EnsureWorktree(tempDir, taskID, "main", "feature/task-test-123")
+	if err != nil {
+		t.Fatalf("EnsureWorktree second time failed: %v", err)
+	}
+	if wtDir2 != wtDir {
+		t.Fatalf("expected same worktree dir, got %s != %s", wtDir2, wtDir)
+	}
+
+	// 4. List worktrees
+	list, err := mgr.ListWorktrees(tempDir)
+	if err != nil {
+		t.Fatalf("ListWorktrees failed: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected 1 worktree in list, got %d", len(list))
+	}
+
+	// 5. Cleanup worktree
+	if err := mgr.CleanupWorktree(tempDir, taskID); err != nil {
+		t.Fatalf("CleanupWorktree failed: %v", err)
+	}
+
+	if _, err := os.Stat(wtDir); !os.IsNotExist(err) {
+		t.Fatalf("worktree directory still exists after cleanup")
+	}
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed in %s: %v\nOutput: %s", args, dir, err, string(out))
+	}
+}

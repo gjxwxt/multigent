@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { Play, RefreshCw, X } from 'lucide-react'
+import { Globe, Play, RefreshCw, X } from 'lucide-react'
 import { WorkflowBoard } from '../../components/workflow/WorkflowBoard'
 import { ConversationLog } from '../../components/ui/ConversationLog'
 import { PlaceholderCard } from '../../components/ui/PlaceholderCard'
@@ -25,6 +25,7 @@ import { cn } from '../../lib/cn'
 import { useFormatDateTime } from '../../lib/format-datetime'
 import { useApiJson } from '../../lib/use-api'
 import { useWorkspaceAccess } from '../../lib/workspace-access'
+import { showToast } from '../../components/ui/Toast'
 
 type SafeUser = { username: string; displayName?: string; email?: string }
 type ProjectMember = { name: string; model?: string; avatar?: string }
@@ -343,10 +344,18 @@ export default function ProjectTaskFollowPage() {
     }
   }
 
+  const previewState = useApiJson<{ taskId: string; type: string; status: string; url: string }>(
+    projectId && taskId ? `/api/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/preview` : null,
+    5000,
+  )
+  const [previewStarting, setPreviewStarting] = useState(false)
+
+  const preview = previewState.status === 'ok' ? previewState.data : null
+
   return (
     <div className="fixed inset-0 z-[70] flex flex-col bg-neutral-50 text-neutral-900 dark:bg-zinc-950 dark:text-zinc-100">
       <header className="flex h-14 shrink-0 items-center justify-between border-b border-neutral-200/80 bg-white/90 px-4 backdrop-blur-md dark:border-zinc-800 dark:bg-zinc-950/90">
-        <div className="min-w-0">
+        <div className="min-w-0 pr-4">
           <div className="flex items-center gap-2 text-xs text-neutral-400 dark:text-zinc-500">
             <Link to={`/projects/${encodeURIComponent(projectId)}/tasks`} className="hover:text-sky-700 dark:hover:text-sky-400">
               {t('projectNav.tasks')}
@@ -357,6 +366,53 @@ export default function ProjectTaskFollowPage() {
           <h1 className="truncate text-sm font-semibold text-neutral-900 dark:text-zinc-100">{displayTask?.title || taskId}</h1>
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          {displayTask?.branchName && (
+            <div className="hidden sm:inline-flex items-center gap-1.5 font-mono text-xs text-sky-800 bg-sky-50 dark:bg-sky-950/60 dark:text-sky-300 px-2.5 py-1 rounded-lg border border-sky-200/80 dark:border-sky-800 shadow-xs">
+              <span className="flex items-center gap-1 font-semibold text-sky-700 dark:text-sky-300">
+                {displayTask.baseBranch || 'main'}
+                {displayTask.baseCommit ? (
+                  <span className="text-[11px] font-normal text-sky-600/80 dark:text-sky-400/80">({displayTask.baseCommit.slice(0, 7)})</span>
+                ) : null}
+              </span>
+              <span className="text-sky-400 dark:text-sky-600 font-bold select-none">──►</span>
+              <span className="truncate max-w-[220px]" title={displayTask.branchName}>
+                {displayTask.branchName}
+              </span>
+            </div>
+          )}
+          {preview && preview.type !== 'cli' && (
+            <div className="flex items-center">
+              {preview.status === 'running' ? (
+                <a
+                  href={preview.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-50 px-2.5 py-1.5 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-950/40 dark:text-emerald-300"
+                >
+                  <span className="size-2 animate-pulse rounded-full bg-emerald-500" />
+                  打开实时预览 ↗
+                </a>
+              ) : (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setPreviewStarting(true)
+                    try {
+                      await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/preview/start`, {})
+                      window.open(`/preview/${encodeURIComponent(taskId)}/`, '_blank')
+                    } finally {
+                      setPreviewStarting(false)
+                    }
+                  }}
+                  disabled={previewStarting}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-sky-600/30 bg-sky-50 px-2.5 py-1.5 text-xs font-semibold text-sky-700 transition hover:bg-sky-100 dark:border-sky-500/30 dark:bg-sky-950/40 dark:text-sky-300"
+                >
+                  <Globe className={cn('size-3.5', previewStarting && 'animate-spin')} />
+                  {previewStarting ? '启动中…' : '启动实时预览'}
+                </button>
+              )}
+            </div>
+          )}
           {displayTask && (
             <span className={cn('rounded-full px-2.5 py-1 text-xs font-medium', statusColor[displayStatus] ?? statusColor.pending)}>
               {displayStatus === 'in_progress' && <span className="mr-1.5 inline-block size-1.5 animate-pulse rounded-full bg-current align-middle" />}

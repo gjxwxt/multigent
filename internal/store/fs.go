@@ -255,7 +255,9 @@ func (s *fsStore) ListRoles(teamPath string) ([]*RoleEntry, error) {
 	return roles, nil
 }
 
-// ── Projects ──────────────────────────────────────────────────────────────────
+func (s *fsStore) ProjectDir(name string) string {
+	return s.projectDir(name)
+}
 
 func (s *fsStore) projectDir(name string) string {
 	return s.abs("projects", name)

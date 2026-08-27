@@ -215,6 +215,7 @@ func (s *dbStore) ProjectPrompt(name string) (string, error) { return s.files.Pr
 func (s *dbStore) SaveProjectPrompt(name string, content string) error {
 	return s.files.SaveProjectPrompt(name, content)
 }
+func (s *dbStore) ProjectDir(name string) string { return s.files.ProjectDir(name) }
 func (s *dbStore) ListProjects() ([]*entity.Project, error) {
 	recs, err := s.db.ListRecords("projects", s.workspaceID, nil)
 	if err != nil {

@@ -375,7 +375,7 @@ function InitializeProjectModal({
           const availableWorkers = projList.filter((w) => w.name && w.model !== 'human')
           setAgents(availableWorkers as Array<{ name: string; displayName?: string; model?: string }>)
           if (availableWorkers.length > 0) {
-            setSelectedAgent(availableWorkers[0].name)
+            setSelectedAgent(availableWorkers[0].name || '')
           } else {
             setSelectedAgent('')
           }

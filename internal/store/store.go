@@ -69,6 +69,7 @@ type Store interface {
 	ProjectPrompt(name string) (string, error)
 	SaveProjectPrompt(name string, content string) error
 	ListProjects() ([]*entity.Project, error)
+	ProjectDir(name string) string
 
 	// ProjectConfig reads the declarative project.yaml (agents, playbooks, etc.).
 	// Returns nil, nil when the file does not exist.

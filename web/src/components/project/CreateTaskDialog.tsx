@@ -1,5 +1,6 @@
-import { useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
+import { Check, ChevronDown, GitBranch } from 'lucide-react'
 import { apiPost } from '../../lib/api'
 import { cn } from '../../lib/cn'
 import { useApiJson } from '../../lib/use-api'
@@ -67,6 +68,8 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
   const [actorBindings, setActorBindings] = useState<Record<string, ActorBinding>>({})
   const [taskTemplateId, setTaskTemplateId] = useState('')
   const [templateInputs, setTemplateInputs] = useState<Record<string, string>>({})
+  const [baseBranch, setBaseBranch] = useState('main')
+  const [branchName, setBranchName] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
@@ -78,9 +81,19 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
     open && selectedProject ? `/api/v1/projects/${encodeURIComponent(selectedProject)}/task-templates` : null,
     0,
   )
+  const branchesState = useApiJson<{ branches: string[] }>(
+    open && selectedProject ? `/api/v1/projects/${encodeURIComponent(selectedProject)}/branches` : null,
+    0,
+  )
   const usersState = useApiJson<UserListResponse>(open ? '/api/v1/users' : null, 0)
   const workflows = workflowsState.status === 'ok' ? workflowsState.data.workflows : []
   const taskTemplates = templatesState.status === 'ok' ? templatesState.data.templates : []
+  const availableBranches = useMemo(() => {
+    if (branchesState.status === 'ok' && Array.isArray(branchesState.data.branches) && branchesState.data.branches.length > 0) {
+      return branchesState.data.branches
+    }
+    return ['main']
+  }, [branchesState])
   const people = usersState.status === 'ok' ? usersState.data.filter((p) => !p.disabled) : []
   const selectedWorkflow = workflows.find((wf) => wf.id === workflowDefinitionId)
   const selectedTemplate = taskTemplates.find((template) => template.id === taskTemplateId)
@@ -299,6 +312,8 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
             ...(dueDate ? { dueDate } : {}),
             ...(parentId ? { parentId } : {}),
             ...(estimateDuration.trim() ? { estimateDuration: estimateDuration.trim() } : {}),
+            ...(baseBranch.trim() ? { baseBranch: baseBranch.trim() } : {}),
+            ...(branchName.trim() ? { branchName: branchName.trim() } : {}),
             workflowActorBindings: actorBindings,
           },
         )
@@ -317,6 +332,8 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
           ...(dueDate ? { dueDate } : {}),
           ...(parentId ? { parentId } : {}),
           ...(estimateDuration.trim() ? { estimateDuration: estimateDuration.trim() } : {}),
+          ...(baseBranch.trim() ? { baseBranch: baseBranch.trim() } : {}),
+          ...(branchName.trim() ? { branchName: branchName.trim() } : {}),
           ...(workflowDefinitionId ? { workflowDefinitionId } : {}),
           ...(workflowDefinitionId ? { workflowActorBindings: actorBindings } : {}),
           },
@@ -632,6 +649,44 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
                 </label>
               </div>
 
+              {/* Git Branch & Worktree Isolation Selector */}
+              <div className="rounded-lg border border-sky-100 bg-sky-50/40 p-3 dark:border-sky-950/60 dark:bg-sky-950/20">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-sky-900 dark:text-sky-300">
+                    🌿 Git 分支隔离与独立 Worktree
+                  </span>
+                  <span className="text-[11px] text-neutral-400 dark:text-zinc-500">
+                    自动隔离开发环境，多任务互不冲突
+                  </span>
+                </div>
+                <div className="mt-2 flex items-center gap-2">
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between">
+                      <label className="text-[11px] font-medium text-neutral-600 dark:text-zinc-400">Base 分支 (from)</label>
+                      <span className="text-[10px] text-sky-600 dark:text-sky-400">可搜索/选择</span>
+                    </div>
+                    <BranchCombobox
+                      value={baseBranch}
+                      onChange={setBaseBranch}
+                      branches={availableBranches}
+                      fieldCls={fieldCls}
+                    />
+                  </div>
+                  <div className="mt-4 shrink-0 text-sky-600 dark:text-sky-400 font-bold select-none">
+                    ──►
+                  </div>
+                  <div className="flex-1">
+                    <label className="text-[11px] font-medium text-neutral-600 dark:text-zinc-400">特性分支 (to)</label>
+                    <input
+                      value={branchName}
+                      onChange={(e) => setBranchName(e.target.value)}
+                      placeholder="feature/task-name (留空自动生成)"
+                      className={cn(fieldCls, 'mt-0.5 font-mono text-xs')}
+                    />
+                  </div>
+                </div>
+              </div>
+
               {createMode === 'blank' ? (
                 <label className="block text-sm">
                   <span className="text-neutral-600 dark:text-zinc-400">{t('workflows.taskWorkflow')}</span>
@@ -714,6 +769,102 @@ function PreviewBlock({ label, value, multiline }: { label: string; value: strin
       )}>
         {value || '—'}
       </div>
+    </div>
+  )
+}
+
+function BranchCombobox({
+  value,
+  onChange,
+  branches,
+  fieldCls,
+}: {
+  value: string
+  onChange: (val: string) => void
+  branches: string[]
+  fieldCls: string
+}) {
+  const [open, setOpen] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  const filtered = useMemo(() => {
+    const q = value.toLowerCase().trim()
+    if (!q) return branches
+    return branches.filter((b) => b.toLowerCase().includes(q))
+  }, [branches, value])
+
+  return (
+    <div ref={containerRef} className="relative">
+      <div className="relative flex items-center">
+        <GitBranch className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-neutral-400 dark:text-zinc-500" />
+        <input
+          value={value}
+          onChange={(e) => {
+            onChange(e.target.value)
+            setOpen(true)
+          }}
+          onFocus={() => setOpen(true)}
+          placeholder="main"
+          className={cn(fieldCls, 'mt-0.5 pl-8 pr-7 font-mono text-xs')}
+        />
+        <button
+          type="button"
+          tabIndex={-1}
+          onClick={() => setOpen(!open)}
+          className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-neutral-400 hover:text-neutral-600 dark:text-zinc-500 dark:hover:text-zinc-300"
+        >
+          <ChevronDown className={cn('size-3.5 transition-transform duration-150', open && 'rotate-180')} />
+        </button>
+      </div>
+
+      {open && (
+        <div className="absolute left-0 top-full z-50 mt-1 max-h-52 w-full min-w-[200px] overflow-y-auto rounded-lg border border-neutral-200 bg-white py-1 shadow-xl dark:border-zinc-700 dark:bg-zinc-900 animate-scale-in">
+          <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-neutral-400 dark:text-zinc-500">
+            可用分支 (Git Branches)
+          </div>
+          {filtered.length === 0 ? (
+            <div className="px-3 py-2 text-xs text-neutral-400 dark:text-zinc-500">
+              未找到匹配分支，将使用 <span className="font-mono text-sky-600 dark:text-sky-400">"{value}"</span>
+            </div>
+          ) : (
+            filtered.map((b) => {
+              const isSelected = value === b
+              return (
+                <button
+                  key={b}
+                  type="button"
+                  onClick={() => {
+                    onChange(b)
+                    setOpen(false)
+                  }}
+                  className={cn(
+                    'flex w-full items-center justify-between px-3 py-1.5 text-left text-xs font-mono transition-colors',
+                    isSelected
+                      ? 'bg-sky-50 font-semibold text-sky-700 dark:bg-sky-950/60 dark:text-sky-300'
+                      : 'text-neutral-700 hover:bg-neutral-100 dark:text-zinc-300 dark:hover:bg-zinc-800',
+                  )}
+                >
+                  <span className="flex items-center gap-1.5 truncate">
+                    <GitBranch className="size-3 shrink-0 text-neutral-400 dark:text-zinc-500" />
+                    <span className="truncate">{b}</span>
+                  </span>
+                  {isSelected && <Check className="size-3.5 shrink-0 text-sky-600 dark:text-sky-400" />}
+                </button>
+              )
+            })
+          )}
+        </div>
+      )}
     </div>
   )
 }

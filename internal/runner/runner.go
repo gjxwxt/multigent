@@ -413,7 +413,6 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 	if err != nil {
 		return nil, err
 	}
-
 	agentDir := filepath.Join(r.root, "projects", project, "agents", agentName)
 
 	// HTTP agent: bypass CLI subprocess, send prompt to HTTP endpoint directly.
@@ -421,7 +420,16 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 		return r.runTaskHTTP(project, agentName, agentDir, meta, task)
 	}
 
-	fullPrompt := r.taskPromptWithWorkflowContext(project, agentName, task) + fmt.Sprintf(systemMetaFooter,
+	scopedBoundary := ""
+	if task.BranchName != "" || task.WorktreeDir != "" {
+		base := task.BaseBranch
+		if base == "" {
+			base = "main"
+		}
+		scopedBoundary = fmt.Sprintf("【Git Worktree 独立分支安全边界约束】\n- 你当前工作在独立特性分支 `%s` (基于 `%s`) 的专用工作区 (Worktree) 中。\n- 你的工作根目录已映射至 `/workspace`。所有代码修改、新增文件与单测验证必须严格限定在 `/workspace` 内部。\n- 严禁执行 git checkout 切换到其他分支，严禁修改父仓库或其他任务的文件。\n\n", task.BranchName, base)
+	}
+
+	fullPrompt := scopedBoundary + r.taskPromptWithWorkflowContext(project, agentName, task) + fmt.Sprintf(systemMetaFooter,
 		task.ID, project, agentName, task.ID, task.ID, task.ID, task.ID, project, agentName)
 
 	// Write prompt to a temp file (avoids shell escaping issues).
@@ -458,6 +466,13 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 		execDir    string // working directory for the host process
 	)
 
+	execAgentDir := agentDir
+	if strings.TrimSpace(task.WorktreeDir) != "" {
+		if _, err := os.Stat(task.WorktreeDir); err == nil {
+			execAgentDir = task.WorktreeDir
+		}
+	}
+
 	if meta.Sandbox != nil && meta.Sandbox.Provider != entity.SandboxNone {
 		provider, ok := runenv.ProviderFor(meta.Sandbox.Provider)
 		if !ok {
@@ -489,7 +504,7 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 			WorkspaceRoot: r.root,
 			Project:       project,
 			Agent:         agentName,
-			AgentDir:      agentDir,
+			AgentDir:      execAgentDir,
 			Model:         model,
 			Command:       remappedInner,
 			Env:           agentEnv,

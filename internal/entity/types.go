@@ -652,6 +652,11 @@ type Task struct {
 	// for the same agent, AddTask returns that task's ID instead of creating a new one.
 	IdempotencyKey string `yaml:"idempotency_key,omitempty"`
 
+	BaseBranch  string `yaml:"base_branch,omitempty" json:"baseBranch,omitempty"`
+	BaseCommit  string `yaml:"base_commit,omitempty" json:"baseCommit,omitempty"`
+	BranchName  string `yaml:"branch_name,omitempty" json:"branchName,omitempty"`
+	WorktreeDir string `yaml:"worktree_dir,omitempty" json:"worktreeDir,omitempty"`
+
 	Vars map[string]string `yaml:"vars,omitempty"`
 }
 

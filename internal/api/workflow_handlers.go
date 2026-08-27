@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -603,6 +605,18 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 		t.Summary = summary
 		t.UpdatedAt = now
 		t.FinishedAt = &now
+		if s.previewEngine != nil {
+			_ = s.previewEngine.StopEphemeralPreview(taskID)
+		}
+		if s.worktreeMgr != nil {
+			projectRoot := s.st.ProjectDir(project)
+			wsDir := filepath.Join(projectRoot, "workspace")
+			gitRoot := projectRoot
+			if _, err := os.Stat(filepath.Join(wsDir, ".git")); err == nil {
+				gitRoot = wsDir
+			}
+			_ = s.worktreeMgr.CleanupWorktree(gitRoot, taskID)
+		}
 		if err := s.ts.PersistTask(project, agent, t); err != nil {
 			return taskWorkflowResponse{}, http.StatusInternalServerError, err
 		}

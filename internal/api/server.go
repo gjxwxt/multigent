@@ -21,7 +21,9 @@ import (
 	"github.com/multigent/multigent/internal/builtins"
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
+	"github.com/multigent/multigent/internal/gitworktree"
 	"github.com/multigent/multigent/internal/interaction"
+	"github.com/multigent/multigent/internal/preview"
 	"github.com/multigent/multigent/internal/store"
 	"github.com/multigent/multigent/internal/taskstore"
 	"github.com/multigent/multigent/internal/telemetry"
@@ -107,6 +109,8 @@ type Server struct {
 	modelAuthSessions      map[string]*modelAuthSession
 	telemetryUsageMu       sync.Mutex
 	telemetryUsageCache    map[string]telemetryUsageCacheEntry
+	previewEngine          *preview.Engine
+	worktreeMgr            *gitworktree.Manager
 }
 
 // NewServer builds an API server for the given workspace root.
@@ -144,6 +148,8 @@ func NewServer(root, apiKey string) *Server {
 		connectorSetupSessions: make(map[string]connectorDeviceAuthSession),
 		modelAuthSessions:      make(map[string]*modelAuthSession),
 		telemetryUsageCache:    make(map[string]telemetryUsageCacheEntry),
+		previewEngine:          preview.NewEngine(),
+		worktreeMgr:            gitworktree.NewManager(),
 	}
 	go s.restoreDesiredSchedulers()
 	s.startConnectionHealthChecker()
@@ -468,6 +474,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/workflow", s.handleGetTaskWorkflow)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/start", s.handleStartProjectTask)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/workflow/review", s.handlePostTaskWorkflowReview)
+	mux.HandleFunc("GET /api/v1/projects/{name}/branches", s.handleListProjectBranches)
+	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview", s.handleGetTaskPreview)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/start", s.handlePostTaskPreviewStart)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/stop", s.handlePostTaskPreviewStop)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/feedback", s.handlePostTaskPreviewFeedback)
+	mux.HandleFunc("/preview/", s.handleTaskPreviewProxy)
 	mux.HandleFunc("POST /api/v1/workspaces/{workspaceId}/workflow/triggers/{notificationId}/callback", s.handlePostWorkflowTriggerCallback)
 	mux.HandleFunc("GET /api/v1/prompts/agency", s.handleGetAgencyPrompt)
 	mux.HandleFunc("PUT /api/v1/prompts/agency", s.handlePutAgencyPrompt)
@@ -608,6 +620,8 @@ func (s *Server) Handler() http.Handler {
 	publicMux.HandleFunc("POST /api/v1/invitations/{token}/reject", s.handleRejectInvitation)
 	publicMux.HandleFunc("POST /api/v1/im/{provider}/events", s.handleIMEvent)
 	publicMux.HandleFunc("GET /api/v1/health", s.handleHealth)
+	publicMux.HandleFunc("/preview/", s.handleTaskPreviewProxy)
+	publicMux.HandleFunc("/api/v1/projects/{name}/tasks/{taskId}/preview/feedback", s.handlePostTaskPreviewFeedback)
 	runtimeMux := http.NewServeMux()
 	runtimeMux.HandleFunc("GET /api/v1/runtime/connections", s.handleRuntimeConnections)
 	runtimeMux.HandleFunc("GET /api/v1/runtime/tasks", s.handleRuntimeTasks)
@@ -692,7 +706,10 @@ func withCORS(next http.Handler) http.Handler {
 
 func withJSONHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "/download") && !strings.Contains(r.URL.Path, "/files/content/") {
+		if !strings.HasSuffix(r.URL.Path, "/download") &&
+			!strings.Contains(r.URL.Path, "/files/content/") &&
+			!strings.HasPrefix(r.URL.Path, "/preview/") &&
+			!strings.HasPrefix(r.URL.Path, "/_multigent_preview/") {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		}
 		next.ServeHTTP(w, r)
@@ -1257,6 +1274,10 @@ type taskRow struct {
 	EstimateDuration string    `json:"estimateDuration,omitempty"`
 	HasWorkflow      bool      `json:"hasWorkflow,omitempty"`
 	ForkSessionID    string    `json:"forkSessionId,omitempty"`
+	BaseBranch       string    `json:"baseBranch,omitempty"`
+	BaseCommit       string    `json:"baseCommit,omitempty"`
+	BranchName       string    `json:"branchName,omitempty"`
+	WorktreeDir      string    `json:"worktreeDir,omitempty"`
 }
 
 func taskToRow(t *entity.Task, project, agent string, archived bool) taskRow {
@@ -1277,6 +1298,10 @@ func taskToRow(t *entity.Task, project, agent string, archived bool) taskRow {
 		CreatedAt: t.CreatedAt.UTC(), UpdatedAt: t.UpdatedAt.UTC(),
 		EstimateDuration: t.EstimateDuration,
 		ForkSessionID:    runtimeForkSessionIDFromTask(t),
+		BaseBranch:       t.BaseBranch,
+		BaseCommit:       t.BaseCommit,
+		BranchName:       t.BranchName,
+		WorktreeDir:      t.WorktreeDir,
 	}
 	if t.StartedAt != nil {
 		r.StartedAt = t.StartedAt.UTC().Format(time.RFC3339Nano)
@@ -1295,6 +1320,14 @@ func taskToRow(t *entity.Task, project, agent string, archived bool) taskRow {
 
 func (s *Server) taskToRow(t *entity.Task, project, agent string, archived bool) taskRow {
 	row := taskToRow(t, project, agent, archived)
+	if row.BaseCommit == "" && (row.BaseBranch != "" || row.WorktreeDir != "") && s.worktreeMgr != nil {
+		gitRoot := s.resolveProjectGitRoot(project)
+		base := row.BaseBranch
+		if base == "" {
+			base = "main"
+		}
+		row.BaseCommit = s.worktreeMgr.GetCommitHash(gitRoot, base)
+	}
 	row.AssigneeLabel = s.identityLabel(row.Assignee)
 	row.CreatedByLabel = s.identityLabel(row.CreatedBy)
 	return row
