@@ -8,12 +8,18 @@
 
   // Extract metadata
   var currentScript = document.currentScript || document.querySelector('script[data-task-id]');
-  var taskId = (currentScript && currentScript.getAttribute('data-task-id')) || '';
-  var project = (currentScript && currentScript.getAttribute('data-project')) || '';
+  var taskId = (currentScript && currentScript.getAttribute('data-task-id')) || window.__MG_PREVIEW_TASK_ID__ || '';
+  var project = (currentScript && currentScript.getAttribute('data-project')) || window.__MG_PREVIEW_PROJECT__ || '';
 
   if (!taskId) {
     var match = window.location.pathname.match(/\/preview\/([^\/]+)/);
     if (match) taskId = match[1];
+  }
+  if (!taskId) {
+    try { taskId = sessionStorage.getItem('__mg_preview_task_id') || ''; } catch(e) {}
+  }
+  if (!project) {
+    try { project = sessionStorage.getItem('__mg_preview_project') || ''; } catch(e) {}
   }
 
   var isMac = /Mac|iPod|iPhone|iPad/.test(navigator.platform);
@@ -1603,8 +1609,16 @@ ${content || '请根据上述目标 DOM 元素位置与代码上下文进行优�
     })
       .then(function (res) {
         if (!res.ok) {
-          return res.json().then(function (data) {
-            throw new Error(data.message || (data.error && data.error.message) || ('HTTP ' + res.status));
+          return res.text().then(function (rawText) {
+            try {
+              var data = JSON.parse(rawText);
+              throw new Error(data.message || (data.error && data.error.message) || ('HTTP ' + res.status));
+            } catch (parseErr) {
+              if (parseErr.message && !parseErr.message.includes('JSON')) {
+                throw parseErr;
+              }
+              throw new Error(rawText || ('HTTP ' + res.status));
+            }
           });
         }
         var reader = res.body.getReader();

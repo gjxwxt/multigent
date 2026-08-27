@@ -649,16 +649,57 @@ var htmlAttrRe = regexp.MustCompile(`(?i)\b(href|src|action)\s*=\s*(["'])/([^"']
 func rewriteHTML(html, taskID, projectName string) string {
 	previewPrefix := fmt.Sprintf("/preview/%s/", taskID)
 
-	// Interceptor script to handle dynamic fetches, XMLHttpRequest, and WebSocket
-	patchScript := fmt.Sprintf(`<script>
+	// Interceptor script to handle dynamic fetches, XMLHttpRequest, WebSocket, and SPA History Navigation
+	patchScript := fmt.Sprintf(`<base href=%q><script>
 (function(){
   var prefix = %q;
+  window.__MG_PREVIEW_TASK_ID__ = %q;
+  window.__MG_PREVIEW_PROJECT__ = %q;
+  try {
+    sessionStorage.setItem('__mg_preview_task_id', %q);
+    sessionStorage.setItem('__mg_preview_project', %q);
+  } catch(e) {}
+
   function patchUrl(u) {
     if (typeof u === 'string' && u.startsWith('/') && !u.startsWith('/preview/') && !u.startsWith('/_multigent_preview/')) {
       return prefix + u.slice(1);
     }
     return u;
   }
+
+  // Patch history.pushState and replaceState for SPA React Router
+  var origPushState = window.history.pushState;
+  if (origPushState) {
+    window.history.pushState = function(state, unused, url) {
+      if (url) {
+        url = patchUrl(url);
+      }
+      return origPushState.call(this, state, unused, url);
+    };
+  }
+  var origReplaceState = window.history.replaceState;
+  if (origReplaceState) {
+    window.history.replaceState = function(state, unused, url) {
+      if (url) {
+        url = patchUrl(url);
+      }
+      return origReplaceState.call(this, state, unused, url);
+    };
+  }
+
+  // Intercept click on links to keep them inside preview subpath
+  document.addEventListener('click', function(e) {
+    var a = e.target && e.target.closest ? e.target.closest('a') : null;
+    if (!a) return;
+    var href = a.getAttribute('href');
+    if (href && href.startsWith('/') && !href.startsWith('/preview/') && !href.startsWith('/_multigent_preview/')) {
+      e.preventDefault();
+      var newHref = prefix + href.slice(1);
+      a.setAttribute('href', newHref);
+      window.location.href = newHref;
+    }
+  }, true);
+
   var origFetch = window.fetch;
   if (origFetch) {
     window.fetch = function(input, init) {
@@ -695,7 +736,7 @@ func rewriteHTML(html, taskID, projectName string) string {
     window.WebSocket.prototype = origWS.prototype;
   }
 })();
-</script>`, previewPrefix)
+</script>`, previewPrefix, previewPrefix, taskID, projectName, taskID, projectName)
 
 	// Rewrite static HTML attributes: href="/...", src="/...", action="/..."
 	html = htmlAttrRe.ReplaceAllStringFunc(html, func(match string) string {
