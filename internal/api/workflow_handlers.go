@@ -694,7 +694,7 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 func isPullRequestReviewStep(step entity.WorkflowStep) bool {
 	id := strings.ToLower(strings.TrimSpace(step.ID))
 	title := strings.ToLower(strings.TrimSpace(step.Title))
-	return strings.Contains(id, "pr_review") || strings.Contains(id, "mr_review") || strings.Contains(title, "pull request") || strings.Contains(title, "merge request")
+	return strings.Contains(id, "pr_review") || strings.Contains(id, "mr_review") || strings.Contains(id, "merge_and_sync") || strings.Contains(id, "push_to_gitlab") || strings.Contains(title, "pull request") || strings.Contains(title, "merge request") || strings.Contains(title, "merge and sync")
 }
 
 func isApprovalDecision(decision string) bool {

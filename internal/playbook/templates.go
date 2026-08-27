@@ -86,6 +86,7 @@ func softwareDelivery(locale string) entity.PlaybookTemplate {
 				"implementation":    "developer-agent",
 				"changelog_cleanup": "developer-agent",
 				"create_pr":         "developer-agent",
+				"merge_and_sync":    "developer-agent",
 				"qa":                "qa-agent",
 				"release":           "release-agent",
 			}, map[string][]string{
@@ -93,6 +94,7 @@ func softwareDelivery(locale string) entity.PlaybookTemplate {
 				"implementation":    {"task-management", "code-review", "git-pr-delivery"},
 				"changelog_cleanup": {"task-management", "code-review", "git-pr-delivery"},
 				"create_pr":         {"task-management", "code-review", "git-pr-delivery"},
+				"merge_and_sync":    {"task-management", "code-review", "git-pr-delivery"},
 				"qa":                {"qa-checklist", "multigent-docs"},
 				"release":           {"release-checklist"},
 			}),

@@ -113,13 +113,13 @@ func TestSoftwareDeliveryTemplateHasPRReviewLoop(t *testing.T) {
 	for _, step := range tmpl.Steps {
 		steps[step.ID] = step
 	}
-	for _, id := range []string{"implementation", "code_review", "changelog_cleanup", "create_pr", "pr_review", "qa"} {
+	for _, id := range []string{"implementation", "code_review", "changelog_cleanup", "create_pr", "pr_review", "merge_and_sync", "qa"} {
 		if _, ok := steps[id]; !ok {
 			t.Fatalf("expected step %q", id)
 		}
 	}
-	if steps["changelog_cleanup"].Type != "agent_task" || steps["create_pr"].Type != "agent_task" {
-		t.Fatal("expected changelog cleanup and create PR to be agent tasks")
+	if steps["changelog_cleanup"].Type != "agent_task" || steps["create_pr"].Type != "agent_task" || steps["merge_and_sync"].Type != "agent_task" {
+		t.Fatal("expected changelog cleanup, create PR, and merge_and_sync to be agent tasks")
 	}
 	if steps["pr_review"].Type != "human_review" {
 		t.Fatal("expected PR review to be a human review gate")
@@ -137,11 +137,11 @@ func TestSoftwareDeliveryTemplateHasPRReviewLoop(t *testing.T) {
 	if edge := findEdge("code_review", "changelog_cleanup"); edge.Condition == nil || edge.Condition.Value != "approve" {
 		t.Fatal("expected approved code review to enter changelog cleanup")
 	}
-	if edge := findEdge("pr_review", "qa"); edge.Condition == nil || !strings.Contains(edge.Condition.Value, "approve") {
-		t.Fatal("expected approved PR review to enter QA")
+	if edge := findEdge("pr_review", "merge_and_sync"); edge.Condition == nil || !strings.Contains(edge.Condition.Value, "approve") {
+		t.Fatal("expected approved PR review to enter merge_and_sync")
 	}
-	if edge := findEdge("pr_review", "push_to_gitlab"); edge.Condition == nil || !strings.Contains(edge.Condition.Value, "approve_push") {
-		t.Fatal("expected approved PR push to enter push_to_gitlab")
+	if edge := findEdge("merge_and_sync", "qa"); !edge.IsDefault {
+		t.Fatal("expected merge_and_sync to enter QA by default")
 	}
 	if edge := findEdge("pr_review", "implementation"); edge.Condition == nil || edge.Condition.Value != "request_changes" {
 		t.Fatal("expected requested PR changes to return to implementation")
@@ -173,7 +173,7 @@ func TestSeededSoftwareDeliveryHasPRReviewLoop(t *testing.T) {
 	for _, step := range def.Steps {
 		seen[step.ID] = true
 	}
-	for _, id := range []string{"changelog_cleanup", "create_pr", "pr_review"} {
+	for _, id := range []string{"changelog_cleanup", "create_pr", "pr_review", "merge_and_sync"} {
 		if !seen[id] {
 			t.Fatalf("expected seeded step %q", id)
 		}
