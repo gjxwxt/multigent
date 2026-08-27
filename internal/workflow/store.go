@@ -1148,6 +1148,38 @@ func (s *Store) RunForTask(project, taskID string) (entity.WorkflowRun, bool, er
 	return run, true, nil
 }
 
+// WillComplete reports whether completing the current step with the supplied
+// output would make the workflow terminal. It mirrors the routing checks in
+// CompleteAndAdvance without mutating any workflow state, so callers can run
+// required external side effects before committing a terminal transition.
+func (s *Store) WillComplete(project, taskID string, outputValues map[string]string, summary, output, status string) (bool, error) {
+	run, ok, err := s.RunForTask(project, taskID)
+	if err != nil || !ok {
+		return false, err
+	}
+	def, ok, err := s.RunDefinition(run)
+	if err != nil || !ok {
+		return false, err
+	}
+	currentStep, ok := stepByID(def.Steps, run.ActiveStepID)
+	if !ok {
+		return false, nil
+	}
+	values, err := normalizeWorkflowOutputValues(currentStep, outputValues, summary, output, strings.TrimSpace(status) == "failed")
+	if err != nil {
+		return false, err
+	}
+	edge, hasNext := chooseNextEdge(def.Edges, currentStep.ID, values, output)
+	if !hasNext && workflowHasOutgoingEdges(def.Edges, currentStep.ID) && !isTerminalReviewApproval(currentStep, def.Edges, values) {
+		return false, fmt.Errorf("workflow step %q output did not match any outgoing route", currentStep.Title)
+	}
+	if !hasNext {
+		return true, nil
+	}
+	_, nextExists := stepByID(def.Steps, edge.To)
+	return !nextExists, nil
+}
+
 func (s *Store) ReconcileRunCurrentAssigneeForTask(project, taskID string) (entity.WorkflowRun, bool, error) {
 	run, ok, err := s.RunForTask(project, taskID)
 	if err != nil || !ok {

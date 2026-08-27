@@ -594,7 +594,51 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 	if comments != "" {
 		outputs["comments"] = comments
 	}
+	if updateTaskRemoteMR(t, outputs) {
+		t.UpdatedAt = time.Now().UTC()
+		if err := s.ts.PersistTask(project, agent, t); err != nil {
+			return taskWorkflowResponse{}, http.StatusInternalServerError, err
+		}
+	}
 	summary := formatWorkflowReviewFields(outputs)
+	workflowStore := wfStore
+	run, runFound, err := workflowStore.RunForTask(project, taskID)
+	if err != nil {
+		return taskWorkflowResponse{}, http.StatusInternalServerError, err
+	}
+	var currentStep entity.WorkflowStep
+	if runFound {
+		if def, found, err := workflowStore.RunDefinition(run); err != nil {
+			return taskWorkflowResponse{}, http.StatusInternalServerError, err
+		} else if found {
+			for _, step := range def.Steps {
+				if step.ID == run.ActiveStepID {
+					currentStep = step
+					break
+				}
+			}
+		}
+	}
+
+	// Terminal delivery has external side effects. Complete those side effects
+	// before committing the workflow terminal state, otherwise a failed merge
+	// would be reported as a successful task.
+	deliveryPrepared := false
+	if runFound && isPullRequestReviewStep(currentStep) {
+		willComplete, err := workflowStore.WillComplete(project, taskID, outputs, summary, "", "completed")
+		if err != nil {
+			return taskWorkflowResponse{}, http.StatusBadRequest, err
+		}
+		if willComplete {
+			if !isApprovalDecision(outputs["decision"]) {
+				return taskWorkflowResponse{}, http.StatusBadRequest, errors.New("pull request review requires an approval decision")
+			}
+			if err := s.prepareTaskDelivery(r, project, t, ""); err != nil {
+				return taskWorkflowResponse{}, http.StatusConflict, err
+			}
+			deliveryPrepared = true
+		}
+	}
 	transition, err := wfStore.CompleteAndAdvance(project, taskID, summary, "", outputs, "completed")
 	if err != nil {
 		return taskWorkflowResponse{}, http.StatusBadRequest, err
@@ -606,43 +650,10 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 		t.Summary = summary
 		t.UpdatedAt = now
 		t.FinishedAt = &now
-		if s.previewEngine != nil {
-			_ = s.previewEngine.StopEphemeralPreview(taskID)
+		if !deliveryPrepared && isPullRequestReviewStep(currentStep) {
+			return taskWorkflowResponse{}, http.StatusConflict, errors.New("terminal pull request review completed without delivery preparation")
 		}
-		if s.worktreeMgr != nil {
-			projectRoot := s.st.ProjectDir(project)
-			wsDir := filepath.Join(projectRoot, "workspace")
-			gitRoot := projectRoot
-			if _, err := os.Stat(filepath.Join(wsDir, ".git")); err == nil {
-				gitRoot = wsDir
-			}
-
-			// Perform merge into main (GitLab remote or local safe merge)
-			p, err := s.st.Project(project)
-			if err == nil && p != nil {
-				defaultBranch := p.DefaultBranch
-				if defaultBranch == "" {
-					defaultBranch = "main"
-				}
-
-				if p.RemoteProvider == "gitlab" && p.RemoteProjectID != "" && t.RemoteMRIID != "" {
-					if host, _, err := s.resolveGitLabHost(p.RemoteConnection); err == nil {
-						commitMsg := fmt.Sprintf("Merge MR !%s (%s)", t.RemoteMRIID, t.Title)
-						_ = host.MergeMR(r.Context(), p.RemoteProjectID, t.RemoteMRIID, t.RemoteMRHeadSHA, commitMsg)
-						_ = s.worktreeMgr.SyncMain(gitRoot, defaultBranch)
-						t.RemoteMRState = "merged"
-					}
-				} else if t.BranchName != "" {
-					commitMsg := fmt.Sprintf("merge: task %s (%s)", t.ID, t.Title)
-					if mergedSHA, err := s.worktreeMgr.MergeBranchLocally(gitRoot, defaultBranch, t.BranchName, commitMsg); err == nil {
-						t.RemoteMRHeadSHA = mergedSHA
-						t.RemoteMRState = "merged"
-					}
-				}
-			}
-
-			_ = s.worktreeMgr.CleanupWorktree(gitRoot, taskID)
-		}
+		s.cleanupTaskDeliveryArtifacts(project, taskID)
 		if err := s.ts.PersistTask(project, agent, t); err != nil {
 			return taskWorkflowResponse{}, http.StatusInternalServerError, err
 		}
@@ -678,6 +689,156 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 		return taskWorkflowResponse{}, http.StatusNotFound, errors.New("workflow definition not found")
 	}
 	return taskWorkflowResponse{Definition: def, Run: transition.Run, Steps: steps, Branches: branches, History: history}, http.StatusOK, nil
+}
+
+func isPullRequestReviewStep(step entity.WorkflowStep) bool {
+	id := strings.ToLower(strings.TrimSpace(step.ID))
+	title := strings.ToLower(strings.TrimSpace(step.Title))
+	return strings.Contains(id, "pr_review") || strings.Contains(id, "mr_review") || strings.Contains(title, "pull request") || strings.Contains(title, "merge request")
+}
+
+func isApprovalDecision(decision string) bool {
+	switch strings.ToLower(strings.TrimSpace(decision)) {
+	case "approve", "approved", "pass", "ok", "yes", "approve_push", "approve_local":
+		return true
+	default:
+		return false
+	}
+}
+
+func updateTaskRemoteMR(task *entity.Task, outputs map[string]string) bool {
+	if task == nil {
+		return false
+	}
+	first := func(keys ...string) string {
+		for _, key := range keys {
+			if value := strings.TrimSpace(outputs[key]); value != "" {
+				return value
+			}
+		}
+		return ""
+	}
+	urlValue := first("pr_url", "mr_url", "change_request_url")
+	if urlValue == "none" || strings.HasPrefix(strings.ToLower(urlValue), "branch:") {
+		return false
+	}
+	iid := first("pr_number", "mr_iid", "mr_number", "change_request_number")
+	if iid == "none" {
+		iid = ""
+	}
+	headSHA := first("head_sha", "headSha", "commit_sha", "commitSha")
+	state := first("mr_state", "pr_state", "change_request_state")
+	changed := false
+	if iid != "" && task.RemoteMRIID != iid {
+		task.RemoteMRIID = iid
+		changed = true
+	}
+	if urlValue != "" && task.RemoteMRURL != urlValue {
+		task.RemoteMRURL = urlValue
+		changed = true
+	}
+	if headSHA != "" && task.RemoteMRHeadSHA != headSHA {
+		task.RemoteMRHeadSHA = headSHA
+		changed = true
+	}
+	if state == "" && (iid != "" || urlValue != "") {
+		state = "opened"
+	}
+	if state != "" && task.RemoteMRState != state {
+		task.RemoteMRState = state
+		changed = true
+	}
+	return changed
+}
+
+func (s *Server) prepareTaskDelivery(r *http.Request, project string, task *entity.Task, requestedCommitMessage string) error {
+	if s.worktreeMgr == nil {
+		return errors.New("worktree manager is unavailable")
+	}
+	projectRoot := s.st.ProjectDir(project)
+	wsDir := filepath.Join(projectRoot, "workspace")
+	gitRoot := projectRoot
+	if _, err := os.Stat(filepath.Join(wsDir, ".git")); err == nil {
+		gitRoot = wsDir
+	}
+	p, err := s.st.Project(project)
+	if err != nil || p == nil {
+		return fmt.Errorf("load project for delivery: %w", err)
+	}
+	defaultBranch := p.DefaultBranch
+	if defaultBranch == "" {
+		defaultBranch = "main"
+	}
+	commitMsg := strings.TrimSpace(requestedCommitMessage)
+	if commitMsg == "" {
+		commitMsg = fmt.Sprintf("merge: task %s (%s)", task.ID, task.Title)
+	}
+	if p.RemoteProvider == "gitlab" {
+		if p.RemoteProjectID == "" || task.RemoteMRIID == "" {
+			return fmt.Errorf("remote GitLab delivery is incomplete: project ID and MR IID are required")
+		}
+		host, _, err := s.resolveGitLabHost(p.RemoteConnection)
+		if err != nil {
+			return fmt.Errorf("resolve GitLab connection: %w", err)
+		}
+		// Always read the remote MR before deciding whether delivery is done.
+		// Task metadata can be stale or reported by an agent, so it must not be
+		// trusted as proof that a remote merge already happened.
+		mr, err := host.GetMR(r.Context(), p.RemoteProjectID, task.RemoteMRIID)
+		if err != nil {
+			return fmt.Errorf("read GitLab MR !%s before merge: %w", task.RemoteMRIID, err)
+		}
+		if task.RemoteMRURL == "" {
+			task.RemoteMRURL = mr.WebURL
+		}
+		if strings.EqualFold(strings.TrimSpace(mr.State), "merged") {
+			task.RemoteMRState = "merged"
+		} else {
+			expectedHeadSHA := strings.TrimSpace(task.RemoteMRHeadSHA)
+			if expectedHeadSHA == "" {
+				expectedHeadSHA = strings.TrimSpace(mr.HeadSHA)
+				task.RemoteMRHeadSHA = expectedHeadSHA
+			}
+			if expectedHeadSHA == "" {
+				return fmt.Errorf("GitLab MR !%s has no source head SHA to merge", task.RemoteMRIID)
+			}
+			mergeMessage := strings.TrimSpace(requestedCommitMessage)
+			if mergeMessage == "" {
+				mergeMessage = fmt.Sprintf("Merge MR !%s (%s)", task.RemoteMRIID, task.Title)
+			}
+			if err := host.MergeMR(r.Context(), p.RemoteProjectID, task.RemoteMRIID, expectedHeadSHA, mergeMessage); err != nil {
+				return fmt.Errorf("merge GitLab MR !%s: %w", task.RemoteMRIID, err)
+			}
+		}
+		if err := s.worktreeMgr.SyncMain(gitRoot, defaultBranch); err != nil {
+			return fmt.Errorf("sync %s after GitLab merge: %w", defaultBranch, err)
+		}
+		task.RemoteMRState = "merged"
+		return nil
+	}
+	if strings.TrimSpace(p.RemoteProvider) != "" {
+		return fmt.Errorf("remote provider %q is not supported by task delivery yet", p.RemoteProvider)
+	}
+
+	if task.BranchName == "" {
+		return errors.New("local delivery requires a task branch")
+	}
+	mergedSHA, err := s.worktreeMgr.MergeBranchLocally(gitRoot, defaultBranch, task.BranchName, commitMsg)
+	if err != nil {
+		return fmt.Errorf("local merge failed: %w", err)
+	}
+	task.RemoteMRHeadSHA = mergedSHA
+	task.RemoteMRState = "merged"
+	return nil
+}
+
+func (s *Server) cleanupTaskDeliveryArtifacts(project, taskID string) {
+	if s.previewEngine != nil {
+		_ = s.previewEngine.StopEphemeralPreview(taskID)
+	}
+	if s.worktreeMgr != nil {
+		_ = s.worktreeMgr.CleanupWorktree(s.resolveProjectGitRoot(project), taskID)
+	}
 }
 
 func formatWorkflowReviewFields(fields map[string]string) string {

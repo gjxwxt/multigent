@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -508,17 +509,56 @@ func (s *Server) submitWorkflowReviewFromTrigger(workspaceID string, record work
 	}
 	summary := formatWorkflowReviewFields(outputs)
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	deliveryPrepared := false
+	var currentStep entity.WorkflowStep
+	run, found, err := wfStore.RunForTask(record.Project, record.TaskID)
+	if err != nil {
+		return result, err
+	}
+	if found {
+		def, defFound, err := wfStore.RunDefinition(run)
+		if err != nil {
+			return result, err
+		}
+		if defFound {
+			for _, step := range def.Steps {
+				if step.ID == run.ActiveStepID {
+					currentStep = step
+					break
+				}
+			}
+			if isPullRequestReviewStep(currentStep) {
+				willComplete, err := wfStore.WillComplete(record.Project, record.TaskID, outputs, summary, "", "completed")
+				if err != nil {
+					return result, err
+				}
+				if willComplete {
+					if !isApprovalDecision(outputs["decision"]) {
+						return result, errors.New("pull request review requires an approval decision")
+					}
+					if err := s.prepareTaskDelivery(r, record.Project, t, ""); err != nil {
+						return result, err
+					}
+					deliveryPrepared = true
+				}
+			}
+		}
+	}
 	result, err = wfStore.CompleteAndAdvance(record.Project, record.TaskID, summary, "", outputs, "completed")
 	if err != nil {
 		return result, err
 	}
 	_ = s.ts.RemoveFromInbox(record.TaskID)
 	if result.Done {
+		if isPullRequestReviewStep(currentStep) && !deliveryPrepared {
+			return result, errors.New("terminal pull request review completed without delivery preparation")
+		}
 		now := time.Now().UTC()
 		t.Status = entity.TaskStatusDoneSuccess
 		t.Summary = summary
 		t.UpdatedAt = now
 		t.FinishedAt = &now
+		s.cleanupTaskDeliveryArtifacts(record.Project, record.TaskID)
 		if err := s.ts.PersistTask(record.Project, agent, t); err != nil {
 			return result, err
 		}

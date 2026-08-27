@@ -60,6 +60,33 @@ func TestGitLabHostListNamespaces(t *testing.T) {
 	}
 }
 
+func TestGitLabHostListNamespacesPaginates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v4/namespaces" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.URL.Query().Get("page") == "1" {
+			w.Header().Set("X-Next-Page", "2")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[{"id":10,"name":"Alice","path":"alice","kind":"user","full_path":"alice"}]`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[{"id":20,"name":"Core Team","path":"core-team","kind":"group","full_path":"core-team"}]`))
+	}))
+	defer srv.Close()
+
+	host := NewGitLabHost(GitLabConfig{BaseURL: srv.URL, Token: "t"})
+	ns, err := host.ListNamespaces(context.Background())
+	if err != nil {
+		t.Fatalf("ListNamespaces failed: %v", err)
+	}
+	if len(ns) != 2 || ns[0].ID != 10 || ns[1].ID != 20 {
+		t.Fatalf("unexpected paginated namespaces: %+v", ns)
+	}
+}
+
 func TestGitLabHostCreateRepository(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v4/projects" && r.Method == http.MethodPost {

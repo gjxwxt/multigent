@@ -192,6 +192,53 @@ func TestMergeBranchLocallyDirty(t *testing.T) {
 	}
 }
 
+func TestMergeBranchLocallyAbortsConflictInRepository(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "gitworktree-merge-conflict-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	runGit(t, tempDir, "init", "-b", "main")
+	runGit(t, tempDir, "config", "user.email", "test@multigent.ai")
+	runGit(t, tempDir, "config", "user.name", "Multigent Tester")
+	readme := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readme, []byte("base\n"), 0644); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	runGit(t, tempDir, "add", "README.md")
+	runGit(t, tempDir, "commit", "-m", "initial commit")
+
+	mgr := NewManager()
+	wtDir, branch, err := mgr.EnsureWorktree(tempDir, "task-conflict", "main", "feature/conflict")
+	if err != nil {
+		t.Fatalf("EnsureWorktree failed: %v", err)
+	}
+	defer mgr.CleanupWorktree(tempDir, "task-conflict")
+
+	if err := os.WriteFile(filepath.Join(wtDir, "README.md"), []byte("feature\n"), 0644); err != nil {
+		t.Fatalf("write feature readme: %v", err)
+	}
+	runGit(t, wtDir, "add", "README.md")
+	runGit(t, wtDir, "commit", "-m", "feature change")
+
+	if err := os.WriteFile(readme, []byte("main\n"), 0644); err != nil {
+		t.Fatalf("write main readme: %v", err)
+	}
+	runGit(t, tempDir, "add", "README.md")
+	runGit(t, tempDir, "commit", "-m", "main change")
+
+	if _, err := mgr.MergeBranchLocally(tempDir, "main", branch, "merge conflict"); err == nil {
+		t.Fatal("expected merge conflict")
+	}
+	if status := string(runGitOutput(t, tempDir, "status", "--porcelain", "--untracked-files=no")); status != "" {
+		t.Fatalf("repository remained dirty after aborted merge: %q", status)
+	}
+	if _, err := exec.Command("git", "-C", tempDir, "rev-parse", "--verify", "MERGE_HEAD").Output(); err == nil {
+		t.Fatal("MERGE_HEAD remained after aborted merge")
+	}
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
@@ -200,4 +247,15 @@ func runGit(t *testing.T, dir string, args ...string) {
 	if err != nil {
 		t.Fatalf("git %v failed in %s: %v\nOutput: %s", args, dir, err, string(out))
 	}
+}
+
+func runGitOutput(t *testing.T, dir string, args ...string) []byte {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %v failed in %s: %v", args, dir, err)
+	}
+	return out
 }

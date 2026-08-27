@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -84,40 +85,53 @@ type gitlabNamespace struct {
 }
 
 func (g *GitLabHost) ListNamespaces(ctx context.Context) ([]Namespace, error) {
-	req, err := g.newRequest(ctx, http.MethodGet, "/namespaces?per_page=100", nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := g.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("list gitlab namespaces: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return nil, ErrUnauthorized
-	}
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("list gitlab namespaces status %d: %s", resp.StatusCode, string(b))
-	}
-
-	var raw []gitlabNamespace
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		return nil, fmt.Errorf("decode gitlab namespaces: %w", err)
-	}
-
 	var out []Namespace
-	for _, ns := range raw {
-		out = append(out, Namespace{
-			ID:       ns.ID,
-			Name:     ns.Name,
-			Path:     ns.Path,
-			Kind:     ns.Kind,
-			FullPath: ns.FullPath,
-		})
+	for page := 1; ; page++ {
+		endpoint := fmt.Sprintf("/namespaces?per_page=100&page=%d", page)
+		req, err := g.newRequest(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := g.client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("list gitlab namespaces: %w", err)
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			resp.Body.Close()
+			return nil, ErrUnauthorized
+		}
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("list gitlab namespaces status %d: %s", resp.StatusCode, string(b))
+		}
+
+		var raw []gitlabNamespace
+		decodeErr := json.NewDecoder(resp.Body).Decode(&raw)
+		nextPage := strings.TrimSpace(resp.Header.Get("X-Next-Page"))
+		resp.Body.Close()
+		if decodeErr != nil {
+			return nil, fmt.Errorf("decode gitlab namespaces: %w", decodeErr)
+		}
+		for _, ns := range raw {
+			out = append(out, Namespace{
+				ID:       ns.ID,
+				Name:     ns.Name,
+				Path:     ns.Path,
+				Kind:     ns.Kind,
+				FullPath: ns.FullPath,
+			})
+		}
+		if nextPage == "" {
+			return out, nil
+		}
+		next, err := strconv.Atoi(nextPage)
+		if err != nil || next <= page {
+			return nil, fmt.Errorf("invalid GitLab namespace pagination header %q", nextPage)
+		}
+		page = next - 1
 	}
-	return out, nil
 }
 
 type gitlabProjectResp struct {
@@ -260,24 +274,40 @@ func (g *GitLabHost) CreateOrUpdateMR(ctx context.Context, projectID string, exi
 		if err == nil {
 			return cr, nil
 		}
+		if !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
 	}
 
 	// 2. Search for existing open MR with source_branch
-	endpointSearch := fmt.Sprintf("/projects/%s/merge_requests?source_branch=%s&state=opened",
-		url.PathEscape(projectID), url.QueryEscape(sourceBranch))
+	endpointSearch := fmt.Sprintf("/projects/%s/merge_requests?source_branch=%s&target_branch=%s&state=opened",
+		url.PathEscape(projectID), url.QueryEscape(sourceBranch), url.QueryEscape(targetBranch))
 	searchReq, err := g.newRequest(ctx, http.MethodGet, endpointSearch, nil)
-	if err == nil {
-		searchResp, err := g.client.Do(searchReq)
-		if err == nil {
-			defer searchResp.Body.Close()
-			if searchResp.StatusCode == http.StatusOK {
-				var openMRs []gitlabMRResp
-				if err := json.NewDecoder(searchResp.Body).Decode(&openMRs); err == nil && len(openMRs) > 0 {
-					iidStr := strconv.FormatInt(openMRs[0].IID, 10)
-					return g.updateMR(ctx, projectID, iidStr, title, desc)
-				}
-			}
-		}
+	if err != nil {
+		return nil, err
+	}
+	searchResp, err := g.client.Do(searchReq)
+	if err != nil {
+		return nil, fmt.Errorf("search gitlab merge requests: %w", err)
+	}
+	if searchResp.StatusCode == http.StatusUnauthorized || searchResp.StatusCode == http.StatusForbidden {
+		searchResp.Body.Close()
+		return nil, ErrUnauthorized
+	}
+	if searchResp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(searchResp.Body)
+		searchResp.Body.Close()
+		return nil, fmt.Errorf("search gitlab merge requests status %d: %s", searchResp.StatusCode, string(b))
+	}
+	var openMRs []gitlabMRResp
+	decodeErr := json.NewDecoder(searchResp.Body).Decode(&openMRs)
+	searchResp.Body.Close()
+	if decodeErr != nil {
+		return nil, fmt.Errorf("decode gitlab merge requests: %w", decodeErr)
+	}
+	if len(openMRs) > 0 {
+		iidStr := strconv.FormatInt(openMRs[0].IID, 10)
+		return g.updateMR(ctx, projectID, iidStr, title, desc)
 	}
 
 	// 3. Create new MR

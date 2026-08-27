@@ -77,7 +77,7 @@ func (m *Manager) EnsureWorktree(projectRoot, taskID, baseBranch, featureBranch 
 	hasOrigin := false
 	cmdRemote := exec.Command("git", "remote")
 	cmdRemote.Dir = projectRoot
-	if out, err := cmdRemote.Output(); err == nil && strings.Contains(string(out), "origin") {
+	if out, err := cmdRemote.Output(); err == nil && hasRemote(string(out), "origin") {
 		hasOrigin = true
 	}
 
@@ -120,6 +120,16 @@ func (m *Manager) EnsureWorktree(projectRoot, taskID, baseBranch, featureBranch 
 		return "", "", fmt.Errorf("read created worktree branch: %w", err)
 	}
 	return targetDir, branch, nil
+}
+
+func hasRemote(remoteList, wanted string) bool {
+	wanted = strings.TrimSpace(wanted)
+	for _, remote := range strings.Split(remoteList, "\n") {
+		if strings.TrimSpace(remote) == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func checkedOutBranch(worktreeDir string) (string, error) {
@@ -311,7 +321,9 @@ func (m *Manager) MergeBranchLocally(projectRoot, targetBranch, sourceBranch, co
 	cmdMerge.Stderr = &stderrMerge
 	if err := cmdMerge.Run(); err != nil {
 		// Attempt clean abort on failure / conflict
-		_ = exec.Command("git", "merge", "--abort").Run()
+		cmdAbort := exec.Command("git", "merge", "--abort")
+		cmdAbort.Dir = projectRoot
+		_ = cmdAbort.Run()
 		return "", fmt.Errorf("merge branch %s into %s failed: %w (%s)", sourceBranch, targetBranch, err, stderrMerge.String())
 	}
 
@@ -335,14 +347,44 @@ func (m *Manager) SyncMain(projectRoot, defaultBranch string) error {
 		defaultBranch = "main"
 	}
 
+	projectRoot = strings.TrimSpace(projectRoot)
+	if projectRoot == "" {
+		return fmt.Errorf("project root is required")
+	}
+
 	// Check if origin remote exists
 	cmdRemote := exec.Command("git", "remote")
 	cmdRemote.Dir = projectRoot
-	if out, err := cmdRemote.Output(); err == nil && strings.Contains(string(out), "origin") {
-		cmdPull := exec.Command("git", "pull", "--ff-only", "origin", defaultBranch)
-		cmdPull.Dir = projectRoot
-		if err := cmdPull.Run(); err != nil {
-			return fmt.Errorf("sync main from origin failed: %w", err)
+	if out, err := cmdRemote.Output(); err == nil && hasRemote(string(out), "origin") {
+		cmdBranch := exec.Command("git", "branch", "--show-current")
+		cmdBranch.Dir = projectRoot
+		branchOut, err := cmdBranch.Output()
+		if err != nil {
+			return fmt.Errorf("read current branch before sync: %w", err)
+		}
+		if current := strings.TrimSpace(string(branchOut)); current != defaultBranch {
+			return fmt.Errorf("cannot sync %s: repository is on branch %s", defaultBranch, current)
+		}
+
+		cmdStatus := exec.Command("git", "status", "--porcelain")
+		cmdStatus.Dir = projectRoot
+		statusOut, err := cmdStatus.Output()
+		if err != nil {
+			return fmt.Errorf("check repository status before sync: %w", err)
+		}
+		if strings.TrimSpace(string(statusOut)) != "" {
+			return fmt.Errorf("cannot sync %s: repository has uncommitted changes", defaultBranch)
+		}
+
+		cmdFetch := exec.Command("git", "fetch", "origin", defaultBranch)
+		cmdFetch.Dir = projectRoot
+		if err := cmdFetch.Run(); err != nil {
+			return fmt.Errorf("fetch origin %s failed: %w", defaultBranch, err)
+		}
+		cmdMerge := exec.Command("git", "merge", "--ff-only", "origin/"+defaultBranch)
+		cmdMerge.Dir = projectRoot
+		if err := cmdMerge.Run(); err != nil {
+			return fmt.Errorf("fast-forward %s from origin failed: %w", defaultBranch, err)
 		}
 	}
 	return nil

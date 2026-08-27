@@ -1322,6 +1322,10 @@ type taskRow struct {
 	BaseCommit       string    `json:"baseCommit,omitempty"`
 	BranchName       string    `json:"branchName,omitempty"`
 	WorktreeDir      string    `json:"worktreeDir,omitempty"`
+	RemoteMRIID      string    `json:"remoteMrIid,omitempty"`
+	RemoteMRURL      string    `json:"remoteMrUrl,omitempty"`
+	RemoteMRHeadSHA  string    `json:"remoteMrHeadSha,omitempty"`
+	RemoteMRState    string    `json:"remoteMrState,omitempty"`
 }
 
 func taskToRow(t *entity.Task, project, agent string, archived bool) taskRow {
@@ -1346,6 +1350,10 @@ func taskToRow(t *entity.Task, project, agent string, archived bool) taskRow {
 		BaseCommit:       t.BaseCommit,
 		BranchName:       t.BranchName,
 		WorktreeDir:      t.WorktreeDir,
+		RemoteMRIID:      t.RemoteMRIID,
+		RemoteMRURL:      t.RemoteMRURL,
+		RemoteMRHeadSHA:  t.RemoteMRHeadSHA,
+		RemoteMRState:    t.RemoteMRState,
 	}
 	if t.StartedAt != nil {
 		r.StartedAt = t.StartedAt.UTC().Format(time.RFC3339Nano)

@@ -8,7 +8,6 @@ import (
 
 	"github.com/multigent/multigent/internal/codehost"
 	controldb "github.com/multigent/multigent/internal/db"
-	"github.com/multigent/multigent/internal/gitworktree"
 )
 
 func (s *Server) resolveGitLabHost(connectionID string) (*codehost.GitLabHost, string, error) {
@@ -188,62 +187,31 @@ func (s *Server) handleMergeTaskMR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Remote GitLab Mode
-	if p.RemoteProvider == "gitlab" && p.RemoteProjectID != "" && task.RemoteMRIID != "" {
-		host, _, err := s.resolveGitLabHost(p.RemoteConnection)
-		if err != nil {
-			s.serverError(w, fmt.Errorf("resolve gitlab connection: %w", err))
-			return
-		}
-
-		err = host.MergeMR(r.Context(), p.RemoteProjectID, task.RemoteMRIID, task.RemoteMRHeadSHA, body.CommitMessage)
-		if err != nil {
-			s.serverError(w, fmt.Errorf("merge gitlab mr %s: %w", task.RemoteMRIID, err))
-			return
-		}
-
-		// Pull merged changes into local workspace
-		mgr := gitworktree.NewManager()
-		_ = mgr.SyncMain(p.Repo, p.DefaultBranch)
-
-		task.RemoteMRState = "merged"
-		_ = s.ts.PersistTask(projectName, agentName, task)
-
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ok":     true,
-			"mode":   "gitlab_remote",
-			"mrIid":  task.RemoteMRIID,
-			"status": "merged",
-		})
+	if err := s.prepareTaskDelivery(r, projectName, task, body.CommitMessage); err != nil {
+		s.serverError(w, err)
 		return
 	}
-
-	// 2. Pure Local Worktree Mode
-	mgr := gitworktree.NewManager()
-	branchToMerge := task.BranchName
-	if branchToMerge == "" {
-		branchToMerge = fmt.Sprintf("feature/%s", task.ID)
-	}
-
-	targetBranch := p.DefaultBranch
-	if targetBranch == "" {
-		targetBranch = "main"
-	}
-
-	mergedSHA, err := mgr.MergeBranchLocally(p.Repo, targetBranch, branchToMerge, body.CommitMessage)
-	if err != nil {
-		s.serverError(w, fmt.Errorf("local merge failed: %w", err))
+	if err := s.ts.PersistTask(projectName, agentName, task); err != nil {
+		s.serverError(w, fmt.Errorf("persist task delivery state: %w", err))
 		return
 	}
+	s.cleanupTaskDeliveryArtifacts(projectName, taskID)
 
-	task.RemoteMRState = "merged"
-	task.RemoteMRHeadSHA = mergedSHA
-	_ = s.ts.PersistTask(projectName, agentName, task)
+	mode := "local"
+	response := map[string]any{
+		"ok":     true,
+		"mode":   mode,
+		"mrIid":  task.RemoteMRIID,
+		"status": "merged",
+	}
+	if p.RemoteProvider == "gitlab" {
+		mode = "gitlab_remote"
+		response["mode"] = mode
+	} else {
+		// Keep the legacy response field for local callers while the task
+		// metadata remains the source of truth for both delivery modes.
+		response["mergedSha"] = task.RemoteMRHeadSHA
+	}
 
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"ok":        true,
-		"mode":      "local",
-		"mergedSha": mergedSHA,
-		"status":    "merged",
-	})
+	_ = json.NewEncoder(w).Encode(response)
 }

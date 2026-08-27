@@ -1063,6 +1063,7 @@ func (s *Server) completeRuntimeWorkflowStep(workspaceID, project string, t *ent
 	if output == "" {
 		output = strings.TrimSpace(t.LastError)
 	}
+	updateTaskRemoteMR(t, outputs)
 	result, err := wfStore.CompleteAndAdvance(project, t.ID, t.Summary, output, outputs, stepStatus)
 	if err != nil {
 		return result, false, err
