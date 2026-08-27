@@ -735,7 +735,7 @@ func rewriteHTML(html, taskID, projectName string) string {
 }
 
 func (s *Server) resolveTaskWorktreeDir(project, taskID string) string {
-	task, _, err := s.findTaskInProject(project, taskID)
+	task, agent, err := s.findTaskInProject(project, taskID)
 	if err == nil && task != nil && strings.TrimSpace(task.WorktreeDir) != "" {
 		if _, err := os.Stat(task.WorktreeDir); err == nil {
 			return task.WorktreeDir
@@ -746,6 +746,21 @@ func (s *Server) resolveTaskWorktreeDir(project, taskID string) string {
 	stdWt := gitworktree.WorktreeDir(s.st.ProjectDir(project), taskID)
 	if _, err := os.Stat(stdWt); err == nil {
 		return stdWt
+	}
+
+	// Check agent workspace path
+	if task != nil && agent != "" {
+		agentDir := filepath.Join(s.st.ProjectDir(project), "agents", agent)
+		if _, err := os.Stat(agentDir); err == nil {
+			return agentDir
+		}
+	}
+
+	// Check project repo if configured
+	if p, err := s.st.Project(project); err == nil && p != nil && p.Repo != "" {
+		if _, err := os.Stat(p.Repo); err == nil {
+			return p.Repo
+		}
 	}
 
 	// Fallback to project workspace directory

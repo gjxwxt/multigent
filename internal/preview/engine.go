@@ -57,19 +57,25 @@ func DetectProjectType(worktreeDir string) ProjectType {
 		return ProjectTypeCLI
 	}
 
-	hasRootPackageJSON := fileExists(filepath.Join(worktreeDir, "package.json"))
-	hasFrontendPackageJSON := fileExists(filepath.Join(worktreeDir, "frontend", "package.json"))
-	hasRootGoMod := fileExists(filepath.Join(worktreeDir, "go.mod"))
-	hasBackendGoMod := fileExists(filepath.Join(worktreeDir, "backend", "go.mod"))
-	hasRequirements := fileExists(filepath.Join(worktreeDir, "requirements.txt"))
+	hasFrontend := fileExists(filepath.Join(worktreeDir, "package.json")) ||
+		fileExists(filepath.Join(worktreeDir, "web", "package.json")) ||
+		fileExists(filepath.Join(worktreeDir, "frontend", "package.json")) ||
+		fileExists(filepath.Join(worktreeDir, "client", "package.json")) ||
+		fileExists(filepath.Join(worktreeDir, "app", "package.json"))
 
-	if (hasFrontendPackageJSON || hasRootPackageJSON) && (hasRootGoMod || hasBackendGoMod || hasRequirements) {
+	hasBackend := fileExists(filepath.Join(worktreeDir, "go.mod")) ||
+		fileExists(filepath.Join(worktreeDir, "server", "go.mod")) ||
+		fileExists(filepath.Join(worktreeDir, "server", "main.go")) ||
+		fileExists(filepath.Join(worktreeDir, "backend", "go.mod")) ||
+		fileExists(filepath.Join(worktreeDir, "requirements.txt"))
+
+	if hasFrontend && hasBackend {
 		return ProjectTypeFullstack
 	}
-	if hasFrontendPackageJSON || hasRootPackageJSON {
+	if hasFrontend {
 		return ProjectTypeFrontend
 	}
-	if hasRootGoMod || hasBackendGoMod || hasRequirements {
+	if hasBackend {
 		return ProjectTypeBackend
 	}
 	return ProjectTypeCLI
@@ -139,7 +145,15 @@ func (e *Engine) StartEphemeralPreview(ctx context.Context, taskID, projectName,
 	var runCmd []string
 	switch projType {
 	case ProjectTypeFullstack:
-		if fileExists(filepath.Join(worktreeDir, "frontend", "package.json")) {
+		if fileExists(filepath.Join(worktreeDir, "web", "package.json")) {
+			backendCmd := ""
+			if fileExists(filepath.Join(worktreeDir, "server", "main.go")) || fileExists(filepath.Join(worktreeDir, "server", "go.mod")) {
+				backendCmd = "PORT=8080 go run -buildvcs=false ./server/... 2>/dev/null & "
+			} else if fileExists(filepath.Join(worktreeDir, "main.go")) || fileExists(filepath.Join(worktreeDir, "go.mod")) {
+				backendCmd = "PORT=8080 go run -buildvcs=false . 2>/dev/null & "
+			}
+			runCmd = []string{"sh", "-c", setupEnv + fmt.Sprintf("%s(cd web && npx vite --port %d --host 0.0.0.0 || npx vite preview --port %d --host 0.0.0.0)", backendCmd, port, port)}
+		} else if fileExists(filepath.Join(worktreeDir, "frontend", "package.json")) {
 			backendCmd := ""
 			if fileExists(filepath.Join(worktreeDir, "main.go")) || fileExists(filepath.Join(worktreeDir, "go.mod")) {
 				backendCmd = "PORT=8080 go run -buildvcs=false . 2>/dev/null & "

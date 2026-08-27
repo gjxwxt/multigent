@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { Globe, Play, RefreshCw, X } from 'lucide-react'
+import { GitBranch, Globe, Play, RefreshCw, X } from 'lucide-react'
 import { WorkflowBoard } from '../../components/workflow/WorkflowBoard'
 import { ConversationLog } from '../../components/ui/ConversationLog'
 import { PlaceholderCard } from '../../components/ui/PlaceholderCard'
@@ -368,24 +368,33 @@ export default function ProjectTaskFollowPage() {
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {(() => {
-            const taskBranch = displayTask?.branchName || (displayTask?.worktreeDir ? `feature/${displayTask.id}` : null)
-            if (!taskBranch) return null
+            const isFeatureBranch = Boolean(displayTask?.branchName || displayTask?.worktreeDir)
+            const taskBranch = displayTask?.branchName || (displayTask?.worktreeDir ? `feature/${displayTask.id}` : displayTask?.baseBranch || 'main')
             return (
               <div className="hidden sm:inline-flex items-center gap-1.5 font-mono text-xs text-sky-800 bg-sky-50 dark:bg-sky-950/60 dark:text-sky-300 px-2.5 py-1 rounded-lg border border-sky-200/80 dark:border-sky-800 shadow-xs">
-                <span className="flex items-center gap-1 font-semibold text-sky-700 dark:text-sky-300">
-                  {displayTask?.baseBranch || 'main'}
-                  {displayTask?.baseCommit ? (
-                    <span className="text-[11px] font-normal text-sky-600/80 dark:text-sky-400/80">({displayTask.baseCommit.slice(0, 7)})</span>
-                  ) : null}
-                </span>
-                <span className="text-sky-400 dark:text-sky-600 font-bold select-none">──►</span>
-                <span className="truncate max-w-[220px]" title={taskBranch}>
-                  {taskBranch}
-                </span>
+                {isFeatureBranch ? (
+                  <>
+                    <span className="flex items-center gap-1 font-semibold text-sky-700 dark:text-sky-300">
+                      {displayTask?.baseBranch || 'main'}
+                      {displayTask?.baseCommit ? (
+                        <span className="text-[11px] font-normal text-sky-600/80 dark:text-sky-400/80">({displayTask.baseCommit.slice(0, 7)})</span>
+                      ) : null}
+                    </span>
+                    <span className="text-sky-400 dark:text-sky-600 font-bold select-none">──►</span>
+                    <span className="truncate max-w-[220px]" title={taskBranch}>
+                      {taskBranch}
+                    </span>
+                  </>
+                ) : (
+                  <span className="flex items-center gap-1 font-semibold text-sky-700 dark:text-sky-300">
+                    <GitBranch className="size-3.5 text-sky-600 dark:text-sky-400" />
+                    <span>{taskBranch}</span>
+                  </span>
+                )}
               </div>
             )
           })()}
-          {preview && preview.type !== 'cli' && (
+          {preview && (preview.status === 'running' || preview.type !== 'cli' || preview.type === 'fullstack' || preview.type === 'frontend') && (
             <div className="flex items-center">
               {preview.status === 'running' ? (
                 <a
