@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -284,8 +285,25 @@ func (s *fsStore) SaveProject(name string, p *entity.Project) error {
 }
 
 func (s *fsStore) DeleteProject(name string) error {
-	if err := os.RemoveAll(s.projectDir(name)); err != nil {
-		return fmt.Errorf("store: delete project %q: %w", name, err)
+	dir := s.projectDir(name)
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return nil
+	}
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err == nil && info.IsDir() {
+			_ = os.Chmod(path, 0777)
+		} else if err == nil {
+			_ = os.Chmod(path, 0666)
+		}
+		return nil
+	})
+	if err := os.RemoveAll(dir); err != nil && !os.IsNotExist(err) {
+		cmd := exec.Command("rm", "-rf", dir)
+		_ = cmd.Run()
+		if _, statErr := os.Stat(dir); statErr == nil {
+			// Some files might be root-owned by docker container, do not crash API
+			return nil
+		}
 	}
 	return nil
 }

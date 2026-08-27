@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+
+	controldb "github.com/multigent/multigent/internal/db"
 )
 
 func (s *Server) handleDeleteTeam(w http.ResponseWriter, r *http.Request) {
@@ -86,6 +88,19 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, err)
 		return
 	}
+	workspaceID, _ := s.currentWorkspaceID()
+	if workspaceID != "" {
+		memberships, err := s.controlDB.ListProjectMemberships(controldb.ProjectMembershipFilter{
+			WorkspaceID: workspaceID,
+			ProjectID:   project,
+		})
+		if err == nil {
+			for _, m := range memberships {
+				_ = s.controlDB.DeleteProjectMembership(workspaceID, m.ID)
+			}
+		}
+	}
+
 	if err := s.st.DeleteProject(project); err != nil {
 		s.serverError(w, err)
 		return
