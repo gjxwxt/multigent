@@ -103,6 +103,80 @@ func TestWorkflowConditionInDoesNotUseSubstringMatching(t *testing.T) {
 	}
 }
 
+func TestSoftwareDeliveryTemplateHasPRReviewLoop(t *testing.T) {
+	tmpl, ok := Template("agentic-software-delivery", "en")
+	if !ok {
+		t.Fatal("expected software delivery template")
+	}
+
+	steps := make(map[string]entity.WorkflowStep, len(tmpl.Steps))
+	for _, step := range tmpl.Steps {
+		steps[step.ID] = step
+	}
+	for _, id := range []string{"implementation", "code_review", "changelog_cleanup", "create_pr", "pr_review", "qa"} {
+		if _, ok := steps[id]; !ok {
+			t.Fatalf("expected step %q", id)
+		}
+	}
+	if steps["changelog_cleanup"].Type != "agent_task" || steps["create_pr"].Type != "agent_task" {
+		t.Fatal("expected changelog cleanup and create PR to be agent tasks")
+	}
+	if steps["pr_review"].Type != "human_review" {
+		t.Fatal("expected PR review to be a human review gate")
+	}
+
+	findEdge := func(from, to string) entity.WorkflowEdge {
+		for _, edge := range tmpl.Edges {
+			if edge.From == from && edge.To == to {
+				return edge
+			}
+		}
+		t.Fatalf("expected edge %s -> %s", from, to)
+		return entity.WorkflowEdge{}
+	}
+	if edge := findEdge("code_review", "changelog_cleanup"); edge.Condition == nil || edge.Condition.Value != "approve" {
+		t.Fatal("expected approved code review to enter changelog cleanup")
+	}
+	if edge := findEdge("pr_review", "qa"); edge.Condition == nil || edge.Condition.Value != "approve" {
+		t.Fatal("expected approved PR review to enter QA")
+	}
+	if edge := findEdge("pr_review", "implementation"); edge.Condition == nil || edge.Condition.Value != "request_changes" {
+		t.Fatal("expected requested PR changes to return to implementation")
+	}
+}
+
+func TestSeededSoftwareDeliveryHasPRReviewLoop(t *testing.T) {
+	controlDB, err := db.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer controlDB.Close()
+	if err := controlDB.UpsertWorkspace(db.Workspace{ID: "workspace-seed", Name: "Workspace", Slug: "workspace-seed", Root: t.TempDir()}); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+
+	store := NewStore(controlDB, "workspace-seed")
+	if err := store.SeedDefaults(); err != nil {
+		t.Fatalf("seed defaults: %v", err)
+	}
+	def, ok, err := store.Definition("software-delivery-v1")
+	if err != nil || !ok {
+		t.Fatalf("load seeded definition: ok=%v err=%v", ok, err)
+	}
+	if def.Version < 5 {
+		t.Fatalf("expected seeded workflow version >= 5, got %d", def.Version)
+	}
+	seen := map[string]bool{}
+	for _, step := range def.Steps {
+		seen[step.ID] = true
+	}
+	for _, id := range []string{"changelog_cleanup", "create_pr", "pr_review"} {
+		if !seen[id] {
+			t.Fatalf("expected seeded step %q", id)
+		}
+	}
+}
+
 func TestWorkflowActorBindingPrefersStepIDOverRole(t *testing.T) {
 	controlDB, err := db.Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {
