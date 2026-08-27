@@ -29,7 +29,17 @@ import { apiDelete, apiFetch, apiPost, apiPut } from '../../lib/api'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { showToast } from '../../components/ui/Toast'
 
-type ProjectDetail = { name: string; description: string; repo: string }
+type ProjectDetail = {
+  name: string
+  description: string
+  repo: string
+  remoteProvider?: string
+  remoteConnection?: string
+  remoteProjectId?: string
+  remoteUrl?: string
+  cloneUrl?: string
+  defaultBranch?: string
+}
 type PromptData = { content: string }
 
 export default function ProjectSettingsPage() {
@@ -62,6 +72,9 @@ export default function ProjectSettingsPage() {
               name={detail.name}
               initialDescription={detail.description}
               initialRepo={detail.repo}
+              remoteProvider={detail.remoteProvider}
+              remoteUrl={detail.remoteUrl}
+              cloneUrl={detail.cloneUrl}
               onReload={() => setReloadKey((k) => k + 1)}
             />
           )}
@@ -144,12 +157,18 @@ function BasicInfoEditor({
   name,
   initialDescription,
   initialRepo,
+  remoteProvider,
+  remoteUrl,
+  cloneUrl,
   onReload,
 }: {
   projectId: string
   name: string
   initialDescription: string
   initialRepo: string
+  remoteProvider?: string
+  remoteUrl?: string
+  cloneUrl?: string
   onReload: () => void
 }) {
   const { t } = useTranslation()
@@ -307,6 +326,37 @@ function BasicInfoEditor({
             )}
           </dd>
         </div>
+
+        {/* Remote code host info if bound */}
+        {remoteUrl && (
+          <div className="flex items-center justify-between gap-4 px-5 py-3 bg-sky-50/40 dark:bg-sky-950/20">
+            <dt className="w-32 shrink-0 text-xs font-medium text-sky-800 dark:text-sky-300 flex items-center gap-1.5">
+              <FolderGit2 className="size-3.5" />
+              <span>远程代码仓库</span>
+            </dt>
+            <dd className="flex-1 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <span className="font-mono text-xs text-neutral-700 dark:text-zinc-300 truncate block">
+                  {remoteUrl}
+                </span>
+                {cloneUrl && (
+                  <span className="font-mono text-[10px] text-neutral-400 dark:text-zinc-500 truncate block mt-0.5">
+                    git clone {cloneUrl}
+                  </span>
+                )}
+              </div>
+              <a
+                href={remoteUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 rounded bg-white px-2.5 py-1 text-[11px] font-medium text-sky-600 border border-sky-200 hover:bg-sky-50 shadow-xs dark:bg-zinc-800 dark:border-zinc-700 dark:text-sky-400 shrink-0"
+              >
+                <span>在 {remoteProvider === 'gitlab' ? 'GitLab' : '远程'} 查看</span>
+                <ArrowRight className="size-3" />
+              </a>
+            </dd>
+          </div>
+        )}
       </dl>
 
       <InitializeProjectModal
@@ -356,19 +406,29 @@ function InitializeProjectModal({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // GitLab remote creation state
+  const [gitlabStatus, setGitlabStatus] = useState<{ connected: boolean; connectionId?: string }>({ connected: false })
+  const [gitlabNamespaces, setGitlabNamespaces] = useState<Array<{ id: number; name: string; fullPath: string; kind: string }>>([])
+  const [syncToGitLab, setSyncToGitLab] = useState(true)
+  const [selectedNamespaceId, setSelectedNamespaceId] = useState<number | null>(null)
+  const [repoSlug, setRepoSlug] = useState(projectId)
+  const [visibility, setVisibility] = useState<'private' | 'internal' | 'public'>('private')
+
   const [agents, setAgents] = useState<Array<{ name: string; displayName?: string; model?: string }>>([])
   const [selectedAgent, setSelectedAgent] = useState<string>('')
   const [loadingAgents, setLoadingAgents] = useState(false)
 
-  // Sync localPath & fetch project member agents whenever modal opens
+  // Sync localPath, fetch agents & check GitLab connection status whenever modal opens
   useEffect(() => {
     if (isOpen) {
       if (currentRepo.trim()) {
         setLocalPath(currentRepo.trim())
       }
+      setRepoSlug(projectId)
       setError(null)
       setLoadingAgents(true)
 
+      // Fetch project member agents
       apiFetch<Array<{ name?: string; displayName?: string; model?: string }>>(`/api/v1/projects/${encodeURIComponent(projectId)}/agents`)
         .then((projAgentsRes) => {
           const projList = Array.isArray(projAgentsRes) ? projAgentsRes : []
@@ -386,6 +446,25 @@ function InitializeProjectModal({
         })
         .finally(() => {
           setLoadingAgents(false)
+        })
+
+      // Check GitLab connection status & fetch namespaces
+      apiFetch<{ connected: boolean; connectionId?: string }>('/api/v1/integrations/gitlab/status')
+        .then((st) => {
+          setGitlabStatus(st)
+          if (st.connected) {
+            return apiFetch<{ ok: boolean; namespaces: Array<{ id: number; name: string; fullPath: string; kind: string }> }>('/api/v1/integrations/gitlab/namespaces')
+              .then((nsRes) => {
+                const list = nsRes.namespaces || []
+                setGitlabNamespaces(list)
+                if (list.length > 0) {
+                  setSelectedNamespaceId(list[0].id)
+                }
+              })
+          }
+        })
+        .catch(() => {
+          setGitlabStatus({ connected: false })
         })
     }
   }, [isOpen, currentRepo, projectId])
@@ -408,10 +487,34 @@ function InitializeProjectModal({
           ? localPath.trim()
           : defaultProjectWorkspace
 
-      // 1. Update project repo in backend
+      let remoteMetadata: any = {}
+      if (activeTab === 'create_new' && syncToGitLab && gitlabStatus.connected) {
+        // Create remote repository on GitLab
+        const createRes = await apiPost<{ ok: boolean; connectionId: string; repository: { id: string; name: string; webUrl: string; httpCloneUrl: string; sshCloneUrl: string; defaultBranch: string } }>('/api/v1/integrations/gitlab/projects', {
+          connectionId: gitlabStatus.connectionId,
+          name: repoSlug.trim() || projectId,
+          path: repoSlug.trim() || projectId,
+          namespaceId: selectedNamespaceId || 0,
+          visibility: visibility,
+          description: currentDescription || `Repository for ${projectId}`,
+        })
+        if (createRes && createRes.repository) {
+          remoteMetadata = {
+            remoteProvider: 'gitlab',
+            remoteConnection: createRes.connectionId,
+            remoteProjectId: createRes.repository.id,
+            remoteUrl: createRes.repository.webUrl,
+            cloneUrl: createRes.repository.httpCloneUrl,
+            defaultBranch: createRes.repository.defaultBranch || 'main',
+          }
+        }
+      }
+
+      // 1. Update project repo and remote metadata in backend
       await apiPut(`/api/v1/projects/${encodeURIComponent(projectId)}`, {
         description: currentDescription,
         repo: targetRepo,
+        ...remoteMetadata,
       })
 
       // 2. Ensure agent is bound to project memberships
@@ -439,14 +542,15 @@ function InitializeProjectModal({
         }
       } else {
         // Create new
-        if (useTemplate) {
-          const tpl = TEMPLATES.find((x) => x.id === selectedTemplate)
-          const tplName = tpl ? t(tpl.label) : selectedTemplate
-          taskTitle = `【工程初始化】构建 ${tplName} 模板脚手架`
-          taskPrompt = `请在当前项目工作区 (${targetRepo}) 初始化 "${tplName}" 工程骨架：\n\n1. 初始化 Git 仓库并创建符合最佳实践的完整工程目录；\n2. 生成基础依赖配置（package.json、go.mod、requirements.txt 等）与入口文件；\n3. 添加标准的 .gitignore 和详细的 README.md 开发说明；\n4. 进行一次基础构建与语法校验，确保工程可一键启动；\n5. 输出初始化完成报告，列出目录架构与启动命令。`
+        const tpl = TEMPLATES.find((x) => x.id === selectedTemplate)
+        const tplName = (useTemplate && tpl) ? t(tpl.label) : '基础空白'
+
+        if (remoteMetadata.cloneUrl) {
+          taskTitle = `【工程初始化】构建 ${tplName} 脚手架并首推远程 GitLab`
+          taskPrompt = `请在当前项目工作区 (${targetRepo}) 初始化 "${tplName}" 工程骨架并首次推送到远程 GitLab 仓库：\n\n1. 初始化 Git 仓库并创建符合最佳实践的完整工程文件与目录；\n2. 生成基础依赖配置与入口文件；\n3. 添加标准的 .gitignore 和详细的 README.md 开发说明；\n4. 进行一次基础构建与语法校验，确保工程可一键启动；\n5. 配置远程仓库并推送：\n   git remote add origin "${remoteMetadata.cloneUrl}" || git remote set-url origin "${remoteMetadata.cloneUrl}"\n   git branch -M main\n   git add .\n   git commit -m "chore: initial ${tplName} scaffold"\n   git push -u origin main\n6. 输出初始化完成报告，列出目录架构与启动命令。`
         } else {
-          taskTitle = `【工程初始化】初始化空白代码工程`
-          taskPrompt = `请在当前项目工作区 (${targetRepo}) 初始化基础 Git 仓库，创建标准的 README.md 和 .gitignore 文件，并输出初始化完成说明。`
+          taskTitle = `【工程初始化】构建 ${tplName} 模板脚手架`
+          taskPrompt = `请在当前项目工作区 (${targetRepo}) 初始化 "${tplName}" 工程骨架：\n\n1. 初始化 Git 仓库并创建符合最佳实践的完整工程目录；\n2. 生成基础依赖配置与入口文件；\n3. 添加标准的 .gitignore 和详细的 README.md 开发说明；\n4. 进行一次基础构建与语法校验，确保工程可一键启动；\n5. 输出初始化完成报告，列出目录架构与启动命令。`
         }
       }
 
@@ -664,6 +768,87 @@ function InitializeProjectModal({
                       )
                     })}
                   </div>
+                </div>
+              )}
+
+              {/* GitLab Remote Repository Configuration */}
+              {gitlabStatus.connected && (
+                <div className="rounded-lg border border-sky-200 bg-sky-50/50 p-4 dark:border-sky-900/60 dark:bg-sky-950/20 space-y-3">
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={syncToGitLab}
+                      onChange={(e) => setSyncToGitLab(e.target.checked)}
+                      className="size-4 rounded border-neutral-300 text-sky-600 focus:ring-sky-500 dark:border-zinc-700 dark:bg-zinc-950"
+                    />
+                    <span className="text-xs font-semibold text-sky-900 dark:text-sky-200">
+                      同步在 GitLab 上自动创建远程仓库并绑定 (推荐)
+                    </span>
+                  </label>
+
+                  {syncToGitLab && (
+                    <div className="space-y-3 pt-1">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <label className="block">
+                          <span className="text-[11px] font-medium text-neutral-600 dark:text-zinc-400">
+                            命名空间 (Namespace / Group)
+                          </span>
+                          <select
+                            value={selectedNamespaceId || ''}
+                            onChange={(e) => setSelectedNamespaceId(Number(e.target.value))}
+                            className="mt-1 w-full rounded-md border border-neutral-200 bg-white px-2.5 py-1.5 text-xs text-neutral-900 outline-none focus:border-sky-400 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+                          >
+                            {gitlabNamespaces.map((ns) => (
+                              <option key={ns.id} value={ns.id}>
+                                {ns.fullPath} ({ns.kind === 'user' ? '个人' : '团队'})
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+
+                        <label className="block">
+                          <span className="text-[11px] font-medium text-neutral-600 dark:text-zinc-400">
+                            仓库路径 (Repository Slug)
+                          </span>
+                          <input
+                            type="text"
+                            value={repoSlug}
+                            onChange={(e) => setRepoSlug(e.target.value)}
+                            placeholder={projectId}
+                            className="mt-1 w-full rounded-md border border-neutral-200 bg-white px-2.5 py-1.5 font-mono text-xs text-neutral-900 outline-none focus:border-sky-400 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+                          />
+                        </label>
+                      </div>
+
+                      <div className="flex items-center gap-4">
+                        <span className="text-[11px] font-medium text-neutral-600 dark:text-zinc-400">
+                          可见性:
+                        </span>
+                        <label className="flex items-center gap-1.5 cursor-pointer text-xs text-neutral-700 dark:text-zinc-300">
+                          <input
+                            type="radio"
+                            name="visibility"
+                            value="private"
+                            checked={visibility === 'private'}
+                            onChange={() => setVisibility('private')}
+                            className="size-3.5 text-sky-600 focus:ring-sky-500"
+                          />
+                          <span>私有 (Private)</span>
+                        </label>
+                        <label className="flex items-center gap-1.5 cursor-pointer text-xs text-neutral-700 dark:text-zinc-300">
+                          <input
+                            type="radio"
+                            name="visibility"
+                            value="internal"
+                            checked={visibility === 'internal'}
+                            onChange={() => setVisibility('internal')}
+                            className="size-3.5 text-sky-600 focus:ring-sky-500"
+                          />
+                          <span>内部 (Internal)</span>
+                        </label>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

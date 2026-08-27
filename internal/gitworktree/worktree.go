@@ -73,6 +73,25 @@ func (m *Manager) EnsureWorktree(projectRoot, taskID, baseBranch, featureBranch 
 		return "", "", fmt.Errorf("create worktrees parent dir: %w", err)
 	}
 
+	// Check if remote origin exists
+	hasOrigin := false
+	cmdRemote := exec.Command("git", "remote")
+	cmdRemote.Dir = projectRoot
+	if out, err := cmdRemote.Output(); err == nil && strings.Contains(string(out), "origin") {
+		hasOrigin = true
+	}
+
+	startPoint := baseBranch
+	if hasOrigin {
+		// Attempt to fetch fresh base branch from origin
+		cmdFetch := exec.Command("git", "fetch", "origin", baseBranch)
+		cmdFetch.Dir = projectRoot
+		if err := cmdFetch.Run(); err != nil {
+			return "", "", fmt.Errorf("git fetch origin %s failed: %w (remote origin is configured but unreachable)", baseBranch, err)
+		}
+		startPoint = "origin/" + baseBranch
+	}
+
 	// Check if the feature branch already exists locally
 	branchExists := false
 	cmdCheck := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+featureBranch)
@@ -86,15 +105,6 @@ func (m *Manager) EnsureWorktree(projectRoot, taskID, baseBranch, featureBranch 
 		// Checkout existing branch into worktree
 		cmdWorktree = exec.Command("git", "worktree", "add", targetDir, featureBranch)
 	} else {
-		// Create new branch based on baseBranch (or origin/baseBranch)
-		startPoint := baseBranch
-		// Try resolving base branch reference
-		cmdRev := exec.Command("git", "rev-parse", "--verify", baseBranch)
-		cmdRev.Dir = projectRoot
-		if err := cmdRev.Run(); err != nil {
-			// Try origin/<baseBranch>
-			startPoint = "origin/" + baseBranch
-		}
 		cmdWorktree = exec.Command("git", "worktree", "add", "-b", featureBranch, targetDir, startPoint)
 	}
 
@@ -245,4 +255,95 @@ func (m *Manager) GetCommitHash(projectRoot, ref string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// MergeBranchLocally merges a feature branch into a target branch (e.g. main) locally with safety checks.
+// It returns the resulting commit hash or an error if there are uncommitted changes or conflicts.
+func (m *Manager) MergeBranchLocally(projectRoot, targetBranch, sourceBranch, commitMessage string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	projectRoot = strings.TrimSpace(projectRoot)
+	targetBranch = strings.TrimSpace(targetBranch)
+	if targetBranch == "" {
+		targetBranch = "main"
+	}
+	sourceBranch = strings.TrimSpace(sourceBranch)
+	if sourceBranch == "" {
+		return "", fmt.Errorf("source branch is required")
+	}
+
+	// 1. Check if root repository is clean (ignoring .multigent runtime artifacts)
+	cmdStatus := exec.Command("git", "status", "--porcelain")
+	cmdStatus.Dir = projectRoot
+	statusOut, err := cmdStatus.Output()
+	if err != nil {
+		return "", fmt.Errorf("check repository status: %w", err)
+	}
+	var dirtyLines []string
+	for _, line := range strings.Split(string(statusOut), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "?? .multigent") || strings.HasPrefix(line, "?? .git") {
+			continue
+		}
+		dirtyLines = append(dirtyLines, line)
+	}
+	if len(dirtyLines) > 0 {
+		return "", fmt.Errorf("cannot merge: root repository has uncommitted changes: %s", strings.Join(dirtyLines, ", "))
+	}
+
+	// 2. Checkout target branch
+	cmdCheckout := exec.Command("git", "checkout", targetBranch)
+	cmdCheckout.Dir = projectRoot
+	var stderrCheckout bytes.Buffer
+	cmdCheckout.Stderr = &stderrCheckout
+	if err := cmdCheckout.Run(); err != nil {
+		return "", fmt.Errorf("checkout target branch %s failed: %w (%s)", targetBranch, err, stderrCheckout.String())
+	}
+
+	// 3. Perform merge with --no-ff
+	if commitMessage == "" {
+		commitMessage = fmt.Sprintf("merge: branch '%s' into '%s'", sourceBranch, targetBranch)
+	}
+	cmdMerge := exec.Command("git", "merge", "--no-ff", "-m", commitMessage, sourceBranch)
+	cmdMerge.Dir = projectRoot
+	var stderrMerge bytes.Buffer
+	cmdMerge.Stderr = &stderrMerge
+	if err := cmdMerge.Run(); err != nil {
+		// Attempt clean abort on failure / conflict
+		_ = exec.Command("git", "merge", "--abort").Run()
+		return "", fmt.Errorf("merge branch %s into %s failed: %w (%s)", sourceBranch, targetBranch, err, stderrMerge.String())
+	}
+
+	// 4. Retrieve resulting HEAD commit hash
+	cmdRev := exec.Command("git", "rev-parse", "HEAD")
+	cmdRev.Dir = projectRoot
+	out, err := cmdRev.Output()
+	if err != nil {
+		return "", fmt.Errorf("read merged commit hash: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// SyncMain pulls latest changes from origin for the given branch if a remote is configured.
+func (m *Manager) SyncMain(projectRoot, defaultBranch string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	defaultBranch = strings.TrimSpace(defaultBranch)
+	if defaultBranch == "" {
+		defaultBranch = "main"
+	}
+
+	// Check if origin remote exists
+	cmdRemote := exec.Command("git", "remote")
+	cmdRemote.Dir = projectRoot
+	if out, err := cmdRemote.Output(); err == nil && strings.Contains(string(out), "origin") {
+		cmdPull := exec.Command("git", "pull", "--ff-only", "origin", defaultBranch)
+		cmdPull.Dir = projectRoot
+		if err := cmdPull.Run(); err != nil {
+			return fmt.Errorf("sync main from origin failed: %w", err)
+		}
+	}
+	return nil
 }

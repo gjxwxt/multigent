@@ -112,6 +112,86 @@ func TestEnsureWorktreeReturnsGeneratedBranch(t *testing.T) {
 	}
 }
 
+func TestMergeBranchLocally(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "gitworktree-merge-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	runGit(t, tempDir, "init", "-b", "main")
+	runGit(t, tempDir, "config", "user.email", "test@multigent.ai")
+	runGit(t, tempDir, "config", "user.name", "Multigent Tester")
+	readme := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readme, []byte("# Base\n"), 0644); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	runGit(t, tempDir, "add", "README.md")
+	runGit(t, tempDir, "commit", "-m", "initial commit")
+
+	mgr := NewManager()
+
+	// 1. Create feature branch and commit
+	wtDir, branch, err := mgr.EnsureWorktree(tempDir, "task-merge-1", "main", "feature/merge-1")
+	if err != nil {
+		t.Fatalf("EnsureWorktree failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, "new_feature.txt"), []byte("cool feature\n"), 0644); err != nil {
+		t.Fatalf("write new feature: %v", err)
+	}
+	runGit(t, wtDir, "add", "new_feature.txt")
+	runGit(t, wtDir, "commit", "-m", "feat: cool feature")
+
+	// 2. Merge feature branch locally into main
+	commitSHA, err := mgr.MergeBranchLocally(tempDir, "main", branch, "merge: feat cool feature")
+	if err != nil {
+		t.Fatalf("MergeBranchLocally failed: %v", err)
+	}
+	if len(commitSHA) < 7 {
+		t.Fatalf("expected valid commit SHA, got %q", commitSHA)
+	}
+
+	// 3. Verify that main now contains the new file
+	if _, err := os.Stat(filepath.Join(tempDir, "new_feature.txt")); err != nil {
+		t.Fatalf("new_feature.txt missing from main after merge")
+	}
+}
+
+func TestMergeBranchLocallyDirty(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "gitworktree-dirty-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	runGit(t, tempDir, "init", "-b", "main")
+	runGit(t, tempDir, "config", "user.email", "test@multigent.ai")
+	runGit(t, tempDir, "config", "user.name", "Multigent Tester")
+	readme := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readme, []byte("# Base\n"), 0644); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	runGit(t, tempDir, "add", "README.md")
+	runGit(t, tempDir, "commit", "-m", "initial commit")
+
+	mgr := NewManager()
+	_, branch, err := mgr.EnsureWorktree(tempDir, "task-dirty-1", "main", "feature/dirty-1")
+	if err != nil {
+		t.Fatalf("EnsureWorktree failed: %v", err)
+	}
+
+	// Make root repo dirty
+	if err := os.WriteFile(readme, []byte("# Modified uncommitted\n"), 0644); err != nil {
+		t.Fatalf("write dirty readme: %v", err)
+	}
+
+	// Merge should fail because of uncommitted changes
+	_, err = mgr.MergeBranchLocally(tempDir, "main", branch, "merge")
+	if err == nil {
+		t.Fatalf("expected MergeBranchLocally to fail on dirty working directory")
+	}
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

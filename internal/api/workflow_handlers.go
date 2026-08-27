@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -615,6 +616,31 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 			if _, err := os.Stat(filepath.Join(wsDir, ".git")); err == nil {
 				gitRoot = wsDir
 			}
+
+			// Perform merge into main (GitLab remote or local safe merge)
+			p, err := s.st.Project(project)
+			if err == nil && p != nil {
+				defaultBranch := p.DefaultBranch
+				if defaultBranch == "" {
+					defaultBranch = "main"
+				}
+
+				if p.RemoteProvider == "gitlab" && p.RemoteProjectID != "" && t.RemoteMRIID != "" {
+					if host, _, err := s.resolveGitLabHost(p.RemoteConnection); err == nil {
+						commitMsg := fmt.Sprintf("Merge MR !%s (%s)", t.RemoteMRIID, t.Title)
+						_ = host.MergeMR(r.Context(), p.RemoteProjectID, t.RemoteMRIID, t.RemoteMRHeadSHA, commitMsg)
+						_ = s.worktreeMgr.SyncMain(gitRoot, defaultBranch)
+						t.RemoteMRState = "merged"
+					}
+				} else if t.BranchName != "" {
+					commitMsg := fmt.Sprintf("merge: task %s (%s)", t.ID, t.Title)
+					if mergedSHA, err := s.worktreeMgr.MergeBranchLocally(gitRoot, defaultBranch, t.BranchName, commitMsg); err == nil {
+						t.RemoteMRHeadSHA = mergedSHA
+						t.RemoteMRState = "merged"
+					}
+				}
+			}
+
 			_ = s.worktreeMgr.CleanupWorktree(gitRoot, taskID)
 		}
 		if err := s.ts.PersistTask(project, agent, t); err != nil {

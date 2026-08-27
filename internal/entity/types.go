@@ -148,14 +148,22 @@ type Team struct {
 // Project is a concrete product or initiative.
 // Stored at <root>/projects/<name>/project.yaml.
 type Project struct {
-	Name        string `yaml:"name"`
-	Description string `yaml:"description,omitempty"`
-	// Repo is the path (relative or absolute) to the actual code repository.
-	Repo string `yaml:"repo,omitempty"`
+	Name        string `yaml:"name" json:"name"`
+	Description string `yaml:"description,omitempty" json:"description,omitempty"`
+	// Repo is the path (relative or absolute) to the actual local code repository.
+	Repo string `yaml:"repo,omitempty" json:"repo,omitempty"`
 	// Owners are humans accountable for project-level scope and context.
-	Owners []string `yaml:"owners,omitempty"`
+	Owners []string `yaml:"owners,omitempty" json:"owners,omitempty"`
 	// ContextPack is a future SaaS-facing hook for versioned project context.
-	ContextPack string `yaml:"context_pack,omitempty"`
+	ContextPack string `yaml:"context_pack,omitempty" json:"contextPack,omitempty"`
+
+	// Remote code host integration metadata
+	RemoteProvider   string `yaml:"remote_provider,omitempty" json:"remoteProvider,omitempty"`     // "gitlab" | "github" | "gitee"
+	RemoteConnection string `yaml:"remote_connection,omitempty" json:"remoteConnection,omitempty"` // Connector ID
+	RemoteProjectID  string `yaml:"remote_project_id,omitempty" json:"remoteProjectId,omitempty"`   // Remote project ID or path_with_namespace
+	RemoteURL        string `yaml:"remote_url,omitempty" json:"remoteUrl,omitempty"`               // Remote Web UI URL (e.g. https://gitlab.com/group/repo)
+	CloneURL         string `yaml:"clone_url,omitempty" json:"cloneUrl,omitempty"`                 // Clean Clone URL (no embedded tokens)
+	DefaultBranch    string `yaml:"default_branch,omitempty" json:"defaultBranch,omitempty"`       // Default branch name, e.g. "main"
 }
 
 // Skill is a reusable capability definition.
@@ -656,6 +664,12 @@ type Task struct {
 	BaseCommit  string `yaml:"base_commit,omitempty" json:"baseCommit,omitempty"`
 	BranchName  string `yaml:"branch_name,omitempty" json:"branchName,omitempty"`
 	WorktreeDir string `yaml:"worktree_dir,omitempty" json:"worktreeDir,omitempty"`
+
+	// Remote merge request delivery tracking
+	RemoteMRIID     string `yaml:"remote_mr_iid,omitempty" json:"remoteMrIid,omitempty"`
+	RemoteMRURL     string `yaml:"remote_mr_url,omitempty" json:"remoteMrUrl,omitempty"`
+	RemoteMRHeadSHA string `yaml:"remote_mr_head_sha,omitempty" json:"remoteMrHeadSha,omitempty"`
+	RemoteMRState   string `yaml:"remote_mr_state,omitempty" json:"remoteMrState,omitempty"`
 
 	Vars map[string]string `yaml:"vars,omitempty"`
 }

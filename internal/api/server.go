@@ -482,6 +482,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/start", s.handlePostTaskPreviewStart)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/stop", s.handlePostTaskPreviewStop)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/feedback", s.handlePostTaskPreviewFeedback)
+	mux.HandleFunc("GET /api/v1/integrations/gitlab/status", s.handleGitLabStatus)
+	mux.HandleFunc("GET /api/v1/integrations/gitlab/namespaces", s.handleGitLabNamespaces)
+	mux.HandleFunc("POST /api/v1/integrations/gitlab/projects", s.handleGitLabCreateProject)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{id}/merge", s.handleMergeTaskMR)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview/live", s.handleGetTaskPreviewLive)
 	mux.HandleFunc("/preview/", s.handleTaskPreviewProxy)
 	mux.HandleFunc("POST /api/v1/workspaces/{workspaceId}/workflow/triggers/{notificationId}/callback", s.handlePostWorkflowTriggerCallback)
@@ -1057,9 +1061,15 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"name":        p.Name,
-		"description": p.Description,
-		"repo":        p.Repo,
+		"name":             p.Name,
+		"description":      p.Description,
+		"repo":             p.Repo,
+		"remoteProvider":   p.RemoteProvider,
+		"remoteConnection": p.RemoteConnection,
+		"remoteProjectId":  p.RemoteProjectID,
+		"remoteUrl":        p.RemoteURL,
+		"cloneUrl":         p.CloneURL,
+		"defaultBranch":    p.DefaultBranch,
 	})
 }
 
@@ -1078,8 +1088,14 @@ func (s *Server) handlePutProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Description string `json:"description"`
-		Repo        string `json:"repo"`
+		Description      string `json:"description"`
+		Repo             string `json:"repo"`
+		RemoteProvider   string `json:"remoteProvider"`
+		RemoteConnection string `json:"remoteConnection"`
+		RemoteProjectID  string `json:"remoteProjectId"`
+		RemoteURL        string `json:"remoteUrl"`
+		CloneURL         string `json:"cloneUrl"`
+		DefaultBranch    string `json:"defaultBranch"`
 	}
 	if err := s.readJSON(w, r, &body); err != nil {
 		s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeInvalidJSON, "invalid JSON body")
@@ -1087,6 +1103,24 @@ func (s *Server) handlePutProject(w http.ResponseWriter, r *http.Request) {
 	}
 	p.Description = body.Description
 	p.Repo = body.Repo
+	if body.RemoteProvider != "" {
+		p.RemoteProvider = body.RemoteProvider
+	}
+	if body.RemoteConnection != "" {
+		p.RemoteConnection = body.RemoteConnection
+	}
+	if body.RemoteProjectID != "" {
+		p.RemoteProjectID = body.RemoteProjectID
+	}
+	if body.RemoteURL != "" {
+		p.RemoteURL = body.RemoteURL
+	}
+	if body.CloneURL != "" {
+		p.CloneURL = body.CloneURL
+	}
+	if body.DefaultBranch != "" {
+		p.DefaultBranch = body.DefaultBranch
+	}
 	if err := s.st.SaveProject(name, p); err != nil {
 		s.serverError(w, err)
 		return
