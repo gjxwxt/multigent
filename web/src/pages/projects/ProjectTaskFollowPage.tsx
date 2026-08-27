@@ -366,20 +366,24 @@ export default function ProjectTaskFollowPage() {
           <h1 className="truncate text-sm font-semibold text-neutral-900 dark:text-zinc-100">{displayTask?.title || taskId}</h1>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {displayTask?.branchName && (
-            <div className="hidden sm:inline-flex items-center gap-1.5 font-mono text-xs text-sky-800 bg-sky-50 dark:bg-sky-950/60 dark:text-sky-300 px-2.5 py-1 rounded-lg border border-sky-200/80 dark:border-sky-800 shadow-xs">
-              <span className="flex items-center gap-1 font-semibold text-sky-700 dark:text-sky-300">
-                {displayTask.baseBranch || 'main'}
-                {displayTask.baseCommit ? (
-                  <span className="text-[11px] font-normal text-sky-600/80 dark:text-sky-400/80">({displayTask.baseCommit.slice(0, 7)})</span>
-                ) : null}
-              </span>
-              <span className="text-sky-400 dark:text-sky-600 font-bold select-none">──►</span>
-              <span className="truncate max-w-[220px]" title={displayTask.branchName}>
-                {displayTask.branchName}
-              </span>
-            </div>
-          )}
+          {(() => {
+            const taskBranch = displayTask?.branchName || (displayTask?.worktreeDir ? `feature/${displayTask.id}` : null)
+            if (!taskBranch) return null
+            return (
+              <div className="hidden sm:inline-flex items-center gap-1.5 font-mono text-xs text-sky-800 bg-sky-50 dark:bg-sky-950/60 dark:text-sky-300 px-2.5 py-1 rounded-lg border border-sky-200/80 dark:border-sky-800 shadow-xs">
+                <span className="flex items-center gap-1 font-semibold text-sky-700 dark:text-sky-300">
+                  {displayTask?.baseBranch || 'main'}
+                  {displayTask?.baseCommit ? (
+                    <span className="text-[11px] font-normal text-sky-600/80 dark:text-sky-400/80">({displayTask.baseCommit.slice(0, 7)})</span>
+                  ) : null}
+                </span>
+                <span className="text-sky-400 dark:text-sky-600 font-bold select-none">──►</span>
+                <span className="truncate max-w-[220px]" title={taskBranch}>
+                  {taskBranch}
+                </span>
+              </div>
+            )
+          })()}
           {preview && preview.type !== 'cli' && (
             <div className="flex items-center">
               {preview.status === 'running' ? (

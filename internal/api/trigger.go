@@ -22,13 +22,16 @@ import (
 //
 // It also runs a background poller that periodically checks for agents with
 // message triggers that have unread messages (to catch messages sent via CLI).
-// The poller debounces: when unread messages are first detected it waits for
-// TriggerDebounce (default 5m) before firing, so that multiple agent-to-agent
-// messages accumulate and are processed in a single wakeup.
+type queuedTrigger struct {
+	triggerType entity.TriggerType
+	reason      string
+}
+
 type triggerManager struct {
 	mu        sync.Mutex
-	inflight  map[string]time.Time // key = "project/agent" → trigger start time
-	firstSeen map[string]time.Time // key = "project/agent" → when unread was first detected (debounce)
+	inflight  map[string]time.Time     // key = "project/agent" → trigger start time
+	queued    map[string]queuedTrigger // key = "project/agent" → pending trigger to run when inflight finishes
+	firstSeen map[string]time.Time     // key = "project/agent" → when unread was first detected (debounce)
 	root      string
 	binPath   string
 	ts        taskstore.Store
@@ -43,6 +46,7 @@ const defaultTriggerDebounce = 5 * time.Minute
 func newTriggerManager(root, binPath string, ts taskstore.Store, db controldb.Store) *triggerManager {
 	return &triggerManager{
 		inflight:  make(map[string]time.Time),
+		queued:    make(map[string]queuedTrigger),
 		firstSeen: make(map[string]time.Time),
 		root:      root,
 		binPath:   binPath,
@@ -73,7 +77,7 @@ func (tm *triggerManager) StopPoller() {
 func (tm *triggerManager) pollLoop(ctx context.Context) {
 	defer close(tm.pollDone)
 
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -83,8 +87,146 @@ func (tm *triggerManager) pollLoop(ctx context.Context) {
 		case <-ticker.C:
 			tm.checkMessageTriggers()
 			tm.checkDueScheduledTaskWakeups()
+			tm.checkPendingTaskTriggers()
 		}
 	}
+}
+
+// checkPendingTaskTriggers scans all agents with on_task triggers that have pending tasks
+// and are not currently running or inflight, and fires a wakeup.
+func (tm *triggerManager) checkPendingTaskTriggers() {
+	projects, err := tm.ts.ListProjects()
+	if err != nil {
+		return
+	}
+	workspaceID := tm.workspaceID()
+	for _, project := range projects {
+		if tm.db == nil || workspaceID == "" {
+			continue
+		}
+		memberships, err := tm.db.ListProjectMemberships(controldb.ProjectMembershipFilter{
+			WorkspaceID: workspaceID,
+			ProjectID:   project,
+			MemberType:  "agent_worker",
+		})
+		if err != nil {
+			continue
+		}
+		for _, membership := range memberships {
+			agent := strings.TrimSpace(membership.Title)
+			if agent == "" {
+				worker, ok, err := tm.db.AgentWorkerByID(workspaceID, membership.MemberID)
+				if err == nil && ok {
+					agent = strings.TrimSpace(worker.Name)
+				}
+			}
+			if agent == "" {
+				continue
+			}
+			hb, configured := tm.heartbeatForTrigger(project, agent)
+			if !configured || hb == nil || hb.Paused || !hb.HasTrigger(entity.TriggerOnTask) {
+				continue
+			}
+
+			key := project + "/" + agent
+			tm.mu.Lock()
+			_, inflight := tm.inflight[key]
+			tm.mu.Unlock()
+			if inflight {
+				continue
+			}
+
+			if hb.PID > 0 && hb.LastWakeupStatus == "running" {
+				if proc, err := os.FindProcess(hb.PID); err == nil {
+					if proc.Signal(syscall.Signal(0)) == nil {
+						continue
+					}
+				}
+			}
+
+			tasks, err := tm.ts.ListTasks(project, agent)
+			if err != nil {
+				continue
+			}
+			hasPending := false
+			for _, t := range tasks {
+				if t != nil && t.Status == entity.TaskStatusPending {
+					hasPending = true
+					break
+				}
+			}
+			if hasPending {
+				tm.Fire(project, agent, entity.TriggerOnTask, "poller: pending task")
+			}
+		}
+	}
+}
+
+// checkDueScheduledTaskWakeups wakes agents that have at least one due
+// notBefore-gated pending task. This is intentionally independent from the
+// generic "task" trigger: when an agent schedules a reminder for itself, the
+// due time is the trigger.
+func (tm *triggerManager) checkDueScheduledTaskWakeups() {
+	projects, err := tm.ts.ListProjects()
+	if err != nil {
+		return
+	}
+	now := time.Now().UTC()
+	workspaceID := tm.workspaceID()
+	for _, project := range projects {
+		if tm.db == nil || workspaceID == "" {
+			continue
+		}
+		memberships, err := tm.db.ListProjectMemberships(controldb.ProjectMembershipFilter{
+			WorkspaceID: workspaceID,
+			ProjectID:   project,
+			MemberType:  "agent_worker",
+		})
+		if err != nil {
+			continue
+		}
+		for _, membership := range memberships {
+			agent := strings.TrimSpace(membership.Title)
+			if agent == "" {
+				worker, ok, err := tm.db.AgentWorkerByID(workspaceID, membership.MemberID)
+				if err == nil && ok {
+					agent = strings.TrimSpace(worker.Name)
+				}
+			}
+			if agent == "" {
+				continue
+			}
+			hb, configured := tm.heartbeatForTrigger(project, agent)
+			if !configured || hb == nil || hb.Paused {
+				continue
+			}
+			task, ok := tm.nextDueScheduledTask(project, agent, now)
+			if !ok {
+				continue
+			}
+			tm.fireWakeup(project, agent, hb, entity.TriggerOnTask, "scheduled task due: "+task.ID)
+		}
+	}
+}
+
+func (tm *triggerManager) nextDueScheduledTask(project, agent string, now time.Time) (*entity.Task, bool) {
+	tasks, err := tm.ts.ListTasks(project, agent, entity.TaskStatusPending)
+	if err != nil {
+		return nil, false
+	}
+	var best *entity.Task
+	for _, task := range tasks {
+		if task == nil || task.NotBefore == nil || task.NotBefore.After(now) {
+			continue
+		}
+		if best == nil ||
+			task.NotBefore.Before(*best.NotBefore) ||
+			(task.NotBefore.Equal(*best.NotBefore) && (task.Priority < best.Priority ||
+				(task.Priority == best.Priority && task.CreatedAt.Before(best.CreatedAt)))) {
+			best = task
+		}
+	}
+	return best, best != nil
 }
 
 // checkMessageTriggers scans all agents for those with message triggers
@@ -261,15 +403,17 @@ func (tm *triggerManager) fireWakeup(project, agent string, hb *entity.Heartbeat
 
 	tm.mu.Lock()
 	if _, ok := tm.inflight[key]; ok {
+		tm.queued[key] = queuedTrigger{triggerType: triggerType, reason: reason}
 		tm.mu.Unlock()
-		fmt.Fprintf(os.Stderr, "[trigger] %s/%s: skip — already inflight\n", project, agent)
+		fmt.Fprintf(os.Stderr, "[trigger] %s/%s: queued — already inflight\n", project, agent)
 		return
 	}
 	if hb.PID > 0 && hb.LastWakeupStatus == "running" {
 		if proc, err := os.FindProcess(hb.PID); err == nil {
 			if proc.Signal(syscall.Signal(0)) == nil {
+				tm.queued[key] = queuedTrigger{triggerType: triggerType, reason: reason}
 				tm.mu.Unlock()
-				fmt.Fprintf(os.Stderr, "[trigger] %s/%s: skip — agent already running (pid=%d)\n", project, agent, hb.PID)
+				fmt.Fprintf(os.Stderr, "[trigger] %s/%s: queued — agent already running (pid=%d)\n", project, agent, hb.PID)
 				return
 			}
 		}
@@ -281,7 +425,18 @@ func (tm *triggerManager) fireWakeup(project, agent string, hb *entity.Heartbeat
 		defer func() {
 			tm.mu.Lock()
 			delete(tm.inflight, key)
+			next, hasNext := tm.queued[key]
+			if hasNext {
+				delete(tm.queued, key)
+			}
 			tm.mu.Unlock()
+
+			if hasNext {
+				go func() {
+					time.Sleep(300 * time.Millisecond)
+					tm.Fire(project, agent, next.triggerType, next.reason)
+				}()
+			}
 		}()
 
 		fmt.Fprintf(os.Stderr, "[trigger] %s/%s fired (%s: %s)\n", project, agent, triggerType, reason)

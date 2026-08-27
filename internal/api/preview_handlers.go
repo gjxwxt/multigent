@@ -649,12 +649,12 @@ var htmlAttrRe = regexp.MustCompile(`(?i)\b(href|src|action)\s*=\s*(["'])/([^"']
 func rewriteHTML(html, taskID, projectName string) string {
 	previewPrefix := fmt.Sprintf("/preview/%s/", taskID)
 
-	// Interceptor script to handle dynamic fetches and XMLHttpRequest
+	// Interceptor script to handle dynamic fetches, XMLHttpRequest, and WebSocket
 	patchScript := fmt.Sprintf(`<script>
 (function(){
   var prefix = %q;
   function patchUrl(u) {
-    if (typeof u === 'string' && u.startsWith('/') && !u.startsWith('/preview/') && !u.startsWith('/_multigent_preview/') && !u.startsWith('/api/v1/')) {
+    if (typeof u === 'string' && u.startsWith('/') && !u.startsWith('/preview/') && !u.startsWith('/_multigent_preview/')) {
       return prefix + u.slice(1);
     }
     return u;
@@ -677,6 +677,22 @@ func rewriteHTML(html, taskID, projectName string) string {
       args[1] = patchUrl(url);
       return origOpen.apply(this, args);
     };
+  }
+  var origWS = window.WebSocket;
+  if (origWS) {
+    window.WebSocket = function(url, protocols) {
+      if (typeof url === 'string') {
+        try {
+          var parsed = new URL(url);
+          if (parsed.pathname === '/' || !parsed.pathname.startsWith('/preview/')) {
+            parsed.pathname = prefix + (parsed.pathname.startsWith('/') ? parsed.pathname.slice(1) : parsed.pathname);
+            url = parsed.toString();
+          }
+        } catch(e) {}
+      }
+      return protocols !== undefined ? new origWS(url, protocols) : new origWS(url);
+    };
+    window.WebSocket.prototype = origWS.prototype;
   }
 })();
 </script>`, previewPrefix)

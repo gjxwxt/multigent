@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next'
 import ReactMarkdown from 'react-markdown'
 import type { Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { ClipboardCopy, MessageSquare, Pencil, Play, Send, Trash2, X } from 'lucide-react'
+import { ClipboardCopy, ExternalLink, GitPullRequest, Globe, MessageSquare, Pencil, Play, Send, Trash2, X } from 'lucide-react'
 import { cn } from '../../lib/cn'
 import { apiDelete, apiFetch, apiPost, apiPut } from '../../lib/api'
 import { useFormatDateTime } from '../../lib/format-datetime'
@@ -280,6 +280,7 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
   const [assigneeBusy, setAssigneeBusy] = useState(false)
   const [assigneeErr, setAssigneeErr] = useState<string | null>(null)
   const [startBusy, setStartBusy] = useState(false)
+  const [previewStarting, setPreviewStarting] = useState(false)
 
   const runsQuery = `/api/v1/telemetry/runs?allTime=1&project=${encodeURIComponent(task.project)}`
   const runsState = useApiJson<{ runs: RunRow[] }>(runsQuery, 0)
@@ -293,6 +294,12 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
     workflowVersion,
     { silentStatuses: silentNotFound },
   )
+  const previewState = useApiJson<{ taskId: string; type: string; status: string; url: string }>(
+    task?.project && task?.id ? `/api/v1/projects/${encodeURIComponent(task.project)}/tasks/${encodeURIComponent(task.id)}/preview` : null,
+    workflowVersion,
+    { silentStatuses: silentNotFound },
+  )
+  const preview = previewState.status === 'ok' ? previewState.data : null
   const usersState = useApiJson<SafeUser[]>('/api/v1/users', 0)
   const membersState = useApiJson<ProjectMember[]>(`/api/v1/projects/${encodeURIComponent(task.project)}/agents`, 0)
   const actorLabels = useMemo(() => {
@@ -440,7 +447,59 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
             <span className={cn('shrink-0 text-[11px] font-bold', prio.cls)}>{prio.text}</span>
             <span className="truncate text-sm font-medium text-neutral-900 dark:text-zinc-100">{task.title}</span>
           </div>
-          <div className="flex items-center gap-1 shrink-0">
+          <div className="flex items-center gap-1.5 shrink-0">
+            {(() => {
+              const taskBranch = task.branchName || (task.worktreeDir ? `feature/${task.id}` : null)
+              if (!taskBranch) return null
+              return (
+                <div className="hidden sm:inline-flex items-center gap-1 font-mono text-[11px] text-sky-800 bg-sky-50 dark:bg-sky-950/60 dark:text-sky-300 px-2 py-0.5 rounded-md border border-sky-200/80 dark:border-sky-800 shadow-xs">
+                  <span className="font-semibold text-sky-700 dark:text-sky-300">
+                    {task.baseBranch || 'main'}
+                    {task.baseCommit ? (
+                      <span className="text-[10px] font-normal text-sky-600/80 dark:text-sky-400/80">({task.baseCommit.slice(0, 7)})</span>
+                    ) : null}
+                  </span>
+                  <span className="text-sky-400 dark:text-sky-600 font-bold select-none">──►</span>
+                  <span className="truncate max-w-[150px]" title={taskBranch}>
+                    {taskBranch}
+                  </span>
+                </div>
+              )
+            })()}
+            {preview && preview.type !== 'cli' && (
+              <div className="flex items-center">
+                {preview.status === 'running' ? (
+                  <a
+                    href={preview.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-950/40 dark:text-emerald-300"
+                  >
+                    <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />
+                    打开实时预览 ↗
+                  </a>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setPreviewStarting(true)
+                      try {
+                        await apiPost(`/api/v1/projects/${encodeURIComponent(task.project)}/tasks/${encodeURIComponent(task.id)}/preview/start`, {})
+                        window.open(`/preview/${encodeURIComponent(task.id)}/`, '_blank')
+                        setWorkflowVersion((v) => v + 1)
+                      } finally {
+                        setPreviewStarting(false)
+                      }
+                    }}
+                    disabled={previewStarting}
+                    className="inline-flex items-center gap-1 rounded-md border border-sky-600/30 bg-sky-50 px-2 py-1 text-xs font-semibold text-sky-700 transition hover:bg-sky-100 dark:border-sky-500/30 dark:bg-sky-950/40 dark:text-sky-300"
+                  >
+                    <Globe className={cn('size-3.5', previewStarting && 'animate-spin')} />
+                    {previewStarting ? '启动中…' : '启动实时预览'}
+                  </button>
+                )}
+              </div>
+            )}
             {task.hasWorkflow && (
               <Link
                 to={`/projects/${encodeURIComponent(task.project)}/tasks/${encodeURIComponent(task.id)}/follow`}
@@ -954,18 +1013,37 @@ export function WorkflowRuntimePanel({
                   </select>
                 </label>
               )}
-              {editableOutputFields.map((field) => (
-                <label key={field.name} className="block">
-                  <WorkflowFieldTitle fieldName={field.name} description={field.description} required />
-                  <textarea
-                    value={field.name === 'comments' ? reviewComments : reviewOutputs[field.name] || ''}
-                    onChange={(e) => onChangeOutput(field.name, e.target.value)}
-                    rows={field.name === 'comments' ? 3 : 2}
-                    placeholder={field.description || field.name}
-                    className={cn(reviewInputClass(field.name), 'resize-y')}
-                  />
-                </label>
-              ))}
+              {editableOutputFields.map((field) => {
+                const isCommentsField = field.name === 'comments'
+                const prUrl = (inputValues['pr_url'] || '').trim()
+                const isHttpPr = Boolean(prUrl && prUrl.toLowerCase() !== 'none' && (prUrl.startsWith('http://') || prUrl.startsWith('https://')))
+
+                return (
+                  <label key={field.name} className="block">
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <WorkflowFieldTitle fieldName={field.name} description={field.description} required />
+                      {isCommentsField && isHttpPr && (
+                        <a
+                          href={prUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1 text-xs font-semibold text-sky-600 hover:text-sky-700 hover:underline dark:text-sky-400"
+                        >
+                          <GitPullRequest className="size-3.5" />
+                          <span>打开 Pull Request ↗</span>
+                        </a>
+                      )}
+                    </div>
+                    <textarea
+                      value={field.name === 'comments' ? reviewComments : reviewOutputs[field.name] || ''}
+                      onChange={(e) => onChangeOutput(field.name, e.target.value)}
+                      rows={field.name === 'comments' ? 3 : 2}
+                      placeholder={field.description || field.name}
+                      className={cn(reviewInputClass(field.name), 'resize-y')}
+                    />
+                  </label>
+                )
+              })}
               {reviewErr && <p className="text-sm text-red-600 dark:text-red-400">{reviewErr}</p>}
               <div className="flex justify-end gap-2">
                 {usesDefaultReviewButtons ? (
@@ -1175,16 +1253,34 @@ function WorkflowFieldList({ fields, values }: { fields: WorkflowField[]; values
   if (fields.length === 0) return null
   return (
     <div className="mb-2 space-y-2">
-      {fields.map((field) => (
-        <div key={field.name} className="rounded-lg border border-neutral-100 bg-white p-2.5 dark:border-zinc-800 dark:bg-zinc-950">
-          <WorkflowFieldTitle fieldName={field.name} description={field.description} />
-          {values[field.name] && (
-            <div className="mt-1.5 break-words text-sm text-neutral-800 dark:text-zinc-200">
-              <WorkflowValueText value={values[field.name]} />
+      {fields.map((field) => {
+        const val = values[field.name]
+        const isUrlField = (field.name === 'pr_url' || field.name === 'preview_url') && val && val.toLowerCase() !== 'none'
+        const isHttpUrl = isUrlField && (val.startsWith('http://') || val.startsWith('https://') || val.startsWith('/preview/'))
+        return (
+          <div key={field.name} className="rounded-lg border border-neutral-100 bg-white p-2.5 dark:border-zinc-800 dark:bg-zinc-950">
+            <div className="flex items-center justify-between gap-2">
+              <WorkflowFieldTitle fieldName={field.name} description={field.description} />
+              {isHttpUrl && (
+                <a
+                  href={val}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 font-sans text-xs font-semibold text-sky-600 hover:text-sky-700 dark:text-sky-400"
+                >
+                  <ExternalLink className="size-3" />
+                  <span>直接打开</span>
+                </a>
+              )}
             </div>
-          )}
-        </div>
-      ))}
+            {val && (
+              <div className="mt-1.5 break-words text-sm text-neutral-800 dark:text-zinc-200">
+                <WorkflowValueText value={val} />
+              </div>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }

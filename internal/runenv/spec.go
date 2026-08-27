@@ -56,7 +56,12 @@ func (DockerProvider) Available() error { return sandbox.CheckDocker() }
 
 func (DockerProvider) Command(spec ProcessSpec) (string, []string, error) {
 	cfg := DockerConfig(spec.Runtime)
-	cfg.ExtraVolumes = append(cfg.ExtraVolumes, "multigent-toolchains:"+agentcli.ToolchainHome)
+	cfg.ExtraVolumes = append(cfg.ExtraVolumes,
+		"multigent-toolchains:"+agentcli.ToolchainHome,
+		"multigent-npm-cache:/root/.npm",
+		"multigent-go-cache:/root/go/pkg/mod",
+		"multigent-go-build-cache:/root/.cache/go-build",
+	)
 	pathParts := []string{}
 	if toolBin := runtimeEnvValue(spec.Runtime, "MULTIGENT_TOOL_BIN_DIR"); toolBin != "" {
 		pathParts = append(pathParts, dockerWorkspacePath(spec.AgentDir, toolBin))

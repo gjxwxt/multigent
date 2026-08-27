@@ -134,22 +134,36 @@ func (e *Engine) StartEphemeralPreview(ctx context.Context, taskID, projectName,
 	e.instances[taskID] = instance
 
 	// Determine container startup command based on project layout
+	setupEnv := "git config --global --add safe.directory '*' 2>/dev/null || true; export GOFLAGS='-buildvcs=false'; "
+
 	var runCmd []string
 	switch projType {
 	case ProjectTypeFullstack:
-		if fileExists(filepath.Join(worktreeDir, "package.json")) {
-			runCmd = []string{"sh", "-c", fmt.Sprintf("npm run seed 2>/dev/null || true; PORT=%d npm start || PORT=%d npm run dev -- --port %d --host 0.0.0.0 || PORT=%d node server/index.js", port, port, port, port)}
-		} else if fileExists(filepath.Join(worktreeDir, "Makefile")) {
-			runCmd = []string{"sh", "-c", fmt.Sprintf("make build && ./dist/multigent start --addr 0.0.0.0:%d || (cd frontend && npm install && npm run build) && go run ./cmd/... -port %d", port, port)}
-		} else if fileExists(filepath.Join(worktreeDir, "cmd", "api", "main.go")) {
-			runCmd = []string{"sh", "-c", fmt.Sprintf("(cd frontend && npm run build 2>/dev/null || true) && PORT=%d go run ./cmd/api/main.go -port %d", port, port)}
+		if fileExists(filepath.Join(worktreeDir, "frontend", "package.json")) {
+			backendCmd := ""
+			if fileExists(filepath.Join(worktreeDir, "main.go")) || fileExists(filepath.Join(worktreeDir, "go.mod")) {
+				backendCmd = "PORT=8080 go run -buildvcs=false . 2>/dev/null & "
+			} else if fileExists(filepath.Join(worktreeDir, "cmd", "api", "main.go")) {
+				backendCmd = "PORT=8080 go run -buildvcs=false ./cmd/api/main.go 2>/dev/null & "
+			} else if fileExists(filepath.Join(worktreeDir, "server", "index.js")) {
+				backendCmd = "PORT=8080 node server/index.js 2>/dev/null & "
+			} else if fileExists(filepath.Join(worktreeDir, "main.py")) {
+				backendCmd = "PORT=8080 python3 main.py 2>/dev/null & "
+			}
+			runCmd = []string{"sh", "-c", setupEnv + fmt.Sprintf("%s(cd frontend && npx vite --port %d --host 0.0.0.0 || npx vite preview --port %d --host 0.0.0.0)", backendCmd, port, port)}
+		} else if fileExists(filepath.Join(worktreeDir, "package.json")) {
+			runCmd = []string{"sh", "-c", setupEnv + fmt.Sprintf("npm run seed 2>/dev/null || true; PORT=%d npm start || PORT=%d npm run dev -- --port %d --host 0.0.0.0 || PORT=%d node server/index.js", port, port, port, port)}
+		} else if fileExists(filepath.Join(worktreeDir, "main.go")) || fileExists(filepath.Join(worktreeDir, "go.mod")) {
+			runCmd = []string{"sh", "-c", setupEnv + fmt.Sprintf("(cd frontend && npm run build 2>/dev/null || true); PORT=%d ./bin/server || PORT=%d go run -buildvcs=false . || PORT=%d go run -buildvcs=false ./cmd/... || PORT=%d go run -buildvcs=false ./...", port, port, port, port)}
 		} else {
-			runCmd = []string{"sh", "-c", fmt.Sprintf("PORT=%d go run ./... || (cd frontend && npx vite preview --port %d --host 0.0.0.0)", port, port)}
+			runCmd = []string{"sh", "-c", setupEnv + fmt.Sprintf("PORT=%d ./bin/server || PORT=%d go run -buildvcs=false ./... || PORT=%d go run -buildvcs=false .", port, port, port)}
 		}
 	case ProjectTypeFrontend:
-		runCmd = []string{"sh", "-c", fmt.Sprintf("npm run seed 2>/dev/null || true; PORT=%d npm start || PORT=%d node server/index.js || npx vite --port %d --host 0.0.0.0 || npx vite preview --port %d --host 0.0.0.0", port, port, port, port)}
+		runCmd = []string{"sh", "-c", setupEnv + fmt.Sprintf("npm run seed 2>/dev/null || true; PORT=%d npm start || PORT=%d node server/index.js || npx vite --port %d --host 0.0.0.0 || npx vite preview --port %d --host 0.0.0.0", port, port, port, port)}
 	case ProjectTypeBackend:
-		runCmd = []string{"sh", "-c", fmt.Sprintf("PORT=%d npm start || PORT=%d go run ./cmd/... || PORT=%d go run ./... || python3 main.py --port %d", port, port, port, port)}
+		runCmd = []string{"sh", "-c", setupEnv + fmt.Sprintf("PORT=%d ./bin/server || PORT=%d npm start || PORT=%d go run -buildvcs=false . || PORT=%d go run -buildvcs=false ./cmd/... || PORT=%d go run -buildvcs=false ./... || python3 main.py --port %d", port, port, port, port, port, port)}
+	default:
+		runCmd = []string{"sh", "-c", setupEnv + fmt.Sprintf("PORT=%d ./bin/server || PORT=%d go run -buildvcs=false . || PORT=%d go run -buildvcs=false ./...", port, port, port)}
 	}
 
 	dockerArgs := []string{
@@ -157,8 +171,15 @@ func (e *Engine) StartEphemeralPreview(ctx context.Context, taskID, projectName,
 		"--name", containerName,
 		"-p", fmt.Sprintf("127.0.0.1:%d:%d", port, port),
 		"-v", fmt.Sprintf("%s:/workspace", worktreeDir),
+		"-v", "multigent-toolchains:/opt/multigent/toolchains",
+		"-v", "multigent-npm-cache:/root/.npm",
+		"-v", "multigent-go-cache:/root/go/pkg/mod",
+		"-v", "multigent-go-build-cache:/root/.cache/go-build",
 		"-w", "/workspace",
 		"-e", fmt.Sprintf("PORT=%d", port),
+		"-e", "GOFLAGS=-buildvcs=false",
+		"-e", "NPM_CONFIG_PREFIX=/opt/multigent/toolchains/npm",
+		"-e", "PATH=/opt/multigent/toolchains/npm/bin:/usr/local/go/bin:/root/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		"ghcr.io/multigent/multigent/runtime-base:latest",
 	}
 	dockerArgs = append(dockerArgs, runCmd...)

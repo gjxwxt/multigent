@@ -137,8 +137,11 @@ func TestSoftwareDeliveryTemplateHasPRReviewLoop(t *testing.T) {
 	if edge := findEdge("code_review", "changelog_cleanup"); edge.Condition == nil || edge.Condition.Value != "approve" {
 		t.Fatal("expected approved code review to enter changelog cleanup")
 	}
-	if edge := findEdge("pr_review", "qa"); edge.Condition == nil || edge.Condition.Value != "approve" {
+	if edge := findEdge("pr_review", "qa"); edge.Condition == nil || !strings.Contains(edge.Condition.Value, "approve") {
 		t.Fatal("expected approved PR review to enter QA")
+	}
+	if edge := findEdge("pr_review", "push_to_gitlab"); edge.Condition == nil || !strings.Contains(edge.Condition.Value, "approve_push") {
+		t.Fatal("expected approved PR push to enter push_to_gitlab")
 	}
 	if edge := findEdge("pr_review", "implementation"); edge.Condition == nil || edge.Condition.Value != "request_changes" {
 		t.Fatal("expected requested PR changes to return to implementation")
