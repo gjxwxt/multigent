@@ -179,11 +179,27 @@ func (s *Server) createProjectTaskFromBody(w http.ResponseWriter, r *http.Reques
 		if _, err := os.Stat(filepath.Join(wsDir, ".git")); err == nil {
 			gitRoot = wsDir
 		}
-		if s.worktreeMgr != nil {
-			t.BaseCommit = s.worktreeMgr.GetCommitHash(gitRoot, t.BaseBranch)
-			if wtDir, err := s.worktreeMgr.EnsureWorktree(gitRoot, t.ID, t.BaseBranch, t.BranchName); err == nil {
-				t.WorktreeDir = wtDir
+		if _, err := os.Stat(filepath.Join(gitRoot, ".git")); err == nil {
+			if s.worktreeMgr == nil {
+				s.jsonError(w, http.StatusInternalServerError, "git worktree manager is unavailable")
+				return
 			}
+			baseBranch := strings.TrimSpace(t.BaseBranch)
+			if baseBranch == "" {
+				baseBranch = "main"
+			}
+			t.BaseBranch = baseBranch
+			t.BaseCommit = s.worktreeMgr.GetCommitHash(gitRoot, baseBranch)
+			wtDir, branchName, err := s.worktreeMgr.EnsureWorktree(gitRoot, t.ID, baseBranch, t.BranchName)
+			if err != nil {
+				s.jsonError(w, http.StatusConflict, fmt.Sprintf("prepare git worktree: %v", err))
+				return
+			}
+			t.WorktreeDir = wtDir
+			t.BranchName = branchName
+		} else if strings.TrimSpace(t.BranchName) != "" {
+			s.jsonError(w, http.StatusBadRequest, "a feature branch requires a git repository")
+			return
 		}
 	}
 	if est, err := entity.NormalizeEstimateDuration(body.EstimateDuration); err != nil {

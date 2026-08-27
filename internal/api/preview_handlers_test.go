@@ -69,4 +69,21 @@ func TestResolveTaskWorktreeDir(t *testing.T) {
 	if !strings.Contains(res, "workspace") && !strings.Contains(res, "myproj") {
 		t.Fatalf("expected resolved workspace dir, got %s", res)
 	}
+
+	// 4. Test status
+	statusReq := httptest.NewRequest(http.MethodGet, "/api/v1/projects/myproj/tasks/t-123/preview/status", nil)
+	statusReq.SetPathValue("name", "myproj")
+	statusReq.SetPathValue("taskId", "t-123")
+	statusW := httptest.NewRecorder()
+	s.handleGetTaskPreviewStatus(statusW, statusReq)
+	if statusW.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", statusW.Code)
+	}
+	var statusRes map[string]any
+	if err := json.NewDecoder(statusW.Body).Decode(&statusRes); err != nil {
+		t.Fatalf("decode status JSON: %v", err)
+	}
+	if statusRes["busy"] != false {
+		t.Fatalf("expected busy=false, got %v", statusRes["busy"])
+	}
 }

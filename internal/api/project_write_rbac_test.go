@@ -66,7 +66,7 @@ func TestProjectWriteRBACDistinguishesViewerOperatorAndLinkedAgent(t *testing.T)
 	}
 }
 
-func TestCreateWorkflowTaskDoesNotStartTask(t *testing.T) {
+func TestCreateWorkflowTaskMarksActiveAgentStep(t *testing.T) {
 	s, workspaceID := newConnectionGrantPolicyServer(t)
 	seedSampleAgentsForTest(t, s, workspaceID)
 	now := time.Now().UTC()
@@ -125,8 +125,8 @@ func TestCreateWorkflowTaskDoesNotStartTask(t *testing.T) {
 	if rows[0].Agent != "pm" || rows[0].Assignee != "sample/pm" {
 		t.Fatalf("expected task routed to workflow start agent pm, got agent=%q assignee=%q", rows[0].Agent, rows[0].Assignee)
 	}
-	if rows[0].Status != string(entity.TaskStatusPending) {
-		t.Fatalf("expected created workflow task to remain pending, got %q", rows[0].Status)
+	if rows[0].Status != string(entity.TaskStatusInProgress) {
+		t.Fatalf("expected created workflow task with an active agent step to be in progress, got %q", rows[0].Status)
 	}
 
 	run, found, err := wfStore.RunForTask("sample", rows[0].ID)

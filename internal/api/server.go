@@ -111,6 +111,8 @@ type Server struct {
 	telemetryUsageCache    map[string]telemetryUsageCacheEntry
 	previewEngine          *preview.Engine
 	worktreeMgr            *gitworktree.Manager
+	previewMu              sync.Mutex
+	previewSessions        map[string]*previewChatSession
 }
 
 // NewServer builds an API server for the given workspace root.
@@ -150,6 +152,7 @@ func NewServer(root, apiKey string) *Server {
 		telemetryUsageCache:    make(map[string]telemetryUsageCacheEntry),
 		previewEngine:          preview.NewEngine(),
 		worktreeMgr:            gitworktree.NewManager(),
+		previewSessions:        make(map[string]*previewChatSession),
 	}
 	go s.restoreDesiredSchedulers()
 	s.startConnectionHealthChecker()
@@ -479,6 +482,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/start", s.handlePostTaskPreviewStart)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/stop", s.handlePostTaskPreviewStop)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/feedback", s.handlePostTaskPreviewFeedback)
+	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview/live", s.handleGetTaskPreviewLive)
 	mux.HandleFunc("/preview/", s.handleTaskPreviewProxy)
 	mux.HandleFunc("POST /api/v1/workspaces/{workspaceId}/workflow/triggers/{notificationId}/callback", s.handlePostWorkflowTriggerCallback)
 	mux.HandleFunc("GET /api/v1/prompts/agency", s.handleGetAgencyPrompt)
@@ -621,7 +625,11 @@ func (s *Server) Handler() http.Handler {
 	publicMux.HandleFunc("POST /api/v1/im/{provider}/events", s.handleIMEvent)
 	publicMux.HandleFunc("GET /api/v1/health", s.handleHealth)
 	publicMux.HandleFunc("/preview/", s.handleTaskPreviewProxy)
-	publicMux.HandleFunc("/api/v1/projects/{name}/tasks/{taskId}/preview/feedback", s.handlePostTaskPreviewFeedback)
+	publicMux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/feedback", s.handlePostTaskPreviewFeedback)
+	publicMux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/chat", s.handlePostTaskPreviewChat)
+	publicMux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview/live", s.handleGetTaskPreviewLive)
+	publicMux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/stop", s.handlePostTaskPreviewStop)
+	publicMux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview/status", s.handleGetTaskPreviewStatus)
 	runtimeMux := http.NewServeMux()
 	runtimeMux.HandleFunc("GET /api/v1/runtime/connections", s.handleRuntimeConnections)
 	runtimeMux.HandleFunc("GET /api/v1/runtime/tasks", s.handleRuntimeTasks)
@@ -709,7 +717,9 @@ func withJSONHeaders(next http.Handler) http.Handler {
 		if !strings.HasSuffix(r.URL.Path, "/download") &&
 			!strings.Contains(r.URL.Path, "/files/content/") &&
 			!strings.HasPrefix(r.URL.Path, "/preview/") &&
-			!strings.HasPrefix(r.URL.Path, "/_multigent_preview/") {
+			!strings.HasPrefix(r.URL.Path, "/_multigent_preview/") &&
+			!strings.HasSuffix(r.URL.Path, "/preview/chat") &&
+			!strings.HasSuffix(r.URL.Path, "/preview/live") {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		}
 		next.ServeHTTP(w, r)

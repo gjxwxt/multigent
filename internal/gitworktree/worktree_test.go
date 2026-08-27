@@ -32,9 +32,12 @@ func TestGitWorktreeLifecycle(t *testing.T) {
 	taskID := "task-test-123"
 
 	// 1. Ensure worktree
-	wtDir, err := mgr.EnsureWorktree(tempDir, taskID, "main", "feature/task-test-123")
+	wtDir, branch, err := mgr.EnsureWorktree(tempDir, taskID, "main", "feature/task-test-123")
 	if err != nil {
 		t.Fatalf("EnsureWorktree failed: %v", err)
+	}
+	if branch != "feature/task-test-123" {
+		t.Fatalf("expected feature branch, got %q", branch)
 	}
 
 	if _, err := os.Stat(filepath.Join(wtDir, "README.md")); err != nil {
@@ -50,12 +53,15 @@ func TestGitWorktreeLifecycle(t *testing.T) {
 	runGit(t, wtDir, "commit", "-m", "add feature")
 
 	// 3. Ensure worktree idempotent
-	wtDir2, err := mgr.EnsureWorktree(tempDir, taskID, "main", "feature/task-test-123")
+	wtDir2, branch2, err := mgr.EnsureWorktree(tempDir, taskID, "main", "feature/task-test-123")
 	if err != nil {
 		t.Fatalf("EnsureWorktree second time failed: %v", err)
 	}
 	if wtDir2 != wtDir {
 		t.Fatalf("expected same worktree dir, got %s != %s", wtDir2, wtDir)
+	}
+	if branch2 != branch {
+		t.Fatalf("expected same branch, got %q != %q", branch2, branch)
 	}
 
 	// 4. List worktrees
@@ -74,6 +80,35 @@ func TestGitWorktreeLifecycle(t *testing.T) {
 
 	if _, err := os.Stat(wtDir); !os.IsNotExist(err) {
 		t.Fatalf("worktree directory still exists after cleanup")
+	}
+}
+
+func TestEnsureWorktreeReturnsGeneratedBranch(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "gitworktree-generated-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	runGit(t, tempDir, "init", "-b", "main")
+	runGit(t, tempDir, "config", "user.email", "test@multigent.ai")
+	runGit(t, tempDir, "config", "user.name", "Multigent Tester")
+	readme := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(readme, []byte("# Test Repo\n"), 0644); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	runGit(t, tempDir, "add", "README.md")
+	runGit(t, tempDir, "commit", "-m", "initial commit")
+
+	wtDir, branch, err := NewManager().EnsureWorktree(tempDir, "task-generated", "main", "")
+	if err != nil {
+		t.Fatalf("EnsureWorktree failed: %v", err)
+	}
+	if branch != "feature/task-generated" {
+		t.Fatalf("expected generated branch, got %q", branch)
+	}
+	if wtDir != WorktreeDir(tempDir, "task-generated") {
+		t.Fatalf("unexpected worktree dir: %q", wtDir)
 	}
 }
 

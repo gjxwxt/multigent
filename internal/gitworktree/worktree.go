@@ -32,27 +32,31 @@ func sanitizeTaskID(taskID string) string {
 }
 
 // EnsureWorktree prepares a dedicated git worktree for a task.
-// If the worktree already exists, it returns its path.
+// If the worktree already exists, it returns its path and checked-out branch.
 // Otherwise, it fetches the base branch, creates the feature branch, and adds the worktree.
-func (m *Manager) EnsureWorktree(projectRoot, taskID, baseBranch, featureBranch string) (string, error) {
+func (m *Manager) EnsureWorktree(projectRoot, taskID, baseBranch, featureBranch string) (string, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	projectRoot = strings.TrimSpace(projectRoot)
 	if projectRoot == "" {
-		return "", fmt.Errorf("project root is required")
+		return "", "", fmt.Errorf("project root is required")
 	}
 
 	// Verify that projectRoot is a git repository
 	gitDir := filepath.Join(projectRoot, ".git")
 	if _, err := os.Stat(gitDir); err != nil {
-		return "", fmt.Errorf("project root is not a git repository: %w", err)
+		return "", "", fmt.Errorf("project root is not a git repository: %w", err)
 	}
 
 	targetDir := WorktreeDir(projectRoot, taskID)
 	if _, err := os.Stat(targetDir); err == nil {
 		// Worktree directory already exists
-		return targetDir, nil
+		branch, err := checkedOutBranch(targetDir)
+		if err != nil {
+			return "", "", fmt.Errorf("read existing worktree branch: %w", err)
+		}
+		return targetDir, branch, nil
 	}
 
 	baseBranch = strings.TrimSpace(baseBranch)
@@ -66,7 +70,7 @@ func (m *Manager) EnsureWorktree(projectRoot, taskID, baseBranch, featureBranch 
 
 	// Create parent directory for worktrees
 	if err := os.MkdirAll(filepath.Dir(targetDir), 0755); err != nil {
-		return "", fmt.Errorf("create worktrees parent dir: %w", err)
+		return "", "", fmt.Errorf("create worktrees parent dir: %w", err)
 	}
 
 	// Check if the feature branch already exists locally
@@ -98,10 +102,28 @@ func (m *Manager) EnsureWorktree(projectRoot, taskID, baseBranch, featureBranch 
 	var stderr bytes.Buffer
 	cmdWorktree.Stderr = &stderr
 	if err := cmdWorktree.Run(); err != nil {
-		return "", fmt.Errorf("git worktree add failed: %w (stderr: %s)", err, stderr.String())
+		return "", "", fmt.Errorf("git worktree add failed: %w (stderr: %s)", err, stderr.String())
 	}
 
-	return targetDir, nil
+	branch, err := checkedOutBranch(targetDir)
+	if err != nil {
+		return "", "", fmt.Errorf("read created worktree branch: %w", err)
+	}
+	return targetDir, branch, nil
+}
+
+func checkedOutBranch(worktreeDir string) (string, error) {
+	cmd := exec.Command("git", "branch", "--show-current")
+	cmd.Dir = worktreeDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch == "" {
+		return "", fmt.Errorf("worktree has no checked-out branch")
+	}
+	return branch, nil
 }
 
 // CleanupWorktree removes the git worktree and prunes worktree metadata.

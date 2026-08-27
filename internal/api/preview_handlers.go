@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,16 +12,100 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/gitworktree"
 	"github.com/multigent/multigent/internal/preview"
 )
+
+type previewChatSession struct {
+	TaskID      string
+	Project     string
+	Agent       string
+	StartedAt   time.Time
+	Cancel      context.CancelFunc
+	Cmd         *exec.Cmd
+	Events      []string
+	Subscribers map[chan string]struct{}
+	Mu          sync.Mutex
+	Done        bool
+	Stopped     bool
+}
+
+func (s *previewChatSession) addSubscriber() (chan string, []string) {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	ch := make(chan string, 256)
+	if s.Subscribers == nil {
+		s.Subscribers = make(map[chan string]struct{})
+	}
+	history := make([]string, len(s.Events))
+	copy(history, s.Events)
+	if !s.Done && !s.Stopped {
+		s.Subscribers[ch] = struct{}{}
+	}
+	return ch, history
+}
+
+func (s *previewChatSession) removeSubscriber(ch chan string) {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	if s.Subscribers != nil {
+		delete(s.Subscribers, ch)
+	}
+}
+
+func (s *previewChatSession) broadcast(payload string) {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	s.Events = append(s.Events, payload)
+	for ch := range s.Subscribers {
+		select {
+		case ch <- payload:
+		default:
+		}
+	}
+}
+
+func (s *previewChatSession) finish(stopped bool) {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	if s.Done || s.Stopped {
+		return
+	}
+	s.Done = true
+	s.Stopped = stopped
+	endPayload := `{"type":"done"}`
+	if stopped {
+		endPayload = `{"type":"stopped"}`
+	}
+	s.Events = append(s.Events, endPayload)
+	for ch := range s.Subscribers {
+		select {
+		case ch <- endPayload:
+		default:
+		}
+		close(ch)
+	}
+	s.Subscribers = make(map[chan string]struct{})
+}
+
+type previewChatMsg struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type previewChatBody struct {
+	Message string           `json:"message"`
+	History []previewChatMsg `json:"history,omitempty"`
+}
 
 func (s *Server) handleListProjectBranches(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("name")
@@ -105,21 +191,6 @@ func (s *Server) handlePostTaskPreviewStart(w http.ResponseWriter, r *http.Reque
 	_ = json.NewEncoder(w).Encode(inst)
 }
 
-func (s *Server) handlePostTaskPreviewStop(w http.ResponseWriter, r *http.Request) {
-	project := r.PathValue("name")
-	taskID := r.PathValue("taskId")
-	if !s.checkProjectAccess(w, r, project) {
-		return
-	}
-
-	if s.previewEngine != nil {
-		_ = s.previewEngine.StopEphemeralPreview(taskID)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
-}
-
 type previewFeedbackBody struct {
 	Feedback string `json:"feedback"`
 	Category string `json:"category,omitempty"`
@@ -188,6 +259,304 @@ func (s *Server) handlePostTaskPreviewFeedback(w http.ResponseWriter, r *http.Re
 		"taskId":  taskID,
 		"prompt":  feedbackPrompt,
 		"message": "Feedback submitted to agent",
+	})
+}
+
+func (s *Server) handlePostTaskPreviewChat(w http.ResponseWriter, r *http.Request) {
+	project := strings.TrimSpace(r.PathValue("name"))
+	taskID := strings.TrimSpace(r.PathValue("taskId"))
+
+	if (project == "" || project == "current") && s.previewEngine != nil {
+		if inst, ok := s.previewEngine.GetInstance(taskID); ok && inst.Project != "" {
+			project = inst.Project
+		}
+	}
+
+	var body previewChatBody
+	if err := s.readJSON(w, r, &body); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	msg := strings.TrimSpace(body.Message)
+	if msg == "" {
+		s.jsonError(w, http.StatusBadRequest, "message content is required")
+		return
+	}
+
+	task, agentName, err := s.findTaskInProject(project, taskID)
+	if err != nil || task == nil {
+		s.jsonError(w, http.StatusNotFound, "task not found")
+		return
+	}
+
+	workspaceID, err := s.currentWorkspaceID()
+	if err != nil {
+		s.serverError(w, err)
+		return
+	}
+
+	worktreeDir := s.resolveTaskWorktreeDir(project, taskID)
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		s.jsonError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	// 1. Branch Mutex check
+	s.previewMu.Lock()
+	if existing, busy := s.previewSessions[taskID]; busy && existing != nil && !existing.Done && !existing.Stopped {
+		s.previewMu.Unlock()
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "Agent 正在修改当前分支代码，请稍候或点击中止")
+		return
+	}
+
+	// Detached background context: page refresh will NOT kill the agent!
+	ctx, cancel := context.WithCancel(context.Background())
+	session := &previewChatSession{
+		TaskID:      taskID,
+		Project:     project,
+		Agent:       agentName,
+		StartedAt:   time.Now(),
+		Cancel:      cancel,
+		Subscribers: make(map[chan string]struct{}),
+	}
+	s.previewSessions[taskID] = session
+	s.previewMu.Unlock()
+
+	// 2. Record user comment
+	author := "user"
+	if cur := s.currentUser(r); cur != nil && strings.TrimSpace(cur.Username) != "" {
+		author = cur.Username
+	}
+	_ = s.ts.AddComment(project, agentName, &entity.TaskComment{
+		ID:        entity.NewCommentID(),
+		TaskID:    taskID,
+		Author:    author,
+		Body:      "[Preview Chat] " + msg,
+		CreatedAt: time.Now().UTC(),
+	})
+
+	// 3. Build Prompt with conversation history
+	var promptBuf strings.Builder
+	promptBuf.WriteString("【预览界面即时修改】用户在特性分支 (Worktree) 的实时预览环境中提出了代码修改要求：\n\n")
+	for _, h := range body.History {
+		roleLabel := "用户"
+		if h.Role == "assistant" {
+			roleLabel = "助手"
+		}
+		promptBuf.WriteString(fmt.Sprintf("%s: %s\n", roleLabel, h.Content))
+	}
+	promptBuf.WriteString(fmt.Sprintf("\n用户最新修改需求: %s\n\n", msg))
+	promptBuf.WriteString("【重要准则】请严格在当前 Worktree 目录 (/workspace) 内完成代码修改，并确保本地服务热重载正常，严禁切换分支。")
+	promptText := promptBuf.String()
+
+	// 4. Start execution command in background goroutine
+	args := []string{"--dir", s.root, "exec", "--project", project, "--agent", agentName, "--prompt", promptText, "--no-save-session", "--no-session"}
+	cmd := exec.CommandContext(ctx, s.sched.binPath, args...)
+	cmd.Dir = s.root
+	runID := "preview-exec-" + time.Now().UTC().Format("20060102-150405")
+	runtimeToken := s.issueAgentRuntimeToken(runtimeAgentTokenPayload{
+		WorkspaceID:  workspaceID,
+		Project:      project,
+		Agent:        agentName,
+		RunID:        runID,
+		Capabilities: defaultRuntimeCapabilities(),
+	}, 2*time.Hour)
+	cmd.Env = append(os.Environ(),
+		"MULTIGENT_API_URL="+localRuntimeAPIURLForRequest(r),
+		"MULTIGENT_AGENT_TOKEN="+runtimeToken,
+		"MULTIGENT_RUN_ID="+runID,
+		"MULTIGENT_WORKSPACE_ID="+workspaceID,
+		"MULTIGENT_WORKTREE_DIR="+worktreeDir,
+	)
+	setProcGroup(cmd)
+	session.Cmd = cmd
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		session.finish(true)
+		s.serverError(w, err)
+		return
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		session.finish(true)
+		s.serverError(w, err)
+		return
+	}
+
+	if err := cmd.Start(); err != nil {
+		session.finish(true)
+		s.serverError(w, err)
+		return
+	}
+
+	agentModel := entity.AgentModel("")
+	if meta, err := s.agentMetaForProjectMember(workspaceID, project, agentName); err == nil && meta != nil {
+		agentModel = meta.Model
+	}
+
+	go func() {
+		lines := make(chan string, 64)
+		var wg sync.WaitGroup
+		scan := func(src io.Reader) {
+			defer wg.Done()
+			scanner := bufio.NewScanner(src)
+			scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
+			for scanner.Scan() {
+				line := strings.TrimRight(scanner.Text(), "\r")
+				if line != "" {
+					lines <- line
+				}
+			}
+		}
+		wg.Add(2)
+		go scan(stdout)
+		go scan(stderr)
+		go func() {
+			wg.Wait()
+			close(lines)
+		}()
+
+		for line := range lines {
+			payload := chatSSEPayload(line, agentModel)
+			session.broadcast(payload)
+		}
+
+		_ = cmd.Wait()
+		session.finish(ctx.Err() != nil)
+	}()
+
+	// Subscribe current HTTP request to the live stream
+	subCh, history := session.addSubscriber()
+	defer session.removeSubscriber(subCh)
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	flusher.Flush()
+
+	for _, p := range history {
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", p); err != nil {
+			return
+		}
+		flusher.Flush()
+	}
+
+	for {
+		select {
+		case p, ok := <-subCh:
+			if !ok {
+				return
+			}
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", p); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+func (s *Server) handleGetTaskPreviewLive(w http.ResponseWriter, r *http.Request) {
+	taskID := strings.TrimSpace(r.PathValue("taskId"))
+	s.previewMu.Lock()
+	session, exists := s.previewSessions[taskID]
+	s.previewMu.Unlock()
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		s.jsonError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	flusher.Flush()
+
+	if !exists || session == nil {
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", `{"type":"idle"}`)
+		flusher.Flush()
+		return
+	}
+
+	subCh, history := session.addSubscriber()
+	defer session.removeSubscriber(subCh)
+
+	for _, p := range history {
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", p); err != nil {
+			return
+		}
+		flusher.Flush()
+	}
+
+	if session.Done || session.Stopped {
+		return
+	}
+
+	for {
+		select {
+		case p, ok := <-subCh:
+			if !ok {
+				return
+			}
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", p); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+func (s *Server) handlePostTaskPreviewStop(w http.ResponseWriter, r *http.Request) {
+	taskID := strings.TrimSpace(r.PathValue("taskId"))
+	s.previewMu.Lock()
+	session, exists := s.previewSessions[taskID]
+	if exists && session != nil {
+		session.Cancel()
+		if session.Cmd != nil && session.Cmd.Process != nil {
+			killProcessGroup(session.Cmd.Process.Pid)
+		}
+		session.finish(true)
+	}
+	s.previewMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":      true,
+		"stopped": exists,
+		"taskId":  taskID,
+	})
+}
+
+func (s *Server) handleGetTaskPreviewStatus(w http.ResponseWriter, r *http.Request) {
+	taskID := strings.TrimSpace(r.PathValue("taskId"))
+	s.previewMu.Lock()
+	session, exists := s.previewSessions[taskID]
+	var agent string
+	var startedAt *time.Time
+	busy := false
+	if exists && session != nil && !session.Done && !session.Stopped {
+		busy = true
+		agent = session.Agent
+		startedAt = &session.StartedAt
+	}
+	s.previewMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"taskId":    taskID,
+		"busy":      busy,
+		"agent":     agent,
+		"startedAt": startedAt,
 	})
 }
 

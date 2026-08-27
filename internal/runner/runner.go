@@ -253,12 +253,24 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 		containerPromptFile := "/workspace/" + filepath.Base(promptFile)
 		remappedInner := remapPromptFile(innerArgs, promptFile, containerPromptFile)
 		remappedInner = adaptSandboxArgs(model, remappedInner)
+		execAgentDir := agentDir
+		if wtDir := strings.TrimSpace(runtimeEnv["MULTIGENT_WORKTREE_DIR"]); wtDir != "" {
+			if _, err := os.Stat(wtDir); err == nil {
+				execAgentDir = wtDir
+			}
+		}
+		if wtDir := strings.TrimSpace(os.Getenv("MULTIGENT_WORKTREE_DIR")); wtDir != "" && execAgentDir == agentDir {
+			if _, err := os.Stat(wtDir); err == nil {
+				execAgentDir = wtDir
+			}
+		}
+
 		var err error
 		executable, args, err = provider.Command(runenv.ProcessSpec{
 			WorkspaceRoot: r.root,
 			Project:       project,
 			Agent:         agentName,
-			AgentDir:      agentDir,
+			AgentDir:      execAgentDir,
 			Model:         model,
 			Command:       remappedInner,
 			Env:           agentEnv,
@@ -271,8 +283,20 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 			return nil, fmt.Errorf("runtime %s: build command: %w", meta.Sandbox.Provider, err)
 		}
 	} else {
+		execAgentDir := agentDir
+		if wtDir := strings.TrimSpace(runtimeEnv["MULTIGENT_WORKTREE_DIR"]); wtDir != "" {
+			if _, err := os.Stat(wtDir); err == nil {
+				execAgentDir = wtDir
+			}
+		}
+		if wtDir := strings.TrimSpace(os.Getenv("MULTIGENT_WORKTREE_DIR")); wtDir != "" && execAgentDir == agentDir {
+			if _, err := os.Stat(wtDir); err == nil {
+				execAgentDir = wtDir
+			}
+		}
+
 		effectiveEnv = mergeEnv(effectiveEnv, directHostRuntimeEnv(model))
-		effectiveEnv = mergeEnv(effectiveEnv, directHostRuntimeHomeEnv(agentDir, model))
+		effectiveEnv = mergeEnv(effectiveEnv, directHostRuntimeHomeEnv(execAgentDir, model))
 		effectiveEnv = mergeEnv(effectiveEnv, r.workspaceFilesEnv(filepath.Join(r.root, ".multigent", "files")))
 		innerArgs = adaptDirectHostArgs(model, innerArgs)
 		if err := validateDirectHostExecution(model, innerArgs, effectiveEnv); err != nil {
@@ -280,7 +304,7 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 		}
 		executable = innerArgs[0]
 		args = innerArgs[1:]
-		execDir = agentDir
+		execDir = execAgentDir
 	}
 
 	// Prepare log file.
