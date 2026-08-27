@@ -514,6 +514,7 @@ function InitializeProjectModal({
             remoteProjectId: createRes.repository.id,
             remoteUrl: createRes.repository.webUrl,
             cloneUrl: createRes.repository.httpCloneUrl,
+            authenticatedCloneUrl: createRes.repository.authenticatedCloneUrl,
             defaultBranch: createRes.repository.defaultBranch || 'main',
           }
         }
@@ -554,8 +555,9 @@ function InitializeProjectModal({
         const tpl = TEMPLATES.find((x) => x.id === selectedTemplate)
         const tplName = (useTemplate && tpl) ? t(tpl.label) : '基础空白'
 
-        if (remoteMetadata.cloneUrl) {
-          const pushUrl = remoteMetadata.cloneUrl
+        const rawUrl = remoteMetadata.authenticatedCloneUrl || remoteMetadata.cloneUrl
+        if (rawUrl) {
+          const pushUrl = rawUrl
             .replace('//localhost', '//host.docker.internal')
             .replace('//127.0.0.1', '//host.docker.internal')
           taskTitle = `【工程初始化】构建 ${tplName} 脚手架并首推远程 GitLab`
