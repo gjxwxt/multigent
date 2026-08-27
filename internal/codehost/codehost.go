@@ -37,9 +37,10 @@ type Repository struct {
 	Name              string `json:"name"`
 	PathWithNamespace string `json:"pathWithNamespace"`
 	WebURL            string `json:"webUrl"`
-	HTTPCloneURL      string `json:"httpCloneUrl"` // clean URL without embedded token
-	SSHCloneURL       string `json:"sshCloneUrl"`
-	DefaultBranch     string `json:"defaultBranch"`
+	HTTPCloneURL          string `json:"httpCloneUrl"` // clean URL without embedded token
+	AuthenticatedCloneURL string `json:"authenticatedCloneUrl,omitempty"`
+	SSHCloneURL           string `json:"sshCloneUrl"`
+	DefaultBranch         string `json:"defaultBranch"`
 }
 
 // ChangeRequest represents a Merge Request (GitLab) or Pull Request (GitHub/Gitee).
