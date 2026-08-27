@@ -15,6 +15,7 @@ import {
   Laptop,
   Layers,
   Lock,
+  RotateCw,
   Save,
   Sparkles,
   Trash2,
@@ -299,6 +300,14 @@ function BasicInfoEditor({
                     <Lock className="size-3 text-neutral-500" />
                     {t('projectSettings.repoLocked')}
                   </span>
+                  <button
+                    type="button"
+                    onClick={() => setInitModalOpen(true)}
+                    className="inline-flex items-center gap-1 rounded-md border border-neutral-200 bg-white px-2.5 py-1 text-xs font-medium text-neutral-700 hover:bg-neutral-50 hover:text-sky-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700 transition-colors shadow-2xs"
+                  >
+                    <RotateCw className="size-3" />
+                    <span>重新初始化</span>
+                  </button>
                   <button
                     type="button"
                     onClick={handleUnlock}

@@ -705,8 +705,21 @@ func (s *Server) handleStartProjectTask(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if task.Status.IsTerminal() {
-		s.jsonErrorCode(w, http.StatusConflict, ErrCodeValidationFailed, "task is already finished")
-		return
+		if task.Status == entity.TaskStatusDoneFailed || task.Status == entity.TaskStatusCancelled {
+			// Allow restarting/retrying failed or cancelled tasks
+			task.Status = entity.TaskStatusPending
+			task.StartedAt = nil
+			task.FinishedAt = nil
+			task.LastError = ""
+			task.UpdatedAt = time.Now().UTC()
+			if err := s.ts.UpdateTask(project, agent, task); err != nil {
+				s.serverError(w, err)
+				return
+			}
+		} else {
+			s.jsonErrorCode(w, http.StatusConflict, ErrCodeValidationFailed, "task is already finished")
+			return
+		}
 	}
 	if task.Status == entity.TaskStatusAwaitingConfirmation {
 		s.jsonErrorCode(w, http.StatusConflict, ErrCodeValidationFailed, "current assignee is not an agent")

@@ -189,11 +189,12 @@ export default function ProjectTaskFollowPage() {
     (!liveLogState || liveLogState.status !== 'ok' || !liveLogFinished),
   )
 
+  const isFailedOrCancelled = displayTask?.status === 'done_failed' || displayTask?.status === 'cancelled'
   const canStart = Boolean(
     displayTask &&
     startAgent &&
     displayStatus !== 'in_progress' &&
-    !isTerminal(displayTask.status) &&
+    (!isTerminal(displayTask.status) || isFailedOrCancelled) &&
     (canAdmin || canOperateAgent(user, projectId, startAgent)),
   )
   const canReview = Boolean(activeStep?.type === 'human_review' && isWorkflowStepOpen(activeInstance?.status) && !isTerminal(displayTask?.status || ''))
@@ -475,9 +476,21 @@ export default function ProjectTaskFollowPage() {
                   type="button"
                   onClick={() => void startCurrentAgent()}
                   disabled={!canStart || startBusy || displayStatus === 'in_progress'}
-                  className="rounded-lg border border-sky-600 bg-white px-3 py-2 text-sm font-medium text-sky-700 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-sky-500 dark:bg-zinc-900 dark:text-sky-400 dark:hover:bg-zinc-800"
+                  className={cn(
+                    'rounded-lg border px-3 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40',
+                    isFailedOrCancelled
+                      ? 'border-amber-600 bg-amber-50 text-amber-800 hover:bg-amber-100 dark:border-amber-500 dark:bg-amber-950/40 dark:text-amber-300'
+                      : 'border-sky-600 bg-white text-sky-700 hover:bg-sky-50 dark:border-sky-500 dark:bg-zinc-900 dark:text-sky-400 dark:hover:bg-zinc-800'
+                  )}
                 >
-                  <span className="inline-flex items-center gap-1.5"><Play className={cn('size-3.5', (startBusy || displayStatus === 'in_progress') && 'animate-pulse')} />{displayStatus === 'in_progress' ? t('tasks.status.in_progress') : startBusy ? t('tasks.starting') : t('tasks.startCurrentAgent')}</span>
+                  <span className="inline-flex items-center gap-1.5">
+                    {isFailedOrCancelled ? (
+                      <RefreshCw className={cn('size-3.5', (startBusy || displayStatus === 'in_progress') && 'animate-spin')} />
+                    ) : (
+                      <Play className={cn('size-3.5', (startBusy || displayStatus === 'in_progress') && 'animate-pulse')} />
+                    )}
+                    {displayStatus === 'in_progress' ? t('tasks.status.in_progress') : startBusy ? t('tasks.starting') : isFailedOrCancelled ? '重新执行任务' : t('tasks.startCurrentAgent')}
+                  </span>
                 </button>
                 {startAgent && <span className="font-mono text-xs text-neutral-400 dark:text-zinc-500">{startAgent}</span>}
               </div>

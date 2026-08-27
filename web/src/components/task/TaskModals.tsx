@@ -3,9 +3,8 @@ import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import ReactMarkdown from 'react-markdown'
-import type { Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { ClipboardCopy, ExternalLink, GitPullRequest, Globe, MessageSquare, Pencil, Play, Send, Trash2, X } from 'lucide-react'
+import { ClipboardCopy, ExternalLink, GitPullRequest, Globe, MessageSquare, Pencil, Play, RotateCw, Send, Trash2, X } from 'lucide-react'
 import { cn } from '../../lib/cn'
 import { apiDelete, apiFetch, apiPost, apiPut } from '../../lib/api'
 import { useFormatDateTime } from '../../lib/format-datetime'
@@ -340,7 +339,8 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
     : []
   const canReviewWorkflow = Boolean(activeWorkflowStep?.type === 'human_review' && isWorkflowStepOpen(activeWorkflowInst?.status) && !isTerminal(task.status))
   const startAgentName = startableAgentName(task)
-  const canStartAgent = Boolean(startAgentName && task.status === 'pending')
+  const isFailedOrCancelled = task.status === 'done_failed' || task.status === 'cancelled'
+  const canStartAgent = Boolean(startAgentName && (task.status === 'pending' || isFailedOrCancelled))
 
   useEffect(() => {
     setReviewComments('')
@@ -419,7 +419,7 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
   }
 
   async function startCurrentAssignee() {
-    if (!startAgentName || isTerminal(task.status)) return
+    if (!startAgentName || (isTerminal(task.status) && !isFailedOrCancelled)) return
     setStartBusy(true)
     try {
       await apiPost(`/api/v1/projects/${encodeURIComponent(task.project)}/tasks/${encodeURIComponent(task.id)}/start`, {}, { suppressToast: true })
@@ -514,10 +514,19 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
                 type="button"
                 onClick={() => void startCurrentAssignee()}
                 disabled={!canStartAgent || startBusy}
-                title={!startAgentName ? t('tasks.startRequiresAgent') : t('tasks.start')}
-                className="rounded-md p-1 text-neutral-400 transition-colors enabled:hover:bg-sky-50 enabled:hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-35 dark:text-zinc-500 dark:enabled:hover:bg-zinc-800 dark:enabled:hover:text-sky-400"
+                title={!startAgentName ? t('tasks.startRequiresAgent') : isFailedOrCancelled ? '重新执行任务' : t('tasks.start')}
+                className={cn(
+                  'rounded-md p-1 transition-colors disabled:cursor-not-allowed disabled:opacity-35',
+                  isFailedOrCancelled
+                    ? 'text-amber-600 hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-950/30'
+                    : 'text-neutral-400 enabled:hover:bg-sky-50 enabled:hover:text-sky-700 dark:text-zinc-500 dark:enabled:hover:bg-zinc-800 dark:enabled:hover:text-sky-400'
+                )}
               >
-                <Play className={cn('size-4', startBusy && 'animate-pulse')} strokeWidth={1.8} />
+                {isFailedOrCancelled ? (
+                  <RotateCw className={cn('size-4', startBusy && 'animate-spin')} strokeWidth={1.8} />
+                ) : (
+                  <Play className={cn('size-4', startBusy && 'animate-pulse')} strokeWidth={1.8} />
+                )}
               </button>
             )}
             {canEdit && (
