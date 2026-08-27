@@ -224,7 +224,7 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 	effectiveEnv = mergeEnv(effectiveEnv, runtimeEnv)
 	apiModel, apiBaseURL := resolveAPIModelFromEnv(model, effectiveEnv)
 	invoker := InvokerFor(model, meta.RunCommand, meta.AddDirs)
-	resumeSessionID := ResumeSessionIDForCLI(sessionID)
+	resumeSessionID := r.validateResumeSessionID(agentDir, model, sessionID)
 	innerArgs := invoker.Args(promptFile, resumeSessionID)
 
 	var (
@@ -476,7 +476,7 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 	effectiveEnv = mergeEnv(effectiveEnv, runtimeEnv)
 	apiModel, apiBaseURL := resolveAPIModelFromEnv(model, effectiveEnv)
 	invoker := InvokerFor(model, meta.RunCommand, meta.AddDirs)
-	resumeSessionID := ResumeSessionIDForCLI(sessionID)
+	resumeSessionID := r.validateResumeSessionID(agentDir, model, sessionID)
 
 	// Build the inner agent CLI arguments.
 	innerArgs := invoker.Args(promptFile, resumeSessionID)
@@ -1879,6 +1879,21 @@ func isExecutableFile(path string) bool {
 		return false
 	}
 	return info.Mode()&0o111 != 0
+}
+
+func (r *Runner) validateResumeSessionID(agentDir string, model entity.AgentModel, sessionID string) string {
+	resumeSessionID := ResumeSessionIDForCLI(sessionID)
+	if resumeSessionID == "" {
+		return ""
+	}
+	switch entity.NormaliseModel(model) {
+	case entity.ModelClaudeCode:
+		sessionDir := filepath.Join(agentDir, ".multigent", "runtime-home", "claudecode", ".claude", "sessions")
+		if entries, err := os.ReadDir(sessionDir); err != nil || len(entries) == 0 {
+			return ""
+		}
+	}
+	return resumeSessionID
 }
 
 func (r *Runner) materializeProviderCredentials(agentDir string, meta *entity.AgentMeta) error {

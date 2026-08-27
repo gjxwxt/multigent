@@ -546,8 +546,11 @@ function InitializeProjectModal({
         const tplName = (useTemplate && tpl) ? t(tpl.label) : '基础空白'
 
         if (remoteMetadata.cloneUrl) {
+          const pushUrl = remoteMetadata.cloneUrl
+            .replace('//localhost', '//host.docker.internal')
+            .replace('//127.0.0.1', '//host.docker.internal')
           taskTitle = `【工程初始化】构建 ${tplName} 脚手架并首推远程 GitLab`
-          taskPrompt = `请在当前项目工作区 (${targetRepo}) 初始化 "${tplName}" 工程骨架并首次推送到远程 GitLab 仓库：\n\n1. 初始化 Git 仓库并创建符合最佳实践的完整工程文件与目录；\n2. 生成基础依赖配置与入口文件；\n3. 添加标准的 .gitignore 和详细的 README.md 开发说明；\n4. 进行一次基础构建与语法校验，确保工程可一键启动；\n5. 配置远程仓库并推送：\n   git remote add origin "${remoteMetadata.cloneUrl}" || git remote set-url origin "${remoteMetadata.cloneUrl}"\n   git branch -M main\n   git add .\n   git commit -m "chore: initial ${tplName} scaffold"\n   git push -u origin main\n6. 输出初始化完成报告，列出目录架构与启动命令。`
+          taskPrompt = `请在当前项目工作区 (${targetRepo}) 初始化 "${tplName}" 工程骨架并首次推送到远程 GitLab 仓库：\n\n1. 初始化 Git 仓库并创建符合最佳实践的完整工程文件与目录；\n2. 生成基础依赖配置与入口文件；\n3. 添加标准的 .gitignore 和详细的 README.md 开发说明；\n4. 进行一次基础构建与语法校验，确保工程可一键启动；\n5. 配置远程仓库并推送（沙箱内通过 host.docker.internal 访问宿主服务）：\n   git remote add origin "${pushUrl}" || git remote set-url origin "${pushUrl}"\n   git branch -M main\n   git add .\n   git commit -m "chore: initial ${tplName} scaffold"\n   git push -u origin main\n6. 输出初始化完成报告，列出目录架构与启动命令。`
         } else {
           taskTitle = `【工程初始化】构建 ${tplName} 模板脚手架`
           taskPrompt = `请在当前项目工作区 (${targetRepo}) 初始化 "${tplName}" 工程骨架：\n\n1. 初始化 Git 仓库并创建符合最佳实践的完整工程目录；\n2. 生成基础依赖配置与入口文件；\n3. 添加标准的 .gitignore 和详细的 README.md 开发说明；\n4. 进行一次基础构建与语法校验，确保工程可一键启动；\n5. 输出初始化完成报告，列出目录架构与启动命令。`
