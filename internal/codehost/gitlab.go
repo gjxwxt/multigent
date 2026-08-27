@@ -192,6 +192,23 @@ func (g *GitLabHost) CreateRepository(ctx context.Context, req CreateRepoRequest
 	}
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
+		if strings.Contains(string(b), "has already been taken") {
+			// Look up existing repository
+			searchReq, err := g.newRequest(ctx, http.MethodGet, "/projects?search="+url.QueryEscape(name)+"&simple=true", nil)
+			if err == nil {
+				if searchResp, err := g.client.Do(searchReq); err == nil {
+					defer searchResp.Body.Close()
+					var projects []gitlabProjectResp
+					if json.NewDecoder(searchResp.Body).Decode(&projects) == nil {
+						for _, proj := range projects {
+							if proj.Name == name || proj.PathWithNamespace == path || strings.HasSuffix(proj.PathWithNamespace, "/"+path) {
+								return g.toRepository(proj), nil
+							}
+						}
+					}
+				}
+			}
+		}
 		return nil, fmt.Errorf("create gitlab project status %d: %s", resp.StatusCode, string(b))
 	}
 
@@ -200,6 +217,10 @@ func (g *GitLabHost) CreateRepository(ctx context.Context, req CreateRepoRequest
 		return nil, fmt.Errorf("decode gitlab project response: %w", err)
 	}
 
+	return g.toRepository(p), nil
+}
+
+func (g *GitLabHost) toRepository(p gitlabProjectResp) *Repository {
 	defaultBranch := p.DefaultBranch
 	if defaultBranch == "" {
 		defaultBranch = "main"
@@ -225,7 +246,7 @@ func (g *GitLabHost) CreateRepository(ctx context.Context, req CreateRepoRequest
 		AuthenticatedCloneURL: authCloneURL,
 		SSHCloneURL:           p.SSHURLToRepo,
 		DefaultBranch:         defaultBranch,
-	}, nil
+	}
 }
 
 func (g *GitLabHost) DeleteRepository(ctx context.Context, projectID string) error {
