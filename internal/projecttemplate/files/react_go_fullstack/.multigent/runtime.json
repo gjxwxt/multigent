@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "backend": {
+    "directory": "server",
+    "command": "go run .",
+    "port": 8080,
+    "healthPath": "/api/health"
+  },
+  "frontend": {
+    "directory": "web",
+    "command": "npm run dev -- --host 0.0.0.0 --port ${PORT}"
+  },
+  "preview": {
+    "healthPath": "/",
+    "startupTimeoutSeconds": 45
+  }
+}

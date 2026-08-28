@@ -40,6 +40,9 @@ type ProjectDetail = {
   remoteUrl?: string
   cloneUrl?: string
   defaultBranch?: string
+  templateId?: string
+  templateVersion?: string
+  templateDigest?: string
 }
 type PromptData = { content: string }
 
@@ -544,6 +547,18 @@ function InitializeProjectModal({
         })
       }
 
+      // React + Go is currently the first deterministic project template. The
+      // server writes its fixed files before the Agent task starts; the Agent
+      // then installs dependencies, verifies the result and handles Git.
+      const deterministicTemplate = activeTab === 'create_new' && useTemplate && selectedTemplate === 'react_go_fullstack'
+      let templateReport: { templateId: string; templateVersion: string; templateDigest: string } | null = null
+      if (deterministicTemplate) {
+        templateReport = await apiPost<{ templateId: string; templateVersion: string; templateDigest: string }>(
+          `/api/v1/projects/${encodeURIComponent(projectId)}/initialize-template`,
+          { repo: targetRepo, templateId: selectedTemplate },
+        )
+      }
+
       // 3. Prepare task payload & dispatch
       let taskTitle = ''
       let taskPrompt = ''
@@ -563,12 +578,20 @@ function InitializeProjectModal({
         const tplName = (useTemplate && tpl) ? t(tpl.label) : '基础空白'
 
         const cleanCloneUrl = remoteMetadata.cloneUrl
+        const templateReadySteps = templateReport
+          ? `模板已由系统确定性生成（${templateReport.templateId} v${templateReport.templateVersion}，摘要 ${templateReport.templateDigest.slice(0, 12)}）。不要重写基础骨架，先执行：
+1. make doctor；
+2. cd web && npm install（没有 package-lock.json 时）并执行 npm run build；
+3. cd server && go test ./...；
+4. 检查 .multigent/runtime.json、前端 /api 代理和 server/api/health 是否一致。
+`
+          : ''
         if (cleanCloneUrl) {
           taskTitle = `【工程初始化】构建 ${tplName} 脚手架并首推远程 GitLab`
-          taskPrompt = `请在当前项目工作区 (${targetRepo}) 初始化 "${tplName}" 工程骨架并首次推送到远程 GitLab 仓库：\n\n1. 初始化 Git 仓库并创建符合最佳实践的完整工程文件与目录；\n2. 生成基础依赖配置与入口文件；\n3. 添加标准的 .gitignore 和详细的 README.md 开发说明；\n4. 进行一次基础构建与语法校验，确保工程可一键启动；\n5. 使用系统已注入的 GitLab credential helper 配置远程仓库并推送（禁止把 Token 写入 URL）：\n   git remote add origin "${cleanCloneUrl}" || git remote set-url origin "${cleanCloneUrl}"\n   git branch -M main\n   git add .\n   git commit -m "chore: initial ${tplName} scaffold"\n   git push -u origin main\n6. 输出初始化完成报告，列出目录架构与启动命令。`
+          taskPrompt = `请在当前项目工作区 (${targetRepo}) 完成 "${tplName}" 工程初始化并首次推送到远程 GitLab 仓库。\n\n${templateReadySteps}如果模板尚未由系统生成，再补齐缺失的工程文件；不要覆盖已有用户文件。然后：\n1. 使用系统已注入的 GitLab credential helper 配置远程仓库并推送（禁止把 Token 写入 URL）：\n   git remote add origin "${cleanCloneUrl}" || git remote set-url origin "${cleanCloneUrl}"\n   git branch -M main\n   git add .\n   git commit -m "chore: initial ${tplName} scaffold"\n   git push -u origin main\n2. 输出初始化完成报告，列出目录架构、验证结果与启动命令。`
         } else {
           taskTitle = `【工程初始化】构建 ${tplName} 模板脚手架`
-          taskPrompt = `请在当前项目工作区 (${targetRepo}) 初始化 "${tplName}" 工程骨架：\n\n1. 初始化 Git 仓库并创建符合最佳实践的完整工程目录；\n2. 生成基础依赖配置与入口文件；\n3. 添加标准的 .gitignore 和详细的 README.md 开发说明；\n4. 进行一次基础构建与语法校验，确保工程可一键启动；\n5. 输出初始化完成报告，列出目录架构与启动命令。`
+          taskPrompt = `请在当前项目工作区 (${targetRepo}) 完成 "${tplName}" 工程初始化。\n\n${templateReadySteps}如果模板尚未由系统生成，再补齐缺失的工程文件；不要覆盖已有用户文件。然后：\n1. 初始化 Git 仓库并创建首个提交；\n2. 执行基础测试与构建，确保工程可一键启动；\n3. 输出初始化完成报告，列出目录架构、验证结果与启动命令。`
         }
       }
 

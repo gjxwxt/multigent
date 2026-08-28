@@ -1,0 +1,3 @@
+module example.com/multigent-fullstack
+
+go 1.26

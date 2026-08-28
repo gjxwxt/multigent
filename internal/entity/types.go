@@ -156,6 +156,11 @@ type Project struct {
 	Owners []string `yaml:"owners,omitempty" json:"owners,omitempty"`
 	// ContextPack is a future SaaS-facing hook for versioned project context.
 	ContextPack string `yaml:"context_pack,omitempty" json:"contextPack,omitempty"`
+	// Template metadata identifies the deterministic starter used to initialize
+	// the repository. It is intentionally separate from task history.
+	TemplateID      string `yaml:"template_id,omitempty" json:"templateId,omitempty"`
+	TemplateVersion string `yaml:"template_version,omitempty" json:"templateVersion,omitempty"`
+	TemplateDigest  string `yaml:"template_digest,omitempty" json:"templateDigest,omitempty"`
 
 	// Remote code host integration metadata
 	RemoteProvider   string `yaml:"remote_provider,omitempty" json:"remoteProvider,omitempty"`     // "gitlab" | "github" | "gitee"

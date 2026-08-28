@@ -392,6 +392,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/runtime-nodes/{id}", s.handleDeleteRuntimeNode)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks", s.handlePostProjectTask)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/from-template", s.handlePostProjectTaskFromTemplate)
+	mux.HandleFunc("POST /api/v1/projects/{name}/initialize-template", s.handleInitializeProjectTemplate)
 	mux.HandleFunc("POST /api/v1/projects/{name}/agents/{agent}/crons/{cronId}/pause", s.handlePostCronPause)
 	mux.HandleFunc("POST /api/v1/projects/{name}/agents/{agent}/crons/{cronId}/resume", s.handlePostCronResume)
 	mux.HandleFunc("PUT /api/v1/projects/{name}/agents/{agent}/crons/{cronId}", s.handlePutCron)
@@ -1071,6 +1072,9 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		"name":             p.Name,
 		"description":      p.Description,
 		"repo":             p.Repo,
+		"templateId":       p.TemplateID,
+		"templateVersion":  p.TemplateVersion,
+		"templateDigest":   p.TemplateDigest,
 		"remoteProvider":   p.RemoteProvider,
 		"remoteConnection": p.RemoteConnection,
 		"remoteProjectId":  p.RemoteProjectID,
