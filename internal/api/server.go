@@ -1072,6 +1072,7 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		"name":             p.Name,
 		"description":      p.Description,
 		"repo":             p.Repo,
+		"defaultRepo":      filepath.Join(s.st.ProjectDir(name), "workspace"),
 		"templateId":       p.TemplateID,
 		"templateVersion":  p.TemplateVersion,
 		"templateDigest":   p.TemplateDigest,

@@ -26,7 +26,7 @@ import {
 } from 'lucide-react'
 import { cn } from '../../lib/cn'
 import { useApiJson } from '../../lib/use-api'
-import { apiDelete, apiFetch, apiPost, apiPut } from '../../lib/api'
+import { ApiError, apiDelete, apiFetch, apiPost, apiPut } from '../../lib/api'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { showToast } from '../../components/ui/Toast'
 
@@ -34,6 +34,7 @@ type ProjectDetail = {
   name: string
   description: string
   repo: string
+  defaultRepo?: string
   remoteProvider?: string
   remoteConnection?: string
   remoteProjectId?: string
@@ -76,9 +77,13 @@ export default function ProjectSettingsPage() {
               name={detail.name}
               initialDescription={detail.description}
               initialRepo={detail.repo}
+              defaultRepo={detail.defaultRepo}
               remoteProvider={detail.remoteProvider}
+              remoteConnection={detail.remoteConnection}
+              remoteProjectId={detail.remoteProjectId}
               remoteUrl={detail.remoteUrl}
               cloneUrl={detail.cloneUrl}
+              defaultBranch={detail.defaultBranch}
               onReload={() => setReloadKey((k) => k + 1)}
             />
           )}
@@ -161,18 +166,26 @@ function BasicInfoEditor({
   name,
   initialDescription,
   initialRepo,
+  defaultRepo,
   remoteProvider,
   remoteUrl,
   cloneUrl,
+  remoteConnection,
+  remoteProjectId,
+  defaultBranch,
   onReload,
 }: {
   projectId: string
   name: string
   initialDescription: string
   initialRepo: string
+  defaultRepo?: string
   remoteProvider?: string
+  remoteConnection?: string
+  remoteProjectId?: string
   remoteUrl?: string
   cloneUrl?: string
+  defaultBranch?: string
   onReload: () => void
 }) {
   const { t } = useTranslation()
@@ -375,6 +388,13 @@ function BasicInfoEditor({
         projectId={projectId}
         currentDescription={description}
         currentRepo={repo}
+        defaultRepo={defaultRepo}
+        existingRemoteProvider={remoteProvider}
+        existingRemoteConnection={remoteConnection}
+        existingRemoteProjectId={remoteProjectId}
+        existingRemoteUrl={remoteUrl}
+        existingCloneUrl={cloneUrl}
+        existingDefaultBranch={defaultBranch}
         isOpen={initModalOpen}
         onClose={() => setInitModalOpen(false)}
         onSuccess={handleInitSuccess}
@@ -396,6 +416,13 @@ function InitializeProjectModal({
   projectId,
   currentDescription,
   currentRepo,
+  defaultRepo,
+  existingRemoteProvider,
+  existingRemoteConnection,
+  existingRemoteProjectId,
+  existingRemoteUrl,
+  existingCloneUrl,
+  existingDefaultBranch,
   isOpen,
   onClose,
   onSuccess,
@@ -403,6 +430,13 @@ function InitializeProjectModal({
   projectId: string
   currentDescription: string
   currentRepo: string
+  defaultRepo?: string
+  existingRemoteProvider?: string
+  existingRemoteConnection?: string
+  existingRemoteProjectId?: string
+  existingRemoteUrl?: string
+  existingCloneUrl?: string
+  existingDefaultBranch?: string
   isOpen: boolean
   onClose: () => void
   onSuccess: (newRepo: string) => void
@@ -411,7 +445,8 @@ function InitializeProjectModal({
   const navigate = useNavigate()
   const [activeTab, setActiveTab] = useState<'bind_existing' | 'create_new'>('bind_existing')
   const [existingType, setExistingType] = useState<'local' | 'remote'>('remote')
-  const [localPath, setLocalPath] = useState(currentRepo.trim() || `/opt/multigent/data/projects/${projectId}/workspace`)
+  const fallbackRepo = defaultRepo?.trim() || `/opt/multigent/data/projects/${projectId}/workspace`
+  const [localPath, setLocalPath] = useState(currentRepo.trim() || fallbackRepo)
   const [remoteUrl, setRemoteUrl] = useState('')
   const [useTemplate, setUseTemplate] = useState(true)
   const [selectedTemplate, setSelectedTemplate] = useState('react_go_fullstack')
@@ -433,18 +468,24 @@ function InitializeProjectModal({
   // Sync localPath, fetch agents & check GitLab connection status whenever modal opens
   useEffect(() => {
     if (isOpen) {
-      if (currentRepo.trim()) {
-        setLocalPath(currentRepo.trim())
-      }
+      const legacyDefaultRepo = `/opt/multigent/data/projects/${projectId}/workspace`
+      setLocalPath(currentRepo.trim() && currentRepo.trim() !== legacyDefaultRepo ? currentRepo.trim() : fallbackRepo)
       setRepoSlug(projectId)
       setError(null)
       setLoadingAgents(true)
 
-      // Fetch project member agents
+      // A new project has no membership yet. Fall back to workspace agents;
+      // the submit step creates the project membership before the task.
       apiFetch<Array<{ name?: string; displayName?: string; model?: string }>>(`/api/v1/projects/${encodeURIComponent(projectId)}/agents`)
         .then((projAgentsRes) => {
           const projList = Array.isArray(projAgentsRes) ? projAgentsRes : []
           const availableWorkers = projList.filter((w) => w.name && w.model !== 'human')
+          if (availableWorkers.length > 0) return availableWorkers
+          return apiFetch<{ agents?: Array<{ name?: string; displayName?: string; model?: string }> }>('/api/v1/agents')
+            .then((workspaceAgentsRes) => (Array.isArray(workspaceAgentsRes?.agents) ? workspaceAgentsRes.agents : [])
+              .filter((w) => w.name && w.model !== 'human'))
+        })
+        .then((availableWorkers) => {
           setAgents(availableWorkers as Array<{ name: string; displayName?: string; model?: string }>)
           if (availableWorkers.length > 0) {
             setSelectedAgent(availableWorkers[0].name || '')
@@ -479,7 +520,7 @@ function InitializeProjectModal({
           setGitlabStatus({ connected: false })
         })
     }
-  }, [isOpen, currentRepo, projectId])
+  }, [isOpen, currentRepo, projectId, fallbackRepo])
 
   if (!isOpen) return null
 
@@ -493,7 +534,11 @@ function InitializeProjectModal({
         return
       }
 
-      const defaultProjectWorkspace = currentRepo.trim() || `/opt/multigent/data/projects/${projectId}/workspace`
+      // Older clients persisted this path before the server exposed the real
+      // workspace root. Treat it as empty so retries migrate to defaultRepo.
+      const legacyDefaultRepo = `/opt/multigent/data/projects/${projectId}/workspace`
+      const persistedRepo = currentRepo.trim() === legacyDefaultRepo ? '' : currentRepo.trim()
+      const defaultProjectWorkspace = persistedRepo || fallbackRepo
       const targetRepo =
         activeTab === 'bind_existing' && existingType === 'local' && localPath.trim()
           ? localPath.trim()
@@ -501,23 +546,40 @@ function InitializeProjectModal({
 
       let remoteMetadata: any = {}
       if (activeTab === 'create_new' && syncToGitLab && gitlabStatus.connected) {
-        // Create remote repository on GitLab
-        const createRes = await apiPost<{ ok: boolean; connectionId: string; repository: { id: string; name: string; webUrl: string; httpCloneUrl: string; sshCloneUrl: string; defaultBranch: string } }>('/api/v1/integrations/gitlab/projects', {
-          connectionId: gitlabStatus.connectionId,
-          name: repoSlug.trim() || projectId,
-          path: repoSlug.trim() || projectId,
-          namespaceId: selectedNamespaceId || 0,
-          visibility: visibility,
-          description: currentDescription || `Repository for ${projectId}`,
-        })
-        if (createRes && createRes.repository) {
+        const requestedSlug = repoSlug.trim() || projectId
+        const canReuseRemote = existingRemoteProvider === 'gitlab'
+          && existingRemoteConnection === gitlabStatus.connectionId
+          && Boolean(existingRemoteProjectId && existingRemoteUrl && existingCloneUrl)
+          && requestedSlug === projectId
+        if (canReuseRemote) {
+          // A previous attempt may have created the remote before failing in a
+          // later step. Reuse it instead of turning a retry into duplicate 409.
           remoteMetadata = {
             remoteProvider: 'gitlab',
-            remoteConnection: createRes.connectionId,
-            remoteProjectId: createRes.repository.id,
-            remoteUrl: createRes.repository.webUrl,
-            cloneUrl: createRes.repository.httpCloneUrl,
-            defaultBranch: createRes.repository.defaultBranch || 'main',
+            remoteConnection: existingRemoteConnection,
+            remoteProjectId: existingRemoteProjectId,
+            remoteUrl: existingRemoteUrl,
+            cloneUrl: existingCloneUrl,
+            defaultBranch: existingDefaultBranch || 'main',
+          }
+        } else {
+          const createRes = await apiPost<{ ok: boolean; connectionId: string; repository: { id: string; name: string; webUrl: string; httpCloneUrl: string; sshCloneUrl: string; defaultBranch: string } }>('/api/v1/integrations/gitlab/projects', {
+            connectionId: gitlabStatus.connectionId,
+            name: requestedSlug,
+            path: requestedSlug,
+            namespaceId: selectedNamespaceId || 0,
+            visibility: visibility,
+            description: currentDescription || `Repository for ${projectId}`,
+          })
+          if (createRes && createRes.repository) {
+            remoteMetadata = {
+              remoteProvider: 'gitlab',
+              remoteConnection: createRes.connectionId,
+              remoteProjectId: createRes.repository.id,
+              remoteUrl: createRes.repository.webUrl,
+              cloneUrl: createRes.repository.httpCloneUrl,
+              defaultBranch: createRes.repository.defaultBranch || 'main',
+            }
           }
         }
       }
@@ -608,7 +670,9 @@ function InitializeProjectModal({
       onSuccess(targetRepo)
       navigate(`/projects/${encodeURIComponent(projectId)}/tasks`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setError(err instanceof ApiError && err.serverMessage
+        ? err.serverMessage
+        : err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
