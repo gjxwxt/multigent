@@ -1253,6 +1253,11 @@ func (s *Server) finalizeRuntimeTaskRun(run *controldb.RuntimeRun, body runtimeR
 	}
 	task.UpdatedAt = now
 	entity.ApplyStatusTimestamps(task, prev, now)
+	if task.Status == entity.TaskStatusDoneSuccess {
+		s.captureTaskCompletionSnapshot(task)
+		s.syncTaskCompletionRemote(run.ProjectID, task)
+		s.cleanupTaskDeliveryArtifacts(run.ProjectID, task.ID)
+	}
 	_ = s.ts.ArchiveTask(run.ProjectID, run.AgentID, task)
 }
 

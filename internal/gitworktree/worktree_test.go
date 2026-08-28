@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -109,6 +110,198 @@ func TestEnsureWorktreeReturnsGeneratedBranch(t *testing.T) {
 	}
 	if wtDir != WorktreeDir(tempDir, "task-generated") {
 		t.Fatalf("unexpected worktree dir: %q", wtDir)
+	}
+}
+
+func TestResolveBaseCommitUsesFetchedRemoteRevision(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "gitworktree-remote-base-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	remoteDir := filepath.Join(tempDir, "origin.git")
+	rootDir := filepath.Join(tempDir, "repo")
+	runGit(t, tempDir, "init", "--bare", remoteDir)
+	if err := os.MkdirAll(rootDir, 0755); err != nil {
+		t.Fatalf("create repo dir: %v", err)
+	}
+	runGit(t, rootDir, "init", "-b", "main")
+	runGit(t, rootDir, "config", "user.email", "test@multigent.ai")
+	runGit(t, rootDir, "config", "user.name", "Multigent Tester")
+	readme := filepath.Join(rootDir, "README.md")
+	if err := os.WriteFile(readme, []byte("initial\n"), 0644); err != nil {
+		t.Fatalf("write initial file: %v", err)
+	}
+	runGit(t, rootDir, "add", "README.md")
+	runGit(t, rootDir, "commit", "-m", "initial")
+	runGit(t, rootDir, "remote", "add", "origin", remoteDir)
+	runGit(t, rootDir, "push", "-u", "origin", "main")
+	remoteBase := strings.TrimSpace(string(runGitOutput(t, rootDir, "rev-parse", "HEAD")))
+
+	// Advance the local branch without pushing. A new task must still use the
+	// freshly fetched remote base, not this stale local branch.
+	if err := os.WriteFile(readme, []byte("local-only\n"), 0644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+	runGit(t, rootDir, "add", "README.md")
+	runGit(t, rootDir, "commit", "-m", "local only")
+
+	mgr := NewManager()
+	resolved, err := mgr.ResolveBaseCommit(rootDir, "main")
+	if err != nil {
+		t.Fatalf("ResolveBaseCommit failed: %v", err)
+	}
+	if resolved != remoteBase {
+		t.Fatalf("resolved base = %s, want remote %s", resolved, remoteBase)
+	}
+
+	wtDir, _, err := mgr.EnsureWorktreeAt(rootDir, "task-remote-base", resolved, "feature/task-remote-base")
+	if err != nil {
+		t.Fatalf("EnsureWorktreeAt failed: %v", err)
+	}
+	defer mgr.CleanupWorktree(rootDir, "task-remote-base")
+	checkedOut := strings.TrimSpace(string(runGitOutput(t, wtDir, "rev-parse", "HEAD")))
+	if checkedOut != remoteBase {
+		t.Fatalf("worktree HEAD = %s, want remote %s", checkedOut, remoteBase)
+	}
+}
+
+func TestCaptureSnapshotRequiresCleanWorktree(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "gitworktree-snapshot-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+	runGit(t, tempDir, "init", "-b", "main")
+	runGit(t, tempDir, "config", "user.email", "test@multigent.ai")
+	runGit(t, tempDir, "config", "user.name", "Multigent Tester")
+	file := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(file, []byte("clean\n"), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	runGit(t, tempDir, "add", "README.md")
+	runGit(t, tempDir, "commit", "-m", "initial")
+
+	mgr := NewManager()
+	commit, err := mgr.CaptureSnapshot(tempDir)
+	if err != nil || len(commit) != 40 {
+		t.Fatalf("CaptureSnapshot clean result = %q, %v", commit, err)
+	}
+	if err := os.WriteFile(file, []byte("dirty\n"), 0644); err != nil {
+		t.Fatalf("modify file: %v", err)
+	}
+	if _, err := mgr.CaptureSnapshot(tempDir); err == nil {
+		t.Fatal("expected dirty worktree snapshot to fail")
+	}
+}
+
+func TestEnsureSnapshotWorktreePinsCompletionCommit(t *testing.T) {
+	tempDir := t.TempDir()
+	runGit(t, tempDir, "init", "-b", "main")
+	runGit(t, tempDir, "config", "user.email", "test@multigent.ai")
+	runGit(t, tempDir, "config", "user.name", "Multigent Tester")
+	file := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(file, []byte("v1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, tempDir, "add", "README.md")
+	runGit(t, tempDir, "commit", "-m", "v1")
+	completion := strings.TrimSpace(string(runGitOutput(t, tempDir, "rev-parse", "HEAD")))
+	if err := os.WriteFile(file, []byte("v2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, tempDir, "commit", "-am", "v2")
+
+	mgr := NewManager()
+	snapshot, err := mgr.EnsureSnapshotWorktree(tempDir, "task-completed", completion)
+	if err != nil {
+		t.Fatalf("EnsureSnapshotWorktree: %v", err)
+	}
+	defer mgr.CleanupWorktree(tempDir, "task-completed")
+	got := strings.TrimSpace(string(runGitOutput(t, snapshot, "rev-parse", "HEAD")))
+	if got != completion {
+		t.Fatalf("snapshot HEAD = %s, want %s", got, completion)
+	}
+	if content, err := os.ReadFile(filepath.Join(snapshot, "README.md")); err != nil || string(content) != "v1\n" {
+		t.Fatalf("snapshot content = %q, err=%v", content, err)
+	}
+}
+
+func TestPushBranchVerifiesRemoteSHA(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "gitworktree-push-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+	remoteDir := filepath.Join(tempDir, "origin.git")
+	rootDir := filepath.Join(tempDir, "repo")
+	runGit(t, tempDir, "init", "--bare", remoteDir)
+	if err := os.MkdirAll(rootDir, 0755); err != nil {
+		t.Fatalf("create repo dir: %v", err)
+	}
+	runGit(t, rootDir, "init", "-b", "main")
+	runGit(t, rootDir, "config", "user.email", "test@multigent.ai")
+	runGit(t, rootDir, "config", "user.name", "Multigent Tester")
+	file := filepath.Join(rootDir, "README.md")
+	if err := os.WriteFile(file, []byte("base\n"), 0644); err != nil {
+		t.Fatalf("write base file: %v", err)
+	}
+	runGit(t, rootDir, "add", "README.md")
+	runGit(t, rootDir, "commit", "-m", "initial")
+	runGit(t, rootDir, "remote", "add", "origin", remoteDir)
+	runGit(t, rootDir, "push", "-u", "origin", "main")
+
+	_, branch, err := NewManager().EnsureWorktree(rootDir, "task-push", "main", "feature/task-push")
+	if err != nil {
+		t.Fatalf("EnsureWorktree failed: %v", err)
+	}
+	defer NewManager().CleanupWorktree(rootDir, "task-push")
+	wtDir := WorktreeDir(rootDir, "task-push")
+	if err := os.WriteFile(filepath.Join(wtDir, "feature.txt"), []byte("feature\n"), 0644); err != nil {
+		t.Fatalf("write feature file: %v", err)
+	}
+	runGit(t, wtDir, "add", "feature.txt")
+	runGit(t, wtDir, "commit", "-m", "feature")
+	commit := strings.TrimSpace(string(runGitOutput(t, wtDir, "rev-parse", "HEAD")))
+
+	if err := NewManager().PushBranch(rootDir, branch, commit); err != nil {
+		t.Fatalf("PushBranch failed: %v", err)
+	}
+	remote := strings.TrimSpace(string(runGitOutput(t, rootDir, "ls-remote", "--heads", "origin", "refs/heads/"+branch)))
+	if !strings.HasPrefix(remote, commit+"\t") {
+		t.Fatalf("remote ref = %q, want commit %s", remote, commit)
+	}
+}
+
+func TestIsAncestorDistinguishesSquashLikeHistory(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "gitworktree-ancestor-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+	runGit(t, tempDir, "init", "-b", "main")
+	runGit(t, tempDir, "config", "user.email", "test@multigent.ai")
+	runGit(t, tempDir, "config", "user.name", "Multigent Tester")
+	file := filepath.Join(tempDir, "README.md")
+	if err := os.WriteFile(file, []byte("base\n"), 0644); err != nil {
+		t.Fatalf("write base file: %v", err)
+	}
+	runGit(t, tempDir, "add", "README.md")
+	runGit(t, tempDir, "commit", "-m", "base")
+	base := strings.TrimSpace(string(runGitOutput(t, tempDir, "rev-parse", "HEAD")))
+	if err := os.WriteFile(file, []byte("feature\n"), 0644); err != nil {
+		t.Fatalf("write feature file: %v", err)
+	}
+	runGit(t, tempDir, "commit", "-am", "feature")
+	feature := strings.TrimSpace(string(runGitOutput(t, tempDir, "rev-parse", "HEAD")))
+
+	mgr := NewManager()
+	if ok, err := mgr.IsAncestor(tempDir, base, feature); err != nil || !ok {
+		t.Fatalf("base should be ancestor of feature: ok=%v err=%v", ok, err)
+	}
+	if ok, err := mgr.IsAncestor(tempDir, feature, base); err != nil || ok {
+		t.Fatalf("feature should not be ancestor of base: ok=%v err=%v", ok, err)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Manager manages git worktrees for isolated task execution.
@@ -15,9 +16,56 @@ type Manager struct {
 	mu sync.Mutex
 }
 
+const (
+	projectLockWait  = 30 * time.Second
+	projectLockStale = 10 * time.Minute
+)
+
 // NewManager creates a new git worktree manager.
 func NewManager() *Manager {
 	return &Manager{}
+}
+
+// acquireProjectLock serializes Git metadata operations across Manager
+// instances and processes. The directory creation is atomic on the supported
+// filesystems; stale locks are recoverable after a crashed process.
+func acquireProjectLock(projectRoot string) (func(), error) {
+	projectRoot = strings.TrimSpace(projectRoot)
+	if projectRoot == "" {
+		return nil, fmt.Errorf("project root is required")
+	}
+	lockParent := filepath.Join(projectRoot, ".multigent")
+	if err := os.MkdirAll(lockParent, 0755); err != nil {
+		return nil, fmt.Errorf("create git lock directory: %w", err)
+	}
+	lockDir := filepath.Join(lockParent, "git-operation.lock")
+	deadline := time.Now().Add(projectLockWait)
+	for {
+		err := os.Mkdir(lockDir, 0755)
+		if err == nil {
+			return func() { _ = os.Remove(lockDir) }, nil
+		}
+		if !os.IsExist(err) {
+			return nil, fmt.Errorf("create git operation lock: %w", err)
+		}
+		if info, statErr := os.Stat(lockDir); statErr == nil && time.Since(info.ModTime()) > projectLockStale {
+			if removeErr := os.Remove(lockDir); removeErr == nil {
+				continue
+			}
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("timed out waiting for project Git lock")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func projectRootForWorktree(path string) string {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if filepath.Base(filepath.Dir(path)) == "worktrees" && filepath.Base(filepath.Dir(filepath.Dir(path))) == ".multigent" {
+		return filepath.Dir(filepath.Dir(filepath.Dir(path)))
+	}
+	return path
 }
 
 // WorktreeDir returns the absolute path for a task's worktree.
@@ -37,6 +85,143 @@ func sanitizeTaskID(taskID string) string {
 func (m *Manager) EnsureWorktree(projectRoot, taskID, baseBranch, featureBranch string) (string, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	unlock, err := acquireProjectLock(projectRoot)
+	if err != nil {
+		return "", "", err
+	}
+	defer unlock()
+
+	// Re-opening an existing task worktree must remain possible while the
+	// remote is temporarily unavailable; only a new worktree needs a fresh
+	// remote base revision.
+	if _, err := os.Stat(WorktreeDir(strings.TrimSpace(projectRoot), taskID)); err == nil {
+		return m.ensureWorktree(projectRoot, taskID, baseBranch, "", featureBranch)
+	}
+	baseCommit, err := m.resolveBaseCommit(projectRoot, baseBranch)
+	if err != nil {
+		return "", "", err
+	}
+	return m.ensureWorktree(projectRoot, taskID, baseBranch, baseCommit, featureBranch)
+}
+
+// ResolveBaseCommit fetches the requested base branch when origin is configured
+// and returns the exact full SHA that a new task should use.
+func (m *Manager) ResolveBaseCommit(projectRoot, baseBranch string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	unlock, err := acquireProjectLock(projectRoot)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	return m.resolveBaseCommit(projectRoot, baseBranch)
+}
+
+// EnsureWorktreeAt prepares a task worktree from an already resolved commit.
+// Callers should persist the same commit as the task's baseCommit.
+func (m *Manager) EnsureWorktreeAt(projectRoot, taskID, baseCommit, featureBranch string) (string, string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	unlock, err := acquireProjectLock(projectRoot)
+	if err != nil {
+		return "", "", err
+	}
+	defer unlock()
+	return m.ensureWorktree(projectRoot, taskID, "", baseCommit, featureBranch)
+}
+
+// EnsureSnapshotWorktree materializes a detached, read-only preview checkout
+// at an exact completion commit. It never reuses a moving task branch, so a
+// later push cannot change what a completed-task preview displays.
+func (m *Manager) EnsureSnapshotWorktree(projectRoot, taskID, commit string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	unlock, err := acquireProjectLock(projectRoot)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+
+	projectRoot = strings.TrimSpace(projectRoot)
+	commit = strings.TrimSpace(commit)
+	if projectRoot == "" || commit == "" {
+		return "", fmt.Errorf("project root and snapshot commit are required")
+	}
+	if _, err := os.Stat(filepath.Join(projectRoot, ".git")); err != nil {
+		return "", fmt.Errorf("project root is not a git repository: %w", err)
+	}
+	targetDir := WorktreeDir(projectRoot, taskID)
+	if _, err := os.Stat(targetDir); err == nil {
+		current, revErr := gitRevision(targetDir)
+		if revErr != nil || current != commit {
+			return "", fmt.Errorf("snapshot worktree already exists at a different revision")
+		}
+		return targetDir, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(targetDir), 0755); err != nil {
+		return "", fmt.Errorf("create worktrees parent dir: %w", err)
+	}
+	cmd := exec.Command("git", "worktree", "add", "--detach", targetDir, commit)
+	cmd.Dir = projectRoot
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("git snapshot worktree add failed: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
+	}
+	return targetDir, nil
+}
+
+func gitRevision(worktreeDir string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "HEAD^{commit}")
+	cmd.Dir = worktreeDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (m *Manager) resolveBaseCommit(projectRoot, baseBranch string) (string, error) {
+	projectRoot = strings.TrimSpace(projectRoot)
+	if projectRoot == "" {
+		return "", fmt.Errorf("project root is required")
+	}
+	baseBranch = strings.TrimSpace(baseBranch)
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+	if _, err := os.Stat(filepath.Join(projectRoot, ".git")); err != nil {
+		return "", fmt.Errorf("project root is not a git repository: %w", err)
+	}
+
+	ref := baseBranch
+	cmdRemote := exec.Command("git", "remote")
+	cmdRemote.Dir = projectRoot
+	if out, err := cmdRemote.Output(); err == nil && hasRemote(string(out), "origin") {
+		cmdFetch := exec.Command("git", "fetch", "origin", baseBranch)
+		cmdFetch.Dir = projectRoot
+		var stderr bytes.Buffer
+		cmdFetch.Stderr = &stderr
+		if err := cmdFetch.Run(); err != nil {
+			return "", fmt.Errorf("git fetch origin %s failed: %w (%s)", baseBranch, err, strings.TrimSpace(stderr.String()))
+		}
+		ref = "origin/" + baseBranch
+	}
+
+	cmd := exec.Command("git", "rev-parse", "--verify", ref+"^{commit}")
+	cmd.Dir = projectRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("resolve base commit %s failed: %w", ref, err)
+	}
+	commit := strings.TrimSpace(string(out))
+	if commit == "" {
+		return "", fmt.Errorf("resolve base commit %s returned an empty SHA", ref)
+	}
+	return commit, nil
+}
+
+func (m *Manager) ensureWorktree(projectRoot, taskID, baseBranch, baseCommit, featureBranch string) (string, string, error) {
 
 	projectRoot = strings.TrimSpace(projectRoot)
 	if projectRoot == "" {
@@ -60,9 +245,6 @@ func (m *Manager) EnsureWorktree(projectRoot, taskID, baseBranch, featureBranch 
 	}
 
 	baseBranch = strings.TrimSpace(baseBranch)
-	if baseBranch == "" {
-		baseBranch = "main"
-	}
 	featureBranch = strings.TrimSpace(featureBranch)
 	if featureBranch == "" {
 		featureBranch = fmt.Sprintf("feature/%s", sanitizeTaskID(taskID))
@@ -73,23 +255,16 @@ func (m *Manager) EnsureWorktree(projectRoot, taskID, baseBranch, featureBranch 
 		return "", "", fmt.Errorf("create worktrees parent dir: %w", err)
 	}
 
-	// Check if remote origin exists
-	hasOrigin := false
-	cmdRemote := exec.Command("git", "remote")
-	cmdRemote.Dir = projectRoot
-	if out, err := cmdRemote.Output(); err == nil && hasRemote(string(out), "origin") {
-		hasOrigin = true
-	}
-
-	startPoint := baseBranch
-	if hasOrigin {
-		// Attempt to fetch fresh base branch from origin
-		cmdFetch := exec.Command("git", "fetch", "origin", baseBranch)
-		cmdFetch.Dir = projectRoot
-		if err := cmdFetch.Run(); err != nil {
-			return "", "", fmt.Errorf("git fetch origin %s failed: %w (remote origin is configured but unreachable)", baseBranch, err)
+	startPoint := strings.TrimSpace(baseCommit)
+	if startPoint == "" {
+		if baseBranch == "" {
+			baseBranch = "main"
 		}
-		startPoint = "origin/" + baseBranch
+		var err error
+		startPoint, err = m.resolveBaseCommit(projectRoot, baseBranch)
+		if err != nil {
+			return "", "", err
+		}
 	}
 
 	// Check if the feature branch already exists locally
@@ -150,6 +325,11 @@ func checkedOutBranch(worktreeDir string) (string, error) {
 func (m *Manager) CleanupWorktree(projectRoot, taskID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	unlock, err := acquireProjectLock(projectRoot)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	targetDir := WorktreeDir(projectRoot, taskID)
 	if _, err := os.Stat(targetDir); os.IsNotExist(err) {
@@ -267,11 +447,136 @@ func (m *Manager) GetCommitHash(projectRoot, ref string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// CaptureSnapshot returns the full HEAD SHA when a worktree is clean. A clean
+// worktree is required so the SHA is a truthful immutable task snapshot.
+func (m *Manager) CaptureSnapshot(worktreeDir string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	unlock, err := acquireProjectLock(projectRootForWorktree(worktreeDir))
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+
+	worktreeDir = strings.TrimSpace(worktreeDir)
+	if worktreeDir == "" {
+		return "", fmt.Errorf("worktree directory is required")
+	}
+	status := exec.Command("git", "status", "--porcelain")
+	status.Dir = worktreeDir
+	out, err := status.Output()
+	if err != nil {
+		return "", fmt.Errorf("check worktree status: %w", err)
+	}
+	if strings.TrimSpace(string(out)) != "" {
+		return "", fmt.Errorf("worktree has uncommitted changes")
+	}
+
+	cmd := exec.Command("git", "rev-parse", "--verify", "HEAD^{commit}")
+	cmd.Dir = worktreeDir
+	out, err = cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("read worktree HEAD: %w", err)
+	}
+	commit := strings.TrimSpace(string(out))
+	if commit == "" {
+		return "", fmt.Errorf("worktree HEAD is empty")
+	}
+	return commit, nil
+}
+
+// PushBranch pushes a task branch to origin and verifies that the remote ref
+// points to expectedCommit. The command never embeds credentials in its args.
+func (m *Manager) PushBranch(projectRoot, branch, expectedCommit string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	unlock, err := acquireProjectLock(projectRoot)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	projectRoot = strings.TrimSpace(projectRoot)
+	branch = strings.TrimSpace(branch)
+	expectedCommit = strings.TrimSpace(expectedCommit)
+	if projectRoot == "" || branch == "" || expectedCommit == "" {
+		return fmt.Errorf("project root, branch, and expected commit are required")
+	}
+
+	cmd := exec.Command("git", "push", "origin", "refs/heads/"+branch+":refs/heads/"+branch)
+	cmd.Dir = projectRoot
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git push origin %s failed: %w (%s)", branch, err, redactGitOutput(output.String()))
+	}
+
+	verify := exec.Command("git", "ls-remote", "--heads", "origin", "refs/heads/"+branch)
+	verify.Dir = projectRoot
+	out, err := verify.Output()
+	if err != nil {
+		return fmt.Errorf("verify remote branch %s failed: %w", branch, err)
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) < 1 || !strings.EqualFold(fields[0], expectedCommit) {
+		actual := ""
+		if len(fields) > 0 {
+			actual = fields[0]
+		}
+		return fmt.Errorf("remote branch %s points to %q, expected %q", branch, actual, expectedCommit)
+	}
+	return nil
+}
+
+// IsAncestor reports whether ancestor is reachable from descendant. It is
+// used to detect squash/rebase integration where a task completion commit is
+// no longer in the default branch history.
+func (m *Manager) IsAncestor(projectRoot, ancestor, descendant string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	unlock, err := acquireProjectLock(projectRoot)
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+
+	ancestor = strings.TrimSpace(ancestor)
+	descendant = strings.TrimSpace(descendant)
+	if strings.TrimSpace(projectRoot) == "" || ancestor == "" || descendant == "" {
+		return false, fmt.Errorf("project root, ancestor, and descendant are required")
+	}
+	cmd := exec.Command("git", "merge-base", "--is-ancestor", ancestor, descendant)
+	cmd.Dir = projectRoot
+	err = cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("check ancestor relationship: %w", err)
+}
+
+func redactGitOutput(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "no output"
+	}
+	// Git helper diagnostics can contain a remote URL. Do not surface raw
+	// command output until a structured redaction layer exists.
+	return "git command returned diagnostics (details redacted)"
+}
+
 // MergeBranchLocally merges a feature branch into a target branch (e.g. main) locally with safety checks.
 // It returns the resulting commit hash or an error if there are uncommitted changes or conflicts.
 func (m *Manager) MergeBranchLocally(projectRoot, targetBranch, sourceBranch, commitMessage string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	unlock, err := acquireProjectLock(projectRoot)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 
 	projectRoot = strings.TrimSpace(projectRoot)
 	targetBranch = strings.TrimSpace(targetBranch)
@@ -341,6 +646,11 @@ func (m *Manager) MergeBranchLocally(projectRoot, targetBranch, sourceBranch, co
 func (m *Manager) SyncMain(projectRoot, defaultBranch string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	unlock, err := acquireProjectLock(projectRoot)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	defaultBranch = strings.TrimSpace(defaultBranch)
 	if defaultBranch == "" {

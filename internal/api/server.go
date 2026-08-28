@@ -155,6 +155,11 @@ func NewServer(root, apiKey string) *Server {
 		previewSessions:        make(map[string]*previewChatSession),
 	}
 	go s.restoreDesiredSchedulers()
+	go func() {
+		if err := s.previewEngine.Reconcile(context.Background()); err != nil {
+			log.Printf("preview reconciliation skipped: %v", err)
+		}
+	}()
 	s.startConnectionHealthChecker()
 	s.failStaleInteractionSessionsOnStartup()
 	go s.refreshAgentIMBridges()
@@ -481,6 +486,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview", s.handleGetTaskPreview)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/start", s.handlePostTaskPreviewStart)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/stop", s.handlePostTaskPreviewStop)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/remote-sync/retry", s.handlePostTaskRemoteSyncRetry)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/feedback", s.handlePostTaskPreviewFeedback)
 	mux.HandleFunc("GET /api/v1/integrations/gitlab/status", s.handleGitLabStatus)
 	mux.HandleFunc("GET /api/v1/integrations/gitlab/namespaces", s.handleGitLabNamespaces)
@@ -633,6 +639,7 @@ func (s *Server) Handler() http.Handler {
 	publicMux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/chat", s.handlePostTaskPreviewChat)
 	publicMux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview/live", s.handleGetTaskPreviewLive)
 	publicMux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/stop", s.handlePostTaskPreviewStop)
+	publicMux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/remote-sync/retry", s.handlePostTaskRemoteSyncRetry)
 	publicMux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview/status", s.handleGetTaskPreviewStatus)
 	runtimeMux := http.NewServeMux()
 	runtimeMux.HandleFunc("GET /api/v1/runtime/connections", s.handleRuntimeConnections)
@@ -1287,45 +1294,53 @@ func validAgentName(name string) bool {
 }
 
 type taskRow struct {
-	ID               string    `json:"id"`
-	Project          string    `json:"project"`
-	Agent            string    `json:"agent"`
-	Title            string    `json:"title"`
-	Type             string    `json:"type,omitempty"`
-	Assignee         string    `json:"assignee,omitempty"`
-	AssigneeType     string    `json:"assigneeType,omitempty"`
-	AssigneeID       string    `json:"assigneeId,omitempty"`
-	AssigneeMemberID string    `json:"assigneeMembershipId,omitempty"`
-	AssigneeLabel    string    `json:"assigneeLabel,omitempty"`
-	Description      string    `json:"description,omitempty"`
-	Prompt           string    `json:"prompt,omitempty"`
-	Priority         int       `json:"priority"`
-	Status           string    `json:"status"`
-	StatusGroup      string    `json:"statusGroup"`
-	Archived         bool      `json:"archived"`
-	Summary          string    `json:"summary,omitempty"`
-	Labels           []string  `json:"labels"`
-	ParentID         string    `json:"parentId,omitempty"`
-	Position         float64   `json:"position"`
-	CreatedBy        string    `json:"createdBy,omitempty"`
-	CreatedByLabel   string    `json:"createdByLabel,omitempty"`
-	CreatedAt        time.Time `json:"createdAt"`
-	UpdatedAt        time.Time `json:"updatedAt"`
-	StartedAt        string    `json:"startedAt,omitempty"`
-	FinishedAt       string    `json:"finishedAt,omitempty"`
-	DueDate          string    `json:"dueDate,omitempty"`
-	NotBefore        string    `json:"notBefore,omitempty"`
-	EstimateDuration string    `json:"estimateDuration,omitempty"`
-	HasWorkflow      bool      `json:"hasWorkflow,omitempty"`
-	ForkSessionID    string    `json:"forkSessionId,omitempty"`
-	BaseBranch       string    `json:"baseBranch,omitempty"`
-	BaseCommit       string    `json:"baseCommit,omitempty"`
-	BranchName       string    `json:"branchName,omitempty"`
-	WorktreeDir      string    `json:"worktreeDir,omitempty"`
-	RemoteMRIID      string    `json:"remoteMrIid,omitempty"`
-	RemoteMRURL      string    `json:"remoteMrUrl,omitempty"`
-	RemoteMRHeadSHA  string    `json:"remoteMrHeadSha,omitempty"`
-	RemoteMRState    string    `json:"remoteMrState,omitempty"`
+	ID                 string    `json:"id"`
+	Project            string    `json:"project"`
+	Agent              string    `json:"agent"`
+	Title              string    `json:"title"`
+	Type               string    `json:"type,omitempty"`
+	Assignee           string    `json:"assignee,omitempty"`
+	AssigneeType       string    `json:"assigneeType,omitempty"`
+	AssigneeID         string    `json:"assigneeId,omitempty"`
+	AssigneeMemberID   string    `json:"assigneeMembershipId,omitempty"`
+	AssigneeLabel      string    `json:"assigneeLabel,omitempty"`
+	Description        string    `json:"description,omitempty"`
+	Prompt             string    `json:"prompt,omitempty"`
+	Priority           int       `json:"priority"`
+	Status             string    `json:"status"`
+	StatusGroup        string    `json:"statusGroup"`
+	Archived           bool      `json:"archived"`
+	Summary            string    `json:"summary,omitempty"`
+	Labels             []string  `json:"labels"`
+	ParentID           string    `json:"parentId,omitempty"`
+	Position           float64   `json:"position"`
+	CreatedBy          string    `json:"createdBy,omitempty"`
+	CreatedByLabel     string    `json:"createdByLabel,omitempty"`
+	CreatedAt          time.Time `json:"createdAt"`
+	UpdatedAt          time.Time `json:"updatedAt"`
+	StartedAt          string    `json:"startedAt,omitempty"`
+	FinishedAt         string    `json:"finishedAt,omitempty"`
+	DueDate            string    `json:"dueDate,omitempty"`
+	NotBefore          string    `json:"notBefore,omitempty"`
+	EstimateDuration   string    `json:"estimateDuration,omitempty"`
+	HasWorkflow        bool      `json:"hasWorkflow,omitempty"`
+	ForkSessionID      string    `json:"forkSessionId,omitempty"`
+	BaseBranch         string    `json:"baseBranch,omitempty"`
+	BaseCommit         string    `json:"baseCommit,omitempty"`
+	BranchName         string    `json:"branchName,omitempty"`
+	WorktreeDir        string    `json:"worktreeDir,omitempty"`
+	BaseTaskID         string    `json:"baseTaskId,omitempty"`
+	IntegratedCommit   string    `json:"integratedCommit,omitempty"`
+	RebaseStatus       string    `json:"rebaseStatus,omitempty"`
+	CompletionCommit   string    `json:"completionCommit,omitempty"`
+	RemoteSyncStatus   string    `json:"remoteSyncStatus,omitempty"`
+	RemoteSyncError    string    `json:"remoteSyncError,omitempty"`
+	RemoteSyncCommit   string    `json:"remoteSyncCommit,omitempty"`
+	RemoteSyncAttempts int       `json:"remoteSyncAttempts,omitempty"`
+	RemoteMRIID        string    `json:"remoteMrIid,omitempty"`
+	RemoteMRURL        string    `json:"remoteMrUrl,omitempty"`
+	RemoteMRHeadSHA    string    `json:"remoteMrHeadSha,omitempty"`
+	RemoteMRState      string    `json:"remoteMrState,omitempty"`
 }
 
 func taskToRow(t *entity.Task, project, agent string, archived bool) taskRow {
@@ -1344,16 +1359,24 @@ func taskToRow(t *entity.Task, project, agent string, archived bool) taskRow {
 		Labels: labels, ParentID: t.ParentID, Position: t.Position,
 		CreatedBy: t.CreatedBy,
 		CreatedAt: t.CreatedAt.UTC(), UpdatedAt: t.UpdatedAt.UTC(),
-		EstimateDuration: t.EstimateDuration,
-		ForkSessionID:    runtimeForkSessionIDFromTask(t),
-		BaseBranch:       t.BaseBranch,
-		BaseCommit:       t.BaseCommit,
-		BranchName:       t.BranchName,
-		WorktreeDir:      t.WorktreeDir,
-		RemoteMRIID:      t.RemoteMRIID,
-		RemoteMRURL:      t.RemoteMRURL,
-		RemoteMRHeadSHA:  t.RemoteMRHeadSHA,
-		RemoteMRState:    t.RemoteMRState,
+		EstimateDuration:   t.EstimateDuration,
+		ForkSessionID:      runtimeForkSessionIDFromTask(t),
+		BaseBranch:         t.BaseBranch,
+		BaseCommit:         t.BaseCommit,
+		BranchName:         t.BranchName,
+		WorktreeDir:        t.WorktreeDir,
+		BaseTaskID:         t.BaseTaskID,
+		IntegratedCommit:   t.IntegratedCommit,
+		RebaseStatus:       t.RebaseStatus,
+		CompletionCommit:   t.CompletionCommit,
+		RemoteSyncStatus:   t.RemoteSyncStatus,
+		RemoteSyncError:    t.RemoteSyncError,
+		RemoteSyncCommit:   t.RemoteSyncCommit,
+		RemoteSyncAttempts: t.RemoteSyncAttempts,
+		RemoteMRIID:        t.RemoteMRIID,
+		RemoteMRURL:        t.RemoteMRURL,
+		RemoteMRHeadSHA:    t.RemoteMRHeadSHA,
+		RemoteMRState:      t.RemoteMRState,
 	}
 	if t.StartedAt != nil {
 		r.StartedAt = t.StartedAt.UTC().Format(time.RFC3339Nano)

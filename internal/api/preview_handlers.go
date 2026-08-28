@@ -181,7 +181,27 @@ func (s *Server) handlePostTaskPreviewStart(w http.ResponseWriter, r *http.Reque
 	}
 
 	worktreeDir := s.resolveTaskWorktreeDir(project, taskID)
-	inst, err := s.previewEngine.StartEphemeralPreview(r.Context(), taskID, project, worktreeDir)
+	readOnly := false
+	if task, _, taskErr := s.findTaskInProject(project, taskID); taskErr == nil && task != nil && task.Status.IsTerminal() && strings.TrimSpace(task.CompletionCommit) != "" {
+		if s.worktreeMgr == nil {
+			s.jsonError(w, http.StatusInternalServerError, "worktree manager is unavailable")
+			return
+		}
+		var err error
+		worktreeDir, err = s.worktreeMgr.EnsureSnapshotWorktree(s.resolveProjectGitRoot(project), taskID, task.CompletionCommit)
+		if err != nil {
+			s.jsonError(w, http.StatusConflict, fmt.Sprintf("rebuild completed task snapshot failed: %v", err))
+			return
+		}
+		readOnly = true
+	}
+	var inst *preview.PreviewInstance
+	var err error
+	if readOnly {
+		inst, err = s.previewEngine.StartSnapshotPreview(r.Context(), taskID, project, worktreeDir)
+	} else {
+		inst, err = s.previewEngine.StartEphemeralPreview(r.Context(), taskID, project, worktreeDir)
+	}
 	if err != nil {
 		s.jsonError(w, http.StatusInternalServerError, fmt.Sprintf("start preview failed: %v", err))
 		return
@@ -204,6 +224,10 @@ func (s *Server) handlePostTaskPreviewFeedback(w http.ResponseWriter, r *http.Re
 		if inst, ok := s.previewEngine.GetInstance(taskID); ok && inst.Project != "" {
 			project = inst.Project
 		}
+	}
+	if s.previewInstanceReadOnly(taskID) {
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "completed-task snapshot is read-only; create a follow-up task to modify it")
+		return
 	}
 
 	var body previewFeedbackBody
@@ -270,6 +294,10 @@ func (s *Server) handlePostTaskPreviewChat(w http.ResponseWriter, r *http.Reques
 		if inst, ok := s.previewEngine.GetInstance(taskID); ok && inst.Project != "" {
 			project = inst.Project
 		}
+	}
+	if s.previewInstanceReadOnly(taskID) {
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "completed-task snapshot is read-only; create a follow-up task to modify it")
+		return
 	}
 
 	var body previewChatBody
@@ -655,12 +683,17 @@ func rewriteHTML(html, taskID, projectName string) string {
   var prefix = %q;
   window.__MG_PREVIEW_TASK_ID__ = %q;
   window.__MG_PREVIEW_PROJECT__ = %q;
+  window.__MG_PREVIEW_BASE__ = prefix.replace(/\/$/, '');
+  var controlPrefix = '/api/v1/projects/' + encodeURIComponent(%q) + '/tasks/' + encodeURIComponent(%q) + '/preview/';
   try {
     sessionStorage.setItem('__mg_preview_task_id', %q);
     sessionStorage.setItem('__mg_preview_project', %q);
   } catch(e) {}
 
   function patchUrl(u) {
+    if (typeof u === 'string' && u.startsWith(controlPrefix)) {
+      return u;
+    }
     if (typeof u === 'string' && u.startsWith('/') && !u.startsWith('/preview/') && !u.startsWith('/_multigent_preview/')) {
       return prefix + u.slice(1);
     }
@@ -736,7 +769,7 @@ func rewriteHTML(html, taskID, projectName string) string {
     window.WebSocket.prototype = origWS.prototype;
   }
 })();
-</script>`, previewPrefix, previewPrefix, taskID, projectName, taskID, projectName)
+</script>`, previewPrefix, previewPrefix, taskID, projectName, projectName, taskID, taskID, projectName)
 
 	// Rewrite static HTML attributes: href="/...", src="/...", action="/..."
 	html = htmlAttrRe.ReplaceAllStringFunc(html, func(match string) string {
@@ -810,4 +843,12 @@ func (s *Server) resolveTaskWorktreeDir(project, taskID string) string {
 		return wsDir
 	}
 	return s.st.ProjectDir(project)
+}
+
+func (s *Server) previewInstanceReadOnly(taskID string) bool {
+	if s == nil || s.previewEngine == nil {
+		return false
+	}
+	inst, ok := s.previewEngine.GetInstance(strings.TrimSpace(taskID))
+	return ok && inst != nil && inst.ReadOnly
 }

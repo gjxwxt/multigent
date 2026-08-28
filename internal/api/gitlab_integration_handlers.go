@@ -11,6 +11,34 @@ import (
 )
 
 func (s *Server) resolveGitLabHost(connectionID string) (*codehost.GitLabHost, string, error) {
+	host, connID, err := s.resolveCodeHost("gitlab", connectionID)
+	if err != nil {
+		return nil, "", err
+	}
+	gitlab, ok := host.(*codehost.GitLabHost)
+	if !ok {
+		return nil, "", fmt.Errorf("resolved code host is not GitLab")
+	}
+	return gitlab, connID, nil
+}
+
+func (s *Server) resolveGitHubHost(connectionID string) (*codehost.GitHubHost, string, error) {
+	host, connID, err := s.resolveCodeHost("github", connectionID)
+	if err != nil {
+		return nil, "", err
+	}
+	github, ok := host.(*codehost.GitHubHost)
+	if !ok {
+		return nil, "", fmt.Errorf("resolved code host is not GitHub")
+	}
+	return github, connID, nil
+}
+
+func (s *Server) resolveCodeHost(provider, connectionID string) (codehost.CodeHost, string, error) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider != "gitlab" && provider != "github" {
+		return nil, "", fmt.Errorf("unsupported code host provider %q", provider)
+	}
 	workspaceID, err := s.currentWorkspaceID()
 	if err != nil {
 		return nil, "", err
@@ -18,10 +46,10 @@ func (s *Server) resolveGitLabHost(connectionID string) (*codehost.GitLabHost, s
 
 	connections, err := s.controlDB.ListConnections(controldb.ConnectionFilter{
 		WorkspaceID: workspaceID,
-		Provider:    "gitlab",
+		Provider:    provider,
 	})
 	if err != nil || len(connections) == 0 {
-		return nil, "", fmt.Errorf("no GitLab connection configured in this workspace")
+		return nil, "", fmt.Errorf("no %s connection configured in this workspace", provider)
 	}
 
 	conn := connections[0]
@@ -51,6 +79,13 @@ func (s *Server) resolveGitLabHost(connectionID string) (*codehost.GitLabHost, s
 		}
 		values = opened
 	}
+	if strings.TrimSpace(values["apiKey"]) == "" && conn.AuthType == ConnectionAuthOAuth2 {
+		if token, tokenErr := s.oauthAccessTokenForConnection(conn, values); tokenErr == nil {
+			values["apiKey"] = token
+		} else {
+			return nil, "", fmt.Errorf("resolve %s OAuth token: %w", provider, tokenErr)
+		}
+	}
 
 	baseURL := strings.TrimSpace(values["baseUrl"])
 	if baseURL == "" {
@@ -60,16 +95,17 @@ func (s *Server) resolveGitLabHost(connectionID string) (*codehost.GitLabHost, s
 			baseURL = strings.TrimSpace(v)
 		}
 	}
-	if baseURL == "" {
-		baseURL = "https://gitlab.com"
-	}
 	token := strings.TrimSpace(values["apiKey"])
-
-	host := codehost.NewGitLabHost(codehost.GitLabConfig{
-		BaseURL: baseURL,
-		Token:   token,
-	})
-	return host, conn.ID, nil
+	if provider == "gitlab" {
+		if baseURL == "" {
+			baseURL = "https://gitlab.com"
+		}
+		return codehost.NewGitLabHost(codehost.GitLabConfig{BaseURL: baseURL, Token: token}), conn.ID, nil
+	}
+	if baseURL == "" {
+		baseURL = "https://api.github.com"
+	}
+	return codehost.NewGitHubHost(codehost.GitHubConfig{BaseURL: baseURL, Token: token}), conn.ID, nil
 }
 
 func (s *Server) handleGitLabStatus(w http.ResponseWriter, r *http.Request) {
@@ -204,8 +240,8 @@ func (s *Server) handleMergeTaskMR(w http.ResponseWriter, r *http.Request) {
 		"mrIid":  task.RemoteMRIID,
 		"status": "merged",
 	}
-	if p.RemoteProvider == "gitlab" {
-		mode = "gitlab_remote"
+	if p.RemoteProvider == "gitlab" || p.RemoteProvider == "github" {
+		mode = p.RemoteProvider + "_remote"
 		response["mode"] = mode
 	} else {
 		// Keep the legacy response field for local callers while the task

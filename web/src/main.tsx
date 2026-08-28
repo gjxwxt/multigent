@@ -9,6 +9,8 @@ import { AuthProvider } from './lib/auth'
 import { ThemeProvider } from './theme/ThemeProvider'
 
 function routerBasename() {
+  const injectedPreviewBase = (window as Window & { __MG_PREVIEW_BASE__?: string }).__MG_PREVIEW_BASE__
+  if (injectedPreviewBase) return injectedPreviewBase
   if (!hasTrustedProxyCookie()) return undefined
   const bare = /^\/([a-z0-9][a-z0-9-]*)(\/|$)/.exec(window.location.pathname)
   if (bare && !appRouteSegments.has(bare[1])) return `/${bare[1]}`

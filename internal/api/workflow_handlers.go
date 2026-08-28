@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/multigent/multigent/internal/codehost"
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/store"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
@@ -653,6 +654,8 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 		if !deliveryPrepared && isPullRequestReviewStep(currentStep) {
 			return taskWorkflowResponse{}, http.StatusConflict, errors.New("terminal pull request review completed without delivery preparation")
 		}
+		s.captureTaskCompletionSnapshot(t)
+		s.syncTaskCompletionRemote(project, t)
 		s.cleanupTaskDeliveryArtifacts(project, taskID)
 		if err := s.ts.PersistTask(project, agent, t); err != nil {
 			return taskWorkflowResponse{}, http.StatusInternalServerError, err
@@ -751,6 +754,92 @@ func updateTaskRemoteMR(task *entity.Task, outputs map[string]string) bool {
 	return changed
 }
 
+// captureTaskCompletionSnapshot records a content-addressed Git snapshot
+// before the task worktree is cleaned up. It deliberately does not claim the
+// remote branch is synchronized; that is a separate delivery step.
+func (s *Server) captureTaskCompletionSnapshot(task *entity.Task) {
+	if s == nil || task == nil || s.worktreeMgr == nil || strings.TrimSpace(task.WorktreeDir) == "" {
+		return
+	}
+	commit, err := s.worktreeMgr.CaptureSnapshot(task.WorktreeDir)
+	if err != nil {
+		task.RemoteSyncStatus = "failed"
+		task.RemoteSyncError = fmt.Sprintf("capture completion snapshot: %v", err)
+		return
+	}
+	task.CompletionCommit = commit
+	if strings.TrimSpace(task.RemoteSyncStatus) == "" {
+		task.RemoteSyncStatus = "pending"
+	}
+	task.RemoteSyncError = ""
+}
+
+// syncTaskCompletionRemote is intentionally best-effort after local task
+// completion. A remote outage must be visible as a retryable sync failure, not
+// turn an otherwise valid local task into a failed task.
+func (s *Server) syncTaskCompletionRemote(project string, task *entity.Task) {
+	if s == nil || task == nil || s.worktreeMgr == nil || strings.TrimSpace(task.CompletionCommit) == "" {
+		return
+	}
+	p, err := s.st.Project(project)
+	if err != nil || p == nil || strings.TrimSpace(p.RemoteProvider) == "" {
+		task.RemoteSyncStatus = "not_applicable"
+		task.RemoteSyncError = ""
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(task.RemoteMRState), "merged") {
+		task.RemoteSyncAttempts++
+		task.RemoteSyncStatus = "synced"
+		task.RemoteSyncCommit = firstNonEmpty(task.RemoteMRHeadSHA, task.CompletionCommit)
+		task.RemoteSyncError = ""
+		return
+	}
+	if strings.TrimSpace(task.BranchName) == "" {
+		task.RemoteSyncAttempts++
+		task.RemoteSyncStatus = "failed"
+		task.RemoteSyncError = "task branch is required for remote synchronization"
+		return
+	}
+	task.RemoteSyncAttempts++
+	task.RemoteSyncStatus = "syncing"
+	if err := s.worktreeMgr.PushBranch(s.resolveProjectGitRoot(project), task.BranchName, task.CompletionCommit); err != nil {
+		task.RemoteSyncStatus = "failed"
+		task.RemoteSyncError = err.Error()
+		return
+	}
+	task.RemoteSyncStatus = "synced"
+	task.RemoteSyncCommit = task.CompletionCommit
+	task.RemoteSyncError = ""
+}
+
+func (s *Server) checkTaskIntegrationBase(project string, task *entity.Task) error {
+	if s == nil || task == nil || s.worktreeMgr == nil || strings.TrimSpace(task.BaseTaskID) == "" {
+		return nil
+	}
+	baseTask, _, err := s.findTaskInProject(project, task.BaseTaskID)
+	if err != nil || baseTask == nil {
+		return fmt.Errorf("base task %s not found", task.BaseTaskID)
+	}
+	integrated := strings.TrimSpace(baseTask.IntegratedCommit)
+	if integrated == "" || strings.TrimSpace(task.BranchName) == "" {
+		return nil
+	}
+	if strings.EqualFold(integrated, strings.TrimSpace(baseTask.CompletionCommit)) {
+		task.RebaseStatus = "not_required"
+		return nil
+	}
+	aligned, err := s.worktreeMgr.IsAncestor(s.resolveProjectGitRoot(project), integrated, task.BranchName)
+	if err != nil {
+		return fmt.Errorf("check task base integration: %w", err)
+	}
+	if !aligned {
+		task.RebaseStatus = "required"
+		return fmt.Errorf("task branch %s must be rebased onto integrated base %s before delivery", task.BranchName, integrated)
+	}
+	task.RebaseStatus = "aligned"
+	return nil
+}
+
 func (s *Server) prepareTaskDelivery(r *http.Request, project string, task *entity.Task, requestedCommitMessage string) error {
 	if s.worktreeMgr == nil {
 		return errors.New("worktree manager is unavailable")
@@ -773,20 +862,29 @@ func (s *Server) prepareTaskDelivery(r *http.Request, project string, task *enti
 	if commitMsg == "" {
 		commitMsg = fmt.Sprintf("merge: task %s (%s)", task.ID, task.Title)
 	}
-	if p.RemoteProvider == "gitlab" {
+	if err := s.checkTaskIntegrationBase(project, task); err != nil {
+		return err
+	}
+	if p.RemoteProvider == "gitlab" || p.RemoteProvider == "github" {
 		if p.RemoteProjectID == "" || task.RemoteMRIID == "" {
-			return fmt.Errorf("remote GitLab delivery is incomplete: project ID and MR IID are required")
+			return fmt.Errorf("remote %s delivery is incomplete: project ID and change-request ID are required", p.RemoteProvider)
 		}
-		host, _, err := s.resolveGitLabHost(p.RemoteConnection)
+		var host codehost.CodeHost
+		var err error
+		if p.RemoteProvider == "gitlab" {
+			host, _, err = s.resolveGitLabHost(p.RemoteConnection)
+		} else {
+			host, _, err = s.resolveGitHubHost(p.RemoteConnection)
+		}
 		if err != nil {
-			return fmt.Errorf("resolve GitLab connection: %w", err)
+			return fmt.Errorf("resolve %s connection: %w", p.RemoteProvider, err)
 		}
 		// Always read the remote MR before deciding whether delivery is done.
 		// Task metadata can be stale or reported by an agent, so it must not be
 		// trusted as proof that a remote merge already happened.
 		mr, err := host.GetMR(r.Context(), p.RemoteProjectID, task.RemoteMRIID)
 		if err != nil {
-			return fmt.Errorf("read GitLab MR !%s before merge: %w", task.RemoteMRIID, err)
+			return fmt.Errorf("read %s change request %s before merge: %w", p.RemoteProvider, task.RemoteMRIID, err)
 		}
 		if task.RemoteMRURL == "" {
 			task.RemoteMRURL = mr.WebURL
@@ -800,19 +898,24 @@ func (s *Server) prepareTaskDelivery(r *http.Request, project string, task *enti
 				task.RemoteMRHeadSHA = expectedHeadSHA
 			}
 			if expectedHeadSHA == "" {
-				return fmt.Errorf("GitLab MR !%s has no source head SHA to merge", task.RemoteMRIID)
+				return fmt.Errorf("%s change request %s has no source head SHA to merge", p.RemoteProvider, task.RemoteMRIID)
 			}
 			mergeMessage := strings.TrimSpace(requestedCommitMessage)
 			if mergeMessage == "" {
 				mergeMessage = fmt.Sprintf("Merge MR !%s (%s)", task.RemoteMRIID, task.Title)
 			}
 			if err := host.MergeMR(r.Context(), p.RemoteProjectID, task.RemoteMRIID, expectedHeadSHA, mergeMessage); err != nil {
-				return fmt.Errorf("merge GitLab MR !%s: %w", task.RemoteMRIID, err)
+				return fmt.Errorf("merge %s change request %s: %w", p.RemoteProvider, task.RemoteMRIID, err)
 			}
 		}
 		if err := s.worktreeMgr.SyncMain(gitRoot, defaultBranch); err != nil {
 			return fmt.Errorf("sync %s after GitLab merge: %w", defaultBranch, err)
 		}
+		integrated, err := s.worktreeMgr.ResolveBaseCommit(gitRoot, defaultBranch)
+		if err != nil {
+			return fmt.Errorf("read integrated %s revision: %w", defaultBranch, err)
+		}
+		task.IntegratedCommit = integrated
 		task.RemoteMRState = "merged"
 		return nil
 	}
@@ -828,6 +931,7 @@ func (s *Server) prepareTaskDelivery(r *http.Request, project string, task *enti
 		return fmt.Errorf("local merge failed: %w", err)
 	}
 	task.RemoteMRHeadSHA = mergedSHA
+	task.IntegratedCommit = mergedSHA
 	task.RemoteMRState = "merged"
 	return nil
 }

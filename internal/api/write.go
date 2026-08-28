@@ -75,6 +75,7 @@ type postTaskBody struct {
 	Vars                  map[string]string                      `json:"vars"`
 	AutoStart             bool                                   `json:"autoStart"`
 	BaseBranch            string                                 `json:"baseBranch"`
+	BaseTaskID            string                                 `json:"baseTaskId"`
 	BranchName            string                                 `json:"branchName"`
 }
 
@@ -167,6 +168,7 @@ func (s *Server) createProjectTaskFromBody(w http.ResponseWriter, r *http.Reques
 		ParentID:    strings.TrimSpace(body.ParentID),
 		Vars:        sanitizeTaskVars(body.Vars),
 		BaseBranch:  strings.TrimSpace(body.BaseBranch),
+		BaseTaskID:  strings.TrimSpace(body.BaseTaskID),
 		BranchName:  strings.TrimSpace(body.BranchName),
 		CreatedAt:   now,
 		UpdatedAt:   now,
@@ -189,8 +191,28 @@ func (s *Server) createProjectTaskFromBody(w http.ResponseWriter, r *http.Reques
 				baseBranch = "main"
 			}
 			t.BaseBranch = baseBranch
-			t.BaseCommit = s.worktreeMgr.GetCommitHash(gitRoot, baseBranch)
-			wtDir, branchName, err := s.worktreeMgr.EnsureWorktree(gitRoot, t.ID, baseBranch, t.BranchName)
+			baseCommit := ""
+			if t.BaseTaskID != "" {
+				baseTask, _, findErr := s.findTaskInProject(name, t.BaseTaskID)
+				if findErr != nil || baseTask == nil {
+					s.jsonError(w, http.StatusBadRequest, "base task not found")
+					return
+				}
+				baseCommit = strings.TrimSpace(baseTask.CompletionCommit)
+				if baseCommit == "" {
+					s.jsonError(w, http.StatusConflict, "base task has no completion snapshot")
+					return
+				}
+			}
+			if baseCommit == "" {
+				baseCommit, err = s.worktreeMgr.ResolveBaseCommit(gitRoot, baseBranch)
+			}
+			if err != nil {
+				s.jsonError(w, http.StatusConflict, fmt.Sprintf("resolve git base revision: %v", err))
+				return
+			}
+			t.BaseCommit = baseCommit
+			wtDir, branchName, err := s.worktreeMgr.EnsureWorktreeAt(gitRoot, t.ID, baseCommit, t.BranchName)
 			if err != nil {
 				s.jsonError(w, http.StatusConflict, fmt.Sprintf("prepare git worktree: %v", err))
 				return

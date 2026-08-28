@@ -558,6 +558,8 @@ func (s *Server) submitWorkflowReviewFromTrigger(workspaceID string, record work
 		t.Summary = summary
 		t.UpdatedAt = now
 		t.FinishedAt = &now
+		s.captureTaskCompletionSnapshot(t)
+		s.syncTaskCompletionRemote(record.Project, t)
 		s.cleanupTaskDeliveryArtifacts(record.Project, record.TaskID)
 		if err := s.ts.PersistTask(record.Project, agent, t); err != nil {
 			return result, err

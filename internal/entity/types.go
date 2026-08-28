@@ -160,7 +160,7 @@ type Project struct {
 	// Remote code host integration metadata
 	RemoteProvider   string `yaml:"remote_provider,omitempty" json:"remoteProvider,omitempty"`     // "gitlab" | "github" | "gitee"
 	RemoteConnection string `yaml:"remote_connection,omitempty" json:"remoteConnection,omitempty"` // Connector ID
-	RemoteProjectID  string `yaml:"remote_project_id,omitempty" json:"remoteProjectId,omitempty"`   // Remote project ID or path_with_namespace
+	RemoteProjectID  string `yaml:"remote_project_id,omitempty" json:"remoteProjectId,omitempty"`  // Remote project ID or path_with_namespace
 	RemoteURL        string `yaml:"remote_url,omitempty" json:"remoteUrl,omitempty"`               // Remote Web UI URL (e.g. https://gitlab.com/group/repo)
 	CloneURL         string `yaml:"clone_url,omitempty" json:"cloneUrl,omitempty"`                 // Clean Clone URL (no embedded tokens)
 	DefaultBranch    string `yaml:"default_branch,omitempty" json:"defaultBranch,omitempty"`       // Default branch name, e.g. "main"
@@ -664,6 +664,20 @@ type Task struct {
 	BaseCommit  string `yaml:"base_commit,omitempty" json:"baseCommit,omitempty"`
 	BranchName  string `yaml:"branch_name,omitempty" json:"branchName,omitempty"`
 	WorktreeDir string `yaml:"worktree_dir,omitempty" json:"worktreeDir,omitempty"`
+	// BaseTaskID records the task whose completion snapshot was used as the
+	// base when this task was created.
+	BaseTaskID string `yaml:"base_task_id,omitempty" json:"baseTaskId,omitempty"`
+	// IntegratedCommit is the commit on the integration branch after a PR/MR
+	// merge, which may differ from CompletionCommit after squash/rebase.
+	IntegratedCommit string `yaml:"integrated_commit,omitempty" json:"integratedCommit,omitempty"`
+	RebaseStatus     string `yaml:"rebase_status,omitempty" json:"rebaseStatus,omitempty"`
+	// CompletionCommit is the immutable local snapshot captured on completion.
+	CompletionCommit string `yaml:"completion_commit,omitempty" json:"completionCommit,omitempty"`
+	// RemoteSyncStatus is pending, syncing, synced, failed, or not_applicable.
+	RemoteSyncStatus   string `yaml:"remote_sync_status,omitempty" json:"remoteSyncStatus,omitempty"`
+	RemoteSyncError    string `yaml:"remote_sync_error,omitempty" json:"remoteSyncError,omitempty"`
+	RemoteSyncCommit   string `yaml:"remote_sync_commit,omitempty" json:"remoteSyncCommit,omitempty"`
+	RemoteSyncAttempts int    `yaml:"remote_sync_attempts,omitempty" json:"remoteSyncAttempts,omitempty"`
 
 	// Remote merge request delivery tracking
 	RemoteMRIID     string `yaml:"remote_mr_iid,omitempty" json:"remoteMrIid,omitempty"`

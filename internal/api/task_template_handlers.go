@@ -42,6 +42,7 @@ type taskFromTemplateBody struct {
 	Labels                []string                               `json:"labels"`
 	WorkflowActorBindings map[string]entity.WorkflowActorBinding `json:"workflowActorBindings"`
 	BaseBranch            string                                 `json:"baseBranch"`
+	BaseTaskID            string                                 `json:"baseTaskId"`
 	BranchName            string                                 `json:"branchName"`
 }
 
@@ -325,6 +326,7 @@ func instantiateTaskTemplate(template entity.TaskTemplate, body taskFromTemplate
 		WorkflowDefinitionID:  template.WorkflowDefinitionID,
 		WorkflowActorBindings: actorBindings,
 		BaseBranch:            strings.TrimSpace(body.BaseBranch),
+		BaseTaskID:            strings.TrimSpace(body.BaseTaskID),
 		BranchName:            strings.TrimSpace(body.BranchName),
 	}, nil
 }

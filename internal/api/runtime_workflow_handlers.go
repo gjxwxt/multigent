@@ -1013,6 +1013,11 @@ func (s *Server) handleRuntimeWorkflowStepComplete(w http.ResponseWriter, r *htt
 			t.Status = entity.TaskStatusDoneFailed
 		}
 		entity.ApplyStatusTimestamps(t, prev, now)
+		if t.Status == entity.TaskStatusDoneSuccess {
+			s.captureTaskCompletionSnapshot(t)
+			s.syncTaskCompletionRemote(principal.Project, t)
+			s.cleanupTaskDeliveryArtifacts(principal.Project, t.ID)
+		}
 		if err := s.ts.ArchiveTask(principal.Project, agent, t); err != nil {
 			s.serverError(w, err)
 			return
@@ -1116,6 +1121,9 @@ func (s *Server) advanceParentAfterBranchCompletion(workspaceID, project string,
 		root.Summary = strings.TrimSpace(result.Transition.Current.Summary)
 		root.UpdatedAt = now
 		entity.ApplyStatusTimestamps(root, prev, now)
+		s.captureTaskCompletionSnapshot(root)
+		s.syncTaskCompletionRemote(project, root)
+		s.cleanupTaskDeliveryArtifacts(project, root.ID)
 		if err := s.ts.ArchiveTask(project, rootAgent, root); err != nil {
 			return err
 		}

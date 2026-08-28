@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/multigent/multigent/internal/entity"
+	"github.com/multigent/multigent/internal/gitworktree"
 )
 
 func TestPreviewHandlers(t *testing.T) {
@@ -85,5 +87,60 @@ func TestResolveTaskWorktreeDir(t *testing.T) {
 	}
 	if statusRes["busy"] != false {
 		t.Fatalf("expected busy=false, got %v", statusRes["busy"])
+	}
+}
+
+func TestRewriteHTMLKeepsControlPlanePreviewAPIOutsideProjectPrefix(t *testing.T) {
+	html := rewriteHTML(`<html><head></head><body><script>fetch('/api/v1/projects/testproj/tasks/t-123/preview/chat')</script><script>fetch('/api/data')</script></body></html>`, "t-123", "testproj")
+	if !strings.Contains(html, "window.__MG_PREVIEW_BASE__") {
+		t.Fatal("expected preview base marker in injected script")
+	}
+	if !strings.Contains(html, "var controlPrefix = '/api/v1/projects/'") {
+		t.Fatal("expected control-plane URL guard in injected script")
+	}
+	if strings.Contains(html, "prefix + u.slice(1)") == false {
+		t.Fatal("expected project URL rewriting to remain enabled")
+	}
+}
+
+func TestTaskRemoteSyncRetryKeepsTerminalTaskOnPushFailure(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	s.worktreeMgr = gitworktree.NewManager()
+	if err := s.st.SaveProject("syncproj", &entity.Project{Name: "syncproj", RemoteProvider: "github"}); err != nil {
+		t.Fatalf("save project: %v", err)
+	}
+	seedAgentWorkerWithIDForTest(t, s, workspaceID, "syncproj", "agent", "aw-sync", "pm-sync")
+	task := &entity.Task{
+		ID:               "t-sync-retry",
+		Title:            "sync",
+		Assignee:         "syncproj/agent",
+		Status:           entity.TaskStatusDoneSuccess,
+		Prompt:           "sync",
+		CompletionCommit: strings.Repeat("a", 40),
+		BranchName:       "feature/t-sync-retry",
+		CreatedAt:        time.Now().UTC(),
+		UpdatedAt:        time.Now().UTC(),
+	}
+	if err := s.ts.AddTask("syncproj", "agent", task); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
+
+	req := providerTestRequest(http.MethodPost, "/api/v1/projects/syncproj/tasks/t-sync-retry/remote-sync/retry", "admin", nil)
+	req.SetPathValue("name", "syncproj")
+	req.SetPathValue("taskId", task.ID)
+	w := httptest.NewRecorder()
+	s.handlePostTaskRemoteSyncRetry(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected retry response 200, got %d: %s", w.Code, w.Body.String())
+	}
+	updated, _, err := s.findTaskInProject("syncproj", task.ID)
+	if err != nil || updated == nil {
+		t.Fatalf("find updated task: %v", err)
+	}
+	if updated.Status != entity.TaskStatusDoneSuccess {
+		t.Fatalf("retry changed terminal task status to %s", updated.Status)
+	}
+	if updated.RemoteSyncStatus != "failed" || updated.RemoteSyncAttempts != 1 {
+		t.Fatalf("unexpected retry metadata: status=%q attempts=%d error=%q", updated.RemoteSyncStatus, updated.RemoteSyncAttempts, updated.RemoteSyncError)
 	}
 }
