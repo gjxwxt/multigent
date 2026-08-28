@@ -437,11 +437,13 @@ function InitializeProjectModal({
       setError(null)
       setLoadingAgents(true)
 
-      // Fetch project member agents
-      apiFetch<Array<{ name?: string; displayName?: string; model?: string }>>(`/api/v1/projects/${encodeURIComponent(projectId)}/agents`)
-        .then((projAgentsRes) => {
-          const projList = Array.isArray(projAgentsRes) ? projAgentsRes : []
-          const availableWorkers = projList.filter((w) => w.name && w.model !== 'human')
+      // Fetch workspace agents. The selected worker is added to this project
+      // by the initialization flow, which also makes a brand-new project
+      // usable without a separate members-page detour.
+      apiFetch<{ agents?: Array<{ name?: string; displayName?: string; model?: string }> }>('/api/v1/agents')
+        .then((workspaceAgentsRes) => {
+          const workerList = Array.isArray(workspaceAgentsRes?.agents) ? workspaceAgentsRes.agents : []
+          const availableWorkers = workerList.filter((w) => w.name && w.model !== 'human')
           setAgents(availableWorkers as Array<{ name: string; displayName?: string; model?: string }>)
           if (availableWorkers.length > 0) {
             setSelectedAgent(availableWorkers[0].name || '')
@@ -514,7 +516,6 @@ function InitializeProjectModal({
             remoteProjectId: createRes.repository.id,
             remoteUrl: createRes.repository.webUrl,
             cloneUrl: createRes.repository.httpCloneUrl,
-            authenticatedCloneUrl: createRes.repository.authenticatedCloneUrl,
             defaultBranch: createRes.repository.defaultBranch || 'main',
           }
         }
@@ -527,14 +528,20 @@ function InitializeProjectModal({
         ...remoteMetadata,
       })
 
-      // 2. Ensure agent is bound to project memberships
-      try {
-        await apiPost(
-          `/api/v1/projects/${encodeURIComponent(projectId)}/memberships`,
-          { workerName: selectedAgent }
-        )
-      } catch {
-        // non-blocking if already member
+      // 2. Ensure the selected workspace agent is bound to this project.
+      // The API upserts memberships, so this is safe when re-initializing.
+      await apiPost(
+        `/api/v1/projects/${encodeURIComponent(projectId)}/memberships`,
+        { workerName: selectedAgent }
+      )
+
+      // The initialization task needs the GitLab credential helper at runtime.
+      // This keeps the remote URL clean and scoped to the selected project.
+      if (remoteMetadata.remoteProvider === 'gitlab') {
+        await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/tool-bindings/install`, {
+          connectionId: remoteMetadata.remoteConnection,
+          adapterType: 'cli',
+        })
       }
 
       // 3. Prepare task payload & dispatch
@@ -555,13 +562,10 @@ function InitializeProjectModal({
         const tpl = TEMPLATES.find((x) => x.id === selectedTemplate)
         const tplName = (useTemplate && tpl) ? t(tpl.label) : '基础空白'
 
-        const rawUrl = remoteMetadata.authenticatedCloneUrl || remoteMetadata.cloneUrl
-        if (rawUrl) {
-          const pushUrl = rawUrl
-            .replace('//localhost', '//host.docker.internal')
-            .replace('//127.0.0.1', '//host.docker.internal')
+        const cleanCloneUrl = remoteMetadata.cloneUrl
+        if (cleanCloneUrl) {
           taskTitle = `【工程初始化】构建 ${tplName} 脚手架并首推远程 GitLab`
-          taskPrompt = `请在当前项目工作区 (${targetRepo}) 初始化 "${tplName}" 工程骨架并首次推送到远程 GitLab 仓库：\n\n1. 初始化 Git 仓库并创建符合最佳实践的完整工程文件与目录；\n2. 生成基础依赖配置与入口文件；\n3. 添加标准的 .gitignore 和详细的 README.md 开发说明；\n4. 进行一次基础构建与语法校验，确保工程可一键启动；\n5. 配置远程仓库并推送（沙箱内通过 host.docker.internal 访问宿主服务）：\n   git remote add origin "${pushUrl}" || git remote set-url origin "${pushUrl}"\n   git branch -M main\n   git add .\n   git commit -m "chore: initial ${tplName} scaffold"\n   git push -u origin main\n6. 输出初始化完成报告，列出目录架构与启动命令。`
+          taskPrompt = `请在当前项目工作区 (${targetRepo}) 初始化 "${tplName}" 工程骨架并首次推送到远程 GitLab 仓库：\n\n1. 初始化 Git 仓库并创建符合最佳实践的完整工程文件与目录；\n2. 生成基础依赖配置与入口文件；\n3. 添加标准的 .gitignore 和详细的 README.md 开发说明；\n4. 进行一次基础构建与语法校验，确保工程可一键启动；\n5. 使用系统已注入的 GitLab credential helper 配置远程仓库并推送（禁止把 Token 写入 URL）：\n   git remote add origin "${cleanCloneUrl}" || git remote set-url origin "${cleanCloneUrl}"\n   git branch -M main\n   git add .\n   git commit -m "chore: initial ${tplName} scaffold"\n   git push -u origin main\n6. 输出初始化完成报告，列出目录架构与启动命令。`
         } else {
           taskTitle = `【工程初始化】构建 ${tplName} 模板脚手架`
           taskPrompt = `请在当前项目工作区 (${targetRepo}) 初始化 "${tplName}" 工程骨架：\n\n1. 初始化 Git 仓库并创建符合最佳实践的完整工程目录；\n2. 生成基础依赖配置与入口文件；\n3. 添加标准的 .gitignore 和详细的 README.md 开发说明；\n4. 进行一次基础构建与语法校验，确保工程可一键启动；\n5. 输出初始化完成报告，列出目录架构与启动命令。`
@@ -879,7 +883,7 @@ function InitializeProjectModal({
                 </p>
                 <div className="mt-3">
                   <Link
-                    to={`/projects/${encodeURIComponent(projectId)}/members`}
+                    to="/agents"
                     onClick={onClose}
                     className="inline-flex items-center gap-1.5 rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium text-white shadow-xs hover:bg-amber-700 transition-colors"
                   >
@@ -1017,4 +1021,3 @@ function PromptEditor({ label, apiPath, initialContent }: { label: string; apiPa
     </section>
   )
 }
-

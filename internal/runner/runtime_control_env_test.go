@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -1038,6 +1039,50 @@ func TestWriteRuntimeToolsFileMaterializesBasicExternalToolCredentials(t *testin
 		if strings.Contains(string(toolsBody), secret) {
 			t.Fatalf("tools file leaked %q: %s", secret, string(toolsBody))
 		}
+	}
+}
+
+func TestMaterializeGitLabConfigUsesScopedCredentialHelper(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), ".gitconfig")
+	env, err := materializeGitLabConfig(runtimeConfigFileRef{
+		Path:             "~/.gitconfig",
+		MaterializedPath: configPath,
+	}, map[string]string{
+		"baseUrl": "http://localhost:8083",
+		"apiKey":  "gitlab-secret-token",
+	})
+	if err != nil {
+		t.Fatalf("materializeGitLabConfig failed: %v", err)
+	}
+	if env["GIT_CONFIG_GLOBAL"] != configPath {
+		t.Fatalf("unexpected git config env: %#v", env)
+	}
+
+	configBody, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(configBody), "gitlab-secret-token") || !strings.Contains(string(configBody), ".credential-helper") {
+		t.Fatalf("git config must reference, not contain, the token: %s", configBody)
+	}
+
+	helperPath := configPath + ".credential-helper"
+	helperBody, err := os.ReadFile(helperPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(helperBody), "gitlab-secret-token") || !strings.Contains(string(helperBody), "host.docker.internal:8083") {
+		t.Fatalf("credential helper is not scoped to the runtime GitLab host: %s", helperBody)
+	}
+
+	cmd := exec.Command(helperPath, "get")
+	cmd.Stdin = strings.NewReader("protocol=https\nhost=host.docker.internal:8083\npath=root/my-app.git\n\n")
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("credential helper failed: %v", err)
+	}
+	if got := string(output); !strings.Contains(got, "username=oauth2\n") || !strings.Contains(got, "password=gitlab-secret-token\n") {
+		t.Fatalf("unexpected credential helper output: %q", got)
 	}
 }
 

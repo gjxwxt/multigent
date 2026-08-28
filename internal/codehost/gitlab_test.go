@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -123,6 +124,37 @@ func TestGitLabHostCreateRepository(t *testing.T) {
 	}
 	if repo.ID != "42" || repo.HTTPCloneURL != "https://gitlab.example.com/team/my-app.git" {
 		t.Errorf("unexpected repo: %+v", repo)
+	}
+}
+
+func TestGitLabHostNormalizesLocalCloneURLWithoutCredentials(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{
+			"id": 42,
+			"name": "my-app",
+			"path_with_namespace": "root/my-app",
+			"web_url": "http://localhost:8083/root/my-app",
+			"http_url_to_repo": "http://localhost:8083/root/my-app.git",
+			"ssh_url_to_repo": "ssh://git@localhost:2224/root/my-app.git"
+		}`))
+	}))
+	defer srv.Close()
+
+	host := NewGitLabHost(GitLabConfig{BaseURL: srv.URL, Token: "secret-token"})
+	repo, err := host.CreateRepository(context.Background(), CreateRepoRequest{Name: "my-app"})
+	if err != nil {
+		t.Fatalf("CreateRepository failed: %v", err)
+	}
+	if repo.HTTPCloneURL != "http://host.docker.internal:8083/root/my-app.git" {
+		t.Fatalf("unexpected normalized clone URL: %q", repo.HTTPCloneURL)
+	}
+	body, err := json.Marshal(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "secret-token") || strings.Contains(string(body), "authenticatedCloneUrl") {
+		t.Fatalf("repository response must not expose credentials: %s", body)
 	}
 }
 

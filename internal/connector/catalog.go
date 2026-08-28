@@ -570,18 +570,18 @@ func DefaultRuntimeAdapters(provider Provider) []ToolRuntimeAdapter {
 			{
 				Type:        RuntimeAdapterCLI,
 				Priority:    90,
-				Description: "Use GitLab CLI when available for merge requests, issues, pipelines, and repository workflows.",
+				Description: "Use Git with a scoped GitLab credential helper for repository workflows; use the server-side GitLab API for merge requests and project operations.",
 				Skills:      []string{"gitlab"},
 				CLI: &ToolCLIAdapter{
-					Binary: "glab",
+					Binary: "git",
 					Installer: &ToolInstallerSpec{
 						Type:    "system",
-						Package: "glab",
+						Package: "git",
 						Version: "latest",
-						Check:   []string{"glab --version"},
+						Check:   []string{"git --version"},
 					},
 					ConfigFiles: []ToolConfigFileSpec{
-						{Path: "~/.config/glab-cli/config.yml", Format: "yaml", Description: "Agent-scoped GitLab CLI credential config."},
+						{Path: "~/.gitconfig", Format: "ini", Description: "Agent-scoped Git credential helper config."},
 					},
 				},
 				CredentialMaterialize: CredentialMaterializeRuntimeFile,

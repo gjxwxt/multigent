@@ -394,7 +394,7 @@ export default function ProjectTaskFollowPage() {
               </div>
             )
           })()}
-          {preview && (preview.status === 'running' || preview.type !== 'cli' || preview.type === 'fullstack' || preview.type === 'frontend') && (
+          {preview && (preview.status === 'running' || preview.type !== 'cli') && (
             <div className="flex items-center">
               {preview.status === 'running' ? (
                 <a

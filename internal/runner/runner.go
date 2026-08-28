@@ -2444,6 +2444,8 @@ func materializeCLIConfig(tool runtimeToolRef, adapter runtimeAdapterRef, cfg ru
 	switch strings.TrimSpace(tool.Provider) {
 	case "github":
 		return materializeGitHubCLIConfig(adapter, cfg, secretValues)
+	case "gitlab":
+		return materializeGitLabConfig(cfg, secretValues)
 	case "feishu", "lark":
 		return materializeLarkCLIConfig(tool, adapter, cfg, secretValues)
 	case "ssh_key":
@@ -2686,6 +2688,43 @@ func materializeGitConfig(cfg runtimeConfigFileRef, secretValues map[string]stri
 		lines = append(lines, "\temail = "+userEmail)
 	}
 	if err := os.WriteFile(cfg.MaterializedPath, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		return nil, err
+	}
+	return map[string]string{"GIT_CONFIG_GLOBAL": cfg.MaterializedPath}, nil
+}
+
+func materializeGitLabConfig(cfg runtimeConfigFileRef, secretValues map[string]string) (map[string]string, error) {
+	if cfg.MaterializedPath == "" || !strings.HasSuffix(strings.TrimSpace(cfg.Path), ".gitconfig") {
+		return nil, nil
+	}
+	token := firstNonEmpty(secretValues["apiKey"], secretValues["accessToken"], secretValues["token"])
+	if token == "" {
+		return nil, nil
+	}
+
+	baseURL := firstNonEmpty(secretValues["baseUrl"], "https://gitlab.com")
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Host == "" {
+		return nil, fmt.Errorf("invalid GitLab baseUrl %q", baseURL)
+	}
+	credentialHost := parsed.Host
+	credentialHost = strings.Replace(credentialHost, "localhost", "host.docker.internal", 1)
+	credentialHost = strings.Replace(credentialHost, "127.0.0.1", "host.docker.internal", 1)
+
+	helperPath := cfg.MaterializedPath + ".credential-helper"
+	helperBody := "#!/bin/sh\n" +
+		"if [ \"${1:-}\" != \"get\" ]; then exit 0; fi\n" +
+		"input=$(cat)\n" +
+		"case \"$input\" in\n" +
+		"  *" + shellQuote("host="+credentialHost) + "*)\n" +
+		"    printf '%s\\n' 'username=oauth2' " + shellQuote("password="+token) + "\n" +
+		"    ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(helperPath, []byte(helperBody), 0o700); err != nil {
+		return nil, err
+	}
+	configBody := "[credential]\n\thelper = " + helperPath + "\n"
+	if err := os.WriteFile(cfg.MaterializedPath, []byte(configBody), 0o600); err != nil {
 		return nil, err
 	}
 	return map[string]string{"GIT_CONFIG_GLOBAL": cfg.MaterializedPath}, nil

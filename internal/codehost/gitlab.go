@@ -226,27 +226,22 @@ func (g *GitLabHost) toRepository(p gitlabProjectResp) *Repository {
 		defaultBranch = "main"
 	}
 
-	authCloneURL := p.HTTPURLToRepo
-	authCloneURL = strings.Replace(authCloneURL, "//localhost", "//host.docker.internal", 1)
-	authCloneURL = strings.Replace(authCloneURL, "//127.0.0.1", "//host.docker.internal", 1)
-	if g.token != "" {
-		if strings.HasPrefix(authCloneURL, "http://") {
-			authCloneURL = "http://oauth2:" + url.QueryEscape(g.token) + "@" + strings.TrimPrefix(authCloneURL, "http://")
-		} else if strings.HasPrefix(authCloneURL, "https://") {
-			authCloneURL = "https://oauth2:" + url.QueryEscape(g.token) + "@" + strings.TrimPrefix(authCloneURL, "https://")
-		}
-	}
-
 	return &Repository{
-		ID:                    strconv.FormatInt(p.ID, 10),
-		Name:                  p.Name,
-		PathWithNamespace:     p.PathWithNamespace,
-		WebURL:                p.WebURL,
-		HTTPCloneURL:          p.HTTPURLToRepo,
-		AuthenticatedCloneURL: authCloneURL,
-		SSHCloneURL:           p.SSHURLToRepo,
-		DefaultBranch:         defaultBranch,
+		ID:                strconv.FormatInt(p.ID, 10),
+		Name:              p.Name,
+		PathWithNamespace: p.PathWithNamespace,
+		WebURL:            p.WebURL,
+		HTTPCloneURL:      normalizeGitLabCloneURL(p.HTTPURLToRepo),
+		SSHCloneURL:       p.SSHURLToRepo,
+		DefaultBranch:     defaultBranch,
 	}
+}
+
+func normalizeGitLabCloneURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	raw = strings.Replace(raw, "//localhost", "//host.docker.internal", 1)
+	raw = strings.Replace(raw, "//127.0.0.1", "//host.docker.internal", 1)
+	return raw
 }
 
 func (g *GitLabHost) DeleteRepository(ctx context.Context, projectID string) error {

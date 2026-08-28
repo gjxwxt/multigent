@@ -37,15 +37,14 @@ type Repository struct {
 	Name              string `json:"name"`
 	PathWithNamespace string `json:"pathWithNamespace"`
 	WebURL            string `json:"webUrl"`
-	HTTPCloneURL          string `json:"httpCloneUrl"` // clean URL without embedded token
-	AuthenticatedCloneURL string `json:"authenticatedCloneUrl,omitempty"`
-	SSHCloneURL           string `json:"sshCloneUrl"`
-	DefaultBranch         string `json:"defaultBranch"`
+	HTTPCloneURL      string `json:"httpCloneUrl"` // clean URL without embedded token
+	SSHCloneURL       string `json:"sshCloneUrl"`
+	DefaultBranch     string `json:"defaultBranch"`
 }
 
 // ChangeRequest represents a Merge Request (GitLab) or Pull Request (GitHub/Gitee).
 type ChangeRequest struct {
-	ID           string `json:"id"`           // IID or PR number (e.g. "12")
+	ID           string `json:"id"` // IID or PR number (e.g. "12")
 	ProjectID    string `json:"projectId"`
 	Title        string `json:"title"`
 	Description  string `json:"description"`
@@ -53,7 +52,7 @@ type ChangeRequest struct {
 	TargetBranch string `json:"targetBranch"`
 	HeadSHA      string `json:"headSha"`
 	WebURL       string `json:"webUrl"`
-	State        string `json:"state"`        // "opened" | "merged" | "closed"
+	State        string `json:"state"` // "opened" | "merged" | "closed"
 }
 
 // CodeHost is the provider-agnostic interface for remote code hosting platforms.

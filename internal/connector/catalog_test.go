@@ -46,6 +46,7 @@ func TestDefaultProvidersIncludeRuntimeAdapters(t *testing.T) {
 		{provider: "lark", want: RuntimeAdapterCLI, binary: "lark-cli"},
 		{provider: "feishu", want: RuntimeAdapterCLI, binary: "lark-cli"},
 		{provider: "github", want: RuntimeAdapterCLI, binary: "gh"},
+		{provider: "gitlab", want: RuntimeAdapterCLI, binary: "git"},
 		{provider: "ssh_key", want: RuntimeAdapterCLI, binary: "ssh"},
 		{provider: "git_ssh", want: RuntimeAdapterCLI, binary: "git"},
 		{provider: "npm_registry", want: RuntimeAdapterCLI, binary: "npm"},
