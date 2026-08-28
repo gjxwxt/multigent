@@ -440,13 +440,11 @@ function InitializeProjectModal({
       setError(null)
       setLoadingAgents(true)
 
-      // Fetch workspace agents. The selected worker is added to this project
-      // by the initialization flow, which also makes a brand-new project
-      // usable without a separate members-page detour.
-      apiFetch<{ agents?: Array<{ name?: string; displayName?: string; model?: string }> }>('/api/v1/agents')
-        .then((workspaceAgentsRes) => {
-          const workerList = Array.isArray(workspaceAgentsRes?.agents) ? workspaceAgentsRes.agents : []
-          const availableWorkers = workerList.filter((w) => w.name && w.model !== 'human')
+      // Fetch project member agents
+      apiFetch<Array<{ name?: string; displayName?: string; model?: string }>>(`/api/v1/projects/${encodeURIComponent(projectId)}/agents`)
+        .then((projAgentsRes) => {
+          const projList = Array.isArray(projAgentsRes) ? projAgentsRes : []
+          const availableWorkers = projList.filter((w) => w.name && w.model !== 'human')
           setAgents(availableWorkers as Array<{ name: string; displayName?: string; model?: string }>)
           if (availableWorkers.length > 0) {
             setSelectedAgent(availableWorkers[0].name || '')
@@ -906,7 +904,7 @@ function InitializeProjectModal({
                 </p>
                 <div className="mt-3">
                   <Link
-                    to="/agents"
+                    to={`/projects/${encodeURIComponent(projectId)}/members`}
                     onClick={onClose}
                     className="inline-flex items-center gap-1.5 rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium text-white shadow-xs hover:bg-amber-700 transition-colors"
                   >
