@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -12,6 +13,7 @@ import (
 type initializeProjectTemplateBody struct {
 	Repo       string `json:"repo"`
 	TemplateID string `json:"templateId"`
+	Agent      string `json:"agent"`
 }
 
 // handleInitializeProjectTemplate materializes a deterministic starter before
@@ -49,6 +51,19 @@ func (s *Server) handleInitializeProjectTemplate(w http.ResponseWriter, r *http.
 		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, err.Error())
 		return
 	}
+	agent := strings.TrimSpace(body.Agent)
+	if agent != "" {
+		if !s.agentExistsInProject(name, agent) {
+			removeMaterializedTemplate(repo, report.Files)
+			s.jsonErrorCode(w, http.StatusNotFound, ErrCodeAgentNotFound, "agent not found")
+			return
+		}
+		if _, err := projecttemplate.Seed(s.st.AgentDir(name, agent), templateID); err != nil {
+			removeMaterializedTemplate(repo, report.Files)
+			s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, err.Error())
+			return
+		}
+	}
 	project.Repo = filepath.Clean(repo)
 	project.TemplateID = report.ID
 	project.TemplateVersion = report.Version
@@ -64,6 +79,7 @@ func (s *Server) handleInitializeProjectTemplate(w http.ResponseWriter, r *http.
 		Summary:      "Deterministic project template materialized",
 		After: map[string]any{
 			"repo":            project.Repo,
+			"agent":           agent,
 			"templateId":      report.ID,
 			"templateVersion": report.Version,
 			"templateDigest":  report.Digest,
@@ -72,4 +88,10 @@ func (s *Server) handleInitializeProjectTemplate(w http.ResponseWriter, r *http.
 	})
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(report)
+}
+
+func removeMaterializedTemplate(root string, files []string) {
+	for i := len(files) - 1; i >= 0; i-- {
+		_ = os.Remove(filepath.Join(root, filepath.FromSlash(files[i])))
+	}
 }

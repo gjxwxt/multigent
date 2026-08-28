@@ -64,3 +64,45 @@ func TestMaterializeRejectsUnsupportedTemplate(t *testing.T) {
 		t.Fatal("expected unsupported template error")
 	}
 }
+
+func TestSeedPreservesRuntimeFilesAndIsIdempotent(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "agent")
+	if err := os.MkdirAll(filepath.Join(root, ".multigent", "runtime-home"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(root, ".multigent", "runtime-home", "keep.json")
+	if err := os.WriteFile(keep, []byte("platform-owned"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := Seed(root, ReactGoFullstackID)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if len(first.Files) == 0 {
+		t.Fatal("expected seeded files")
+	}
+	if got, err := os.ReadFile(keep); err != nil || string(got) != "platform-owned" {
+		t.Fatalf("runtime file was changed: %q, %v", got, err)
+	}
+	if _, err := Seed(root, ReactGoFullstackID); err != nil {
+		t.Fatalf("idempotent seed: %v", err)
+	}
+}
+
+func TestSeedRejectsConflictingFilesWithoutOverwriting(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "agent")
+	if err := os.MkdirAll(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	readme := filepath.Join(root, "README.md")
+	if err := os.WriteFile(readme, []byte("user content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Seed(root, ReactGoFullstackID); err == nil {
+		t.Fatal("expected conflicting file to be rejected")
+	}
+	if got, err := os.ReadFile(readme); err != nil || string(got) != "user content" {
+		t.Fatalf("conflicting file was changed: %q, %v", got, err)
+	}
+}

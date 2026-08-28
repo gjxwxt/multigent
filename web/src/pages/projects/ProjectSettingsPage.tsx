@@ -615,7 +615,7 @@ function InitializeProjectModal({
       if (deterministicTemplate) {
         templateReport = await apiPost<{ templateId: string; templateVersion: string; templateDigest: string }>(
           `/api/v1/projects/${encodeURIComponent(projectId)}/initialize-template`,
-          { repo: targetRepo, templateId: selectedTemplate },
+          { repo: targetRepo, templateId: selectedTemplate, agent: selectedAgent },
         )
       }
 
@@ -648,10 +648,10 @@ function InitializeProjectModal({
           : ''
         if (cleanCloneUrl) {
           taskTitle = `【工程初始化】构建 ${tplName} 脚手架并首推远程 GitLab`
-          taskPrompt = `请在当前项目工作区 (${targetRepo}) 完成 "${tplName}" 工程初始化并首次推送到远程 GitLab 仓库。\n\n${templateReadySteps}如果模板尚未由系统生成，再补齐缺失的工程文件；不要覆盖已有用户文件。然后：\n1. 使用系统已注入的 GitLab credential helper 配置远程仓库并推送（禁止把 Token 写入 URL）：\n   git remote add origin "${cleanCloneUrl}" || git remote set-url origin "${cleanCloneUrl}"\n   git branch -M main\n   git add .\n   git commit -m "chore: initial ${tplName} scaffold"\n   git push -u origin main\n2. 输出初始化完成报告，列出目录架构、验证结果与启动命令。`
+          taskPrompt = `请在当前任务工作区完成 "${tplName}" 工程初始化并首次推送到远程 GitLab 仓库。不要访问或假设宿主机路径；执行命令时以当前目录为准，平台已在任务工作区注入确定性模板。\n\n${templateReadySteps}如果模板尚未由系统生成，再补齐缺失的工程文件；不要覆盖已有用户文件。然后：\n1. 使用系统已注入的 GitLab credential helper 配置远程仓库并推送（禁止把 Token 写入 URL）：\n   git remote add origin "${cleanCloneUrl}" || git remote set-url origin "${cleanCloneUrl}"\n   git branch -M main\n   git add .\n   git commit -m "chore: initial ${tplName} scaffold"\n   git push -u origin main\n2. 输出初始化完成报告，列出目录架构、验证结果与启动命令。`
         } else {
           taskTitle = `【工程初始化】构建 ${tplName} 模板脚手架`
-          taskPrompt = `请在当前项目工作区 (${targetRepo}) 完成 "${tplName}" 工程初始化。\n\n${templateReadySteps}如果模板尚未由系统生成，再补齐缺失的工程文件；不要覆盖已有用户文件。然后：\n1. 初始化 Git 仓库并创建首个提交；\n2. 执行基础测试与构建，确保工程可一键启动；\n3. 输出初始化完成报告，列出目录架构、验证结果与启动命令。`
+          taskPrompt = `请在当前任务工作区完成 "${tplName}" 工程初始化。不要访问或假设宿主机路径；执行命令时以当前目录为准，平台已在任务工作区注入确定性模板。\n\n${templateReadySteps}如果模板尚未由系统生成，再补齐缺失的工程文件；不要覆盖已有用户文件。然后：\n1. 初始化 Git 仓库并创建首个提交；\n2. 执行基础测试与构建，确保工程可一键启动；\n3. 输出初始化完成报告，列出目录架构、验证结果与启动命令。`
         }
       }
 

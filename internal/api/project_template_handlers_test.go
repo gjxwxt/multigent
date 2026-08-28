@@ -13,11 +13,13 @@ import (
 )
 
 func TestInitializeProjectTemplateMaterializesAndRecordsMetadata(t *testing.T) {
-	s, _ := newConnectionGrantPolicyServer(t)
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	seedAgentWorkerForTest(t, s, workspaceID, "sample", "pm")
 	repo := filepath.Join(t.TempDir(), "new-repo")
 	req := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/initialize-template", "admin", map[string]string{
 		"repo":       repo,
 		"templateId": projecttemplate.ReactGoFullstackID,
+		"agent":      "pm",
 	})
 	req.SetPathValue("name", "sample")
 	rec := httptest.NewRecorder()
@@ -34,6 +36,9 @@ func TestInitializeProjectTemplateMaterializesAndRecordsMetadata(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(repo, ".multigent", "runtime.json")); err != nil {
 		t.Fatalf("generated runtime contract missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(s.st.AgentDir("sample", "pm"), "web", "src", "App.tsx")); err != nil {
+		t.Fatalf("agent workspace was not seeded: %v", err)
 	}
 	project, err := s.st.Project("sample")
 	if err != nil {
