@@ -654,9 +654,14 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 		if !deliveryPrepared && isPullRequestReviewStep(currentStep) {
 			return taskWorkflowResponse{}, http.StatusConflict, errors.New("terminal pull request review completed without delivery preparation")
 		}
-		s.captureTaskCompletionSnapshot(t)
+		snapshotErr := s.captureTaskCompletionSnapshot(t)
 		s.syncTaskCompletionRemote(project, t)
-		s.cleanupTaskDeliveryArtifacts(project, taskID)
+		if snapshotErr != nil {
+			// Keep the worktree and preview alive: the snapshot holds the
+			// only copy of unpushed work, so cleanup must not run.
+		} else {
+			s.cleanupTaskDeliveryArtifacts(project, taskID)
+		}
 		if err := s.ts.PersistTask(project, agent, t); err != nil {
 			return taskWorkflowResponse{}, http.StatusInternalServerError, err
 		}
@@ -756,22 +761,25 @@ func updateTaskRemoteMR(task *entity.Task, outputs map[string]string) bool {
 
 // captureTaskCompletionSnapshot records a content-addressed Git snapshot
 // before the task worktree is cleaned up. It deliberately does not claim the
-// remote branch is synchronized; that is a separate delivery step.
-func (s *Server) captureTaskCompletionSnapshot(task *entity.Task) {
+// remote branch is synchronized; that is a separate delivery step. A capture
+// failure is returned so callers can keep the worktree alive instead of
+// destroying uncommitted work.
+func (s *Server) captureTaskCompletionSnapshot(task *entity.Task) error {
 	if s == nil || task == nil || s.worktreeMgr == nil || strings.TrimSpace(task.WorktreeDir) == "" {
-		return
+		return nil
 	}
 	commit, err := s.worktreeMgr.CaptureSnapshot(task.WorktreeDir)
 	if err != nil {
 		task.RemoteSyncStatus = "failed"
 		task.RemoteSyncError = fmt.Sprintf("capture completion snapshot: %v", err)
-		return
+		return err
 	}
 	task.CompletionCommit = commit
 	if strings.TrimSpace(task.RemoteSyncStatus) == "" {
 		task.RemoteSyncStatus = "pending"
 	}
 	task.RemoteSyncError = ""
+	return nil
 }
 
 // syncTaskCompletionRemote is intentionally best-effort after local task

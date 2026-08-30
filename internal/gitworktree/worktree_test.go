@@ -452,3 +452,16 @@ func runGitOutput(t *testing.T, dir string, args ...string) []byte {
 	}
 	return out
 }
+
+func TestSanitizeTaskIDBlocksPathTraversal(t *testing.T) {
+	root := t.TempDir()
+	for _, id := range []string{"..", ".", "../escape", "..\\escape", " t-1 "} {
+		dir := WorktreeDir(root, id)
+		if !strings.HasPrefix(dir, filepath.Join(root, ".multigent", "worktrees")+string(filepath.Separator)) {
+			t.Fatalf("task id %q escaped worktrees dir: %s", id, dir)
+		}
+	}
+	if got := WorktreeDir(root, ".."); !strings.Contains(got, "worktrees") {
+		t.Fatalf("expected traversal id contained, got %s", got)
+	}
+}

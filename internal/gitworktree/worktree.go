@@ -76,7 +76,16 @@ func WorktreeDir(projectRoot, taskID string) string {
 func sanitizeTaskID(taskID string) string {
 	taskID = strings.TrimSpace(taskID)
 	r := strings.NewReplacer("/", "-", "\\", "-", ":", "-", " ", "-")
-	return r.Replace(taskID)
+	cleaned := r.Replace(taskID)
+	// Dot-prefixed segments (e.g. "..") would escape the worktrees
+	// directory when joined; flatten them into a safe name.
+	if strings.HasPrefix(cleaned, ".") {
+		cleaned = "task" + strings.TrimLeft(cleaned, ".")
+	}
+	if cleaned == "" {
+		cleaned = "task"
+	}
+	return cleaned
 }
 
 // EnsureWorktree prepares a dedicated git worktree for a task.

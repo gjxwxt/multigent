@@ -49,10 +49,38 @@ type Engine struct {
 	instances map[string]*PreviewInstance
 }
 
-// NewEngine creates a new preview engine.
+// NewEngine creates a new preview engine and starts the background
+// lease-reaper that removes expired preview containers while the service
+// is running (Reconcile only runs once at startup).
 func NewEngine() *Engine {
-	return &Engine{
+	e := &Engine{
 		instances: make(map[string]*PreviewInstance),
+	}
+	go e.reapLoop()
+	return e
+}
+
+func (e *Engine) reapLoop() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		e.reapExpired()
+	}
+}
+
+// reapExpired force-removes running instances whose lease has elapsed.
+func (e *Engine) reapExpired() {
+	now := time.Now().UTC()
+	e.mu.Lock()
+	var expired []string
+	for taskID, inst := range e.instances {
+		if inst != nil && inst.Status == "running" && !inst.ExpiresAt.IsZero() && !now.Before(inst.ExpiresAt) {
+			expired = append(expired, taskID)
+		}
+	}
+	e.mu.Unlock()
+	for _, taskID := range expired {
+		_ = e.StopEphemeralPreview(taskID)
 	}
 }
 
