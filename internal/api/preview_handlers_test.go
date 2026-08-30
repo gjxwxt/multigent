@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -72,8 +73,8 @@ func TestResolveTaskWorktreeDir(t *testing.T) {
 		t.Fatalf("expected resolved workspace dir, got %s", res)
 	}
 
-	// 4. Test status
-	statusReq := httptest.NewRequest(http.MethodGet, "/api/v1/projects/myproj/tasks/t-123/preview/status", nil)
+	// 4. Test status (authenticated via identity context)
+	statusReq := httptest.NewRequest(http.MethodGet, "/api/v1/projects/myproj/tasks/t-123/preview/status", nil).WithContext(context.WithValue(context.Background(), ctxUserKey, "admin"))
 	statusReq.SetPathValue("name", "myproj")
 	statusReq.SetPathValue("taskId", "t-123")
 	statusW := httptest.NewRecorder()
@@ -91,7 +92,7 @@ func TestResolveTaskWorktreeDir(t *testing.T) {
 }
 
 func TestRewriteHTMLKeepsControlPlanePreviewAPIOutsideProjectPrefix(t *testing.T) {
-	html := rewriteHTML(`<html><head></head><body><script>fetch('/api/v1/projects/testproj/tasks/t-123/preview/chat')</script><script>fetch('/api/data')</script></body></html>`, "t-123", "testproj")
+	html := rewriteHTML(`<html><head></head><body><script>fetch('/api/v1/projects/testproj/tasks/t-123/preview/chat')</script><script>fetch('/api/data')</script></body></html>`, "t-123", "testproj", "tok-abc")
 	if !strings.Contains(html, "window.__MG_PREVIEW_BASE__") {
 		t.Fatal("expected preview base marker in injected script")
 	}

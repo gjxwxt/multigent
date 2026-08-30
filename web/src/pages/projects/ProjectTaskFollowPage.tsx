@@ -345,7 +345,7 @@ export default function ProjectTaskFollowPage() {
     }
   }
 
-  const previewState = useApiJson<{ taskId: string; type: string; status: string; url: string }>(
+  const previewState = useApiJson<{ taskId: string; type: string; status: string; url: string; previewToken?: string }>(
     projectId && taskId ? `/api/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/preview` : null,
     5000,
   )
@@ -398,7 +398,7 @@ export default function ProjectTaskFollowPage() {
             <div className="flex items-center">
               {preview.status === 'running' ? (
                 <a
-                  href={preview.url}
+                  href={preview.previewToken ? `${preview.url}?pvt=${encodeURIComponent(preview.previewToken)}` : preview.url}
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-50 px-2.5 py-1.5 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-950/40 dark:text-emerald-300"
@@ -412,8 +412,9 @@ export default function ProjectTaskFollowPage() {
                   onClick={async () => {
                     setPreviewStarting(true)
                     try {
-                      await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/preview/start`, {})
-                      window.open(`/preview/${encodeURIComponent(taskId)}/`, '_blank')
+                      const inst = await apiPost<{ previewToken?: string }>(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/preview/start`, {})
+                      const tokenQS = inst?.previewToken ? `?pvt=${encodeURIComponent(inst.previewToken)}` : ''
+                      window.open(`/preview/${encodeURIComponent(taskId)}/${tokenQS}`, '_blank')
                     } finally {
                       setPreviewStarting(false)
                     }

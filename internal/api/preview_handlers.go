@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	htmllib "html"
 	"io"
 	"net/http"
 	"net/http/httputil"
@@ -155,18 +156,22 @@ func (s *Server) handleGetTaskPreview(w http.ResponseWriter, r *http.Request) {
 		projType := preview.DetectProjectType(worktreeDir)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"taskId":      taskID,
-			"project":     project,
-			"type":        string(projType),
-			"status":      "stopped",
-			"url":         fmt.Sprintf("/preview/%s/", taskID),
-			"worktreeDir": worktreeDir,
+			"taskId":       taskID,
+			"project":      project,
+			"type":         string(projType),
+			"status":       "stopped",
+			"url":          fmt.Sprintf("/preview/%s/", taskID),
+			"worktreeDir":  worktreeDir,
+			"previewToken": s.signPreviewToken(taskID, project),
 		})
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(inst)
+	_ = json.NewEncoder(w).Encode(struct {
+		*preview.PreviewInstance
+		PreviewToken string `json:"previewToken,omitempty"`
+	}{inst, s.signPreviewToken(taskID, inst.Project)})
 }
 
 func (s *Server) handlePostTaskPreviewStart(w http.ResponseWriter, r *http.Request) {
@@ -208,7 +213,10 @@ func (s *Server) handlePostTaskPreviewStart(w http.ResponseWriter, r *http.Reque
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(inst)
+	_ = json.NewEncoder(w).Encode(struct {
+		*preview.PreviewInstance
+		PreviewToken string `json:"previewToken,omitempty"`
+	}{inst, s.signPreviewToken(taskID, project)})
 }
 
 type previewFeedbackBody struct {
@@ -224,6 +232,9 @@ func (s *Server) handlePostTaskPreviewFeedback(w http.ResponseWriter, r *http.Re
 		if inst, ok := s.previewEngine.GetInstance(taskID); ok && inst.Project != "" {
 			project = inst.Project
 		}
+	}
+	if !s.previewRequestAuthorized(w, r, project, taskID) {
+		return
 	}
 	if s.previewInstanceReadOnly(taskID) {
 		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "completed-task snapshot is read-only; create a follow-up task to modify it")
@@ -294,6 +305,13 @@ func (s *Server) handlePostTaskPreviewChat(w http.ResponseWriter, r *http.Reques
 		if inst, ok := s.previewEngine.GetInstance(taskID); ok && inst.Project != "" {
 			project = inst.Project
 		}
+	}
+	if !s.previewRequestAuthorized(w, r, project, taskID) {
+		return
+	}
+	if !s.allowPreviewChat(taskID) {
+		s.jsonErrorCode(w, http.StatusTooManyRequests, ErrCodeConflict, "preview chat rate limit exceeded; retry shortly")
+		return
 	}
 	if s.previewInstanceReadOnly(taskID) {
 		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "completed-task snapshot is read-only; create a follow-up task to modify it")
@@ -492,6 +510,9 @@ func (s *Server) handlePostTaskPreviewChat(w http.ResponseWriter, r *http.Reques
 
 func (s *Server) handleGetTaskPreviewLive(w http.ResponseWriter, r *http.Request) {
 	taskID := strings.TrimSpace(r.PathValue("taskId"))
+	if !s.previewRequestAuthorized(w, r, r.PathValue("name"), taskID) {
+		return
+	}
 	s.previewMu.Lock()
 	session, exists := s.previewSessions[taskID]
 	s.previewMu.Unlock()
@@ -546,6 +567,9 @@ func (s *Server) handleGetTaskPreviewLive(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handlePostTaskPreviewStop(w http.ResponseWriter, r *http.Request) {
 	taskID := strings.TrimSpace(r.PathValue("taskId"))
+	if !s.previewRequestAuthorized(w, r, r.PathValue("name"), taskID) {
+		return
+	}
 	s.previewMu.Lock()
 	session, exists := s.previewSessions[taskID]
 	if exists && session != nil {
@@ -567,6 +591,9 @@ func (s *Server) handlePostTaskPreviewStop(w http.ResponseWriter, r *http.Reques
 
 func (s *Server) handleGetTaskPreviewStatus(w http.ResponseWriter, r *http.Request) {
 	taskID := strings.TrimSpace(r.PathValue("taskId"))
+	if !s.previewRequestAuthorized(w, r, r.PathValue("name"), taskID) {
+		return
+	}
 	s.previewMu.Lock()
 	session, exists := s.previewSessions[taskID]
 	var agent string
@@ -614,6 +641,12 @@ func (s *Server) handleTaskPreviewProxy(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	previewToken := previewRequestToken(r, taskID)
+	if _, tokOK := s.verifyPreviewToken(previewToken, taskID); !tokOK {
+		s.jsonErrorCode(w, http.StatusUnauthorized, ErrCodeUnauthorized, "preview token required")
+		return
+	}
+
 	targetURL, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", inst.Port))
 	if err != nil {
 		http.Error(w, "invalid preview target URL", http.StatusInternalServerError)
@@ -652,7 +685,20 @@ func (s *Server) handleTaskPreviewProxy(w http.ResponseWriter, r *http.Request) 
 		}
 		_ = resp.Body.Close()
 
-		html := rewriteHTML(string(bodyBytes), taskID, inst.Project)
+		html := rewriteHTML(string(bodyBytes), taskID, inst.Project, previewToken)
+
+		// Persist the validated token as a path-scoped cookie so subsequent
+		// sub-resource requests (which never propagate ?pvt=) still
+		// authenticate, while remaining invisible to other origins.
+		previewCookie := &http.Cookie{
+			Name:     "mg_pvt_" + taskID,
+			Value:    previewToken,
+			Path:     fmt.Sprintf("/preview/%s/", taskID),
+			MaxAge:   int(previewTokenTTL.Seconds()),
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+		}
+		resp.Header.Add("Set-Cookie", previewCookie.String())
 
 		newBodyBytes := []byte(html)
 		if isGzip {
@@ -674,7 +720,7 @@ func (s *Server) handleTaskPreviewProxy(w http.ResponseWriter, r *http.Request) 
 
 var htmlAttrRe = regexp.MustCompile(`(?i)\b(href|src|action)\s*=\s*(["'])/([^"']*)(["'])`)
 
-func rewriteHTML(html, taskID, projectName string) string {
+func rewriteHTML(html, taskID, projectName, previewToken string) string {
 	previewPrefix := fmt.Sprintf("/preview/%s/", taskID)
 
 	// Interceptor script to handle dynamic fetches, XMLHttpRequest, WebSocket, and SPA History Navigation
@@ -683,6 +729,7 @@ func rewriteHTML(html, taskID, projectName string) string {
   var prefix = %q;
   window.__MG_PREVIEW_TASK_ID__ = %q;
   window.__MG_PREVIEW_PROJECT__ = %q;
+  window.__MG_PREVIEW_TOKEN__ = %q;
   window.__MG_PREVIEW_BASE__ = prefix.replace(/\/$/, '');
   var controlPrefix = '/api/v1/projects/' + encodeURIComponent(%q) + '/tasks/' + encodeURIComponent(%q) + '/preview/';
   try {
@@ -769,7 +816,7 @@ func rewriteHTML(html, taskID, projectName string) string {
     window.WebSocket.prototype = origWS.prototype;
   }
 })();
-</script>`, previewPrefix, previewPrefix, taskID, projectName, projectName, taskID, taskID, projectName)
+</script>`, previewPrefix, previewPrefix, taskID, projectName, previewToken, projectName, taskID, taskID, projectName)
 
 	// Rewrite static HTML attributes: href="/...", src="/...", action="/..."
 	html = htmlAttrRe.ReplaceAllStringFunc(html, func(match string) string {
@@ -796,7 +843,7 @@ func rewriteHTML(html, taskID, projectName string) string {
 
 	widgetTag := fmt.Sprintf(
 		`<script src="/_multigent_preview/feedback.js" data-task-id="%s" data-project="%s"></script>`,
-		taskID, projectName,
+		htmllib.EscapeString(taskID), htmllib.EscapeString(projectName),
 	)
 
 	if strings.Contains(html, "</body>") {

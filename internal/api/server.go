@@ -113,6 +113,8 @@ type Server struct {
 	worktreeMgr            *gitworktree.Manager
 	previewMu              sync.Mutex
 	previewSessions        map[string]*previewChatSession
+	previewChatMu          sync.Mutex
+	previewChatSeen        map[string]*previewChatBucket
 }
 
 // NewServer builds an API server for the given workspace root.
@@ -641,7 +643,6 @@ func (s *Server) Handler() http.Handler {
 	publicMux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/chat", s.handlePostTaskPreviewChat)
 	publicMux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview/live", s.handleGetTaskPreviewLive)
 	publicMux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/stop", s.handlePostTaskPreviewStop)
-	publicMux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/remote-sync/retry", s.handlePostTaskRemoteSyncRetry)
 	publicMux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview/status", s.handleGetTaskPreviewStatus)
 	runtimeMux := http.NewServeMux()
 	runtimeMux.HandleFunc("GET /api/v1/runtime/connections", s.handleRuntimeConnections)

@@ -294,7 +294,7 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
     workflowVersion,
     { silentStatuses: silentNotFound },
   )
-  const previewState = useApiJson<{ taskId: string; type: string; status: string; url: string }>(
+  const previewState = useApiJson<{ taskId: string; type: string; status: string; url: string; previewToken?: string }>(
     task?.project && task?.id ? `/api/v1/projects/${encodeURIComponent(task.project)}/tasks/${encodeURIComponent(task.id)}/preview` : null,
     workflowVersion,
     { silentStatuses: silentNotFound },
@@ -471,7 +471,7 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
               <div className="flex items-center">
                 {preview.status === 'running' ? (
                   <a
-                    href={preview.url}
+                    href={preview.previewToken ? `${preview.url}?pvt=${encodeURIComponent(preview.previewToken)}` : preview.url}
                     target="_blank"
                     rel="noreferrer"
                     className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-950/40 dark:text-emerald-300"
@@ -485,8 +485,9 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
                     onClick={async () => {
                       setPreviewStarting(true)
                       try {
-                        await apiPost(`/api/v1/projects/${encodeURIComponent(task.project)}/tasks/${encodeURIComponent(task.id)}/preview/start`, {})
-                        window.open(`/preview/${encodeURIComponent(task.id)}/`, '_blank')
+                        const inst = await apiPost<{ previewToken?: string }>(`/api/v1/projects/${encodeURIComponent(task.project)}/tasks/${encodeURIComponent(task.id)}/preview/start`, {})
+                        const tokenQS = inst?.previewToken ? `?pvt=${encodeURIComponent(inst.previewToken)}` : ''
+                        window.open(`/preview/${encodeURIComponent(task.id)}/${tokenQS}`, '_blank')
                         setWorkflowVersion((v) => v + 1)
                       } finally {
                         setPreviewStarting(false)

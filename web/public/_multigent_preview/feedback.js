@@ -22,6 +22,23 @@
     try { project = sessionStorage.getItem('__mg_preview_project') || ''; } catch(e) {}
   }
 
+  // Preview auth token (injected server-side into the document). Read
+  // lazily so script evaluation order never matters.
+  function __mgPreviewToken() {
+    try { return (typeof window.__MG_PREVIEW_TOKEN__ === 'string' && window.__MG_PREVIEW_TOKEN__) || ''; } catch (e) { return ''; }
+  }
+  function __mgAuthUrl(url) {
+    var token = __mgPreviewToken();
+    if (!token) return url;
+    return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'pvt=' + encodeURIComponent(token);
+  }
+  function __mgAuthHeaders(extra) {
+    var headers = extra || {};
+    var token = __mgPreviewToken();
+    if (token) headers['X-Multigent-Preview-Token'] = token;
+    return headers;
+  }
+
   var isMac = /Mac|iPod|iPhone|iPad/.test(navigator.platform);
   var kbdText = isMac ? '⌘K' : 'Ctrl+K';
   var sendKbdText = isMac ? '⌘+Enter' : 'Ctrl+Enter';
@@ -1225,11 +1242,11 @@
   function attachLiveStream(assistantMsg) {
     if (abortCtrl) abortCtrl.abort();
     abortCtrl = new AbortController();
-    var liveUrl = '/api/v1/projects/' + encodeURIComponent(project || 'current') + '/tasks/' + encodeURIComponent(taskId) + '/preview/live';
+    var liveUrl = __mgAuthUrl('/api/v1/projects/' + encodeURIComponent(project || 'current') + '/tasks/' + encodeURIComponent(taskId) + '/preview/live');
 
     fetch(liveUrl, {
       method: 'GET',
-      headers: { 'Accept': 'text/event-stream' },
+      headers: __mgAuthHeaders({ 'Accept': 'text/event-stream' }),
       signal: abortCtrl.signal
     })
       .then(function (res) {
@@ -1279,8 +1296,8 @@
   }
 
   function checkStatus() {
-    var statusUrl = '/api/v1/projects/' + encodeURIComponent(project || 'current') + '/tasks/' + encodeURIComponent(taskId) + '/preview/status';
-    fetch(statusUrl)
+    var statusUrl = __mgAuthUrl('/api/v1/projects/' + encodeURIComponent(project || 'current') + '/tasks/' + encodeURIComponent(taskId) + '/preview/status');
+    fetch(statusUrl, { headers: __mgAuthHeaders() })
       .then(function (r) { return r.json(); })
       .then(function (data) {
         if (data && data.busy) {
@@ -1423,8 +1440,8 @@
   // Stop current execution
   function stopExecution() {
     if (abortCtrl) abortCtrl.abort();
-    var stopUrl = '/api/v1/projects/' + encodeURIComponent(project || 'current') + '/tasks/' + encodeURIComponent(taskId) + '/preview/stop';
-    fetch(stopUrl, { method: 'POST' }).catch(function () {});
+    var stopUrl = __mgAuthUrl('/api/v1/projects/' + encodeURIComponent(project || 'current') + '/tasks/' + encodeURIComponent(taskId) + '/preview/stop');
+    fetch(stopUrl, { method: 'POST', headers: __mgAuthHeaders() }).catch(function () {});
     isStreaming = false;
     setBusyState(false);
 
@@ -1592,7 +1609,7 @@ ${content || '请根据上述目标 DOM 元素位置与代码上下文进行优�
     setBusyState(true);
 
     abortCtrl = new AbortController();
-    var chatUrl = '/api/v1/projects/' + encodeURIComponent(project || 'current') + '/tasks/' + encodeURIComponent(taskId) + '/preview/chat';
+    var chatUrl = __mgAuthUrl('/api/v1/projects/' + encodeURIComponent(project || 'current') + '/tasks/' + encodeURIComponent(taskId) + '/preview/chat');
 
     var historyPayload = msgs.slice(0, -2).map(function (m) {
       return { role: m.role, content: m.content };
@@ -1600,10 +1617,10 @@ ${content || '请根据上述目标 DOM 元素位置与代码上下文进行优�
 
     fetch(chatUrl, {
       method: 'POST',
-      headers: {
+      headers: __mgAuthHeaders({
         'Content-Type': 'application/json',
         'Accept': 'text/event-stream'
-      },
+      }),
       body: JSON.stringify({ message: finalPrompt, history: historyPayload }),
       signal: abortCtrl.signal
     })
