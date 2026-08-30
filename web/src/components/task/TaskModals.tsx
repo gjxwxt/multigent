@@ -477,7 +477,7 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
                     className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-950/40 dark:text-emerald-300"
                   >
                     <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />
-                    打开实时预览 ↗
+                    {t('tasks.openPreview', { defaultValue: '打开实时预览 ↗' })}
                   </a>
                 ) : (
                   <button
@@ -497,7 +497,7 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
                     className="inline-flex items-center gap-1 rounded-md border border-sky-600/30 bg-sky-50 px-2 py-1 text-xs font-semibold text-sky-700 transition hover:bg-sky-100 dark:border-sky-500/30 dark:bg-sky-950/40 dark:text-sky-300"
                   >
                     <Globe className={cn('size-3.5', previewStarting && 'animate-spin')} />
-                    {previewStarting ? '启动中…' : '启动实时预览'}
+                    {previewStarting ? t('tasks.startingPreview', { defaultValue: '启动中…' }) : t('tasks.startPreview', { defaultValue: '启动实时预览' })}
                   </button>
                 )}
               </div>
@@ -516,7 +516,7 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
                 type="button"
                 onClick={() => void startCurrentAssignee()}
                 disabled={!canStartAgent || startBusy}
-                title={!startAgentName ? t('tasks.startRequiresAgent') : isFailedOrCancelled ? '重新执行任务' : t('tasks.start')}
+                title={!startAgentName ? t('tasks.startRequiresAgent') : isFailedOrCancelled ? t('tasks.retryTask', { defaultValue: '重新执行任务' }) : t('tasks.start')}
                 className={cn(
                   'rounded-md p-1 transition-colors disabled:cursor-not-allowed disabled:opacity-35',
                   isFailedOrCancelled
@@ -1041,7 +1041,7 @@ export function WorkflowRuntimePanel({
                           className="inline-flex items-center gap-1 text-xs font-semibold text-sky-600 hover:text-sky-700 hover:underline dark:text-sky-400"
                         >
                           <GitPullRequest className="size-3.5" />
-                          <span>打开 Pull Request ↗</span>
+                          <span>{t('tasks.openPullRequest', { defaultValue: '打开 Pull Request ↗' })}</span>
                         </a>
                       )}
                     </div>
@@ -1261,6 +1261,7 @@ function WorkflowPanelBlock({ title, children }: { title: string; children: Reac
 }
 
 function WorkflowFieldList({ fields, values }: { fields: WorkflowField[]; values: Record<string, string> }) {
+  const { t } = useTranslation()
   if (fields.length === 0) return null
   return (
     <div className="mb-2 space-y-2">
@@ -1280,7 +1281,7 @@ function WorkflowFieldList({ fields, values }: { fields: WorkflowField[]; values
                   className="inline-flex items-center gap-1 font-sans text-xs font-semibold text-sky-600 hover:text-sky-700 dark:text-sky-400"
                 >
                   <ExternalLink className="size-3" />
-                  <span>直接打开</span>
+                  <span>{t('tasks.openDirectly', { defaultValue: '直接打开' })}</span>
                 </a>
               )}
             </div>

@@ -411,7 +411,7 @@ function BasicInfoEditor({
           <div className="flex items-center justify-between gap-4 px-5 py-3 bg-sky-50/40 dark:bg-sky-950/20">
             <dt className="w-32 shrink-0 text-xs font-medium text-sky-800 dark:text-sky-300 flex items-center gap-1.5">
               <FolderGit2 className="size-3.5" />
-              <span>远程代码仓库</span>
+              <span>{t('projectSettings.remoteRepo', { defaultValue: '远程代码仓库' })}</span>
             </dt>
             <dd className="flex-1 flex items-center justify-between gap-3">
               <div className="min-w-0">
@@ -430,7 +430,7 @@ function BasicInfoEditor({
                 rel="noreferrer"
                 className="inline-flex items-center gap-1.5 rounded bg-white px-2.5 py-1 text-[11px] font-medium text-sky-600 border border-sky-200 hover:bg-sky-50 shadow-xs dark:bg-zinc-800 dark:border-zinc-700 dark:text-sky-400 shrink-0"
               >
-                <span>在 {remoteProvider === 'gitlab' ? 'GitLab' : '远程'} 查看</span>
+                <span>{remoteProvider === 'gitlab' ? t('projectSettings.viewOnGitlab', { defaultValue: '在 GitLab 查看' }) : t('projectSettings.viewOnRemote', { defaultValue: '在远程查看' })}</span>
                 <ArrowRight className="size-3" />
               </a>
             </dd>
@@ -751,19 +751,19 @@ function InitializeProjectModal({
 
       if (activeTab === 'bind_existing') {
         if (existingType === 'remote') {
-          taskTitle = `【工程初始化】克隆远程仓库并检查就绪`
+          taskTitle = t('projectSettings.initTaskTitleClone', { defaultValue: '【工程初始化】克隆远程仓库并检查就绪' })
         } else {
-          taskTitle = `【工程初始化】绑定并校验本地工作区`
+          taskTitle = t('projectSettings.initTaskTitleBind', { defaultValue: '【工程初始化】绑定并校验本地工作区' })
         }
       } else {
         // Create new
         const tpl = TEMPLATES.find((x) => x.id === selectedTemplate)
-        const tplName = (useTemplate && tpl) ? t(tpl.label) : '基础空白'
+        const tplName = (useTemplate && tpl) ? t(tpl.label) : t('projectSettings.initTemplateBlankName', { defaultValue: '基础空白' })
 
         if (cleanCloneUrl) {
-          taskTitle = `【工程初始化】构建 ${tplName} 脚手架并首推远程 GitLab`
+          taskTitle = t('projectSettings.initTaskTitleScaffold', { name: tplName, defaultValue: '【工程初始化】构建 {{name}} 脚手架并首推远程 GitLab' })
         } else {
-          taskTitle = `【工程初始化】构建 ${tplName} 模板脚手架`
+          taskTitle = t('projectSettings.initTaskTitleTemplate', { name: tplName, defaultValue: '【工程初始化】构建 {{name}} 模板脚手架' })
         }
       }
 
@@ -782,7 +782,9 @@ function InitializeProjectModal({
       const createdTask = await apiPost<{ id: string }>(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks`, {
         agent: selectedAgent,
         title: taskTitle,
-        description: `自动化工程初始化 (${activeTab === 'bind_existing' ? '已有仓库' : '从零新建'})`,
+        description: activeTab === 'bind_existing'
+          ? t('projectSettings.initTaskDescBind', { defaultValue: '自动化工程初始化 (已有仓库)' })
+          : t('projectSettings.initTaskDescCreate', { defaultValue: '自动化工程初始化 (从零新建)' }),
         prompt: taskPrompt,
         type: 'chore',
         priority: 3,
@@ -799,7 +801,7 @@ function InitializeProjectModal({
         autoStart: true,
       })
 
-      if (!createdTask?.id) throw new Error('初始化任务创建成功但未返回任务 ID')
+      if (!createdTask?.id) throw new Error(t('projectSettings.initErrorNoTaskId', { defaultValue: '初始化任务创建成功但未返回任务 ID' }))
       setInitializationRepo(targetRepo)
       setInitializationTaskId(createdTask.id)
       showToast(t('projectSettings.initSuccess', { defaultValue: '工程初始化任务已创建并启动！' }), 'success')
@@ -1046,7 +1048,7 @@ function InitializeProjectModal({
                       className="size-4 rounded border-neutral-300 text-sky-600 focus:ring-sky-500 dark:border-zinc-700 dark:bg-zinc-950"
                     />
                     <span className="text-xs font-semibold text-sky-900 dark:text-sky-200">
-                      同步在 GitLab 上自动创建远程仓库并绑定 (推荐)
+                      {t('projectSettings.initCreateRadio', { defaultValue: '同步在 GitLab 上自动创建远程仓库并绑定 (推荐)' })}
                     </span>
                   </label>
 
@@ -1055,7 +1057,7 @@ function InitializeProjectModal({
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <label className="block">
                           <span className="text-[11px] font-medium text-neutral-600 dark:text-zinc-400">
-                            命名空间 (Namespace / Group)
+                            {t('projectSettings.initNamespace', { defaultValue: '命名空间 (Namespace / Group)' })}
                           </span>
                           <select
                             value={selectedNamespaceId || ''}
@@ -1064,7 +1066,7 @@ function InitializeProjectModal({
                           >
                             {gitlabNamespaces.map((ns) => (
                               <option key={ns.id} value={ns.id}>
-                                {ns.fullPath} ({ns.kind === 'user' ? '个人' : '团队'})
+                                {ns.fullPath} ({ns.kind === 'user' ? t('projectSettings.nsKindUser', { defaultValue: '个人' }) : t('projectSettings.nsKindGroup', { defaultValue: '团队' })})
                               </option>
                             ))}
                           </select>
@@ -1072,7 +1074,7 @@ function InitializeProjectModal({
 
                         <label className="block">
                           <span className="text-[11px] font-medium text-neutral-600 dark:text-zinc-400">
-                            仓库路径 (Repository Slug)
+                            {t('projectSettings.initRepoSlug', { defaultValue: '仓库路径 (Repository Slug)' })}
                           </span>
                           <input
                             type="text"
@@ -1086,7 +1088,7 @@ function InitializeProjectModal({
 
                       <div className="flex items-center gap-4">
                         <span className="text-[11px] font-medium text-neutral-600 dark:text-zinc-400">
-                          可见性:
+                          {t('projectSettings.initVisibility', { defaultValue: '可见性:' })}
                         </span>
                         <label className="flex items-center gap-1.5 cursor-pointer text-xs text-neutral-700 dark:text-zinc-300">
                           <input
@@ -1097,7 +1099,7 @@ function InitializeProjectModal({
                             onChange={() => setVisibility('private')}
                             className="size-3.5 text-sky-600 focus:ring-sky-500"
                           />
-                          <span>私有 (Private)</span>
+                          <span>{t('projectSettings.visPrivate', { defaultValue: '私有 (Private)' })}</span>
                         </label>
                         <label className="flex items-center gap-1.5 cursor-pointer text-xs text-neutral-700 dark:text-zinc-300">
                           <input
@@ -1108,7 +1110,7 @@ function InitializeProjectModal({
                             onChange={() => setVisibility('internal')}
                             className="size-3.5 text-sky-600 focus:ring-sky-500"
                           />
-                          <span>内部 (Internal)</span>
+                          <span>{t('projectSettings.visInternal', { defaultValue: '内部 (Internal)' })}</span>
                         </label>
                       </div>
                     </div>
@@ -1372,7 +1374,7 @@ function PromptEditor({ label, apiPath, initialContent }: { label: string; apiPa
       </div>
       {preview ? (
         <div className="prose-none max-h-[50vh] overflow-auto p-5 text-sm leading-relaxed text-neutral-800 dark:text-zinc-200">
-          <Markdown remarkPlugins={[remarkGfm]}>{value || '*（空）*'}</Markdown>
+          <Markdown remarkPlugins={[remarkGfm]}>{value || t('projectSettings.promptEmpty', { defaultValue: '*（空）*' })}</Markdown>
         </div>
       ) : (
         <textarea

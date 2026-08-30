@@ -653,17 +653,17 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
               <div className="rounded-lg border border-sky-100 bg-sky-50/40 p-3 dark:border-sky-950/60 dark:bg-sky-950/20">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold text-sky-900 dark:text-sky-300">
-                    🌿 Git 分支隔离与独立 Worktree
+                    {t('tasks.branchIsolationTitle', { defaultValue: '🌿 Git 分支隔离与独立 Worktree' })}
                   </span>
                   <span className="text-[11px] text-neutral-400 dark:text-zinc-500">
-                    自动隔离开发环境，多任务互不冲突
+                    {t('tasks.branchIsolationDesc', { defaultValue: '自动隔离开发环境，多任务互不冲突' })}
                   </span>
                 </div>
                 <div className="mt-2 flex items-center gap-2">
                   <div className="flex-1">
                     <div className="flex items-center justify-between">
-                      <label className="text-[11px] font-medium text-neutral-600 dark:text-zinc-400">Base 分支 (from)</label>
-                      <span className="text-[10px] text-sky-600 dark:text-sky-400">可搜索/选择</span>
+                      <label className="text-[11px] font-medium text-neutral-600 dark:text-zinc-400">{t('tasks.baseBranchLabel', { defaultValue: 'Base 分支 (from)' })}</label>
+                      <span className="text-[10px] text-sky-600 dark:text-sky-400">{t('tasks.branchSearchable', { defaultValue: '可搜索/选择' })}</span>
                     </div>
                     <BranchCombobox
                       value={baseBranch}
@@ -676,11 +676,11 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
                     ──►
                   </div>
                   <div className="flex-1">
-                    <label className="text-[11px] font-medium text-neutral-600 dark:text-zinc-400">特性分支 (to)</label>
+                    <label className="text-[11px] font-medium text-neutral-600 dark:text-zinc-400">{t('tasks.featureBranchLabel', { defaultValue: '特性分支 (to)' })}</label>
                     <input
                       value={branchName}
                       onChange={(e) => setBranchName(e.target.value)}
-                      placeholder="feature/task-name (留空自动生成)"
+                      placeholder={t('tasks.featureBranchPlaceholder', { defaultValue: 'feature/task-name (留空自动生成)' })}
                       className={cn(fieldCls, 'mt-0.5 font-mono text-xs')}
                     />
                   </div>
@@ -784,6 +784,7 @@ function BranchCombobox({
   branches: string[]
   fieldCls: string
 }) {
+  const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -830,11 +831,11 @@ function BranchCombobox({
       {open && (
         <div className="absolute left-0 top-full z-50 mt-1 max-h-52 w-full min-w-[200px] overflow-y-auto rounded-lg border border-neutral-200 bg-white py-1 shadow-xl dark:border-zinc-700 dark:bg-zinc-900 animate-scale-in">
           <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-neutral-400 dark:text-zinc-500">
-            可用分支 (Git Branches)
+            {t('tasks.availableBranches', { defaultValue: '可用分支 (Git Branches)' })}
           </div>
           {filtered.length === 0 ? (
             <div className="px-3 py-2 text-xs text-neutral-400 dark:text-zinc-500">
-              未找到匹配分支，将使用 <span className="font-mono text-sky-600 dark:text-sky-400">"{value}"</span>
+              {t('tasks.noBranchMatch', { value, defaultValue: '未找到匹配分支，将使用 "{{value}}"' })}
             </div>
           ) : (
             filtered.map((b) => {
