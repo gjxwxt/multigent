@@ -14,6 +14,7 @@ import {
   HardDrive,
   Laptop,
   Layers,
+  Loader2,
   Lock,
   RotateCw,
   Save,
@@ -197,6 +198,36 @@ function BasicInfoEditor({
   const [saved, setSaved] = useState(false)
   const [initModalOpen, setInitModalOpen] = useState(false)
   const [toastMessage, setToastMessage] = useState<string | null>(null)
+  const [initializationStatus, setInitializationStatus] = useState<ProjectInitializationStatus>({ status: 'loading' })
+
+  // Initialization is durable server state. Hydrate it when this page opens
+  // and keep the action label current while an existing run is executing.
+  useEffect(() => {
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+
+    const poll = async () => {
+      try {
+        const data = await apiFetch<ProjectInitializationStatus>(
+          `/api/v1/projects/${encodeURIComponent(projectId)}/initialization`,
+          { silentStatuses: [404] },
+        )
+        if (cancelled) return
+        setInitializationStatus(data)
+        if (isInitializationRunning(data.status)) {
+          timer = setTimeout(poll, 2500)
+        }
+      } catch {
+        if (!cancelled) setInitializationStatus({ status: 'idle' })
+      }
+    }
+
+    void poll()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [projectId])
 
   const save = useCallback(async () => {
     setSaving(true)
@@ -234,6 +265,16 @@ function BasicInfoEditor({
     onReload()
     setTimeout(() => setToastMessage(null), 6000)
   }
+
+  const initStatus = initializationStatus.status
+  const initRunning = isInitializationRunning(initStatus)
+  const initButtonLabel = initStatus === 'loading'
+    ? t('projectSettings.initCheckingStatus')
+    : initRunning
+      ? t('projectSettings.initInProgressButton')
+      : initStatus === 'failed'
+        ? t('projectSettings.initFailedButton')
+        : t('projectSettings.initWorkspace')
 
   return (
     <section className="rounded-lg border border-neutral-200/80 bg-white dark:border-zinc-700/60 dark:bg-zinc-900/40">
@@ -319,10 +360,17 @@ function BasicInfoEditor({
                   <button
                     type="button"
                     onClick={() => setInitModalOpen(true)}
-                    className="inline-flex items-center gap-1 rounded-md border border-neutral-200 bg-white px-2.5 py-1 text-xs font-medium text-neutral-700 hover:bg-neutral-50 hover:text-sky-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700 transition-colors shadow-2xs"
+                    className={cn(
+                      'inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors shadow-2xs',
+                      initRunning
+                        ? 'border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-300 dark:hover:bg-sky-950/70'
+                        : initStatus === 'failed'
+                          ? 'border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300 dark:hover:bg-amber-950/70'
+                          : 'border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50 hover:text-sky-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700'
+                    )}
                   >
-                    <RotateCw className="size-3" />
-                    <span>重新初始化</span>
+                    {initRunning ? <Loader2 className="size-3 animate-spin" /> : <RotateCw className="size-3" />}
+                    <span>{initRunning || initStatus === 'failed' ? initButtonLabel : t('projectSettings.reinitialize')}</span>
                   </button>
                   <button
                     type="button"
@@ -338,9 +386,15 @@ function BasicInfoEditor({
                 <button
                   type="button"
                   onClick={() => setInitModalOpen(true)}
-                  className="shrink-0 rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700 transition-colors shadow-xs"
+                  className={cn(
+                    'shrink-0 rounded-md px-3 py-1.5 text-xs font-medium text-white transition-colors shadow-xs',
+                    initRunning ? 'bg-sky-600 hover:bg-sky-700' : 'bg-sky-600 hover:bg-sky-700',
+                  )}
                 >
-                  {t('projectSettings.initWorkspace')}
+                  <span className="inline-flex items-center gap-1.5">
+                    {initRunning && <Loader2 className="size-3 animate-spin" />}
+                    {initRunning ? initButtonLabel : t('projectSettings.initWorkspace')}
+                  </span>
                 </button>
               )}
             </div>
@@ -395,6 +449,12 @@ function BasicInfoEditor({
         existingRemoteUrl={remoteUrl}
         existingCloneUrl={cloneUrl}
         existingDefaultBranch={defaultBranch}
+        existingInitializationTaskId={
+          initializationStatus.task?.id && initializationStatus.status !== 'completed'
+            ? initializationStatus.task.id
+            : undefined
+        }
+        existingInitializationStatus={initializationStatus.status}
         isOpen={initModalOpen}
         onClose={() => setInitModalOpen(false)}
         onSuccess={handleInitSuccess}
@@ -412,6 +472,21 @@ const TEMPLATES = [
   { id: 'blank', label: 'projectSettings.templateBlank', icon: FileText },
 ]
 
+type InitializationWorkflow = {
+  definition: { steps: Array<{ id: string; title: string }> }
+  run: { status: string; activeStepId?: string }
+  steps: Array<{ stepId: string; status: string; summary?: string }>
+}
+
+type ProjectInitializationStatus = {
+  status: string
+  task?: { id: string; status?: string; updatedAt?: string }
+}
+
+function isInitializationRunning(status?: string) {
+  return ['queued', 'active', 'pending', 'in_progress'].includes(status || '')
+}
+
 function InitializeProjectModal({
   projectId,
   currentDescription,
@@ -423,6 +498,8 @@ function InitializeProjectModal({
   existingRemoteUrl,
   existingCloneUrl,
   existingDefaultBranch,
+  existingInitializationTaskId,
+  existingInitializationStatus,
   isOpen,
   onClose,
   onSuccess,
@@ -437,6 +514,8 @@ function InitializeProjectModal({
   existingRemoteUrl?: string
   existingCloneUrl?: string
   existingDefaultBranch?: string
+  existingInitializationTaskId?: string
+  existingInitializationStatus?: string
   isOpen: boolean
   onClose: () => void
   onSuccess: (newRepo: string) => void
@@ -464,6 +543,10 @@ function InitializeProjectModal({
   const [agents, setAgents] = useState<Array<{ name: string; displayName?: string; model?: string }>>([])
   const [selectedAgent, setSelectedAgent] = useState<string>('')
   const [loadingAgents, setLoadingAgents] = useState(false)
+  const [initializationTaskId, setInitializationTaskId] = useState<string | null>(null)
+  const [initializationRepo, setInitializationRepo] = useState('')
+  const [initializationWorkflow, setInitializationWorkflow] = useState<InitializationWorkflow | null>(null)
+  const [initializationLoadError, setInitializationLoadError] = useState<string | null>(null)
 
   // Sync localPath, fetch agents & check GitLab connection status whenever modal opens
   useEffect(() => {
@@ -473,17 +556,21 @@ function InitializeProjectModal({
       setRepoSlug(projectId)
       setError(null)
       setLoadingAgents(true)
+      setInitializationTaskId(
+        existingInitializationTaskId && existingInitializationStatus !== 'completed'
+          ? existingInitializationTaskId
+          : null,
+      )
+      setInitializationRepo('')
+      setInitializationWorkflow(null)
+      setInitializationLoadError(null)
 
-      // A new project has no membership yet. Fall back to workspace agents;
-      // the submit step creates the project membership before the task.
+      // Initialization is project-scoped: only explicitly assigned project
+      // members may execute it. Never leak workspace-global agents here.
       apiFetch<Array<{ name?: string; displayName?: string; model?: string }>>(`/api/v1/projects/${encodeURIComponent(projectId)}/agents`)
         .then((projAgentsRes) => {
           const projList = Array.isArray(projAgentsRes) ? projAgentsRes : []
-          const availableWorkers = projList.filter((w) => w.name && w.model !== 'human')
-          if (availableWorkers.length > 0) return availableWorkers
-          return apiFetch<{ agents?: Array<{ name?: string; displayName?: string; model?: string }> }>('/api/v1/agents')
-            .then((workspaceAgentsRes) => (Array.isArray(workspaceAgentsRes?.agents) ? workspaceAgentsRes.agents : [])
-              .filter((w) => w.name && w.model !== 'human'))
+          return projList.filter((w) => w.name && w.model !== 'human')
         })
         .then((availableWorkers) => {
           setAgents(availableWorkers as Array<{ name: string; displayName?: string; model?: string }>)
@@ -521,6 +608,45 @@ function InitializeProjectModal({
         })
     }
   }, [isOpen, currentRepo, projectId, fallbackRepo])
+
+  // The initialization task owns the durable state. Polling is deliberately
+  // used here instead of a second socket protocol; the task follow page can
+  // take over with the same workflow data if this modal is closed.
+  useEffect(() => {
+    if (!isOpen || !initializationTaskId) return
+    let cancelled = false
+    let attempts = 0
+    let timer: ReturnType<typeof setTimeout> | undefined
+
+    const poll = async () => {
+      try {
+        const data = await apiFetch<InitializationWorkflow>(
+          `/api/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(initializationTaskId)}/workflow`,
+          { silentStatuses: [404] },
+        )
+        if (cancelled) return
+        attempts = 0
+        setInitializationWorkflow(data)
+        setInitializationLoadError(null)
+        if (!['completed', 'failed', 'cancelled'].includes(data.run.status)) {
+          timer = setTimeout(poll, 1500)
+        }
+      } catch (err) {
+        if (cancelled) return
+        attempts += 1
+        if (attempts >= 5) {
+          setInitializationLoadError(err instanceof Error ? err.message : String(err))
+        }
+        timer = setTimeout(poll, 1500)
+      }
+    }
+
+    void poll()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [initializationTaskId, isOpen, projectId])
 
   if (!isOpen) return null
 
@@ -611,9 +737,8 @@ function InitializeProjectModal({
       // server writes its fixed files before the Agent task starts; the Agent
       // then installs dependencies, verifies the result and handles Git.
       const deterministicTemplate = activeTab === 'create_new' && useTemplate && selectedTemplate === 'react_go_fullstack'
-      let templateReport: { templateId: string; templateVersion: string; templateDigest: string } | null = null
       if (deterministicTemplate) {
-        templateReport = await apiPost<{ templateId: string; templateVersion: string; templateDigest: string }>(
+        await apiPost<{ templateId: string; templateVersion: string; templateDigest: string }>(
           `/api/v1/projects/${encodeURIComponent(projectId)}/initialize-template`,
           { repo: targetRepo, templateId: selectedTemplate, agent: selectedAgent },
         )
@@ -622,57 +747,84 @@ function InitializeProjectModal({
       // 3. Prepare task payload & dispatch
       let taskTitle = ''
       let taskPrompt = ''
+      const cleanCloneUrl = remoteMetadata.cloneUrl
 
       if (activeTab === 'bind_existing') {
         if (existingType === 'remote') {
-          const url = remoteUrl.trim() || 'git@gitlab.internal:group/repo.git'
           taskTitle = `【工程初始化】克隆远程仓库并检查就绪`
-          taskPrompt = `请使用配置好的 Git SSH 凭据或 GitLab 访问令牌，在项目工作区目录 (${targetRepo}) 中克隆远程仓库 "${url}"。\n\n克隆完成后：\n1. 检查工程目录结构与分支信息；\n2. 安装项目依赖（如 npm install / go mod download 等）；\n3. 执行一次语法或单测检查；\n4. 输出初始化就绪报告，说明工程已就绪可开始后续任务。`
         } else {
           taskTitle = `【工程初始化】绑定并校验本地工作区`
-          taskPrompt = `项目工作区已绑定到本地路径 "${targetRepo}"。\n\n请进入该目录：\n1. 检查现有代码结构与 Git 状态；\n2. 确认开发环境与依赖就绪情况；\n3. 输出环境健康检查报告。`
         }
       } else {
         // Create new
         const tpl = TEMPLATES.find((x) => x.id === selectedTemplate)
         const tplName = (useTemplate && tpl) ? t(tpl.label) : '基础空白'
 
-        const cleanCloneUrl = remoteMetadata.cloneUrl
-        const templateReadySteps = templateReport
-          ? `模板已由系统确定性生成（${templateReport.templateId} v${templateReport.templateVersion}，摘要 ${templateReport.templateDigest.slice(0, 12)}）。不要重写基础骨架，先执行：
-1. make doctor；
-2. cd web && npm install（没有 package-lock.json 时）并执行 npm run build；
-3. cd server && go test ./...；
-4. 检查 .multigent/runtime.json、前端 /api 代理和 server/api/health 是否一致。
-`
-          : ''
         if (cleanCloneUrl) {
           taskTitle = `【工程初始化】构建 ${tplName} 脚手架并首推远程 GitLab`
-          taskPrompt = `请在当前任务工作区完成 "${tplName}" 工程初始化并首次推送到远程 GitLab 仓库。不要访问或假设宿主机路径；执行命令时以当前目录为准，平台已在任务工作区注入确定性模板。\n\n${templateReadySteps}如果模板尚未由系统生成，再补齐缺失的工程文件；不要覆盖已有用户文件。然后：\n1. 使用系统已注入的 GitLab credential helper 配置远程仓库并推送（禁止把 Token 写入 URL）：\n   git remote add origin "${cleanCloneUrl}" || git remote set-url origin "${cleanCloneUrl}"\n   git branch -M main\n   git add .\n   git commit -m "chore: initial ${tplName} scaffold"\n   git push -u origin main\n2. 输出初始化完成报告，列出目录架构、验证结果与启动命令。`
         } else {
           taskTitle = `【工程初始化】构建 ${tplName} 模板脚手架`
-          taskPrompt = `请在当前任务工作区完成 "${tplName}" 工程初始化。不要访问或假设宿主机路径；执行命令时以当前目录为准，平台已在任务工作区注入确定性模板。\n\n${templateReadySteps}如果模板尚未由系统生成，再补齐缺失的工程文件；不要覆盖已有用户文件。然后：\n1. 初始化 Git 仓库并创建首个提交；\n2. 执行基础测试与构建，确保工程可一键启动；\n3. 输出初始化完成报告，列出目录架构、验证结果与启动命令。`
         }
       }
 
-      // 4. Create and directly start initialization task
-      await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks`, {
+      // 4. Create and directly start the persisted initialization workflow.
+      const initializationRequest = [
+        `mode=${activeTab === 'bind_existing' ? `bind_${existingType}` : 'create_new'}`,
+        `repo=${targetRepo}`,
+        `template=${activeTab === 'create_new' && useTemplate ? selectedTemplate : 'none'}`,
+        `remote=${(activeTab === 'bind_existing' && existingType === 'remote' ? remoteUrl.trim() : cleanCloneUrl) || 'none'}`,
+      ].join('; ')
+      // Keep the root prompt as context only. The workflow step descriptions
+      // are the executable contract; repeating the whole procedure here
+      // would encourage the agent to skip the persisted stage boundaries.
+      taskPrompt = `initialization_request: ${initializationRequest}\n\n请按 Project Initialization 工作流逐阶段执行当前初始化任务。只完成当前阶段并使用 workflow step done 汇报结构化结果；不要跳过失败阶段或把未验证的状态报告为完成。`
+
+      const createdTask = await apiPost<{ id: string }>(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks`, {
         agent: selectedAgent,
         title: taskTitle,
         description: `自动化工程初始化 (${activeTab === 'bind_existing' ? '已有仓库' : '从零新建'})`,
         prompt: taskPrompt,
         type: 'chore',
         priority: 3,
+        labels: ['project-initialization'],
+        workflowDefinitionId: 'project-initialization-v1',
+        workflowActorBindings: {
+          'project-initializer': { type: 'agent', id: selectedAgent },
+        },
+        vars: {
+          initialization_mode: activeTab === 'bind_existing' ? `bind_${existingType}` : 'create_new',
+          initialization_repo: targetRepo,
+          initialization_template: activeTab === 'create_new' && useTemplate ? selectedTemplate : 'none',
+        },
         autoStart: true,
       })
 
+      if (!createdTask?.id) throw new Error('初始化任务创建成功但未返回任务 ID')
+      setInitializationRepo(targetRepo)
+      setInitializationTaskId(createdTask.id)
       showToast(t('projectSettings.initSuccess', { defaultValue: '工程初始化任务已创建并启动！' }), 'success')
-      onSuccess(targetRepo)
-      navigate(`/projects/${encodeURIComponent(projectId)}/tasks`)
     } catch (err) {
       setError(err instanceof ApiError && err.serverMessage
         ? err.serverMessage
         : err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function retryInitialization() {
+    if (!initializationTaskId) return
+    setBusy(true)
+    setInitializationLoadError(null)
+    try {
+      await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(initializationTaskId)}/start`, {}, { suppressToast: true })
+      setInitializationWorkflow((current) => current ? {
+        ...current,
+        run: { ...current.run, status: 'active' },
+        steps: current.steps.map((step) => step.stepId === current.run.activeStepId ? { ...step, status: 'pending', summary: '' } : step),
+      } : current)
+    } catch (err) {
+      setInitializationLoadError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
@@ -699,6 +851,7 @@ function InitializeProjectModal({
           <button
             type="button"
             onClick={onClose}
+            disabled={Boolean(initializationTaskId && !['completed', 'failed', 'cancelled'].includes(initializationWorkflow?.run.status || ''))}
             className="rounded-lg p-1.5 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
           >
             <X className="size-4" />
@@ -737,6 +890,14 @@ function InitializeProjectModal({
 
         {/* Modal Body */}
         <div className="space-y-4 px-6 py-5">
+          {initializationTaskId ? (
+            <InitializationProgress
+              workflow={initializationWorkflow}
+              loadError={initializationLoadError}
+              taskId={initializationTaskId}
+              onViewTask={() => navigate(`/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(initializationTaskId)}/follow`)}
+            />
+          ) : <>
           {error && (
             <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300">
               {error}
@@ -996,10 +1157,20 @@ function InitializeProjectModal({
               </select>
             </div>
           )}
+          </>}
         </div>
 
         {/* Footer */}
         <div className="flex items-center justify-end gap-2.5 border-t border-neutral-100 bg-neutral-50/50 px-6 py-3.5 dark:border-zinc-800 dark:bg-zinc-950/30">
+          {initializationTaskId ? (
+            <InitializationProgressActions
+              workflow={initializationWorkflow}
+              busy={busy}
+              onClose={() => onSuccess(initializationRepo || localPath.trim() || fallbackRepo)}
+              onRetry={() => void retryInitialization()}
+              onViewTask={() => navigate(`/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(initializationTaskId)}/follow`)}
+            />
+          ) : <>
           <button
             type="button"
             onClick={onClose}
@@ -1022,9 +1193,118 @@ function InitializeProjectModal({
                 : t('projectSettings.confirmInit')}
             </span>
           </button>
+          </>}
         </div>
       </div>
     </div>
+  )
+}
+
+function InitializationProgress({
+  workflow,
+  loadError,
+  taskId,
+  onViewTask,
+}: {
+  workflow: InitializationWorkflow | null
+  loadError: string | null
+  taskId: string
+  onViewTask: () => void
+}) {
+  const { t } = useTranslation()
+  const fallbackSteps = [
+    { id: 'prepare', title: t('projectSettings.initStepPrepare') },
+    { id: 'dependencies', title: t('projectSettings.initStepDependencies') },
+    { id: 'verify', title: t('projectSettings.initStepVerify') },
+    { id: 'health', title: t('projectSettings.initStepHealth') },
+    { id: 'sync', title: t('projectSettings.initStepSync') },
+  ]
+  const steps = (workflow?.definition.steps ?? fallbackSteps).map((step) => ({
+    ...step,
+    title: t(`projectSettings.initStep${step.id.charAt(0).toUpperCase()}${step.id.slice(1)}`, { defaultValue: step.title }),
+  }))
+  const statusFor = (stepID: string) => {
+    const status = workflow?.steps.find((step) => step.stepId === stepID)?.status
+    if (status === 'completed' || status === 'success') return 'completed'
+    if (status === 'failed' || status === 'done_failed') return 'failed'
+    if (workflow?.run.activeStepId === stepID) return 'running'
+    return status || 'pending'
+  }
+  const runStatus = workflow?.run.status || 'queued'
+  const failed = runStatus === 'failed' || steps.some((step) => statusFor(step.id) === 'failed')
+  const completed = runStatus === 'completed'
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold text-neutral-900 dark:text-zinc-100">
+            {completed ? t('projectSettings.initCompleted') : failed ? t('projectSettings.initFailed') : t('projectSettings.initRunning')}
+          </h3>
+          <p className="mt-1 text-[11px] text-neutral-500 dark:text-zinc-400">{t('projectSettings.initTaskId', { id: taskId })}</p>
+        </div>
+        <span className={cn(
+          'rounded-full px-2.5 py-1 text-[10px] font-semibold',
+          completed ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300' :
+            failed ? 'bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-300' :
+              'bg-sky-100 text-sky-700 dark:bg-sky-950/50 dark:text-sky-300',
+        )}>
+          {completed ? t('projectSettings.initStatusCompleted') : failed ? t('projectSettings.initStatusFailed') : t('projectSettings.initStatusRunning')}
+        </span>
+      </div>
+
+      <div className="rounded-lg border border-neutral-200 bg-neutral-50/70 p-3 dark:border-zinc-700 dark:bg-zinc-950/40">
+        <ol className="space-y-2.5">
+          {steps.map((step) => {
+            const status = statusFor(step.id)
+            return (
+              <li key={step.id} className="flex items-center gap-2.5 text-xs">
+                {status === 'completed' ? <CheckCircle2 className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                  : status === 'running' || status === 'in_progress' ? <Loader2 className="size-4 shrink-0 animate-spin text-sky-600 dark:text-sky-400" />
+                    : status === 'failed' ? <AlertTriangle className="size-4 shrink-0 text-red-600 dark:text-red-400" />
+                      : <span className="size-4 shrink-0 rounded-full border border-neutral-300 dark:border-zinc-600" />}
+                <span className={cn(
+                  status === 'completed' && 'text-emerald-700 dark:text-emerald-300',
+                  (status === 'running' || status === 'in_progress') && 'font-semibold text-sky-700 dark:text-sky-300',
+                  status === 'failed' && 'font-semibold text-red-700 dark:text-red-300',
+                  !['completed', 'running', 'in_progress', 'failed'].includes(status) && 'text-neutral-500 dark:text-zinc-500',
+                )}>{step.title}</span>
+                {status === 'failed' && <span className="ml-auto text-[10px] text-red-600 dark:text-red-400">{t('projectSettings.initNeedsRetry')}</span>}
+              </li>
+            )
+          })}
+        </ol>
+      </div>
+
+      {loadError && !workflow && <p className="text-[11px] text-amber-700 dark:text-amber-300">{t('projectSettings.initProgressUnavailable', { error: loadError })}</p>}
+      {failed && workflow && <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-[11px] leading-relaxed text-red-800 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300">{t('projectSettings.initFailureHint')}</div>}
+      {!workflow && !loadError && <p className="text-center text-xs text-neutral-500 dark:text-zinc-400">{t('projectSettings.initProgressLoading')}</p>}
+      {(completed || failed) && <button type="button" onClick={onViewTask} className="text-xs font-medium text-sky-600 hover:underline dark:text-sky-400">{t('projectSettings.initViewTask')}</button>}
+    </div>
+  )
+}
+
+function InitializationProgressActions({
+  workflow,
+  busy,
+  onClose,
+  onRetry,
+  onViewTask,
+}: {
+  workflow: InitializationWorkflow | null
+  busy: boolean
+  onClose: () => void
+  onRetry: () => void
+  onViewTask: () => void
+}) {
+  const { t } = useTranslation()
+  const terminal = workflow && ['completed', 'failed', 'cancelled'].includes(workflow.run.status)
+  return (
+    <>
+      <button type="button" onClick={onViewTask} className="rounded-lg border border-neutral-200 bg-white px-3.5 py-1.5 text-xs font-medium text-neutral-700 hover:bg-neutral-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800">{t('projectSettings.initViewTask')}</button>
+      {terminal && workflow.run.status !== 'completed' && <button type="button" onClick={onRetry} disabled={busy} className="rounded-lg bg-amber-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-amber-700 disabled:opacity-50">{busy ? t('projectSettings.initRetrying') : t('projectSettings.initRetry')}</button>}
+      {terminal && workflow.run.status === 'completed' && <button type="button" onClick={onClose} className="rounded-lg bg-sky-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-sky-700">{t('common.close')}</button>}
+    </>
   )
 }
 

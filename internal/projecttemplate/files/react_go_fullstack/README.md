@@ -10,6 +10,8 @@
 
 ```bash
 make doctor
+make install
+make verify
 make dev
 ```
 
@@ -18,8 +20,8 @@ make dev
 ## 验证
 
 ```bash
-make test
+make verify
 curl http://127.0.0.1:8080/api/health
 ```
 
-初始化任务会在这个骨架上安装依赖、执行测试与构建，并负责初始化 Git 和同步远程仓库。不要把 Token 写入 remote URL 或提交到仓库。
+初始化任务会按平台的 Project Initialization 流程执行依赖安装、测试、构建、健康检查、Git 初始化和远程同步。不要把 Token 写入 remote URL 或提交到仓库。

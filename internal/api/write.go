@@ -254,6 +254,12 @@ func (s *Server) createProjectTaskFromBody(w http.ResponseWriter, r *http.Reques
 		if !ok {
 			return
 		}
+		if workflowID == workflowstore.ProjectInitializationWorkflowID {
+			if err := wfStore.EnsureProjectInitializationDefinition(); err != nil {
+				s.serverError(w, err)
+				return
+			}
+		}
 		workflowStore = wfStore
 		def, found, err := wfStore.Definition(workflowID)
 		if err != nil {

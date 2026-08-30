@@ -844,6 +844,34 @@ func (s *Server) reconcileWorkflowTaskBeforeManualStart(workspaceID, project, ta
 	if err != nil || !found || strings.TrimSpace(run.ActiveStepID) == "" || strings.TrimSpace(run.Status) == "completed" {
 		return err
 	}
+	if run.DefinitionID == workflowstore.ProjectInitializationWorkflowID && run.Status == "failed" {
+		steps, err := wfStore.ListStepInstances(run.ID)
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		for i := range steps {
+			if steps[i].StepID != run.ActiveStepID {
+				continue
+			}
+			steps[i].Status = "pending"
+			steps[i].Summary = ""
+			steps[i].OutputArtifact = ""
+			steps[i].OutputValues = nil
+			steps[i].StartedAt = time.Time{}
+			steps[i].FinishedAt = time.Time{}
+			steps[i].UpdatedAt = now
+			if err := wfStore.SaveStepInstance(&steps[i]); err != nil {
+				return err
+			}
+			break
+		}
+		run.Status = "active"
+		run.UpdatedAt = now
+		if err := wfStore.SaveRun(&run); err != nil {
+			return err
+		}
+	}
 	def, found, err := wfStore.RunDefinition(run)
 	if err != nil || !found {
 		return err

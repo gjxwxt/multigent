@@ -72,7 +72,7 @@ func (s *Store) SeedDefaults() error {
 	if def, ok, err := s.Definition("software-delivery-v1"); err != nil {
 		return err
 	} else if ok && def.Scope == "workspace" && def.Project == "" && def.Version >= 5 && def.StartStepID == "requirement_draft" {
-		return nil
+		return s.EnsureProjectInitializationDefinition()
 	}
 	now := time.Now().UTC()
 	def := entity.WorkflowDefinition{
@@ -248,6 +248,56 @@ func (s *Store) SeedDefaults() error {
 			edge("e-qa-review-approve", "qa_review", "release", "approved", cond("decision", "eq", "approve"), map[string]string{"release_candidate": "$output.release_candidate"}, false),
 			edge("e-qa-review-rework", "qa_review", "qa", "changes requested", cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "previous_report": "$input.test_report"}, false),
 		},
+	}
+	if err := s.SaveDefinition(&def); err != nil {
+		return err
+	}
+	return s.EnsureProjectInitializationDefinition()
+}
+
+const ProjectInitializationWorkflowID = "project-initialization-v1"
+
+// EnsureProjectInitializationDefinition installs the fixed initialization
+// pipeline once. It is intentionally a normal workflow definition so the
+// existing task/runtime/workflow machinery provides persistence, retries and
+// progress visibility without a second execution engine.
+func (s *Store) EnsureProjectInitializationDefinition() error {
+	if _, ok, err := s.Definition(ProjectInitializationWorkflowID); err != nil {
+		return err
+	} else if ok {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	step := func(id, title, description string, x int) entity.WorkflowStep {
+		return entity.WorkflowStep{
+			ID: id, Type: "agent_task", Title: title, Description: description,
+			ActorRole:    "project-initializer",
+			InputFields:  []entity.WorkflowField{{Name: "initialization_request", Description: "Initialization mode, repository path, template and remote synchronization requirements."}},
+			OutputFields: []entity.WorkflowField{{Name: "result", Description: "What was executed, verification evidence, and any remaining limitation."}},
+			Position:     entity.WorkflowPosition{X: x, Y: 180},
+			Config:       map[string]string{"color": "sky"},
+		}
+	}
+	def := entity.WorkflowDefinition{
+		ID:          ProjectInitializationWorkflowID,
+		Name:        "Project Initialization",
+		Description: "Deterministic project initialization: prepare the workspace, install dependencies, verify build and health, then commit and synchronize the remote repository.",
+		Version:     1, Scope: "workspace", StartStepID: "prepare",
+		Steps: []entity.WorkflowStep{
+			step("prepare", "Prepare Workspace", "Follow the initialization request exactly. For a remote existing repository, clone or fetch the requested branch into the project workspace. For a system-materialized template, verify the expected files and never overwrite user files. Record the resolved repository and revision.", 80),
+			step("dependencies", "Install Dependencies", "Run the repository's deterministic dependency preparation command when present (for the standard fullstack template: `timeout 180s make install`; otherwise use the package manifests). Use bounded network timeouts, preserve caches, and report the exact command and result.", 360),
+			step("verify", "Build and Verify", "Run the repository's deterministic verification command (for the standard fullstack template: `make verify`). Confirm frontend build, backend tests, and the declared runtime contract. Do not claim readiness from a partial command.", 640),
+			step("health", "Check Runtime Health", "Start the declared backend/frontend entrypoints only as needed and verify the configured health endpoint. Confirm the preview contract can reach the backend through the frontend path. Stop any temporary processes after the check.", 920),
+			step("sync", "Commit and Synchronize", "Create or update the initial Git commit, then push the configured default branch when a remote is present. Never put credentials in a remote URL. If synchronization fails, preserve the local commit and report a retryable error.", 1200),
+		},
+		Edges: []entity.WorkflowEdge{
+			edge("e-prepare-dependencies", "prepare", "dependencies", "", nil, nil, true),
+			edge("e-dependencies-verify", "dependencies", "verify", "", nil, nil, true),
+			edge("e-verify-health", "verify", "health", "", nil, nil, true),
+			edge("e-health-sync", "health", "sync", "", nil, nil, true),
+		},
+		CreatedAt: now, UpdatedAt: now,
 	}
 	return s.SaveDefinition(&def)
 }
@@ -1705,6 +1755,45 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 	if err != nil {
 		return result, err
 	}
+	if strings.TrimSpace(status) == "failed" && run.DefinitionID == ProjectInitializationWorkflowID {
+		// Initialization failures are retryable infrastructure/project-state
+		// failures. Keep the active step and the workflow run addressable so a
+		// later manual start resumes this exact stage instead of skipping it.
+		now := time.Now().UTC()
+		for i := range instances {
+			if instances[i].StepID != run.ActiveStepID {
+				continue
+			}
+			instances[i].Summary = strings.TrimSpace(summary)
+			instances[i].OutputArtifact = workflowValuesJSON(values)
+			instances[i].OutputValues = values
+			instances[i].Status = "failed"
+			instances[i].FinishedAt = now
+			instances[i].UpdatedAt = now
+			if err := s.SaveStepInstance(&instances[i]); err != nil {
+				return result, err
+			}
+			_ = s.SaveStepEvent(&entity.WorkflowStepEvent{
+				RunID: instances[i].RunID, StepID: instances[i].StepID, Status: "failed",
+				ActorType: instances[i].ActorType, ActorID: instances[i].ActorID,
+				Summary: instances[i].Summary, StartedAt: instances[i].StartedAt,
+				FinishedAt: now, InputArtifact: instances[i].InputArtifact,
+				OutputArtifact: instances[i].OutputArtifact, InputValues: instances[i].InputValues,
+				OutputValues: instances[i].OutputValues, CreatedAt: now,
+			})
+			result.Current = instances[i]
+			result.Next = &currentStep
+			result.NextInst = &instances[i]
+			break
+		}
+		run.Status = "failed"
+		run.UpdatedAt = now
+		if err := s.SaveRun(&run); err != nil {
+			return result, err
+		}
+		result.Run = run
+		return result, nil
+	}
 	output = workflowValuesJSON(values)
 	if strings.TrimSpace(summary) == "" {
 		summary = workflowSummaryFromValues(values)
@@ -1781,6 +1870,7 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 		return result, nil
 	}
 	run.ActiveStepID = nextStep.ID
+	run.Status = "active"
 	s.annotateRunCurrentAssignee(&run, nextStep)
 	run.UpdatedAt = now
 	if err := s.SaveRun(&run); err != nil {

@@ -393,6 +393,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks", s.handlePostProjectTask)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/from-template", s.handlePostProjectTaskFromTemplate)
 	mux.HandleFunc("POST /api/v1/projects/{name}/initialize-template", s.handleInitializeProjectTemplate)
+	mux.HandleFunc("GET /api/v1/projects/{name}/initialization", s.handleGetProjectInitialization)
 	mux.HandleFunc("POST /api/v1/projects/{name}/agents/{agent}/crons/{cronId}/pause", s.handlePostCronPause)
 	mux.HandleFunc("POST /api/v1/projects/{name}/agents/{agent}/crons/{cronId}/resume", s.handlePostCronResume)
 	mux.HandleFunc("PUT /api/v1/projects/{name}/agents/{agent}/crons/{cronId}", s.handlePutCron)

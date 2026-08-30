@@ -178,6 +178,61 @@ func TestSeededSoftwareDeliveryHasPRReviewLoop(t *testing.T) {
 			t.Fatalf("expected seeded step %q", id)
 		}
 	}
+	initDef, ok, err := store.Definition(ProjectInitializationWorkflowID)
+	if err != nil || !ok {
+		t.Fatalf("load initialization workflow: ok=%v err=%v", ok, err)
+	}
+	if len(initDef.Steps) != 5 || initDef.StartStepID != "prepare" {
+		t.Fatalf("unexpected initialization workflow: %#v", initDef)
+	}
+}
+
+func TestProjectInitializationFailureStaysRetryable(t *testing.T) {
+	controlDB, err := db.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer controlDB.Close()
+	if err := controlDB.UpsertWorkspace(db.Workspace{ID: "workspace-init", Name: "Workspace", Slug: "workspace-init", Root: t.TempDir()}); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+
+	store := NewStore(controlDB, "workspace-init")
+	now := time.Now().UTC()
+	def := &entity.WorkflowDefinition{
+		ID: ProjectInitializationWorkflowID, Name: "Project Initialization", Version: 1,
+		Scope: "workspace", StartStepID: "prepare",
+		Steps: []entity.WorkflowStep{
+			{ID: "prepare", Type: "agent_task", Title: "Prepare", ActorRole: "project-initializer", OutputFields: []entity.WorkflowField{{Name: "result"}}},
+			{ID: "verify", Type: "agent_task", Title: "Verify", ActorRole: "project-initializer", OutputFields: []entity.WorkflowField{{Name: "result"}}},
+		},
+		Edges:     []entity.WorkflowEdge{{ID: "next", From: "prepare", To: "verify", IsDefault: true}},
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.SaveDefinition(def); err != nil {
+		t.Fatalf("save definition: %v", err)
+	}
+	if _, _, err := store.StartRun("project", "task-init", def.ID, map[string]entity.WorkflowActorBinding{
+		"project-initializer": {Type: "agent", ID: "lina"},
+	}); err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+
+	failed, err := store.CompleteAndAdvance("project", "task-init", "network unavailable", "", nil, "failed")
+	if err != nil {
+		t.Fatalf("complete failed step: %v", err)
+	}
+	if failed.Done || failed.Next == nil || failed.Run.Status != "failed" || failed.Run.ActiveStepID != "prepare" {
+		t.Fatalf("failure should remain retryable at prepare: %#v", failed)
+	}
+	steps, err := store.ListStepInstances(failed.Run.ID)
+	if err != nil {
+		t.Fatalf("list steps: %v", err)
+	}
+	prepare, ok := workflowStepInstanceByIDForTest(steps, "prepare")
+	if !ok || prepare.Status != "failed" {
+		t.Fatalf("expected failed prepare step, got %#v", prepare)
+	}
 }
 
 func TestWorkflowActorBindingPrefersStepIDOverRole(t *testing.T) {

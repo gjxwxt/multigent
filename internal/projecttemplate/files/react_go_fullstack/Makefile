@@ -1,9 +1,17 @@
-.PHONY: dev test build doctor
+.PHONY: dev install test verify build doctor
 
 dev:
 	@trap 'kill 0' EXIT; (cd server && PORT=8080 go run .) & (cd web && npm run dev -- --host 0.0.0.0 --port 27891) & wait
 
+install:
+	@if [ -f web/package-lock.json ]; then cd web && npm ci; else cd web && npm install; fi
+	cd server && go mod download
+
 test:
+	cd server && go test ./...
+	cd web && npm run build
+
+verify: doctor
 	cd server && go test ./...
 	cd web && npm run build
 

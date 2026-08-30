@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/projecttemplate"
+	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
 
 func TestInitializeProjectTemplateMaterializesAndRecordsMetadata(t *testing.T) {
@@ -71,5 +73,51 @@ func TestInitializeProjectTemplateDoesNotOverwriteExistingRepository(t *testing.
 	}
 	if _, err := os.Stat(filepath.Join(repo, "keep.txt")); err != nil {
 		t.Fatalf("existing file should remain: %v", err)
+	}
+}
+
+func TestGetProjectInitializationReturnsLatestDurableRun(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	seedAgentWorkerForTest(t, s, workspaceID, "sample", "pm")
+	if err := workflowstore.NewStore(s.controlDB, workspaceID).EnsureProjectInitializationDefinition(); err != nil {
+		t.Fatalf("ensure initialization workflow: %v", err)
+	}
+
+	now := time.Now().UTC()
+	task := &entity.Task{
+		ID:        "t-init-status",
+		Title:     "Initialize sample",
+		Prompt:    "initialization_request: mode=create_new",
+		Type:      entity.TaskTypeChore,
+		Priority:  3,
+		Assignee:  "sample/pm",
+		Status:    entity.TaskStatusInProgress,
+		Labels:    []string{"project-initialization"},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := s.ts.AddTask("sample", "pm", task); err != nil {
+		t.Fatalf("add initialization task: %v", err)
+	}
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	if _, _, err := wfStore.StartRun("sample", task.ID, workflowstore.ProjectInitializationWorkflowID, map[string]entity.WorkflowActorBinding{
+		"project-initializer": {Type: "agent", ID: "pm"},
+	}); err != nil {
+		t.Fatalf("start initialization workflow: %v", err)
+	}
+
+	req := providerTestRequest(http.MethodGet, "/api/v1/projects/sample/initialization", "admin", nil)
+	req.SetPathValue("name", "sample")
+	rec := httptest.NewRecorder()
+	s.handleGetProjectInitialization(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var got projectInitializationStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if got.Status != "active" || got.Task == nil || got.Task.ID != task.ID {
+		t.Fatalf("unexpected initialization status: %#v", got)
 	}
 }

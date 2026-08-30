@@ -336,7 +336,7 @@ func (s *Server) workflowDocTitles() map[string]string {
 }
 
 func (s *Server) reconcileActiveWorkflowTaskQueue(workspaceID, project, taskID string, run entity.WorkflowRun, def entity.WorkflowDefinition, steps []entity.WorkflowStepInstance, r *http.Request) error {
-	if s == nil || strings.TrimSpace(run.ActiveStepID) == "" || strings.TrimSpace(run.Status) == "completed" {
+	if s == nil || strings.TrimSpace(run.ActiveStepID) == "" || strings.TrimSpace(run.Status) == "completed" || strings.TrimSpace(run.Status) == "failed" || strings.TrimSpace(run.Status) == "cancelled" {
 		return nil
 	}
 	inst, ok := workflowStepInstanceByStepID(steps, run.ActiveStepID)

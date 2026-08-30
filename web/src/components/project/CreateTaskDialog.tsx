@@ -692,7 +692,7 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
                   <span className="text-neutral-600 dark:text-zinc-400">{t('workflows.taskWorkflow')}</span>
                   <select value={workflowDefinitionId} onChange={(e) => onWorkflowChange(e.target.value)} className={fieldCls}>
                     <option value="">{t('workflows.noWorkflow')}</option>
-                    {workflows.map((wf) => <option key={wf.id} value={wf.id}>{wf.name}</option>)}
+                    {workflows.filter((wf) => wf.id !== 'project-initialization-v1').map((wf) => <option key={wf.id} value={wf.id}>{wf.name}</option>)}
                   </select>
                   <p className="mt-0.5 text-xs text-neutral-400 dark:text-zinc-500">{t('workflows.taskWorkflowHint')}</p>
                 </label>
