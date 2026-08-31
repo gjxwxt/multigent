@@ -178,6 +178,11 @@ func logDockerReadiness() {
 	}
 	image := sandbox.DefaultBaseImage()
 	log.Printf("Docker sandbox ready. First agent run may pull runtime image %s and take a few minutes.", image)
+	// Sandboxes run as the server user on Linux; Docker initializes the named
+	// cache volumes with root-owned contents, so hand them over once per start.
+	if err := sandbox.EnsureVolumeOwnership(image); err != nil {
+		log.Printf("warning: could not normalize sandbox cache volume ownership (agent CLI installs may fail): %v", err)
+	}
 }
 
 // newSPAHandler wraps the API handler with an SPA file server.

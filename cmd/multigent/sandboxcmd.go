@@ -229,6 +229,9 @@ func newSandboxPrepareCmd() *cobra.Command {
 					return fmt.Errorf("pull runtime image: %w", err)
 				}
 			}
+			if err := sandbox.EnsureVolumeOwnership(image); err != nil {
+				fmt.Printf("warning: cache volume ownership normalization skipped: %v\n", err)
+			}
 
 			if skipCLIs {
 				fmt.Println("\nSkipping agent CLI toolchain warmup.")

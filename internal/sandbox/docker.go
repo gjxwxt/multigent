@@ -94,11 +94,9 @@ func BuildArgs(agentDir string, model entity.AgentModel, cfg *entity.DockerSandb
 	// no longer fetch, branch, or clean up after a run. On Linux hosts we run
 	// the container under the server's own uid/gid instead. Opt out with
 	// run_as_host_user: false in the agent's sandbox config.
-	if runAsHostUser(cfg) {
-		args = append(args,
-			"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
-			"-e", "HOME=/tmp/multigent-home",
-		)
+	hostUser := runAsHostUser(cfg)
+	if hostUser {
+		args = append(args, "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
 	}
 
 	// ── Image ────────────────────────────────────────────────────────────────
@@ -161,7 +159,7 @@ func BuildArgs(agentDir string, model entity.AgentModel, cfg *entity.DockerSandb
 	if isWorkspaceRoot(workspaceRoot) {
 		if fi, err := os.Stat(binHostDir); err == nil && fi.IsDir() {
 			args = append(args, "-v", binHostDir+":"+UserBin)
-			args = append(args, "-e", "PATH="+UserBin+":"+ContainerDefaultPATH)
+			args = append(args, "-e", "PATH="+UserBin+":"+containerPATHForHostUser(ContainerDefaultPATH, hostUser))
 		}
 	}
 
@@ -171,7 +169,7 @@ func BuildArgs(agentDir string, model entity.AgentModel, cfg *entity.DockerSandb
 		expanded := expandTilde(m)
 		hostPath := strings.SplitN(expanded, ":", 2)[0]
 		if ensureRuntimeMountPath(hostPath) == nil {
-			args = append(args, "-v", expanded)
+			args = append(args, "-v", remapHostUserMount(expanded, hostUser))
 		}
 	}
 
@@ -202,7 +200,7 @@ func BuildArgs(agentDir string, model entity.AgentModel, cfg *entity.DockerSandb
 	// ── Extra volumes ────────────────────────────────────────────────────────
 	if cfg != nil {
 		for _, v := range cfg.ExtraVolumes {
-			args = append(args, "-v", expandTilde(v))
+			args = append(args, "-v", remapHostUserMount(expandTilde(v), hostUser))
 		}
 	}
 
@@ -229,8 +227,25 @@ func BuildArgs(agentDir string, model entity.AgentModel, cfg *entity.DockerSandb
 	// 3. ExtraEnv supports both "KEY" (inherit) and "KEY=VALUE" (explicit).
 	if cfg != nil {
 		for _, kv := range cfg.ExtraEnv {
+			if strings.HasPrefix(kv, "PATH=") {
+				kv = "PATH=" + containerPATHForHostUser(strings.TrimPrefix(kv, "PATH="), hostUser)
+			}
 			args = append(args, "-e", kv)
 		}
+	}
+
+	// 4. Host-user overrides: applied last so they win over image ENV
+	//    (GOPATH/GOMODCACHE are pinned to /root in the image) and user config.
+	if hostUser {
+		// Pre-create HOME (and cache dirs) via a no-op bootstrap prefix;
+		// /tmp is world-writable so the non-root user can mkdir there.
+		args = append(args, "-e", "MULTIGENT_PRECREATE_DIRS="+strings.Join([]string{
+			HostUserHome,
+			HostUserHome + "/go/pkg/mod",
+			HostUserHome + "/.cache/go-build",
+			HostUserHome + "/.npm",
+		}, ","))
+		args = append(args, hostUserEnvOverrides()...)
 	}
 
 	// ── Image + inner command ────────────────────────────────────────────────
@@ -750,6 +765,22 @@ func expandTilde(path string) string {
 // simulate the Linux host path on any platform.
 var runtimeGOOS = runtime.GOOS
 
+// HostUserHome is the container HOME used when the sandbox runs under the
+// host server's uid instead of root. /tmp is world-writable, so the
+// non-root user can create it, and credential mounts are remapped here.
+const HostUserHome = "/tmp/multigent-home"
+
+// NamedCacheVolumes are the persistent Docker volumes holding the agent CLI
+// toolchain and build caches. Docker initializes them with root-owned
+// contents; EnsureVolumeOwnership hands them to the server user so
+// run-as-host-user containers can write.
+var NamedCacheVolumes = []string{
+	"multigent-toolchains",
+	"multigent-npm-cache",
+	"multigent-go-cache",
+	"multigent-go-build-cache",
+}
+
 // runAsHostUser reports whether the container should run under the server's
 // own uid/gid. It defaults to true on Linux (the only host where container
 // root ownership collides with unprivileged host users) unless explicitly
@@ -764,6 +795,106 @@ func runAsHostUser(cfg *entity.DockerSandboxConfig) bool {
 		return *cfg.RunAsHostUser
 	}
 	return true
+}
+
+// hostUserContainerPath remaps a container path pinned under /root to the
+// writable host-user HOME.
+func hostUserContainerPath(p string) string {
+	if p == "/root" {
+		return HostUserHome
+	}
+	if strings.HasPrefix(p, "/root/") {
+		return HostUserHome + strings.TrimPrefix(p, "/root")
+	}
+	return p
+}
+
+// remapHostUserMount rewrites the container side of a "host:container[:mode]"
+// mount when the sandbox runs as the host user: credential sessions and
+// caches default to /root paths the non-root user cannot traverse.
+func remapHostUserMount(vol string, hostUser bool) string {
+	if !hostUser {
+		return vol
+	}
+	parts := strings.SplitN(vol, ":", 3)
+	if len(parts) >= 2 && strings.HasPrefix(parts[1], "/root") {
+		parts[1] = hostUserContainerPath(parts[1])
+		return strings.Join(parts, ":")
+	}
+	return vol
+}
+
+// containerPATHForHostUser swaps /root/go/bin for the host-user GOPATH bin
+// directory in PATH values.
+func containerPATHForHostUser(path string, hostUser bool) string {
+	if !hostUser {
+		return path
+	}
+	return strings.ReplaceAll(path, "/root/go/bin", HostUserHome+"/go/bin")
+}
+
+// hostUserEnvOverrides pins HOME and Go caches to the host-user HOME so the
+// non-root container user can actually write them (the image ENV pins
+// GOPATH/GOMODCACHE to /root). Appended after user ExtraEnv: last -e wins.
+// The HOME directory itself is pre-created in BuildArgs because /tmp is not
+// pre-provisioned in the image and tools assume $HOME exists.
+func hostUserEnvOverrides() []string {
+	return []string{
+		"HOME=" + HostUserHome,
+		"GOPATH=" + HostUserHome + "/go",
+		"GOMODCACHE=" + HostUserHome + "/go/pkg/mod",
+		"GOCACHE=" + HostUserHome + "/.cache/go-build",
+		"npm_config_cache=" + HostUserHome + "/.npm",
+	}
+}
+
+// RunAsHostUserRequested reports whether BuildArgs would run the container as
+// the host user, so command wrappers can add matching bootstrap steps.
+func RunAsHostUserRequested(cfg *entity.DockerSandboxConfig) bool {
+	return runAsHostUser(cfg)
+}
+
+// HostUserPrecreateScript returns the shell snippet that creates the
+// host-user HOME and cache directories before the wrapped command runs.
+func HostUserPrecreateScript() string {
+	return "mkdir -p " + shellQuoteJoin([]string{
+		HostUserHome,
+		HostUserHome + "/go/pkg/mod",
+		HostUserHome + "/.cache/go-build",
+		HostUserHome + "/.npm",
+	})
+}
+
+func shellQuoteJoin(paths []string) string {
+	quoted := make([]string, 0, len(paths))
+	for _, p := range paths {
+		quoted = append(quoted, "'"+strings.ReplaceAll(p, "'", "'\\''")+"'")
+	}
+	return strings.Join(quoted, " ")
+}
+
+// EnsureVolumeOwnership chowns the named cache volumes to the server's
+// uid/gid. Volume contents are initialized by Docker as root; with
+// run-as-host-user sandboxes the non-root container user must own them.
+// The server user needs Docker access to run sandboxes anyway, so a one-off
+// root chown container works without host privileges. Best-effort callers
+// (server start, sandbox prepare) log failures and continue.
+func EnsureVolumeOwnership(image string) error {
+	if err := CheckDocker(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(image) == "" {
+		image = DefaultBaseImage()
+	}
+	uidgid := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
+	for _, vol := range NamedCacheVolumes {
+		cmd := DockerCommand("run", "--rm", "-v", vol+":/vol", image,
+			"/bin/sh", "-lc", "chown -R "+uidgid+" /vol")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("chown volume %s: %w (%s)", vol, err, strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
 }
 
 // sandboxEnvVars returns environment variables that MUST be explicitly set

@@ -301,8 +301,22 @@ func TestBuildArgsRunAsHostUser(t *testing.T) {
 		if !strings.Contains(joined, "--user") || !strings.Contains(joined, fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())) {
 			t.Fatalf("expected host uid:gid --user flag, got: %s", joined)
 		}
-		if !strings.Contains(joined, "HOME=/tmp/multigent-home") {
-			t.Fatalf("expected HOME override, got: %s", joined)
+		// Image ENV pins caches under /root; host-user overrides must win.
+		for _, want := range []string{
+			"HOME=" + HostUserHome,
+			"GOPATH=" + HostUserHome + "/go",
+			"GOMODCACHE=" + HostUserHome + "/go/pkg/mod",
+		} {
+			if !strings.Contains(joined, want) {
+				t.Fatalf("expected env override %q, got: %s", want, joined)
+			}
+		}
+		// Credential mounts targeting /root must be remapped.
+		if strings.Contains(joined, ":/root/.claude") {
+			t.Fatalf("credential mount not remapped away from /root: %s", joined)
+		}
+		if !strings.Contains(joined, HostUserHome+"/.claude") {
+			t.Fatalf("expected remapped credential mount under %s: %s", HostUserHome, joined)
 		}
 	})
 	t.Run("explicit disable", func(t *testing.T) {
@@ -316,5 +330,33 @@ func TestBuildArgsRunAsHostUser(t *testing.T) {
 		if strings.Contains(strings.Join(args, " "), "--user") {
 			t.Fatalf("did not expect --user when disabled: %s", strings.Join(args, " "))
 		}
+		if strings.Contains(strings.Join(args, " "), "HOME="+HostUserHome) {
+			t.Fatalf("did not expect HOME override when disabled")
+		}
 	})
+}
+
+func TestRemapHostUserMount(t *testing.T) {
+	if got := remapHostUserMount("/host/.codex:/root/.codex", true); got != "/host/.codex:"+HostUserHome+"/.codex" {
+		t.Fatalf("codex mount = %q", got)
+	}
+	if got := remapHostUserMount("/host/x:/root/.claude:ro", true); got != "/host/x:"+HostUserHome+"/.claude:ro" {
+		t.Fatalf("mode-preserving remap = %q", got)
+	}
+	if got := remapHostUserMount("/host/x:/notroot", true); got != "/host/x:/notroot" {
+		t.Fatalf("non-/root mount must stay: %q", got)
+	}
+	if got := remapHostUserMount("/host/x:/root/.codex", false); got != "/host/x:/root/.codex" {
+		t.Fatalf("disabled host user must not remap: %q", got)
+	}
+}
+
+func TestContainerPATHForHostUser(t *testing.T) {
+	got := containerPATHForHostUser("/usr/local/go/bin:/root/go/bin:/usr/bin", true)
+	if strings.Contains(got, "/root/go/bin") || !strings.Contains(got, HostUserHome+"/go/bin") {
+		t.Fatalf("PATH not rewritten: %q", got)
+	}
+	if got := containerPATHForHostUser("/root/go/bin", false); got != "/root/go/bin" {
+		t.Fatalf("disabled host user must keep PATH: %q", got)
+	}
 }
