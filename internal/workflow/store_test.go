@@ -903,3 +903,76 @@ func TestUnifiedDeliveryPipelineTemplateStructure(t *testing.T) {
 		t.Fatalf("qa approval must pass release_candidate: %+v", rel.InputMapping)
 	}
 }
+
+func TestHotfixDeployPipelineTemplateStructure(t *testing.T) {
+	tmpl, ok := Template("hotfix-deploy-pipeline", "zh-CN")
+	if !ok {
+		t.Fatal("template not registered")
+	}
+	if tmpl.Name != "紧急修复与部署" {
+		t.Fatalf("zh-CN localization missing: %q", tmpl.Name)
+	}
+
+	stepIDs := map[string]bool{}
+	human := 0
+	for _, s := range tmpl.Steps {
+		if stepIDs[s.ID] {
+			t.Fatalf("duplicate step id %q", s.ID)
+		}
+		stepIDs[s.ID] = true
+		if s.Type == "human_review" {
+			human++
+		}
+	}
+	for _, want := range []string{"triage", "hotfix_review", "implement_fix", "verify_and_tag", "confirm"} {
+		if !stepIDs[want] {
+			t.Fatalf("missing step %q", want)
+		}
+	}
+	if human != 2 {
+		t.Fatalf("expected 2 human_review steps (plan review, deploy confirm), got %d", human)
+	}
+
+	edges := map[string]entity.WorkflowEdge{}
+	for _, e := range tmpl.Edges {
+		edges[e.ID] = e
+	}
+	// Deterministic baseline: the approval edge must hand implement_fix the
+	// frozen base_commit from triage diagnosis, never a moving branch ref.
+	approve, ok := edges["e-fix-approved"]
+	if !ok || approve.To != "implement_fix" || approve.Condition == nil || approve.Condition.Value != "approve" {
+		t.Fatalf("approve edge missing or wrong: %+v", approve)
+	}
+	if approve.InputMapping["base_commit"] != "$input.diagnosis.base_commit" {
+		t.Fatalf("approve edge must carry frozen base_commit from diagnosis: %+v", approve.InputMapping)
+	}
+	// Plan-rejection recycles into triage with the prior diagnosis preserved.
+	reject := edges["e-fix-rejected"]
+	if reject.To != "triage" || reject.Condition == nil || reject.Condition.Value != "request_changes" {
+		t.Fatalf("plan-rejection edge missing or wrong: %+v", reject)
+	}
+	if reject.InputMapping["previous_diagnosis"] != "$input.diagnosis" {
+		t.Fatalf("plan-rejection edge must preserve prior diagnosis: %+v", reject.InputMapping)
+	}
+	// Deploy confirmation is dual-rework: fix-quality issues return to
+	// implement_fix (the earliest code-producing step, matching the unified
+	// template's rework convention); wrong-diagnosis issues escalate to triage.
+	fixRework := edges["e-confirm-done"]
+	if fixRework.To != "implement_fix" || fixRework.Condition == nil || fixRework.Condition.Value != "request_changes" {
+		t.Fatalf("fix-rework edge missing or wrong: %+v", fixRework)
+	}
+	retriage := edges["e-confirm-retriage"]
+	if retriage.To != "triage" || retriage.Condition == nil || retriage.Condition.Value != "escalate" {
+		t.Fatalf("retriage edge missing or wrong: %+v", retriage)
+	}
+	// Gate actors: product-owner owns both human gates, distinct agents for
+	// triage vs fix so the queues do not serialize on one identity.
+	if tmpl.Steps[0].ActorRole != "triage-agent" {
+		t.Fatalf("triage must run on triage-agent, got %q", tmpl.Steps[0].ActorRole)
+	}
+	for _, s := range tmpl.Steps {
+		if s.Type == "human_review" && s.ActorRole != "product-owner" {
+			t.Fatalf("human gate %q must be product-owner, got %q", s.ID, s.ActorRole)
+		}
+	}
+}
