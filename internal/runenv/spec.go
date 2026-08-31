@@ -87,11 +87,6 @@ func (DockerProvider) Command(spec ProcessSpec) (string, []string, error) {
 	if bootstrap := runtimeEnvValue(spec.Runtime, "MULTIGENT_TOOL_BOOTSTRAP_FILE"); bootstrap != "" {
 		command = wrapBootstrapScript(command, dockerWorkspacePath(spec.AgentDir, bootstrap))
 	}
-	// Run-as-host-user sandboxes get a HOME under /tmp that the image does not
-	// pre-create; tools (git config, agent CLIs) assume $HOME exists.
-	if sandbox.RunAsHostUserRequested(cfg) {
-		command = wrapInlineScript(command, sandbox.HostUserPrecreateScript())
-	}
 	return sandbox.RunArgs(spec.AgentDir, spec.Model, cfg, command)
 }
 

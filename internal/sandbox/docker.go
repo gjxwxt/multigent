@@ -236,20 +236,21 @@ func BuildArgs(agentDir string, model entity.AgentModel, cfg *entity.DockerSandb
 
 	// 4. Host-user overrides: applied last so they win over image ENV
 	//    (GOPATH/GOMODCACHE are pinned to /root in the image) and user config.
+	//    Each override must be its own "-e KEY=VALUE" pair — bare KEY=VALUE
+	//    args would be parsed as the image reference ("invalid reference
+	//    format") and the container would never start.
 	if hostUser {
-		// Pre-create HOME (and cache dirs) via a no-op bootstrap prefix;
-		// /tmp is world-writable so the non-root user can mkdir there.
-		args = append(args, "-e", "MULTIGENT_PRECREATE_DIRS="+strings.Join([]string{
-			HostUserHome,
-			HostUserHome + "/go/pkg/mod",
-			HostUserHome + "/.cache/go-build",
-			HostUserHome + "/.npm",
-		}, ","))
 		args = append(args, hostUserEnvOverrides()...)
 	}
 
 	// ── Image + inner command ────────────────────────────────────────────────
 	args = append(args, image)
+	if hostUser {
+		// Pre-create HOME (and cache dirs) before the wrapped command runs;
+		// /tmp is world-writable so the non-root user can mkdir there. Done
+		// here (not per-provider) so every BuildArgs caller gets it.
+		innerArgs = wrapInlineCommand(innerArgs, hostUserPrecreateScript())
+	}
 	args = append(args, innerArgs...)
 
 	return args, nil
@@ -835,34 +836,41 @@ func containerPATHForHostUser(path string, hostUser bool) string {
 
 // hostUserEnvOverrides pins HOME and Go caches to the host-user HOME so the
 // non-root container user can actually write them (the image ENV pins
-// GOPATH/GOMODCACHE to /root). Appended after user ExtraEnv: last -e wins.
-// The HOME directory itself is pre-created in BuildArgs because /tmp is not
-// pre-provisioned in the image and tools assume $HOME exists.
+// GOPATH/GOMODCACHE to /root). Returned as ready-to-append "-e KEY=VALUE"
+// flag/value pairs, placed after user ExtraEnv so last -e wins.
 func hostUserEnvOverrides() []string {
-	return []string{
+	pairs := make([]string, 0, 10)
+	for _, kv := range []string{
 		"HOME=" + HostUserHome,
 		"GOPATH=" + HostUserHome + "/go",
 		"GOMODCACHE=" + HostUserHome + "/go/pkg/mod",
 		"GOCACHE=" + HostUserHome + "/.cache/go-build",
 		"npm_config_cache=" + HostUserHome + "/.npm",
+	} {
+		pairs = append(pairs, "-e", kv)
 	}
+	return pairs
 }
 
-// RunAsHostUserRequested reports whether BuildArgs would run the container as
-// the host user, so command wrappers can add matching bootstrap steps.
-func RunAsHostUserRequested(cfg *entity.DockerSandboxConfig) bool {
-	return runAsHostUser(cfg)
-}
-
-// HostUserPrecreateScript returns the shell snippet that creates the
+// hostUserPrecreateScript returns the shell snippet that creates the
 // host-user HOME and cache directories before the wrapped command runs.
-func HostUserPrecreateScript() string {
+func hostUserPrecreateScript() string {
 	return "mkdir -p " + shellQuoteJoin([]string{
 		HostUserHome,
 		HostUserHome + "/go/pkg/mod",
 		HostUserHome + "/.cache/go-build",
 		HostUserHome + "/.npm",
 	})
+}
+
+// wrapInlineCommand prefixes cmd with a one-shot shell that runs script and
+// then execs into the original command. Used for the host-user HOME bootstrap.
+func wrapInlineCommand(cmd []string, script string) []string {
+	if len(cmd) == 0 || strings.TrimSpace(script) == "" {
+		return cmd
+	}
+	wrapped := []string{"/bin/sh", "-lc", script + "\nexec \"$@\"", "--"}
+	return append(wrapped, cmd...)
 }
 
 func shellQuoteJoin(paths []string) string {

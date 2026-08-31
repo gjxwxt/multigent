@@ -302,14 +302,23 @@ func TestBuildArgsRunAsHostUser(t *testing.T) {
 			t.Fatalf("expected host uid:gid --user flag, got: %s", joined)
 		}
 		// Image ENV pins caches under /root; host-user overrides must win.
+		// Every override must be its own "-e KEY=VALUE" pair: a bare KEY=VALUE
+		// arg is parsed by docker as the image reference and the container
+		// fails with "invalid reference format" (regression of 3189b20).
 		for _, want := range []string{
-			"HOME=" + HostUserHome,
-			"GOPATH=" + HostUserHome + "/go",
-			"GOMODCACHE=" + HostUserHome + "/go/pkg/mod",
+			"-e HOME=" + HostUserHome,
+			"-e GOPATH=" + HostUserHome + "/go",
+			"-e GOMODCACHE=" + HostUserHome + "/go/pkg/mod",
+			"-e GOCACHE=" + HostUserHome + "/.cache/go-build",
+			"-e npm_config_cache=" + HostUserHome + "/.npm",
 		} {
 			if !strings.Contains(joined, want) {
 				t.Fatalf("expected env override %q, got: %s", want, joined)
 			}
+		}
+		// HOME precreate bootstrap must wrap the inner command after the image.
+		if !strings.Contains(joined, "mkdir -p") {
+			t.Fatalf("expected HOME precreate wrapper, got: %s", joined)
 		}
 		// Credential mounts targeting /root must be remapped.
 		if strings.Contains(joined, ":/root/.claude") {
