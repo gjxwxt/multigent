@@ -420,10 +420,15 @@ export default function ProjectTaskFollowPage() {
                     }
                   }}
                   disabled={previewStarting}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-sky-600/30 bg-sky-50 px-2.5 py-1.5 text-xs font-semibold text-sky-700 transition hover:bg-sky-100 dark:border-sky-500/30 dark:bg-sky-950/40 dark:text-sky-300"
+                  className={cn(
+                    'inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition',
+                    canReview
+                      ? 'border-sky-500 bg-sky-600 text-white shadow-sm hover:bg-sky-700 ring-2 ring-sky-400/40 dark:bg-sky-600 dark:text-white'
+                      : 'border-sky-600/30 bg-sky-50 text-sky-700 hover:bg-sky-100 dark:border-sky-500/30 dark:bg-sky-950/40 dark:text-sky-300',
+                  )}
                 >
                   <Globe className={cn('size-3.5', previewStarting && 'animate-spin')} />
-                  {previewStarting ? '启动中…' : '启动实时预览'}
+                  {previewStarting ? '启动中…' : canReview ? '打开审核预览 ↗' : '启动实时预览'}
                 </button>
               )}
             </div>

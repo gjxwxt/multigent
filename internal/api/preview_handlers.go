@@ -352,6 +352,12 @@ func (s *Server) handlePostTaskPreviewChat(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Write-lock protection: prevent concurrent file writes while an agent is actively executing background code
+	if task.Status == entity.TaskStatusInProgress {
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "智能体正在后台自动编码/测试中（写锁保护）。请等待当前节点流转至人工审核节点后，再进行代码即时调优。")
+		return
+	}
+
 	workspaceID, err := s.currentWorkspaceID()
 	if err != nil {
 		s.serverError(w, err)

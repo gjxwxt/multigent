@@ -1,11 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -640,6 +642,9 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 			deliveryPrepared = true
 		}
 	}
+	if isApprovalDecision(outputs["decision"]) {
+		s.commitAndPushReviewChanges(project, t)
+	}
 	transition, err := wfStore.CompleteAndAdvance(project, taskID, summary, "", outputs, "completed")
 	if err != nil {
 		return taskWorkflowResponse{}, http.StatusBadRequest, err
@@ -711,6 +716,58 @@ func isApprovalDecision(decision string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func (s *Server) commitAndPushReviewChanges(project string, t *entity.Task) {
+	if t == nil {
+		return
+	}
+	gitRoot := strings.TrimSpace(t.WorktreeDir)
+	if gitRoot == "" {
+		gitRoot = s.resolveProjectGitRoot(project)
+	} else if _, err := os.Stat(gitRoot); err != nil {
+		gitRoot = s.resolveProjectGitRoot(project)
+	}
+	if _, err := os.Stat(filepath.Join(gitRoot, ".git")); err != nil {
+		return
+	}
+
+	// 1. Check for uncommitted working tree changes from in-context preview copilot
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusCmd.Dir = gitRoot
+	statusOut, err := statusCmd.Output()
+	if err != nil || len(bytes.TrimSpace(statusOut)) == 0 {
+		return // working tree is clean
+	}
+
+	// 2. Stage and commit
+	addCmd := exec.Command("git", "add", "-A")
+	addCmd.Dir = gitRoot
+	_ = addCmd.Run()
+
+	commitMsg := "chore(review): user in-context preview feedback fixes"
+	commitCmd := exec.Command("git", "commit", "-m", commitMsg)
+	commitCmd.Dir = gitRoot
+	if err := commitCmd.Run(); err != nil {
+		return
+	}
+
+	// 3. Push if remote is configured
+	branchName := strings.TrimSpace(t.BranchName)
+	if branchName == "" && s.worktreeMgr != nil {
+		branchName, _ = s.worktreeMgr.CheckedOutBranch(gitRoot)
+	}
+	if branchName == "" {
+		branchName = "main"
+	}
+
+	remoteCmd := exec.Command("git", "remote", "get-url", "origin")
+	remoteCmd.Dir = gitRoot
+	if remoteOut, err := remoteCmd.Output(); err == nil && len(bytes.TrimSpace(remoteOut)) > 0 {
+		pushCmd := exec.Command("git", "push", "origin", branchName)
+		pushCmd.Dir = gitRoot
+		_ = pushCmd.Run()
 	}
 }
 
