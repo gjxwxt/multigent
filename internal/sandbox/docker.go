@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -86,6 +87,19 @@ var dockerImageExists = imageExists
 // innerArgs are the agent CLI arguments to run inside the container.
 func BuildArgs(agentDir string, model entity.AgentModel, cfg *entity.DockerSandboxConfig, innerArgs []string) ([]string, error) {
 	args := []string{"run", "--rm", "-i"}
+
+	// ── Run as host user ─────────────────────────────────────────────────────
+	// Containers default to root, which leaves root-owned files in the
+	// bind-mounted agent directory; the unprivileged multigent server can then
+	// no longer fetch, branch, or clean up after a run. On Linux hosts we run
+	// the container under the server's own uid/gid instead. Opt out with
+	// run_as_host_user: false in the agent's sandbox config.
+	if runAsHostUser(cfg) {
+		args = append(args,
+			"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
+			"-e", "HOME=/tmp/multigent-home",
+		)
+	}
 
 	// ── Image ────────────────────────────────────────────────────────────────
 	image := resolveImage(model, cfg)
@@ -730,6 +744,26 @@ func expandTilde(path string) string {
 		return path
 	}
 	return home + path[1:]
+}
+
+// runtimeGOOS mirrors runtime.GOOS; a package-level var so tests can
+// simulate the Linux host path on any platform.
+var runtimeGOOS = runtime.GOOS
+
+// runAsHostUser reports whether the container should run under the server's
+// own uid/gid. It defaults to true on Linux (the only host where container
+// root ownership collides with unprivileged host users) unless explicitly
+// disabled via run_as_host_user: false. Windows has no uid concept and
+// Docker Desktop on macOS remaps bind-mount ownership anyway, so the flag
+// only takes effect on linux.
+func runAsHostUser(cfg *entity.DockerSandboxConfig) bool {
+	if runtimeGOOS != "linux" {
+		return false
+	}
+	if cfg != nil && cfg.RunAsHostUser != nil {
+		return *cfg.RunAsHostUser
+	}
+	return true
 }
 
 // sandboxEnvVars returns environment variables that MUST be explicitly set

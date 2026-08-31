@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -281,4 +282,39 @@ func argAfter(args []string, flag string) string {
 		}
 	}
 	return ""
+}
+
+func TestBuildArgsRunAsHostUser(t *testing.T) {
+	restoreGOOS := func() (restore func()) {
+		orig := runtimeGOOS
+		runtimeGOOS = "linux"
+		return func() { runtimeGOOS = orig }
+	}
+	t.Run("default enabled on linux", func(t *testing.T) {
+		restore := restoreGOOS()
+		defer restore()
+		args, err := BuildArgs(t.TempDir(), entity.ModelClaudeCode, nil, []string{"echo"})
+		if err != nil {
+			t.Fatalf("BuildArgs: %v", err)
+		}
+		joined := strings.Join(args, " ")
+		if !strings.Contains(joined, "--user") || !strings.Contains(joined, fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())) {
+			t.Fatalf("expected host uid:gid --user flag, got: %s", joined)
+		}
+		if !strings.Contains(joined, "HOME=/tmp/multigent-home") {
+			t.Fatalf("expected HOME override, got: %s", joined)
+		}
+	})
+	t.Run("explicit disable", func(t *testing.T) {
+		restore := restoreGOOS()
+		defer restore()
+		off := false
+		args, err := BuildArgs(t.TempDir(), entity.ModelClaudeCode, &entity.DockerSandboxConfig{RunAsHostUser: &off}, []string{"echo"})
+		if err != nil {
+			t.Fatalf("BuildArgs: %v", err)
+		}
+		if strings.Contains(strings.Join(args, " "), "--user") {
+			t.Fatalf("did not expect --user when disabled: %s", strings.Join(args, " "))
+		}
+	})
 }

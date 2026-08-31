@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/multigent/multigent/internal/entity"
+	"github.com/multigent/multigent/internal/gitworktree"
 	"github.com/multigent/multigent/internal/taskstore"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
@@ -177,6 +178,10 @@ func (s *Server) createProjectTaskFromBody(w http.ResponseWriter, r *http.Reques
 	if t.BaseBranch != "" || t.BranchName != "" {
 		gitRoot := s.resolveProjectGitRoot(name)
 		if _, err := os.Stat(filepath.Join(gitRoot, ".git")); err == nil {
+			// Sandbox containers run as root and may leave root-owned files in
+			// the agent clone; the server (unprivileged) could then neither
+			// fetch nor create worktrees. Repair ownership before touching git.
+			gitworktree.RepairWorkspaceOwnership(gitRoot)
 			if s.worktreeMgr == nil {
 				s.jsonError(w, http.StatusInternalServerError, "git worktree manager is unavailable")
 				return

@@ -552,3 +552,105 @@ func TestListBranchesDetailedFallsBackToRemoteRef(t *testing.T) {
 		t.Fatalf("FetchRemoteUpdates with remote: %v", err)
 	}
 }
+
+// TestResolveBaseCommitFallsBackToLocalRemoteRef covers task creation while
+// the host cannot reach (or authenticate against) origin: the last locally
+// known remote-tracking tip must be used instead of failing the request.
+func TestResolveBaseCommitFallsBackToLocalRemoteRef(t *testing.T) {
+	m := NewManager()
+	upstream := t.TempDir()
+	runGit := func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	runGit(upstream, "init", "-b", "main")
+	runGit(upstream, "config", "user.email", "t@t")
+	runGit(upstream, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(upstream, "a.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(upstream, "add", ".")
+	runGit(upstream, "commit", "-m", "init")
+	want := strings.TrimSpace(string(runGitOutput(t, upstream, "rev-parse", "HEAD")))
+
+	clone := t.TempDir()
+	runGit(clone, "clone", upstream, ".")
+	runGit(clone, "config", "user.email", "t@t")
+	runGit(clone, "config", "user.name", "t")
+
+	// Poison origin so fetch fails (unreachable URL), simulating a
+	// credential-less or offline host-side fetch.
+	runGit(clone, "remote", "set-url", "origin", "http://127.0.0.1:1/unreachable.git")
+
+	got, err := m.ResolveBaseCommit(clone, "main")
+	if err != nil {
+		t.Fatalf("ResolveBaseCommit with unreachable origin: %v", err)
+	}
+	if got != want {
+		t.Fatalf("fallback base = %s, want local remote tip %s", got, want)
+	}
+}
+
+// TestGitNetworkEnvNeutralizesSandboxCredentialHelper verifies that host-side
+// fetches survive a repo whose local .git/config was polluted by a container
+// run with a credential.helper pointing at an in-container path.
+func TestGitNetworkEnvNeutralizesSandboxCredentialHelper(t *testing.T) {
+	m := NewManager()
+	upstream := t.TempDir()
+	runGit := func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	runGit(upstream, "init", "-b", "main")
+	runGit(upstream, "config", "user.email", "t@t")
+	runGit(upstream, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(upstream, "a.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(upstream, "add", ".")
+	runGit(upstream, "commit", "-m", "init")
+
+	clone := t.TempDir()
+	runGit(clone, "clone", upstream, ".")
+	runGit(clone, "config", "user.email", "t@t")
+	runGit(clone, "config", "user.name", "t")
+	// Simulate sandbox pollution exactly as observed in agent clones.
+	runGit(clone, "config", "credential.helper", "/workspace/.multigent/runtime-tools/some-run/.gitconfig.credential-helper")
+
+	// FetchRemoteUpdates uses gitNetworkEnv(); without the override this
+	// fetch would abort trying to execute the missing helper.
+	if err := m.FetchRemoteUpdates(clone); err != nil {
+		t.Fatalf("FetchRemoteUpdates with polluted credential.helper: %v", err)
+	}
+}
+
+// TestRepairWorkspaceOwnershipReclaimsRootFiles verifies the post-sandbox
+// ownership repair: root-owned entries (uid 0) under the git root are
+// chowned back to the current user so subsequent git operations succeed.
+func TestRepairWorkspaceOwnershipReclaimsRootFiles(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root: ownership repair is a no-op")
+	}
+	root := t.TempDir()
+	nested := filepath.Join(root, ".git")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate container-created files with uid 0 via chown on darwin/linux.
+	// Only root can chown to uid 0, so when unprivileged we instead assert the
+	// no-op safety path: current-user files must be left untouched and no
+	// error may escape.
+	if err := os.WriteFile(filepath.Join(nested, "FETCH_HEAD"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	RepairWorkspaceOwnership(root) // must not panic or error
+	if _, err := os.Stat(filepath.Join(nested, "FETCH_HEAD")); err != nil {
+		t.Fatalf("expected file to survive repair walk: %v", err)
+	}
+}

@@ -468,6 +468,11 @@ type DockerSandboxConfig struct {
 	// NoAutoCredentials disables the automatic per-model credential mount
 	// defaults. Set to true when you manage credential mounts manually.
 	NoAutoCredentials bool `yaml:"no_auto_credentials,omitempty" json:"no_auto_credentials,omitempty"`
+
+	// RunAsHostUser runs the container under the host server's uid/gid instead
+	// of root (Linux only). This keeps bind-mounted workspace files owned by
+	// the unprivileged multigent service account. Default: true.
+	RunAsHostUser *bool `yaml:"run_as_host_user,omitempty" json:"run_as_host_user,omitempty"`
 }
 
 // ─────────────────────────────────────────────

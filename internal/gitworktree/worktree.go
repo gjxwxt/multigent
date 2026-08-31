@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -209,14 +210,38 @@ func (m *Manager) resolveBaseCommit(projectRoot, baseBranch string) (string, err
 	if out, err := cmdRemote.Output(); err == nil && hasRemote(string(out), "origin") {
 		cmdFetch := exec.Command("git", "fetch", "origin", baseBranch)
 		cmdFetch.Dir = projectRoot
+		cmdFetch.Env = gitNetworkEnv()
 		var stderr bytes.Buffer
 		cmdFetch.Stderr = &stderr
 		if err := cmdFetch.Run(); err != nil {
+			// Host-side fetches often lack sandbox credentials (the runtime
+			// injects them only inside the container). Fall back to the last
+			// locally known remote tip instead of failing task creation.
+			localRef := "origin/" + baseBranch
+			if localErr := cmdLocalRevParse(projectRoot, localRef); localErr == nil {
+				return gitRevParse(projectRoot, localRef)
+			}
 			return "", fmt.Errorf("git fetch origin %s failed: %w (%s)", baseBranch, err, strings.TrimSpace(stderr.String()))
 		}
 		ref = "origin/" + baseBranch
 	}
 
+	commit, err := gitRevParse(projectRoot, ref)
+	if err != nil {
+		return "", err
+	}
+	return commit, nil
+}
+
+// cmdLocalRevParse checks (without error formatting) that a ref resolves.
+func cmdLocalRevParse(projectRoot, ref string) error {
+	cmd := exec.Command("git", "rev-parse", "--verify", ref+"^{commit}")
+	cmd.Dir = projectRoot
+	return cmd.Run()
+}
+
+// gitRevParse verifies a ref and returns its full commit SHA.
+func gitRevParse(projectRoot, ref string) (string, error) {
 	cmd := exec.Command("git", "rev-parse", "--verify", ref+"^{commit}")
 	cmd.Dir = projectRoot
 	out, err := cmd.Output()
@@ -228,6 +253,61 @@ func (m *Manager) resolveBaseCommit(projectRoot, baseBranch string) (string, err
 		return "", fmt.Errorf("resolve base commit %s returned an empty SHA", ref)
 	}
 	return commit, nil
+}
+
+// gitNetworkEnv neutralizes sandbox leftovers for host-side git network
+// operations: container runs write credential.helper entries pointing at
+// in-container paths into the repo's local .git/config, which aborts any
+// host-side fetch/push before it even reaches the network. The explicit
+// empty override wins over repo-local config. Authentication relies on
+// environment-injected credentials; private-remote fetch failures fall back
+// to the last locally known remote tip (see resolveBaseCommit).
+func gitNetworkEnv() []string {
+	return append(os.Environ(),
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=credential.helper",
+		"GIT_CONFIG_VALUE_0=",
+	)
+}
+
+// RepairWorkspaceOwnership returns files under root to the current service
+// user when a sandbox run left them owned by another uid (containers run as
+// root while the multigent server typically runs unprivileged). It is
+// best-effort: entries that cannot be repaired are skipped, and the walk
+// never fails the caller.
+func RepairWorkspaceOwnership(root string) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return
+	}
+	info, err := os.Stat(root)
+	if err != nil || !info.IsDir() {
+		return
+	}
+	if !uidOwnedByOther(root) {
+		return
+	}
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // best-effort: skip unreadable entries
+		}
+		if uidOwnedByOther(path) {
+			_ = os.Chown(path, os.Getuid(), os.Getgid())
+		}
+		return nil
+	})
+}
+
+func uidOwnedByOther(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false
+	}
+	return int(stat.Uid) != os.Getuid()
 }
 
 func (m *Manager) ensureWorktree(projectRoot, taskID, baseBranch, baseCommit, featureBranch string) (string, string, error) {
@@ -440,6 +520,7 @@ func (m *Manager) FetchRemoteUpdates(projectRoot string) error {
 	}
 	cmd := exec.Command("git", "fetch", "origin", "--prune")
 	cmd.Dir = projectRoot
+	cmd.Env = gitNetworkEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -598,6 +679,7 @@ func (m *Manager) PushBranch(projectRoot, branch, expectedCommit string) error {
 
 	cmd := exec.Command("git", "push", "origin", "refs/heads/"+branch+":refs/heads/"+branch)
 	cmd.Dir = projectRoot
+	cmd.Env = gitNetworkEnv()
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
