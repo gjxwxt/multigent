@@ -398,6 +398,7 @@ func (s *Server) reconcileActiveWorkflowTaskQueue(workspaceID, project, taskID s
 		task.Assignee = actorID
 		task.UpdatedAt = now
 		task.FinishedAt = nil
+		task.ArchivedAt = nil
 		s.annotateTaskAssignee(workspaceID, project, task)
 		return s.ts.PersistTask(project, currentAgent, task)
 	}

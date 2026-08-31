@@ -1172,6 +1172,7 @@ func (s *Server) activateNextWorkflowStep(workspaceID, project, previousAgent st
 		completed.Assignee = reviewer
 		completed.UpdatedAt = now
 		completed.FinishedAt = nil
+		completed.ArchivedAt = nil
 		s.annotateTaskAssignee(workspaceID, project, completed)
 		if err := s.ts.PersistTask(project, previousAgent, completed); err != nil {
 			return err
@@ -1223,6 +1224,10 @@ func (s *Server) moveWorkflowTaskToAgent(workspaceID, project, previousAgent, ne
 	task.UpdatedAt = now
 	task.FinishedAt = nil
 	task.LastError = ""
+	// A workflow task reused across steps may carry a stale ArchivedAt from a
+	// scheduler failure archive; if not cleared, ListTasks hides it from the
+	// queue forever and the workflow deadlocks on the next agent step.
+	task.ArchivedAt = nil
 	s.annotateTaskAssignee(workspaceID, project, task)
 	if previousAgent == nextAgent {
 		if err := s.ts.PersistTask(project, nextAgent, task); err != nil {
