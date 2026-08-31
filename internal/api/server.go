@@ -270,6 +270,7 @@ func (s *Server) SetLocalRuntimeAPIURL(url string) {
 	s.localRuntimeAPIURL = strings.TrimRight(strings.TrimSpace(url), "/")
 	s.attentionRecoveryOnce.Do(func() {
 		go s.recoverPendingAttentionWakeups()
+		go s.recoverActiveWorkflowRuns()
 	})
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1112,4 +1113,94 @@ func (s *Server) handleRuntimeTaskWorkflow(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	_ = json.NewEncoder(w).Encode(taskWorkflowResponse{Definition: def, Run: run, Steps: steps, Branches: branches, History: history})
+}
+
+func (s *Server) recoverActiveWorkflowRuns() {
+	if s == nil || s.controlDB == nil || s.ts == nil {
+		return
+	}
+	// Allow 3 seconds for network listeners and dependencies to complete startup
+	time.Sleep(3 * time.Second)
+
+	workspaceID, err := s.currentWorkspaceID()
+	if err != nil || strings.TrimSpace(workspaceID) == "" {
+		return
+	}
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+
+	projects, err := s.ts.ListProjects()
+	if err != nil {
+		return
+	}
+
+	for _, projectName := range projects {
+		agents, err := s.ts.ListAgents(projectName)
+		if err != nil {
+			continue
+		}
+		for _, agentName := range agents {
+			tasks, err := s.ts.ListTasks(projectName, agentName)
+			if err != nil {
+				continue
+			}
+			for _, task := range tasks {
+				if task == nil {
+					continue
+				}
+				// Only recover tasks that are active or pending
+				if task.Status != entity.TaskStatusInProgress && task.Status != entity.TaskStatusPending {
+					continue
+				}
+				run, runFound, err := wfStore.RunForTask(projectName, task.ID)
+				if err != nil || !runFound || run.Status != "active" || strings.TrimSpace(run.ActiveStepID) == "" {
+					continue
+				}
+				def, defFound, err := wfStore.RunDefinition(run)
+				if err != nil || !defFound {
+					continue
+				}
+				var activeStep entity.WorkflowStep
+				foundStep := false
+				for _, step := range def.Steps {
+					if step.ID == run.ActiveStepID {
+						activeStep = step
+						foundStep = true
+						break
+					}
+				}
+				// Never auto-resume human review steps
+				if !foundStep || activeStep.Type == "human_review" {
+					continue
+				}
+
+				// Find step instance
+				instances, err := wfStore.ListStepInstances(run.ID)
+				if err != nil {
+					continue
+				}
+				var activeInst *entity.WorkflowStepInstance
+				for i := range instances {
+					if instances[i].StepID == run.ActiveStepID {
+						activeInst = &instances[i]
+						break
+					}
+				}
+				if activeInst == nil || (activeInst.Status != "pending" && activeInst.Status != "running") {
+					continue
+				}
+
+				targetAgent := strings.TrimSpace(activeInst.ActorID)
+				if targetAgent == "" {
+					targetAgent = agentName
+				}
+
+				log.Printf("[auto-recovery] resuming in-flight workflow task %s (project: %s, agent: %s, step: %s)", task.ID, projectName, targetAgent, run.ActiveStepID)
+
+				// Trigger wakeup in background
+				go func(p, a string, t *entity.Task) {
+					_ = s.fireTaskTriggerOrQueueRuntime(workspaceID, p, a, t, nil, "startup auto-recovery for task "+t.ID)
+				}(projectName, targetAgent, task)
+			}
+		}
+	}
 }
