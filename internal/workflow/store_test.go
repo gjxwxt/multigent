@@ -845,3 +845,61 @@ func TestCancelRunForTaskCancelsActiveRunAndStep(t *testing.T) {
 		t.Fatalf("unexpected step instances: %+v", steps)
 	}
 }
+
+func TestUnifiedDeliveryPipelineTemplateStructure(t *testing.T) {
+	tmpl, ok := Template("unified-delivery-pipeline", "zh-CN")
+	if !ok {
+		t.Fatal("template not registered")
+	}
+	if tmpl.Name != "统一交付流水线" {
+		t.Fatalf("zh-CN localization missing: %q", tmpl.Name)
+	}
+
+	stepIDs := map[string]bool{}
+	hasHuman := 0
+	for _, s := range tmpl.Steps {
+		if stepIDs[s.ID] {
+			t.Fatalf("duplicate step id %q", s.ID)
+		}
+		stepIDs[s.ID] = true
+		if s.Type == "human_review" {
+			hasHuman++
+		}
+	}
+	for _, want := range []string{"clarify", "clarify_review", "implement", "agent_self_review", "code_review", "changelog", "create_pr", "pr_review", "merge_sync", "qa", "qa_signoff", "release"} {
+		if !stepIDs[want] {
+			t.Fatalf("missing step %q", want)
+		}
+	}
+	if hasHuman != 4 {
+		t.Fatalf("expected 4 human_review steps (scope, code, pr, qa), got %d", hasHuman)
+	}
+
+	// Agent self-review recycle loop: rework edge back to implement carries
+	// the round counter, and an escalation edge reaches human review.
+	edges := map[string]entity.WorkflowEdge{}
+	for _, e := range tmpl.Edges {
+		edges[e.ID] = e
+	}
+	rework, ok := edges["e-self-rework"]
+	if !ok || rework.To != "implement" {
+		t.Fatalf("self-review rework edge missing or wrong target: %+v", rework)
+	}
+	if rework.InputMapping["review_rounds"] == "" {
+		t.Fatal("rework edge must carry review_rounds back to implement")
+	}
+	esc, ok := edges["e-self-escalate"]
+	if !ok || esc.To != "code_review" || esc.Condition == nil || esc.Condition.Value != "escalate" {
+		t.Fatalf("escalation edge missing or wrong: %+v", esc)
+	}
+	// PR rework must preserve the PR reference and comments.
+	prRework := edges["e-pr-rework"]
+	if prRework.InputMapping["previous_pr"] != "$input.pr_url" || prRework.InputMapping["review_comments"] != "$output.comments" {
+		t.Fatalf("pr rework edge must carry previous_pr and comments: %+v", prRework.InputMapping)
+	}
+	// Terminal release must receive the QA-approved candidate.
+	rel := edges["e-qa-approved"]
+	if rel.InputMapping["release_candidate"] != "$output.release_candidate" {
+		t.Fatalf("qa approval must pass release_candidate: %+v", rel.InputMapping)
+	}
+}
