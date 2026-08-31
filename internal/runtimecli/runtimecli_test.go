@@ -39,6 +39,9 @@ func TestResolveHostBinaryMountRequiresExplicitLinuxBinary(t *testing.T) {
 }
 
 func TestResolveAvailableBinaryMountUsesWorkspaceDist(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("host binary auto-discovery only runs on Linux host")
+	}
 	t.Setenv(HostBinaryEnv, "")
 	root := t.TempDir()
 	bin := filepath.Join(root, "dist", BinaryName)
@@ -55,7 +58,8 @@ func TestResolveAvailableBinaryMountUsesWorkspaceDist(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := ResolveAvailableBinaryMount(root)
-	if !strings.HasPrefix(got, bin+":") || !strings.HasSuffix(got, ":"+BinaryPath+":ro") {
+	resolvedBin, _ := filepath.EvalSymlinks(bin)
+	if !strings.HasPrefix(got, resolvedBin+":") || !strings.HasSuffix(got, ":"+BinaryPath+":ro") {
 		t.Fatalf("workspace dist mount=%q", got)
 	}
 }
