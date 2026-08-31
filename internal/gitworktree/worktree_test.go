@@ -465,3 +465,90 @@ func TestSanitizeTaskIDBlocksPathTraversal(t *testing.T) {
 		t.Fatalf("expected traversal id contained, got %s", got)
 	}
 }
+
+func TestListBranchesDetailedReturnsMeta(t *testing.T) {
+	m := NewManager()
+	root := t.TempDir()
+	runGit := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	runGit("init", "-b", "main")
+	runGit("config", "user.email", "t@t")
+	runGit("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", ".")
+	runGit("commit", "-m", "init")
+
+	infos, err := m.ListBranchesDetailed(root)
+	if err != nil {
+		t.Fatalf("ListBranchesDetailed: %v", err)
+	}
+	if len(infos) == 0 || infos[0].Name != "main" {
+		t.Fatalf("expected main first, got %+v", infos)
+	}
+	if len(infos[0].SHA) != 7 {
+		t.Fatalf("expected short sha, got %q", infos[0].SHA)
+	}
+	if infos[0].LastCommitDate == "" {
+		t.Fatal("expected lastCommitDate to be populated")
+	}
+
+	// No remote configured: fetch is a no-op success.
+	if err := m.FetchRemoteUpdates(root); err != nil {
+		t.Fatalf("FetchRemoteUpdates without remote should be nil, got %v", err)
+	}
+}
+
+func TestListBranchesDetailedFallsBackToRemoteRef(t *testing.T) {
+	m := NewManager()
+	upstream := t.TempDir()
+	runGit := func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	runGit(upstream, "init", "-b", "main")
+	runGit(upstream, "config", "user.email", "t@t")
+	runGit(upstream, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(upstream, "a.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(upstream, "add", ".")
+	runGit(upstream, "commit", "-m", "init")
+	runGit(upstream, "branch", "remote-only")
+
+	// Clone leaves remote-only reachable only as origin/remote-only.
+	clone := t.TempDir()
+	runGit(clone, "clone", upstream, ".")
+	runGit(clone, "config", "user.email", "t@t")
+	runGit(clone, "config", "user.name", "t")
+
+	infos, err := m.ListBranchesDetailed(clone)
+	if err != nil {
+		t.Fatalf("ListBranchesDetailed: %v", err)
+	}
+	found := map[string]BranchInfo{}
+	for _, info := range infos {
+		found[info.Name] = info
+	}
+	if info, ok := found["remote-only"]; !ok || info.SHA == "" {
+		t.Fatalf("expected remote-only branch with sha via remote ref fallback, got %+v", found)
+	}
+
+	// Fetch with a real remote is a success.
+	if err := m.FetchRemoteUpdates(clone); err != nil {
+		t.Fatalf("FetchRemoteUpdates with remote: %v", err)
+	}
+}

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Check, ChevronDown, GitBranch } from 'lucide-react'
+import { Check, ChevronDown, GitBranch, RefreshCw } from 'lucide-react'
 import { apiPost } from '../../lib/api'
 import { cn } from '../../lib/cn'
 import { useApiJson } from '../../lib/use-api'
@@ -81,9 +81,11 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
     open && selectedProject ? `/api/v1/projects/${encodeURIComponent(selectedProject)}/task-templates` : null,
     0,
   )
-  const branchesState = useApiJson<{ branches: string[] }>(
+  const [branchRefreshKey, setBranchRefreshKey] = useState(0)
+  const [branchRefreshing, setBranchRefreshing] = useState(false)
+  const branchesState = useApiJson<BranchesResponse>(
     open && selectedProject ? `/api/v1/projects/${encodeURIComponent(selectedProject)}/branches` : null,
-    0,
+    branchRefreshKey,
   )
   const usersState = useApiJson<UserListResponse>(open ? '/api/v1/users' : null, 0)
   const workflows = workflowsState.status === 'ok' ? workflowsState.data.workflows : []
@@ -94,6 +96,21 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
     }
     return ['main']
   }, [branchesState])
+  const branchInfos = useMemo(() => {
+    if (branchesState.status !== 'ok' || !Array.isArray(branchesState.data.branchInfos)) return []
+    return branchesState.data.branchInfos
+  }, [branchesState])
+  const refreshBranches = async () => {
+    if (branchRefreshing || !selectedProject) return
+    setBranchRefreshing(true)
+    try {
+      await apiPost(`/api/v1/projects/${encodeURIComponent(selectedProject)}/branches/refresh`, {})
+    } catch {
+      // Refresh is best-effort; the list stays usable with local refs.
+    }
+    setBranchRefreshKey((k) => k + 1)
+    setBranchRefreshing(false)
+  }
   const people = usersState.status === 'ok' ? usersState.data.filter((p) => !p.disabled) : []
   const selectedWorkflow = workflows.find((wf) => wf.id === workflowDefinitionId)
   const selectedTemplate = taskTemplates.find((template) => template.id === taskTemplateId)
@@ -669,6 +686,9 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
                       value={baseBranch}
                       onChange={setBaseBranch}
                       branches={availableBranches}
+                      branchInfos={branchInfos}
+                      onRefresh={refreshBranches}
+                      refreshing={branchRefreshing}
                       fieldCls={fieldCls}
                     />
                   </div>
@@ -773,15 +793,24 @@ function PreviewBlock({ label, value, multiline }: { label: string; value: strin
   )
 }
 
+type BranchInfo = { name: string; sha?: string; lastCommitDate?: string }
+type BranchesResponse = { branches: string[]; branchInfos?: BranchInfo[]; refreshed?: boolean; refreshErr?: string }
+
 function BranchCombobox({
   value,
   onChange,
   branches,
+  branchInfos,
+  onRefresh,
+  refreshing,
   fieldCls,
 }: {
   value: string
   onChange: (val: string) => void
   branches: string[]
+  branchInfos: BranchInfo[]
+  onRefresh: () => void
+  refreshing: boolean
   fieldCls: string
 }) {
   const { t } = useTranslation()
@@ -797,6 +826,12 @@ function BranchCombobox({
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
+
+  const infoByName = useMemo(() => {
+    const map = new Map<string, BranchInfo>()
+    for (const info of branchInfos) map.set(info.name, info)
+    return map
+  }, [branchInfos])
 
   const filtered = useMemo(() => {
     const q = value.toLowerCase().trim()
@@ -830,8 +865,20 @@ function BranchCombobox({
 
       {open && (
         <div className="absolute left-0 top-full z-50 mt-1 max-h-52 w-full min-w-[200px] overflow-y-auto rounded-lg border border-neutral-200 bg-white py-1 shadow-xl dark:border-zinc-700 dark:bg-zinc-900 animate-scale-in">
-          <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-neutral-400 dark:text-zinc-500">
-            {t('tasks.availableBranches', { defaultValue: '可用分支 (Git Branches)' })}
+          <div className="flex items-center justify-between px-2.5 py-1">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400 dark:text-zinc-500">
+              {t('tasks.availableBranches', { defaultValue: '可用分支 (Git Branches)' })}
+            </span>
+            <button
+              type="button"
+              onClick={() => onRefresh()}
+              disabled={refreshing}
+              title={t('tasks.syncRemoteBranches', { defaultValue: '从远程同步分支列表' })}
+              className="inline-flex items-center gap-1 rounded px-1 py-0.5 text-[10px] font-medium text-sky-600 transition hover:bg-sky-50 disabled:opacity-50 dark:text-sky-400 dark:hover:bg-sky-950/60"
+            >
+              <RefreshCw className={cn('size-3', refreshing && 'animate-spin')} />
+              {refreshing ? t('tasks.syncing', { defaultValue: '同步中…' }) : t('tasks.sync', { defaultValue: '同步' })}
+            </button>
           </div>
           {filtered.length === 0 ? (
             <div className="px-3 py-2 text-xs text-neutral-400 dark:text-zinc-500">
@@ -840,6 +887,7 @@ function BranchCombobox({
           ) : (
             filtered.map((b) => {
               const isSelected = value === b
+              const info = infoByName.get(b)
               return (
                 <button
                   key={b}
@@ -858,6 +906,10 @@ function BranchCombobox({
                   <span className="flex items-center gap-1.5 truncate">
                     <GitBranch className="size-3 shrink-0 text-neutral-400 dark:text-zinc-500" />
                     <span className="truncate">{b}</span>
+                    {info?.sha && <span className="shrink-0 text-[10px] text-neutral-400 dark:text-zinc-500">{info.sha}</span>}
+                    {info?.lastCommitDate && (
+                      <span className="shrink-0 text-[10px] font-sans text-neutral-400 dark:text-zinc-500">· {info.lastCommitDate}</span>
+                    )}
                   </span>
                   {isSelected && <Check className="size-3.5 shrink-0 text-sky-600 dark:text-sky-400" />}
                 </button>

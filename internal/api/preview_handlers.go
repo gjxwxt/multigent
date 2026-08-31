@@ -116,18 +116,77 @@ func (s *Server) handleListProjectBranches(w http.ResponseWriter, r *http.Reques
 	}
 
 	gitRoot := s.resolveProjectGitRoot(project)
+
+	// refresh=1 triggers an explicit user-requested remote fetch so the
+	// listing reflects upstream state. Task creation always fetches the
+	// target branch itself; this only affects UI freshness. A fetch
+	// failure degrades to local refs plus a warning instead of an error.
+	refreshed, refreshErr := s.refreshProjectBranches(project, gitRoot, r.URL.Query().Get("refresh") == "1")
+
 	branches := []string{"main"}
+	branchInfos := []gitworktree.BranchInfo{{Name: "main"}}
 	if s.worktreeMgr != nil {
 		if list, err := s.worktreeMgr.ListBranches(gitRoot); err == nil && len(list) > 0 {
 			branches = list
+		}
+		if detailed, err := s.worktreeMgr.ListBranchesDetailed(gitRoot); err == nil && len(detailed) > 0 {
+			branchInfos = detailed
 		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"project":  project,
-		"branches": branches,
+		"project":     project,
+		"branches":    branches,
+		"branchInfos": branchInfos,
+		"refreshed":   refreshed,
+		"refreshErr":  refreshErr,
 	})
+}
+
+// handlePostProjectBranchesRefresh fetches remote updates for a project's
+// git root and returns the refreshed structured branch listing. Used by the
+// task creation dialog's explicit "sync" affordance.
+func (s *Server) handlePostProjectBranchesRefresh(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("name")
+	if !s.checkProjectAccess(w, r, project) {
+		return
+	}
+	gitRoot := s.resolveProjectGitRoot(project)
+	refreshed, refreshErr := s.refreshProjectBranches(project, gitRoot, true)
+
+	branches := []string{"main"}
+	branchInfos := []gitworktree.BranchInfo{{Name: "main"}}
+	if s.worktreeMgr != nil {
+		if list, err := s.worktreeMgr.ListBranches(gitRoot); err == nil && len(list) > 0 {
+			branches = list
+		}
+		if detailed, err := s.worktreeMgr.ListBranchesDetailed(gitRoot); err == nil && len(detailed) > 0 {
+			branchInfos = detailed
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"project":     project,
+		"branches":    branches,
+		"branchInfos": branchInfos,
+		"refreshed":   refreshed,
+		"refreshErr":  refreshErr,
+	})
+}
+
+// refreshProjectBranches optionally fetches origin and reports whether the
+// refresh succeeded. A nil worktree manager or missing remote is a no-op
+// success; fetch failures are returned as a message, not an error.
+func (s *Server) refreshProjectBranches(project, gitRoot string, refresh bool) (bool, string) {
+	if !refresh || s.worktreeMgr == nil {
+		return false, ""
+	}
+	if err := s.worktreeMgr.FetchRemoteUpdates(gitRoot); err != nil {
+		return false, err.Error()
+	}
+	return true, ""
 }
 
 func (s *Server) resolveProjectGitRoot(project string) string {

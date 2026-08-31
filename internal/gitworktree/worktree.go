@@ -400,12 +400,91 @@ func (m *Manager) ListWorktrees(projectRoot string) ([]string, error) {
 	return paths, nil
 }
 
+// BranchInfo describes one branch for UI pickers: display name plus the
+// commit it currently points at and when that commit was authored. The
+// staleness of lastCommitDate is the user-visible signal that the local
+// refs may be behind the remote and a refresh is worthwhile.
+type BranchInfo struct {
+	Name           string `json:"name"`
+	SHA            string `json:"sha,omitempty"`
+	LastCommitDate string `json:"lastCommitDate,omitempty"`
+}
+
 // ListBranches returns all local and remote branches in the repository,
 // deduplicated and sorted with main/master first.
 func (m *Manager) ListBranches(projectRoot string) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return listBranches(projectRoot)
+}
 
+// FetchRemoteUpdates runs git fetch --prune against origin when one is
+// configured, so subsequent branch listings reflect the remote state.
+// It is intended for explicit user-triggered refreshes, not automatic
+// paths; task creation always fetches the target branch on its own.
+func (m *Manager) FetchRemoteUpdates(projectRoot string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	unlock, err := acquireProjectLock(projectRoot)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	cmdRemote := exec.Command("git", "remote")
+	cmdRemote.Dir = projectRoot
+	out, err := cmdRemote.Output()
+	if err != nil || !hasRemote(string(out), "origin") {
+		// No remote: nothing to fetch, treat as success.
+		return nil
+	}
+	cmd := exec.Command("git", "fetch", "origin", "--prune")
+	cmd.Dir = projectRoot
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git fetch origin --prune failed: %w (%s)", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// ListBranchesDetailed returns structured branch metadata (name, short
+// SHA, relative last-commit date) for UI display.
+func (m *Manager) ListBranchesDetailed(projectRoot string) ([]BranchInfo, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	names, err := listBranches(projectRoot)
+	if err != nil {
+		return nil, err
+	}
+	infos := make([]BranchInfo, 0, len(names))
+	for _, name := range names {
+		info := BranchInfo{Name: name}
+		cmdResolve := exec.Command("git", "rev-parse", "--verify", "--short=7", "refs/heads/"+name)
+		cmdResolve.Dir = projectRoot
+		if out, err := cmdResolve.Output(); err == nil && strings.TrimSpace(string(out)) != "" {
+			info.SHA = strings.TrimSpace(string(out))
+		} else {
+			cmd := exec.Command("git", "rev-parse", "--verify", "--short=7", "refs/remotes/origin/"+name)
+			cmd.Dir = projectRoot
+			if o, err := cmd.Output(); err == nil {
+				info.SHA = strings.TrimSpace(string(o))
+			}
+		}
+		if info.SHA != "" {
+			cmdDate := exec.Command("git", "log", "-1", "--format=%cr", info.SHA)
+			cmdDate.Dir = projectRoot
+			if out, err := cmdDate.Output(); err == nil {
+				info.LastCommitDate = strings.TrimSpace(string(out))
+			}
+		}
+		infos = append(infos, info)
+	}
+	return infos, nil
+}
+
+func listBranches(projectRoot string) ([]string, error) {
 	cmd := exec.Command("git", "branch", "-a", "--format=%(refname:short)")
 	cmd.Dir = projectRoot
 	out, err := cmd.Output()
