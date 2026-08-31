@@ -70,7 +70,7 @@ confirm(human, product-owner)        确认部署结果与观察
 4. 失败读 job trace 分析根因,修复重推,循环至全绿;
 5. 产出:最终 YAML、流水线 URL、调试问题清单;不可自动化项(如 runner 缺失)如实记录为平台阻塞。
 
-**前置**:GitLab runner 已注册可用(人工确认 1 分钟)。
+**前置**（2026-08-31 已核销）:连接器 `local-gitlab` active 且 grants 含 `1test`;GitLab runner `AITP Local CI Runner` 在线,已关联到 `root/1test`(project runner,原仅绑 personal-ai-pipeline-local)。**注意**:该 runner `run_untagged=false`,CI job 必须声明 `tags: [docker]`(或 aitp/local)才会被拾取——任务卡第 1 步写 YAML 时带上。
 
 **实验观察目标**:NotBefore 延时唤醒可靠性、轮询节拍、是否值得封装 `mga pipeline status` 命令(结论入 HANDOFF 候选)。
 
