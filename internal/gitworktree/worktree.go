@@ -316,6 +316,11 @@ func hasRemote(remoteList, wanted string) bool {
 	return false
 }
 
+// CheckedOutBranch returns the currently checked-out branch name for a git directory or worktree.
+func (m *Manager) CheckedOutBranch(worktreeDir string) (string, error) {
+	return checkedOutBranch(worktreeDir)
+}
+
 func checkedOutBranch(worktreeDir string) (string, error) {
 	cmd := exec.Command("git", "branch", "--show-current")
 	cmd.Dir = worktreeDir

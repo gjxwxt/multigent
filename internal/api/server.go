@@ -1402,7 +1402,13 @@ func taskToRow(t *entity.Task, project, agent string, archived bool) taskRow {
 
 func (s *Server) taskToRow(t *entity.Task, project, agent string, archived bool) taskRow {
 	row := taskToRow(t, project, agent, archived)
-	if row.BaseCommit == "" && (row.BaseBranch != "" || row.WorktreeDir != "") && s.worktreeMgr != nil {
+	if row.BranchName == "" && s.worktreeMgr != nil {
+		gitRoot := s.resolveProjectGitRoot(project)
+		if curBranch, err := s.worktreeMgr.CheckedOutBranch(gitRoot); err == nil && curBranch != "" && curBranch != row.BaseBranch {
+			row.BranchName = curBranch
+		}
+	}
+	if row.BaseCommit == "" && (row.BaseBranch != "" || row.WorktreeDir != "" || row.BranchName != "") && s.worktreeMgr != nil {
 		gitRoot := s.resolveProjectGitRoot(project)
 		base := row.BaseBranch
 		if base == "" {

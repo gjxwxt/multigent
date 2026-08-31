@@ -175,12 +175,7 @@ func (s *Server) createProjectTaskFromBody(w http.ResponseWriter, r *http.Reques
 	}
 
 	if t.BaseBranch != "" || t.BranchName != "" {
-		projectRoot := s.st.ProjectDir(name)
-		wsDir := filepath.Join(projectRoot, "workspace")
-		gitRoot := projectRoot
-		if _, err := os.Stat(filepath.Join(wsDir, ".git")); err == nil {
-			gitRoot = wsDir
-		}
+		gitRoot := s.resolveProjectGitRoot(name)
 		if _, err := os.Stat(filepath.Join(gitRoot, ".git")); err == nil {
 			if s.worktreeMgr == nil {
 				s.jsonError(w, http.StatusInternalServerError, "git worktree manager is unavailable")

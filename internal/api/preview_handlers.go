@@ -135,6 +135,22 @@ func (s *Server) resolveProjectGitRoot(project string) string {
 	if _, err := os.Stat(filepath.Join(wsDir, ".git")); err == nil {
 		return wsDir
 	}
+	if p, err := s.st.Project(project); err == nil && p != nil && p.Repo != "" {
+		if _, err := os.Stat(filepath.Join(p.Repo, ".git")); err == nil {
+			return p.Repo
+		}
+	}
+	agentsDir := filepath.Join(projectRoot, "agents")
+	if entries, err := os.ReadDir(agentsDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				agentGit := filepath.Join(agentsDir, e.Name(), ".git")
+				if _, err := os.Stat(agentGit); err == nil {
+					return filepath.Join(agentsDir, e.Name())
+				}
+			}
+		}
+	}
 	return projectRoot
 }
 
