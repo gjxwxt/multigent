@@ -493,3 +493,11 @@ func CheckTCPReady(port int, timeout time.Duration) bool {
 	}
 	return false
 }
+
+// SeedInstanceForTest installs a pre-built instance without launching any
+// container. Test-only helper.
+func (e *Engine) SeedInstanceForTest(inst *PreviewInstance) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.instances[inst.TaskID] = inst
+}

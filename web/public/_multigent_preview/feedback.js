@@ -1611,7 +1611,10 @@ ${content || '请根据上述目标 DOM 元素位置与代码上下文进行优�
     abortCtrl = new AbortController();
     var chatUrl = __mgAuthUrl('/api/v1/projects/' + encodeURIComponent(project || 'current') + '/tasks/' + encodeURIComponent(taskId) + '/preview/chat');
 
-    var historyPayload = msgs.slice(0, -2).map(function (m) {
+    // Send only the recent turns: the server injects a live environment
+    // snapshot per request, so old history adds prompt bulk without value.
+    // Local storage keeps the full transcript for user scrolling.
+    var historyPayload = msgs.slice(-22, -2).map(function (m) {
       return { role: m.role, content: m.content };
     });
 

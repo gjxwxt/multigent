@@ -109,6 +109,87 @@ type previewChatBody struct {
 	History []previewChatMsg `json:"history,omitempty"`
 }
 
+// buildPreviewEnvSnapshot renders the platform-known environment facts for a
+// preview Copilot run. Every Copilot message executes as a fresh
+// --no-session process, so without this block the agent re-discovers ports,
+// service state, and worktree dirtiness from scratch each round — and stale
+// mid-run statements replayed from chat history get treated as facts. The
+// snapshot uses only state the platform already holds (preview engine
+// instance, git worktree read-only queries); it never probes services.
+func (s *Server) buildPreviewEnvSnapshot(project, taskID, worktreeDir string) string {
+	var b strings.Builder
+	b.WriteString("【环境快照 | 平台注入的当前事实,以此为准】\n")
+
+	if s.previewEngine == nil {
+		b.WriteString("- 预览服务: 未启动(从未启动或已被回收;如页面无法访问这是原因)\n")
+	} else if inst, ok := s.previewEngine.GetInstance(taskID); ok && inst != nil {
+		switch inst.Status {
+		case "running":
+			kind := string(inst.Type)
+			readonly := ""
+			if inst.ReadOnly {
+				readonly = ", 只读快照"
+			}
+			b.WriteString(fmt.Sprintf("- 预览服务: 运行中 (%s, 宿主端口 %d, 经 /preview/%s/ 代理%s)\n", kind, inst.Port, taskID, readonly))
+		case "starting":
+			b.WriteString("- 预览服务: 正在启动(稍等片刻即可访问)\n")
+		case "error":
+			b.WriteString(fmt.Sprintf("- 预览服务: 启动失败 (%s)\n", firstLine(inst.Error)))
+		default:
+			b.WriteString("- 预览服务: 已停止\n")
+		}
+	} else {
+		b.WriteString("- 预览服务: 未启动(从未启动或已被回收;如页面无法访问这是原因)\n")
+	}
+
+	if _, err := os.Stat(filepath.Join(worktreeDir, ".git")); err == nil {
+		b.WriteString(fmt.Sprintf("- 工作区目录: %s\n", worktreeDir))
+		if branch, err := gitworktree.NewManager().CheckedOutBranch(worktreeDir); err == nil && strings.TrimSpace(branch) != "" {
+			b.WriteString(fmt.Sprintf("- 当前分支: %s\n", branch))
+		}
+		if out, err := exec.Command("git", "-C", worktreeDir, "status", "--porcelain").Output(); err == nil {
+			lines := nonEmptyLines(string(out))
+			if len(lines) == 0 {
+				b.WriteString("- 未提交改动: 无(工作区干净)\n")
+			} else {
+				limit := len(lines)
+				if limit > 5 {
+					limit = 5
+				}
+				b.WriteString(fmt.Sprintf("- 未提交改动: %d 个文件 (%s)\n", len(lines), strings.Join(lines[:limit], ", ")))
+			}
+		}
+	} else {
+		b.WriteString("- Git: 未检测到 Git 仓库(非分支任务环境,跳过分支/改动信息)\n")
+	}
+
+	b.WriteString("- 注意: 历史对话仅供理解意图,其中的服务状态、改动状态可能已过时;以上快照为当前唯一事实。\n")
+	return b.String()
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > 120 {
+		s = s[:120]
+	}
+	return s
+}
+
+func nonEmptyLines(s string) []string {
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			// porcelain: XY <path>; keep just the path tail.
+			out = append(out, fields[len(fields)-1])
+		}
+	}
+	return out
+}
+
 func (s *Server) handleListProjectBranches(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("name")
 	if !s.checkProjectAccess(w, r, project) {
@@ -467,9 +548,14 @@ func (s *Server) handlePostTaskPreviewChat(w http.ResponseWriter, r *http.Reques
 		CreatedAt: time.Now().UTC(),
 	})
 
-	// 3. Build Prompt with conversation history
+	// 3. Build Prompt: environment snapshot first (fact baseline), then
+	// replayed history (intent context only — may contain stale states),
+	// then the new request. Snapshot-before-history so a long history can
+	// neither bury nor mislead the facts.
 	var promptBuf strings.Builder
-	promptBuf.WriteString("【预览界面即时修改】用户在特性分支 (Worktree) 的实时预览环境中提出了代码修改要求：\n\n")
+	promptBuf.WriteString("【预览界面即时修改】用户在特性分支 (Worktree) 的实时预览环境中提出了代码修改要求。\n\n")
+	promptBuf.WriteString(s.buildPreviewEnvSnapshot(project, taskID, worktreeDir))
+	promptBuf.WriteString("\n\n以下为此前对话记录(仅供理解意图):\n\n")
 	for _, h := range body.History {
 		roleLabel := "用户"
 		if h.Role == "assistant" {

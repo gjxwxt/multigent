@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/gitworktree"
+	"github.com/multigent/multigent/internal/preview"
 )
 
 func TestPreviewHandlers(t *testing.T) {
@@ -144,4 +146,72 @@ func TestTaskRemoteSyncRetryKeepsTerminalTaskOnPushFailure(t *testing.T) {
 	if updated.RemoteSyncStatus != "failed" || updated.RemoteSyncAttempts != 1 {
 		t.Fatalf("unexpected retry metadata: status=%q attempts=%d error=%q", updated.RemoteSyncStatus, updated.RemoteSyncAttempts, updated.RemoteSyncError)
 	}
+}
+
+func TestBuildPreviewEnvSnapshot(t *testing.T) {
+	s, _ := newConnectionGrantPolicyServer(t)
+
+	t.Run("no engine instance reports not started", func(t *testing.T) {
+		s.previewEngine = nil
+		snap := s.buildPreviewEnvSnapshot("p", "t-1", t.TempDir())
+		if !strings.Contains(snap, "未启动") {
+			t.Fatalf("expected not-started fact, got: %s", snap)
+		}
+		if !strings.Contains(snap, "以此为准") {
+			t.Fatalf("expected authority declaration, got: %s", snap)
+		}
+	})
+
+	t.Run("running instance and dirty git worktree", func(t *testing.T) {
+		wt := t.TempDir()
+		run := exec.Command("git", "-C", wt, "init", "-b", "main")
+		if out, err := run.CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v (%s)", err, out)
+		}
+		run = exec.Command("git", "-C", wt, "config", "user.email", "t@t")
+		_ = run.Run()
+		run = exec.Command("git", "-C", wt, "config", "user.name", "t")
+		_ = run.Run()
+		if err := os.WriteFile(filepath.Join(wt, "a.txt"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		run = exec.Command("git", "-C", wt, "add", ".")
+		_ = run.Run()
+		run = exec.Command("git", "-C", wt, "commit", "-m", "init")
+		if out, err := run.CombinedOutput(); err != nil {
+			t.Fatalf("git commit: %v (%s)", err, out)
+		}
+		if err := os.WriteFile(filepath.Join(wt, "b.txt"), []byte("dirty"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		s.previewEngine = preview.NewEngine()
+		// Seed a running instance without launching containers.
+		s.previewEngine.SeedInstanceForTest(&preview.PreviewInstance{
+			TaskID: "t-2", Project: "p", Type: preview.ProjectTypeFullstack,
+			Port: 8080, Status: "running",
+		})
+
+		snap := s.buildPreviewEnvSnapshot("p", "t-2", wt)
+		if !strings.Contains(snap, "运行中") || !strings.Contains(snap, "8080") {
+			t.Fatalf("expected running fact with port, got: %s", snap)
+		}
+		if !strings.Contains(snap, "feature/") && !strings.Contains(snap, "main") {
+			t.Fatalf("expected branch fact, got: %s", snap)
+		}
+		if !strings.Contains(snap, "b.txt") || !strings.Contains(snap, "1 个文件") {
+			t.Fatalf("expected dirty fact, got: %s", snap)
+		}
+	})
+
+	t.Run("non-git directory reports no git instead of failing", func(t *testing.T) {
+		s.previewEngine = nil
+		snap := s.buildPreviewEnvSnapshot("p", "t-3", t.TempDir())
+		if !strings.Contains(snap, "未检测到 Git 仓库") {
+			t.Fatalf("expected no-git note, got: %s", snap)
+		}
+		if strings.Contains(snap, "当前分支") {
+			t.Fatalf("must skip branch info without .git, got: %s", snap)
+		}
+	})
 }
