@@ -644,7 +644,7 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 		}
 	}
 	if isApprovalDecision(outputs["decision"]) {
-		s.commitAndPushReviewChanges(project, t)
+		s.commitAndPushReviewChanges(project, agent, t)
 	}
 	transition, err := wfStore.CompleteAndAdvance(project, taskID, summary, "", outputs, "completed")
 	if err != nil {
@@ -720,7 +720,7 @@ func isApprovalDecision(decision string) bool {
 	}
 }
 
-func (s *Server) commitAndPushReviewChanges(project string, t *entity.Task) {
+func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Task) {
 	if t == nil {
 		return
 	}
@@ -745,12 +745,16 @@ func (s *Server) commitAndPushReviewChanges(project string, t *entity.Task) {
 	// 2. Stage and commit
 	addCmd := exec.Command("git", "add", "-A")
 	addCmd.Dir = gitRoot
-	_ = addCmd.Run()
+	if addOut, err := addCmd.CombinedOutput(); err != nil {
+		log.Printf("[review-commit] git add failed for task %s (project %s): %v (%s)", t.ID, project, err, strings.TrimSpace(string(addOut)))
+		return
+	}
 
 	commitMsg := "chore(review): user in-context preview feedback fixes"
 	commitCmd := exec.Command("git", "commit", "-m", commitMsg)
 	commitCmd.Dir = gitRoot
-	if err := commitCmd.Run(); err != nil {
+	if commitOut, err := commitCmd.CombinedOutput(); err != nil {
+		log.Printf("[review-commit] git commit failed for task %s (project %s): %v (%s)", t.ID, project, err, strings.TrimSpace(string(commitOut)))
 		return
 	}
 
@@ -758,6 +762,9 @@ func (s *Server) commitAndPushReviewChanges(project string, t *entity.Task) {
 	branchName := strings.TrimSpace(t.BranchName)
 	if branchName == "" && s.worktreeMgr != nil {
 		branchName, _ = s.worktreeMgr.CheckedOutBranch(gitRoot)
+	}
+	if branchName == "" {
+		branchName = strings.TrimSpace(t.BaseBranch)
 	}
 	if branchName == "" {
 		branchName = "main"
@@ -768,7 +775,18 @@ func (s *Server) commitAndPushReviewChanges(project string, t *entity.Task) {
 	if remoteOut, err := remoteCmd.Output(); err == nil && len(bytes.TrimSpace(remoteOut)) > 0 {
 		pushCmd := exec.Command("git", "push", "origin", branchName)
 		pushCmd.Dir = gitRoot
-		_ = pushCmd.Run()
+		if pushOut, err := pushCmd.CombinedOutput(); err != nil {
+			log.Printf("[review-commit] git push origin %s failed for task %s: %v (%s)", branchName, t.ID, err, strings.TrimSpace(string(pushOut)))
+			if s.ts != nil && agent != "" {
+				_ = s.ts.AddComment(project, agent, &entity.TaskComment{
+					ID:        entity.NewCommentID(),
+					TaskID:    t.ID,
+					Author:    "system",
+					Body:      fmt.Sprintf("⚠️ 审核阶段修改自动推送至远程分支 `%s` 失败: %v", branchName, err),
+					CreatedAt: time.Now().UTC(),
+				})
+			}
+		}
 	}
 }
 
@@ -1116,91 +1134,98 @@ func (s *Server) handleRuntimeTaskWorkflow(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) recoverActiveWorkflowRuns() {
+	s.recoverActiveWorkflowRunsWithDelay(3 * time.Second)
+}
+
+func (s *Server) recoverActiveWorkflowRunsWithDelay(delay time.Duration) int {
 	if s == nil || s.controlDB == nil || s.ts == nil {
-		return
+		return 0
 	}
-	// Allow 3 seconds for network listeners and dependencies to complete startup
-	time.Sleep(3 * time.Second)
+	if delay > 0 {
+		time.Sleep(delay)
+	}
 
 	workspaceID, err := s.currentWorkspaceID()
 	if err != nil || strings.TrimSpace(workspaceID) == "" {
-		return
+		return 0
 	}
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
 
-	projects, err := s.ts.ListProjects()
+	records, err := s.ts.ListAllTaskRecords("")
 	if err != nil {
-		return
+		return 0
 	}
 
-	for _, projectName := range projects {
-		agents, err := s.ts.ListAgents(projectName)
+	resumedCount := 0
+	for _, rec := range records {
+		task := rec.Task
+		if task == nil {
+			continue
+		}
+		projectName := strings.TrimSpace(rec.Project)
+		agentName := strings.TrimSpace(rec.Agent)
+		if projectName == "" || agentName == "" {
+			continue
+		}
+
+		// Only recover tasks that are active or pending
+		if task.Status != entity.TaskStatusInProgress && task.Status != entity.TaskStatusPending {
+			continue
+		}
+		run, runFound, err := wfStore.RunForTask(projectName, task.ID)
+		if err != nil || !runFound || run.Status != "active" || strings.TrimSpace(run.ActiveStepID) == "" {
+			continue
+		}
+		def, defFound, err := wfStore.RunDefinition(run)
+		if err != nil || !defFound {
+			continue
+		}
+		var activeStep entity.WorkflowStep
+		foundStep := false
+		for _, step := range def.Steps {
+			if step.ID == run.ActiveStepID {
+				activeStep = step
+				foundStep = true
+				break
+			}
+		}
+		// Never auto-resume human review steps
+		if !foundStep || activeStep.Type == "human_review" {
+			continue
+		}
+
+		// Find step instance
+		instances, err := wfStore.ListStepInstances(run.ID)
 		if err != nil {
 			continue
 		}
-		for _, agentName := range agents {
-			tasks, err := s.ts.ListTasks(projectName, agentName)
-			if err != nil {
-				continue
-			}
-			for _, task := range tasks {
-				if task == nil {
-					continue
-				}
-				// Only recover tasks that are active or pending
-				if task.Status != entity.TaskStatusInProgress && task.Status != entity.TaskStatusPending {
-					continue
-				}
-				run, runFound, err := wfStore.RunForTask(projectName, task.ID)
-				if err != nil || !runFound || run.Status != "active" || strings.TrimSpace(run.ActiveStepID) == "" {
-					continue
-				}
-				def, defFound, err := wfStore.RunDefinition(run)
-				if err != nil || !defFound {
-					continue
-				}
-				var activeStep entity.WorkflowStep
-				foundStep := false
-				for _, step := range def.Steps {
-					if step.ID == run.ActiveStepID {
-						activeStep = step
-						foundStep = true
-						break
-					}
-				}
-				// Never auto-resume human review steps
-				if !foundStep || activeStep.Type == "human_review" {
-					continue
-				}
-
-				// Find step instance
-				instances, err := wfStore.ListStepInstances(run.ID)
-				if err != nil {
-					continue
-				}
-				var activeInst *entity.WorkflowStepInstance
-				for i := range instances {
-					if instances[i].StepID == run.ActiveStepID {
-						activeInst = &instances[i]
-						break
-					}
-				}
-				if activeInst == nil || (activeInst.Status != "pending" && activeInst.Status != "running") {
-					continue
-				}
-
-				targetAgent := strings.TrimSpace(activeInst.ActorID)
-				if targetAgent == "" {
-					targetAgent = agentName
-				}
-
-				log.Printf("[auto-recovery] resuming in-flight workflow task %s (project: %s, agent: %s, step: %s)", task.ID, projectName, targetAgent, run.ActiveStepID)
-
-				// Trigger wakeup in background
-				go func(p, a string, t *entity.Task) {
-					_ = s.fireTaskTriggerOrQueueRuntime(workspaceID, p, a, t, nil, "startup auto-recovery for task "+t.ID)
-				}(projectName, targetAgent, task)
+		var activeInst *entity.WorkflowStepInstance
+		for i := range instances {
+			if instances[i].StepID == run.ActiveStepID {
+				activeInst = &instances[i]
+				break
 			}
 		}
+		if activeInst == nil || (activeInst.Status != "pending" && activeInst.Status != "running") {
+			continue
+		}
+
+		targetAgent := strings.TrimSpace(activeInst.ActorID)
+		if targetAgent == "" {
+			targetAgent = agentName
+		}
+
+		log.Printf("[auto-recovery] resuming in-flight workflow task %s (project: %s, agent: %s, step: %s)", task.ID, projectName, targetAgent, run.ActiveStepID)
+		resumedCount++
+
+		// Throttle wakeup to avoid thundering herd on restart
+		if delay > 0 {
+			time.Sleep(150 * time.Millisecond)
+		}
+
+		go func(p, a string, t *entity.Task) {
+			_ = s.fireTaskTriggerOrQueueRuntime(workspaceID, p, a, t, nil, "startup auto-recovery for task "+t.ID)
+		}(projectName, targetAgent, task)
 	}
+	return resumedCount
 }

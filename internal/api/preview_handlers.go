@@ -23,6 +23,7 @@ import (
 
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/gitworktree"
+	workflowstore "github.com/multigent/multigent/internal/workflow"
 	"github.com/multigent/multigent/internal/preview"
 )
 
@@ -352,15 +353,16 @@ func (s *Server) handlePostTaskPreviewChat(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Write-lock protection: prevent concurrent file writes while an agent is actively executing background code
-	if task.Status == entity.TaskStatusInProgress {
-		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "智能体正在后台自动编码/测试中（写锁保护）。请等待当前节点流转至人工审核节点后，再进行代码即时调优。")
-		return
-	}
-
 	workspaceID, err := s.currentWorkspaceID()
 	if err != nil {
 		s.serverError(w, err)
+		return
+	}
+
+	// Active execution lock: prevent concurrent file writes while an agent is actively executing background steps.
+	// Allow interactive Copilot when the task is at a human review step (human_review) or awaiting confirmation.
+	if task.Status == entity.TaskStatusInProgress && !s.isTaskAtHumanReviewStep(workspaceID, project, taskID) {
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "当前节点正由智能体后台执行中。待流转至人工审核节点后即可进行代码即时调优。")
 		return
 	}
 
@@ -920,4 +922,25 @@ func (s *Server) previewInstanceReadOnly(taskID string) bool {
 	}
 	inst, ok := s.previewEngine.GetInstance(strings.TrimSpace(taskID))
 	return ok && inst != nil && inst.ReadOnly
+}
+
+func (s *Server) isTaskAtHumanReviewStep(workspaceID, project, taskID string) bool {
+	if s == nil || s.controlDB == nil {
+		return false
+	}
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	run, runFound, err := wfStore.RunForTask(project, taskID)
+	if err != nil || !runFound || run.Status != "active" || strings.TrimSpace(run.ActiveStepID) == "" {
+		return false
+	}
+	def, defFound, err := wfStore.RunDefinition(run)
+	if err != nil || !defFound {
+		return false
+	}
+	for _, step := range def.Steps {
+		if step.ID == run.ActiveStepID {
+			return step.Type == "human_review"
+		}
+	}
+	return false
 }
