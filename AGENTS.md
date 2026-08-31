@@ -106,3 +106,39 @@ multigent/
 3. **保持提交质量**：
    - 避免直接删改现有的单元测试与接口约定。
    - 修改完代码后，必须运行 `make test` 或 `make build` 进行验证，不可未经验证直接声明成功。
+
+---
+
+## 5. 安全红线 (Security Invariants — 违反即事故)
+
+以下约定由真实事故沉淀而来，**任何修改不得绕过**；细节与事故背景见 `HANDOFF.md` 第 7 节：
+
+1. **端点鉴权边界**：`publicMux`（server.go）上的路由完全无认证。新增有副作用的端点一律注册到带 `withTokenAuth` 的主 mux 并做 `checkProjectAccess`；必须暴露给预览 iframe 的端点，handler 内必须校验预览签名 token（`internal/api/preview_token.go`），写端点再加频率限制。
+2. **凭据不落盘**：Git remote URL 持久化必须保持纯净（无 token）；凭据只在推送瞬时注入（credential-helper 或运行时注入）。Git 命令输出入库/返回前端前必须 redact（参考 `redactGitOutput`）。
+3. **并发写保护**：预览 Copilot 写入受工作流节点写锁约束——判定用 `isTaskAtHumanReviewStep`（human_review 放行，查询失败 fail-closed 保持加锁），不能只看 `task.Status`。
+4. **确定性基线**：任务派生必须基于不可变 `baseCommit`（SHA），继承前置任务的 `completionCommit`；禁止以 `origin/main` 的移动引用作为基线。
+
+---
+
+## 6. 核心机制速查 (Key Mechanisms)
+
+改动以下区域前先读懂对应机制，避免破坏既有设计：
+
+| 机制 | 位置 | 要点 |
+|---|---|---|
+| 预览引擎与租期回收 | `internal/preview/engine.go` | 30 分钟租期 + 后台 reaper 每分钟回收；`.multigent/runtime.json` 契约 fail-closed 校验 |
+| Git Worktree 隔离 | `internal/gitworktree/worktree.go` | 项目锁串行化 git 操作；`sanitizeTaskID` 防路径穿越；快照失败必须阻断清理（防丢未推送工作） |
+| 审核自动提交 | `internal/api/workflow_handlers.go` `commitAndPushReviewChanges` | 人工审核 approve 时收编 Copilot 工作区改动为 checkpoint commit；push 失败写任务评论告警，不静默 |
+| 启动自愈扫描 | `internal/api/workflow_handlers.go` `recoverActiveWorkflowRuns` | 重启后 3s 自动恢复停在 agent 节点的 active run；永不自动恢复 human_review；150ms 节流 |
+| 六大生命周期解耦 | `HANDOFF.md` 第 6 节 | 任务/代码基线/Worktree/预览会话/容器/远程同步各自独立字段与状态机，禁止混用单一状态 |
+| 工作流双层体系 | `internal/workflow/store.go` | 代码内置 `Templates()`（只读目录）→ 经 `POST /api/v1/workflows` 实例化落库才可供任务选用；改模板后必须重新实例化才能在 UI 生效 |
+| 统一交付流水线 | 模板 ID `unified-delivery-pipeline` | 12 步闭环，核心是编码后的 Agent 初审闸门（独立 reviewer-agent、实测验证、`review_rounds` 三轮封顶）；发布步 CI 触发为 best-effort（无权限如实填 none） |
+
+---
+
+## 7. 部署与验证环境 (Deployment Context)
+
+- 生产运行环境为 OrbStack Ubuntu VM（`127.0.0.1`），服务监听 `0.0.0.0:27892`；Mac 侧可用 VM IP 直连（推荐，与 HANDOFF.md 拓扑一致）或 OrbStack 的 `127.0.0.1` 端口转发（等价别名）。
+- **修改代码后的部署 SOP（Mac → VM）**：`make build` → `GOOS=linux GOARCH=amd64 go build`（multigent 与 mga 两个产物）→ `orb -m ubuntu sudo cp` 到 `/opt/multigent/bin/` → `systemctl restart multigent` → `journalctl -u multigent` 查日志。完整命令见 `HANDOFF.md` 第 4 节。
+- 部署重启会触发启动自愈扫描器；重启后应检查日志确认无 `panic` 且 `[auto-recovery]` 行为符合预期。
+- `work/multigent-linux-amd64` 是随仓库管理的部署产物，发布新版本后按惯例刷新并单独提交（`build: refresh linux deployment artifact`）。
