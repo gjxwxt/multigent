@@ -777,7 +777,7 @@ function InitializeProjectModal({
       // Keep the root prompt as context only. The workflow step descriptions
       // are the executable contract; repeating the whole procedure here
       // would encourage the agent to skip the persisted stage boundaries.
-      taskPrompt = `initialization_request: ${initializationRequest}\n\n请按 Project Initialization 工作流逐阶段执行当前初始化任务。只完成当前阶段并使用 workflow step done 汇报结构化结果；不要跳过失败阶段或把未验证的状态报告为完成。`
+      taskPrompt = `initialization_request: ${initializationRequest}\n\n请按「项目初始化」工作流逐阶段执行当前初始化任务。只完成当前阶段并使用 workflow step done 汇报结构化结果；不要跳过失败阶段或把未验证的状态报告为完成。`
 
       const createdTask = await apiPost<{ id: string }>(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks`, {
         agent: selectedAgent,
