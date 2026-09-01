@@ -145,3 +145,32 @@ func TestCheckHTTPReadyRequiresSuccessfulStatus(t *testing.T) {
 		t.Fatal("5xx response must not be considered ready")
 	}
 }
+
+func TestFrontendInstallCommandOnlyForColdWorktrees(t *testing.T) {
+	root := t.TempDir()
+	spec := &RuntimeServiceSpec{Directory: "web", Command: "npm run dev"}
+	if err := os.MkdirAll(filepath.Join(root, "web"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "web", "package.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Cold worktree (gitignored node_modules absent): the dev server would
+	// die instantly, so an install prefix is mandatory.
+	cmd := frontendInstallCommand(root, spec)
+	if !strings.Contains(cmd, "npm install") || !strings.Contains(cmd, "cd 'web'") {
+		t.Fatalf("cold worktree must install frontend deps, got %q", cmd)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "web", "node_modules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if cmd := frontendInstallCommand(root, spec); cmd != "" {
+		t.Fatalf("warm worktree must not reinstall, got %q", cmd)
+	}
+	if cmd := frontendInstallCommand(root, nil); cmd != "" {
+		t.Fatalf("nil frontend must produce no install, got %q", cmd)
+	}
+	if cmd := frontendInstallCommand(root, &RuntimeServiceSpec{Directory: "apps", Command: "npm run dev"}); cmd != "" {
+		t.Fatalf("missing package.json must produce no install, got %q", cmd)
+	}
+}

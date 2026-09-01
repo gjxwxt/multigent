@@ -3,6 +3,7 @@ package preview
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -247,6 +248,16 @@ func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktree
 		if contractTimeout > 0 {
 			startupTimeout = time.Duration(contractTimeout) * time.Second
 		}
+		if installCmd := frontendInstallCommand(worktreeDir, runtimeSpec.Frontend); installCmd != "" {
+			// A cold worktree has no node_modules (gitignored), so the dev
+			// server would die instantly and take the whole container down.
+			// The install runs before any service starts, so the readiness
+			// windows must cover a cold npm install too.
+			command = installCmd + command
+			if startupTimeout < 300*time.Second {
+				startupTimeout = 300 * time.Second
+			}
+		}
 		runCmd = []string{"sh", "-c", setupEnv + command}
 	} else {
 		switch projType {
@@ -333,22 +344,60 @@ func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktree
 		}
 	}
 	if backendHostPort > 0 && !backendReady {
-		logs, _ := exec.Command("docker", "logs", "--tail", "120", containerName).CombinedOutput()
-		instance.Status = "error"
-		instance.Error = fmt.Sprintf("preview backend did not become ready; logs: %s", strings.TrimSpace(string(logs)))
-		_ = exec.Command("docker", "rm", "-f", containerName).Run()
-		return instance, fmt.Errorf("preview backend did not become ready")
+		return instance, failInstance(instance, containerName, "preview backend did not become ready")
 	}
 	if !CheckHTTPReadyAt(port, healthPath, startupTimeout) {
-		logs, _ := exec.Command("docker", "logs", "--tail", "120", containerName).CombinedOutput()
-		instance.Status = "error"
-		instance.Error = fmt.Sprintf("preview web server did not become ready; logs: %s", strings.TrimSpace(string(logs)))
-		_ = exec.Command("docker", "rm", "-f", containerName).Run()
-		return instance, fmt.Errorf("preview web server did not become ready")
+		return instance, failInstance(instance, containerName, "preview web server did not become ready")
 	}
 
 	instance.Status = "running"
 	return instance, nil
+}
+
+// frontendInstallCommand returns a shell prefix that installs frontend
+// dependencies when the contract's frontend directory has a package.json but
+// no node_modules. Worktrees are materialized from git, so the gitignored
+// node_modules never exists until something installs it; without this the dev
+// server exits instantly ("vite: not found") and, because it runs as the
+// container's foreground process, takes the whole preview down with it.
+func frontendInstallCommand(worktreeDir string, frontend *RuntimeServiceSpec) string {
+	if frontend == nil {
+		return ""
+	}
+	dir := strings.TrimSpace(frontend.Directory)
+	if dir == "" {
+		dir = "."
+	}
+	base := filepath.Join(worktreeDir, dir)
+	if !fileExists(filepath.Join(base, "package.json")) {
+		return ""
+	}
+	if info, err := os.Stat(filepath.Join(base, "node_modules")); err == nil && info.IsDir() {
+		return ""
+	}
+	return "(cd " + shellQuote(dir) + " && npm install --no-audit --no-fund) && "
+}
+
+// failInstance records a startup failure with the container's exit state and
+// tail logs (collected before the container is removed, since the logs die
+// with it) and returns the error to surface to the caller. An early container
+// exit is reported as such: a dead frontend process otherwise masquerades as
+// "backend did not become ready".
+func failInstance(instance *PreviewInstance, containerName, reason string) error {
+	logs, _ := exec.Command("docker", "logs", "--tail", "120", containerName).CombinedOutput()
+	exit := ""
+	if out, err := exec.Command("docker", "inspect", "--format", "{{.State.Status}} exitcode={{.State.ExitCode}}", containerName).Output(); err == nil {
+		if s := strings.TrimSpace(string(out)); strings.HasPrefix(s, "exited") {
+			exit = s
+		}
+	}
+	if exit != "" {
+		reason = "preview container exited during startup (" + exit + ")"
+	}
+	instance.Status = "error"
+	instance.Error = fmt.Sprintf("%s; logs: %s", reason, strings.TrimSpace(string(logs)))
+	_ = exec.Command("docker", "rm", "-f", containerName).Run()
+	return errors.New(reason)
 }
 
 func previewWorktreeMount(worktreeDir string, readOnly bool) string {
