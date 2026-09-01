@@ -321,6 +321,7 @@ func agentMetaFromWorkerMembership(project string, worker controldb.AgentWorker,
 	meta := &entity.AgentMeta{
 		Name:          name,
 		Project:       strings.TrimSpace(project),
+		Team:          strings.TrimSpace(worker.Team),
 		Role:          strings.TrimSpace(membership.Role),
 		Model:         model,
 		RuntimeModel:  strings.TrimSpace(worker.RuntimeModel),
@@ -330,6 +331,11 @@ func agentMetaFromWorkerMembership(project string, worker controldb.AgentWorker,
 		Avatar:        strings.TrimSpace(worker.Avatar),
 		HiredAt:       createdAt,
 	}
+	// AgentWorker runtime settings live in the control-plane database in 2.x.
+	// Preserve the execution sandbox when adapting them to the runner-facing
+	// AgentMeta; dropping it silently falls back to host execution. The
+	// remaining fields (env/addDirs/runCommand/httpAgent) are this fork's
+	// runtime extensions carried through the same JSON blob.
 	if raw := strings.TrimSpace(worker.RuntimeConfigJSON); raw != "" {
 		var cfg struct {
 			Env        map[string]string       `json:"env,omitempty"`

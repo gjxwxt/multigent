@@ -237,6 +237,26 @@ func TestAgentChannelStatusCommandRepliesWithoutWakeup(t *testing.T) {
 	}
 }
 
+func TestFormatAgentChannelHeartbeatStatusUsesLocation(t *testing.T) {
+	last := time.Date(2026, 8, 27, 5, 51, 16, 0, time.UTC)
+	next := last.Add(2 * time.Hour)
+	loc := time.FixedZone("CST", 8*60*60)
+	lines := formatAgentChannelHeartbeatStatus(&entity.HeartbeatConfig{
+		Enabled:      true,
+		LastWakeup:   &last,
+		NextWakeupAt: &next,
+	}, loc)
+	text := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"上次唤醒: 2026-08-27 13:51:16 CST",
+		"下次唤醒: 2026-08-27 15:51:16 CST",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("status time missing %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestChannelEventBindingRequiresExternalIdentity(t *testing.T) {
 	s, workspaceID := newConnectionGrantPolicyServer(t)
 	if err := s.controlDB.UpsertConnection(controldb.Connection{
@@ -1636,6 +1656,61 @@ func TestShouldWakeAgentForAttentionUsesWorkerMessageTrigger(t *testing.T) {
 	}
 	if !s.shouldWakeAgentForAttention(binding, "im_direct_message") {
 		t.Fatalf("agent should wake when worker attention policy enables broad attention")
+	}
+}
+
+func TestShouldWakeAgentForAttentionUsesRuleFilters(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	worker := controldb.AgentWorker{
+		ID:                  "aw-pm",
+		WorkspaceID:         workspaceID,
+		Name:                "pm-worker",
+		Status:              "active",
+		ScheduleJSON:        `{"triggers":["im_direct_message"]}`,
+		AttentionPolicyJSON: `{"rules":[{"signalType":"im.message","reasons":["im_direct_message"],"fromUsers":["owner"],"includeKeywords":["紧急"],"excludeKeywords":["FYI"],"wake":true}]}`,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+	if err := s.controlDB.UpsertAgentWorker(worker); err != nil {
+		t.Fatalf("worker: %v", err)
+	}
+	binding := controldb.AgentChannelBinding{WorkspaceID: workspaceID, ProjectID: "sample", AgentID: "pm", AgentWorkerID: worker.ID}
+	if s.shouldWakeAgentForAttentionEvent(binding, attentionWakeInput{
+		Reason:     "im_direct_message",
+		SignalType: "im.message",
+		UserID:     "other",
+		Text:       "紧急 帮我看下",
+		ChannelID:  "oc_one",
+	}) {
+		t.Fatalf("agent should not wake for non-matching user")
+	}
+	if s.shouldWakeAgentForAttentionEvent(binding, attentionWakeInput{
+		Reason:     "im_direct_message",
+		SignalType: "im.message",
+		UserID:     "owner",
+		Text:       "FYI 紧急 但不用处理",
+		ChannelID:  "oc_one",
+	}) {
+		t.Fatalf("agent should not wake when excluded keyword matches")
+	}
+	if !s.shouldWakeAgentForAttentionEvent(binding, attentionWakeInput{
+		Reason:     "im_direct_message",
+		SignalType: "im.message",
+		UserID:     "owner",
+		Text:       "紧急 帮我看下",
+		ChannelID:  "oc_one",
+	}) {
+		t.Fatalf("agent should wake when rule filters match")
+	}
+	if s.shouldWakeAgentForAttentionEvent(binding, attentionWakeInput{
+		Reason:     "im_mention",
+		SignalType: "im.message",
+		UserID:     "owner",
+		Text:       "紧急 帮我看下",
+		ChannelID:  "oc_one",
+	}) {
+		t.Fatalf("agent should not wake for a reason constrained by trigger mismatch")
 	}
 }
 

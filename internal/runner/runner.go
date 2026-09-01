@@ -222,6 +222,9 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 	}
 	effectiveEnv := mergeEnv(os.Environ(), agentEnv)
 	effectiveEnv = mergeEnv(effectiveEnv, runtimeEnv)
+	if err := materializeCodexProviderConfig(agentDir, model, effectiveEnv); err != nil {
+		return nil, fmt.Errorf("materialize codex provider config: %w", err)
+	}
 	apiModel, apiBaseURL := resolveAPIModelFromEnv(model, effectiveEnv)
 	invoker := InvokerFor(model, meta.RunCommand, meta.AddDirs)
 	resumeSessionID := r.validateResumeSessionID(agentDir, model, sessionID)
@@ -297,12 +300,13 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 
 		effectiveEnv = mergeEnv(effectiveEnv, directHostRuntimeEnv(model))
 		effectiveEnv = mergeEnv(effectiveEnv, directHostRuntimeHomeEnv(execAgentDir, model))
+		effectiveEnv = ensureDirectHostCLIPath(effectiveEnv)
 		effectiveEnv = mergeEnv(effectiveEnv, r.workspaceFilesEnv(filepath.Join(r.root, ".multigent", "files")))
 		innerArgs = adaptDirectHostArgs(model, innerArgs)
 		if err := validateDirectHostExecution(model, innerArgs, effectiveEnv); err != nil {
 			return nil, err
 		}
-		executable = innerArgs[0]
+		executable = resolveExecutableFromEnv(innerArgs[0], effectiveEnv)
 		args = innerArgs[1:]
 		execDir = execAgentDir
 	}
@@ -474,6 +478,9 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 	}
 	effectiveEnv := mergeEnv(os.Environ(), agentEnv)
 	effectiveEnv = mergeEnv(effectiveEnv, runtimeEnv)
+	if err := materializeCodexProviderConfig(agentDir, model, effectiveEnv); err != nil {
+		return nil, fmt.Errorf("materialize codex provider config: %w", err)
+	}
 	apiModel, apiBaseURL := resolveAPIModelFromEnv(model, effectiveEnv)
 	invoker := InvokerFor(model, meta.RunCommand, meta.AddDirs)
 	resumeSessionID := r.validateResumeSessionID(agentDir, model, sessionID)
@@ -546,12 +553,13 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 		// Direct host execution.
 		effectiveEnv = mergeEnv(effectiveEnv, directHostRuntimeEnv(model))
 		effectiveEnv = mergeEnv(effectiveEnv, directHostRuntimeHomeEnv(agentDir, model))
+		effectiveEnv = ensureDirectHostCLIPath(effectiveEnv)
 		effectiveEnv = mergeEnv(effectiveEnv, r.workspaceFilesEnv(filepath.Join(r.root, ".multigent", "files")))
 		innerArgs = adaptDirectHostArgs(model, innerArgs)
 		if err := validateDirectHostExecution(model, innerArgs, effectiveEnv); err != nil {
 			return nil, err
 		}
-		executable = innerArgs[0]
+		executable = resolveExecutableFromEnv(innerArgs[0], effectiveEnv)
 		args = innerArgs[1:]
 		execDir = agentDir
 	}
@@ -985,6 +993,58 @@ func directHostRuntimeEnv(model entity.AgentModel) map[string]string {
 	default:
 		return nil
 	}
+}
+
+func ensureDirectHostCLIPath(env []string) []string {
+	path := envLookup(env, "PATH")
+	extras := []string{
+		filepath.Join(os.Getenv("HOME"), ".local", "bin"),
+		filepath.Join(os.Getenv("HOME"), ".bun", "bin"),
+		filepath.Join(os.Getenv("HOME"), ".volta", "bin"),
+		"/usr/local/bin",
+		"/opt/homebrew/bin",
+	}
+	parts := []string{}
+	seen := map[string]bool{}
+	for _, part := range filepath.SplitList(path) {
+		part = strings.TrimSpace(part)
+		if part == "" || seen[part] {
+			continue
+		}
+		seen[part] = true
+		parts = append(parts, part)
+	}
+	for _, part := range extras {
+		part = strings.TrimSpace(part)
+		if part == "" || seen[part] {
+			continue
+		}
+		seen[part] = true
+		parts = append(parts, part)
+	}
+	if len(parts) == 0 {
+		return env
+	}
+	return mergeEnv(env, map[string]string{"PATH": strings.Join(parts, string(os.PathListSeparator))})
+}
+
+func resolveExecutableFromEnv(name string, env []string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.ContainsRune(name, os.PathSeparator) {
+		return name
+	}
+	path := envLookup(env, "PATH")
+	for _, dir := range filepath.SplitList(path) {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		candidate := filepath.Join(dir, name)
+		if st, err := os.Stat(candidate); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
+			return candidate
+		}
+	}
+	return name
 }
 
 func directHostRuntimeHomeEnv(agentDir string, model entity.AgentModel) map[string]string {
@@ -2092,6 +2152,70 @@ func writeRuntimeMCPClientConfigs(agentDir string) error {
 	return nil
 }
 
+func materializeCodexProviderConfig(agentDir string, model entity.AgentModel, env []string) error {
+	model = entity.NormaliseModel(model)
+	if model != entity.ModelCodex && model != entity.ModelQoder {
+		return nil
+	}
+	apiKey := envLookup(env, "OPENAI_API_KEY", "CODEX_API_KEY")
+	baseURL := envLookup(env, "OPENAI_BASE_URL", "OPENAI_API_BASE")
+	modelName := envLookup(env, "CODEX_MODEL", "OPENAI_MODEL")
+	path := filepath.Join(agentDir, ".multigent", "runtime-home", string(model), ".codex", "config.toml")
+	body, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if strings.TrimSpace(apiKey) == "" || strings.TrimSpace(baseURL) == "" {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		updated := removeManagedBlock(string(body), "# BEGIN MULTIGENT CODEX MODEL PROVIDER", "# END MULTIGENT CODEX MODEL PROVIDER")
+		if updated == string(body) {
+			return nil
+		}
+		return os.WriteFile(path, []byte(updated), 0o600)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	updated := replaceManagedBlockAtTop(string(body), "# BEGIN MULTIGENT CODEX MODEL PROVIDER", "# END MULTIGENT CODEX MODEL PROVIDER", codexProviderConfigBlock(baseURL, modelName))
+	return os.WriteFile(path, []byte(updated), 0o600)
+}
+
+func codexProviderConfigBlock(baseURL, modelName string) string {
+	providerID := "multigent_openai"
+	lines := []string{
+		"# BEGIN MULTIGENT CODEX MODEL PROVIDER",
+		fmt.Sprintf("model_provider = %q", providerID),
+	}
+	if strings.TrimSpace(modelName) != "" {
+		lines = append(lines, fmt.Sprintf("model = %q", strings.TrimSpace(modelName)))
+	}
+	lines = append(lines,
+		fmt.Sprintf("[model_providers.%s]", providerID),
+		`name = "Multigent OpenAI Compatible"`,
+		fmt.Sprintf("base_url = %q", strings.TrimRight(strings.TrimSpace(baseURL), "/")),
+		`env_key = "OPENAI_API_KEY"`,
+		`wire_api = "responses"`,
+		"supports_websockets = false",
+		"# END MULTIGENT CODEX MODEL PROVIDER",
+		"",
+	)
+	return strings.Join(lines, "\n")
+}
+
+func envLookup(env []string, keys ...string) string {
+	for i := len(env) - 1; i >= 0; i-- {
+		k, v, _ := strings.Cut(env[i], "=")
+		for _, want := range keys {
+			if k == want && v != "" {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
 func mergeMCPJSONConfig(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
@@ -2165,6 +2289,38 @@ func replaceManagedBlock(content, begin, end, block string) string {
 		return strings.TrimRight(block, "\n") + "\n"
 	}
 	return content + "\n\n" + strings.TrimRight(block, "\n") + "\n"
+}
+
+func replaceManagedBlockAtTop(content, begin, end, block string) string {
+	without := strings.TrimRight(removeManagedBlock(content, begin, end), "\n")
+	block = strings.TrimRight(block, "\n")
+	if strings.TrimSpace(without) == "" {
+		return block + "\n"
+	}
+	return block + "\n\n" + strings.TrimLeft(without, "\n") + "\n"
+}
+
+func removeManagedBlock(content, begin, end string) string {
+	without := strings.TrimRight(content, "\n")
+	if start := strings.Index(without, begin); start >= 0 {
+		if stopRel := strings.Index(without[start:], end); stopRel >= 0 {
+			stop := start + stopRel + len(end)
+			prefix := strings.TrimRight(without[:start], "\n")
+			suffix := strings.TrimLeft(without[stop:], "\n")
+			parts := []string{}
+			if prefix != "" {
+				parts = append(parts, prefix)
+			}
+			if suffix != "" {
+				parts = append(parts, suffix)
+			}
+			without = strings.Join(parts, "\n\n")
+		}
+	}
+	if strings.TrimSpace(without) == "" {
+		return ""
+	}
+	return strings.TrimLeft(without, "\n") + "\n"
 }
 
 type runtimeToolsPlan struct {
@@ -2584,7 +2740,14 @@ func materializeGitHubCLIConfig(adapter runtimeAdapterRef, cfg runtimeConfigFile
 	if token == "" || cfg.MaterializedPath == "" {
 		return nil, nil
 	}
-	body := "github.com:\n  oauth_token: " + yamlQuote(token) + "\n  git_protocol: https\n"
+	// gh performs a network-backed legacy config migration when the account
+	// name is absent. Persist the known account name so a transient GitHub API
+	// failure cannot prevent the runtime from starting.
+	body := "github.com:\n"
+	if accountName := strings.TrimSpace(secretValues["accountName"]); accountName != "" {
+		body += "  user: " + yamlQuote(accountName) + "\n"
+	}
+	body += "  oauth_token: " + yamlQuote(token) + "\n  git_protocol: https\n"
 	if err := os.WriteFile(cfg.MaterializedPath, []byte(body), 0o600); err != nil {
 		return nil, err
 	}
@@ -2945,7 +3108,12 @@ func materializeLarkCLIConfig(tool runtimeToolRef, adapter runtimeAdapterRef, cf
 		return nil, err
 	}
 	wrapperPath := filepath.Join(binDir, "lark-cli")
-	if err := os.WriteFile(wrapperPath, []byte(runtimeCLIWrapperScript("lark-cli", "lark-cli", tool, map[string]string{"HOME": larkHome})), 0o700); err != nil {
+	if err := os.WriteFile(wrapperPath, []byte(runtimeCLIWrapperScript("lark-cli", "lark-cli", tool, map[string]string{
+		"HOME": larkHome,
+		// Keep user-mode auth in an explicitly mounted, agent-scoped directory.
+		// The generated config still lives under the connection's isolated HOME.
+		"XDG_DATA_HOME": "/root/.local/share",
+	})), 0o700); err != nil {
 		return nil, err
 	}
 	return map[string]string{"MULTIGENT_LARK_HOME": larkHome}, nil

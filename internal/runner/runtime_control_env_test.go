@@ -156,7 +156,7 @@ func TestInjectRuntimeControlEnvIntoRuntimeUsesInheritedEnv(t *testing.T) {
 func TestInjectRuntimeControlEnvIntoRuntimeEmbedsMaterializedToolEnv(t *testing.T) {
 	cfg := &entity.SandboxConfig{}
 	injectRuntimeControlEnvIntoRuntime(cfg, map[string]string{
-		"MULTIGENT_AGENT_TOKEN": "secret-token",
+		"MULTIGENT_AGENT_TOKEN":   "secret-token",
 		"CUSTOMER_INTERNAL_TOKEN": "runtime-secret",
 	})
 	if len(cfg.Env) != 2 {
@@ -606,6 +606,48 @@ func TestWriteRuntimeMCPClientConfigsMergesExistingConfig(t *testing.T) {
 	}
 }
 
+func TestMaterializeCodexProviderConfigWritesCustomProvider(t *testing.T) {
+	agentDir := t.TempDir()
+	codexPath := filepath.Join(agentDir, ".multigent", "runtime-home", string(entity.ModelCodex), ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexPath, []byte("[projects.\"/workspace\"]\ntrust_level = \"trusted\"\n\n# BEGIN MULTIGENT MCP\n[mcp_servers.multigent]\ncommand = \"mga\"\n# END MULTIGENT MCP\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := materializeCodexProviderConfig(agentDir, entity.ModelCodex, []string{
+		"OPENAI_API_KEY=secret",
+		"OPENAI_BASE_URL=https://proxy.example.test/openai/v1/",
+		"CODEX_MODEL=gpt-5.5",
+	})
+	if err != nil {
+		t.Fatalf("materialize codex provider: %v", err)
+	}
+	body, err := os.ReadFile(codexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if !strings.HasPrefix(text, "# BEGIN MULTIGENT CODEX MODEL PROVIDER\n") {
+		t.Fatalf("codex provider config must stay in root scope before TOML tables:\n%s", text)
+	}
+	for _, want := range []string{
+		`model_provider = "multigent_openai"`,
+		`model = "gpt-5.5"`,
+		`[model_providers.multigent_openai]`,
+		`base_url = "https://proxy.example.test/openai/v1"`,
+		`env_key = "OPENAI_API_KEY"`,
+		`wire_api = "responses"`,
+		"supports_websockets = false",
+		"BEGIN MULTIGENT MCP",
+		`trust_level = "trusted"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("codex config missing %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestWriteRuntimeToolsFileMaterializesGitHubCLIConfig(t *testing.T) {
 	body := []byte(`{
 		"tools":[{
@@ -633,7 +675,7 @@ func TestWriteRuntimeToolsFileMaterializesGitHubCLIConfig(t *testing.T) {
 		if connectionID != "conn_gh" {
 			t.Fatalf("connectionID=%q", connectionID)
 		}
-		return map[string]string{"apiKey": "ghp_test_token"}, true, nil
+		return map[string]string{"apiKey": "ghp_test_token", "accountName": "test-account"}, true, nil
 	})
 	if err != nil {
 		t.Fatalf("write tools file: %v", err)
@@ -650,7 +692,7 @@ func TestWriteRuntimeToolsFileMaterializesGitHubCLIConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read hosts.yml: %v", err)
 	}
-	if !strings.Contains(string(hostsBody), "ghp_test_token") || !strings.Contains(string(hostsBody), "git_protocol: https") {
+	if !strings.Contains(string(hostsBody), `user: "test-account"`) || !strings.Contains(string(hostsBody), "ghp_test_token") || !strings.Contains(string(hostsBody), "git_protocol: https") {
 		t.Fatalf("unexpected hosts.yml: %s", string(hostsBody))
 	}
 	toolsBody, err := os.ReadFile(toolsPath)
@@ -778,7 +820,7 @@ func TestWriteRuntimeToolsFileMaterializesLarkCLIConfig(t *testing.T) {
 		t.Fatalf("read wrapper: %v", err)
 	}
 	wrapperText := string(wrapperBody)
-	if !strings.Contains(wrapperText, "'lark-cli' \"$@\"") || !strings.Contains(wrapperText, larkHome) || !strings.Contains(wrapperText, "MULTIGENT_TOOL_CLI_AUDIT_FILE") {
+	if !strings.Contains(wrapperText, "'lark-cli' \"$@\"") || !strings.Contains(wrapperText, larkHome) || !strings.Contains(wrapperText, "XDG_DATA_HOME='/root/.local/share'") || !strings.Contains(wrapperText, "MULTIGENT_TOOL_CLI_AUDIT_FILE") {
 		t.Fatalf("unexpected wrapper: %s", string(wrapperBody))
 	}
 	if env[runtimeToolCLIAuditEnv] == "" || !strings.Contains(env[runtimeToolCLIAuditEnv], toolDir) {

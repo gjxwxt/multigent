@@ -543,21 +543,21 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/client-tokens", s.handleClientTokensList)
 	mux.HandleFunc("POST /api/v1/client-tokens", s.handleClientTokensCreate)
 	mux.HandleFunc("DELETE /api/v1/client-tokens/{id}", s.handleClientTokensDelete)
-	mux.HandleFunc("GET /api/v1/context/collectors", s.handleContextCollectors)
-	mux.HandleFunc("GET /api/v1/context/artifacts", s.handleContextArtifacts)
-	mux.HandleFunc("GET /api/v1/context/sources", s.handleContextCenterSources)
-	mux.HandleFunc("POST /api/v1/context/sources", s.handleContextCenterSources)
-	mux.HandleFunc("GET /api/v1/context/items", s.handleContextCenterItems)
-	mux.HandleFunc("POST /api/v1/context/items", s.handleContextCenterItems)
-	mux.HandleFunc("POST /api/v1/context/items/batch", s.handleContextCenterItemsBatch)
-	mux.HandleFunc("GET /api/v1/context/items/{id}", s.handleContextCenterItemGet)
-	mux.HandleFunc("GET /api/v1/context/subscriptions", s.handleContextCenterSubscriptions)
-	mux.HandleFunc("POST /api/v1/context/subscriptions", s.handleContextCenterSubscriptions)
-	mux.HandleFunc("POST /api/v1/context/import", s.handleContextImport)
-	mux.HandleFunc("POST /api/v1/context/import/manual", s.handleContextImportManual)
-	mux.HandleFunc("POST /api/v1/context/import/file", s.handleContextImportFile)
-	mux.HandleFunc("POST /api/v1/context/bindings", s.handleContextCreateBinding)
-	mux.HandleFunc("DELETE /api/v1/context/bindings/{id}", s.handleContextDeleteBinding)
+	mux.HandleFunc("GET /api/v1/knowledge-base/collectors", s.handleContextCollectors)
+	mux.HandleFunc("GET /api/v1/knowledge-base/artifacts", s.handleContextArtifacts)
+	mux.HandleFunc("GET /api/v1/knowledge-base/sources", s.handleContextCenterSources)
+	mux.HandleFunc("POST /api/v1/knowledge-base/sources", s.handleContextCenterSources)
+	mux.HandleFunc("GET /api/v1/knowledge-base/items", s.handleContextCenterItems)
+	mux.HandleFunc("POST /api/v1/knowledge-base/items", s.handleContextCenterItems)
+	mux.HandleFunc("POST /api/v1/knowledge-base/items/batch", s.handleContextCenterItemsBatch)
+	mux.HandleFunc("GET /api/v1/knowledge-base/items/{id}", s.handleContextCenterItemGet)
+	mux.HandleFunc("GET /api/v1/knowledge-base/subscriptions", s.handleContextCenterSubscriptions)
+	mux.HandleFunc("POST /api/v1/knowledge-base/subscriptions", s.handleContextCenterSubscriptions)
+	mux.HandleFunc("POST /api/v1/knowledge-base/import", s.handleContextImport)
+	mux.HandleFunc("POST /api/v1/knowledge-base/import/manual", s.handleContextImportManual)
+	mux.HandleFunc("POST /api/v1/knowledge-base/import/file", s.handleContextImportFile)
+	mux.HandleFunc("POST /api/v1/knowledge-base/bindings", s.handleContextCreateBinding)
+	mux.HandleFunc("DELETE /api/v1/knowledge-base/bindings/{id}", s.handleContextDeleteBinding)
 	mux.HandleFunc("GET /api/v1/workbench/messages", s.handleWorkbenchMessages)
 	mux.HandleFunc("GET /api/v1/workbench/tasks", s.handleWorkbenchTasks)
 	mux.HandleFunc("GET /api/v1/workbench/overview", s.handleWorkbenchOverview)
@@ -701,9 +701,56 @@ func (s *Server) Handler() http.Handler {
 	runtimeNodeMux.HandleFunc("POST /api/v1/runtime-node/runs/{runId}/complete", s.handleRuntimeNodeRunComplete)
 	runtimeNodeMux.HandleFunc("POST /api/v1/runtime-node/runs/{runId}/fail", s.handleRuntimeNodeRunFail)
 	publicMux.Handle("/api/v1/runtime-node/", s.withRuntimeNodeAuth(runtimeNodeMux))
+	// External collectors use a deliberately narrow machine-token boundary.
+	// Keep this outside the general Web/API auth mux so user sessions and
+	// trusted-proxy identities cannot accidentally access the ingest endpoint.
+	publicMux.Handle("/api/v1/context/ingest", s.withContextIngestAuth(http.HandlerFunc(s.handleContextIngest)))
 	publicMux.Handle("/", s.withTokenAuth(mux))
 
 	return withCORS(withJSONHeaders(publicMux))
+}
+
+func (s *Server) withContextIngestAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+			s.jsonErrorCode(w, http.StatusUnauthorized, ErrCodeUnauthorized, "bearer client token required")
+			return
+		}
+		identity, ok := s.authenticateRequest(r)
+		if !ok || identity.Source != identitySourceClientToken {
+			s.jsonErrorCode(w, http.StatusUnauthorized, ErrCodeUnauthorized, "client token required")
+			return
+		}
+		if identity.Err != nil {
+			if errors.Is(identity.Err, errIdentityForbidden) {
+				s.jsonErrorCode(w, http.StatusForbidden, ErrCodeForbidden, identity.Err.Error())
+			} else {
+				s.jsonErrorCode(w, http.StatusUnauthorized, ErrCodeUnauthorized, identity.Err.Error())
+			}
+			return
+		}
+		if !containsString(identity.Scopes, clientScopeContextRW) {
+			s.jsonErrorCode(w, http.StatusForbidden, ErrCodeForbidden, "client token scope required: "+clientScopeContextRW)
+			return
+		}
+		ctx := context.WithValue(r.Context(), ctxUserKey, identity.Username)
+		ctx = context.WithValue(ctx, ctxAuthSourceKey, identity.Source)
+		ctx = context.WithValue(ctx, ctxAuthScopesKey, identity.Scopes)
+		req := r.WithContext(ctx)
+		if !s.applyRequestedWorkspace(w, req) {
+			return
+		}
+		next.ServeHTTP(w, req)
+	})
+}
+
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func withCORS(next http.Handler) http.Handler {

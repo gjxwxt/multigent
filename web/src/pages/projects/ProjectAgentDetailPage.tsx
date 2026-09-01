@@ -149,11 +149,38 @@ type WorkerSchedule = {
   triggers?: string[]
 }
 
+type AttentionPolicyRule = {
+  id?: string
+  signalType?: string
+  reasons?: string[]
+  fromUsers?: string[]
+  channels?: string[]
+  includeKeywords?: string[]
+  excludeKeywords?: string[]
+  wake?: boolean
+}
+
+type AttentionPolicy = {
+  rules?: AttentionPolicyRule[]
+  default?: { wake?: boolean }
+}
+
 type AgentWorkerDetail = {
   id: string
   name: string
   displayName?: string
   schedule?: WorkerSchedule
+  attentionPolicy?: AttentionPolicy
+}
+
+type AgentCron = {
+  id: string
+  title: string
+  schedule: string
+  enabled: boolean
+  prompt: string
+  jitter?: string
+  project: string
 }
 
 type KnowledgeDoc = {
@@ -253,6 +280,60 @@ function normalizeWorkerSchedule(schedule?: WorkerSchedule) {
     sessionScope: schedule?.sessionScope || schedule?.SessionScope || 'cycle',
     sessionId: schedule?.sessionId || schedule?.SessionID || '',
     triggers: Array.isArray(schedule?.triggers) ? schedule.triggers : [],
+  }
+}
+
+function emptyAttentionRule(): Required<Pick<AttentionPolicyRule, 'fromUsers' | 'channels' | 'includeKeywords' | 'excludeKeywords'>> {
+  return { fromUsers: [], channels: [], includeKeywords: [], excludeKeywords: [] }
+}
+
+function normalizeAttentionPolicy(policy?: AttentionPolicy) {
+  const rules = Array.isArray(policy?.rules) ? policy.rules : []
+  return {
+    rules: rules.map(rule => ({
+      ...emptyAttentionRule(),
+      ...rule,
+      fromUsers: Array.isArray(rule.fromUsers) ? rule.fromUsers : [],
+      channels: Array.isArray(rule.channels) ? rule.channels : [],
+      includeKeywords: Array.isArray(rule.includeKeywords) ? rule.includeKeywords : [],
+      excludeKeywords: Array.isArray(rule.excludeKeywords) ? rule.excludeKeywords : [],
+    })),
+  }
+}
+
+function textToList(value: string): string[] {
+  return value
+    .split(/[,，\n]/)
+    .map(item => item.trim())
+    .filter(Boolean)
+}
+
+function listToText(values?: string[]): string {
+  return Array.isArray(values) ? values.filter(Boolean).join(', ') : ''
+}
+
+function buildAttentionPolicy(input: {
+  triggers: string[]
+  fromUsers: string[]
+  channels: string[]
+  includeKeywords: string[]
+  excludeKeywords: string[]
+}): AttentionPolicy {
+  const reasons = input.triggers.filter(trigger => trigger.startsWith('im_'))
+  if (reasons.length === 0) {
+    reasons.push('im_direct_message', 'im_mention')
+  }
+  return {
+    rules: [{
+      id: 'im-custom-wake',
+      signalType: 'im.message',
+      reasons,
+      fromUsers: input.fromUsers,
+      channels: input.channels,
+      includeKeywords: input.includeKeywords,
+      excludeKeywords: input.excludeKeywords,
+      wake: true,
+    }],
   }
 }
 
@@ -459,7 +540,7 @@ function ControlledPromptEditor({ label, icon: Icon, value, onChange, onSave, on
   )
 }
 
-function WorkspaceAgentSchedulePanel({ agentId }: { agentId: string }) {
+function WorkspaceAgentSchedulePanel({ agentId, projectIds = [] }: { agentId: string; projectIds?: string[] }) {
   const { t } = useTranslation()
   const [reloadKey, setReloadKey] = useState(0)
   const [editing, setEditing] = useState(false)
@@ -467,6 +548,7 @@ function WorkspaceAgentSchedulePanel({ agentId }: { agentId: string }) {
   const state = useApiJson<{ agent?: AgentWorkerDetail }>(`/api/v1/agents/${encodeURIComponent(agentId)}`, reloadKey, { keepPreviousDataOnReload: true })
   const agent = state.status === 'ok' ? state.data.agent : undefined
   const schedule = normalizeWorkerSchedule(agent?.schedule)
+  const attentionPolicy = normalizeAttentionPolicy(agent?.attentionPolicy)
 
   async function toggleEnabled() {
     if (state.status !== 'ok') return
@@ -531,6 +613,7 @@ function WorkspaceAgentSchedulePanel({ agentId }: { agentId: string }) {
             <ScheduleSummaryItem label={t('agents.activeDays')} value={schedule.activeDays || '-'} />
             <ScheduleSummaryItem label={t('agents.maxTasksPerCycle')} value={String(schedule.maxTasksPerCycle || '-')} />
             <ScheduleSummaryItem label={t('agents.maxCycleDuration')} value={schedule.maxCycleDuration || '-'} />
+            <ScheduleSummaryItem label={t('schedule.customWakeRules', { defaultValue: '自定义条件' })} value={attentionPolicy.rules.length > 0 ? String(attentionPolicy.rules.length) : '-'} />
             <div className="col-span-2">
               <p className="text-neutral-400 dark:text-zinc-500">{t('agents.wakeupTriggers')}</p>
               <div className="mt-1 flex flex-wrap gap-1.5">
@@ -551,6 +634,7 @@ function WorkspaceAgentSchedulePanel({ agentId }: { agentId: string }) {
           agentId={agentId}
           agentName={agent?.displayName || agent?.name || agentId}
           schedule={schedule}
+          attentionPolicy={attentionPolicy}
           onClose={() => setEditing(false)}
           onSaved={() => {
             setEditing(false)
@@ -558,7 +642,102 @@ function WorkspaceAgentSchedulePanel({ agentId }: { agentId: string }) {
           }}
         />
       )}
+      <AgentCronSettings agentName={agent?.name || ''} projectIds={projectIds} />
     </section>
+  )
+}
+
+function AgentCronSettings({ agentName, projectIds }: { agentName: string; projectIds: string[] }) {
+  const { t } = useTranslation()
+  const [crons, setCrons] = useState<AgentCron[]>([])
+  const [open, setOpen] = useState(false)
+  const [project, setProject] = useState(projectIds[0] || '')
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [title, setTitle] = useState('')
+  const [frequency, setFrequency] = useState('daily')
+  const [everyDays, setEveryDays] = useState(2)
+  const [runAt, setRunAt] = useState('09:30')
+  const [jitterNum, setJitterNum] = useState(0)
+  const [jitterUnit, setJitterUnit] = useState<'m' | 'h'>('m')
+  const [prompt, setPrompt] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  async function load() {
+    if (!agentName || projectIds.length === 0) { setCrons([]); return }
+    const responses = await Promise.all(projectIds.map(item => apiFetch<{ project: string; agents?: Array<{ name: string; crons?: Array<Omit<AgentCron, 'project'>> }> }>(`/api/v1/projects/${encodeURIComponent(item)}/schedule`)))
+    const next: AgentCron[] = []
+    responses.forEach(response => {
+      const row = (response.agents ?? []).find(item => item.name === agentName)
+      ;(row?.crons ?? []).forEach(cron => next.push({ ...cron, project: response.project }))
+    })
+    setCrons(next)
+  }
+
+  useEffect(() => {
+    setProject(projectIds[0] || '')
+    void load().catch(() => setCrons([]))
+  }, [agentName, projectIds.join('|')])
+
+  async function create() {
+    if (!project || !title.trim() || !prompt.trim()) return
+    const [hour, minute] = runAt.split(':')
+    const weekday = frequency.startsWith('weekly-') ? frequency.slice('weekly-'.length) : ''
+    const schedule = frequency === 'weekdays' ? `${minute} ${hour} * * 1-5` : weekday ? `${minute} ${hour} * * ${weekday}` : frequency === 'every-days' ? `${minute} ${hour} */${Math.max(1, everyDays)} * *` : frequency === 'monthly' ? `${minute} ${hour} 1 * *` : `${minute} ${hour} * * *`
+    const jitter = jitterNum > 0 ? `${jitterNum}${jitterUnit}` : undefined
+    setBusy(true)
+    try {
+      const path = `/api/v1/projects/${encodeURIComponent(project)}/agents/${encodeURIComponent(agentName)}/crons`
+      if (editingId) {
+        const updated = await apiPut<Omit<AgentCron, 'project'>>(`${path}/${encodeURIComponent(editingId)}`, { title: title.trim(), schedule: schedule.trim(), prompt: prompt.trim(), jitter: jitter || '' })
+        setCrons(current => current.map(cron => cron.id === editingId && cron.project === project ? { ...updated, project } : cron))
+      } else {
+        const created = await apiPost<Omit<AgentCron, 'project'>>(path, { title: title.trim(), schedule: schedule.trim(), prompt: prompt.trim(), enabled: true, sessionScope: 'new', jitter })
+        setCrons(current => [...current, { ...created, project }])
+      }
+      setTitle(''); setPrompt(''); setEditingId(null); setOpen(false)
+      showToast(t('common.saved', { defaultValue: '已保存' }), 'success')
+    } finally { setBusy(false) }
+  }
+
+  function edit(cron: AgentCron) {
+    const fields = cron.schedule.trim().split(/\s+/)
+    const [minute = '00', hour = '09'] = fields
+    setProject(cron.project)
+    setTitle(cron.title)
+    setPrompt(cron.prompt)
+    const jitter = parseScheduleDuration(cron.jitter || '', 0, 'm')
+    setJitterNum(jitter.num)
+    setJitterUnit(jitter.unit)
+    setRunAt(`${hour.padStart(2, '0')}:${minute.padStart(2, '0')}`)
+    if (fields.length === 5 && fields[4] === '1-5') setFrequency('weekdays')
+    else if (fields.length === 5 && /^[0-7]$/.test(fields[4]) && fields[2] === '*') setFrequency(`weekly-${fields[4] === '7' ? '0' : fields[4]}`)
+    else if (fields.length === 5 && /^\*\/\d+$/.test(fields[2])) {
+      setFrequency('every-days')
+      setEveryDays(Number(fields[2].slice(2)))
+    } else if (fields.length === 5 && fields[2] === '1') setFrequency('monthly')
+    else setFrequency('daily')
+    setEditingId(cron.id)
+    setOpen(true)
+  }
+
+  async function toggle(cron: AgentCron) {
+    await apiPost(`/api/v1/projects/${encodeURIComponent(cron.project)}/agents/${encodeURIComponent(agentName)}/crons/${encodeURIComponent(cron.id)}/${cron.enabled ? 'pause' : 'resume'}`, {})
+    await load()
+  }
+
+  async function remove(cron: AgentCron) {
+    if (!window.confirm(t('schedule.confirmDeleteCron'))) return
+    await apiDelete(`/api/v1/projects/${encodeURIComponent(cron.project)}/agents/${encodeURIComponent(agentName)}/crons/${encodeURIComponent(cron.id)}`)
+    await load()
+  }
+
+  if (projectIds.length === 0) return null
+  return (
+    <div className="mt-4 rounded-lg border border-neutral-200/80 bg-white p-4 dark:border-zinc-700/60 dark:bg-zinc-900/40">
+      <div className="flex items-center justify-between gap-3"><div><p className="text-sm font-medium text-neutral-800 dark:text-zinc-200">{t('schedule.cronJobs', { defaultValue: '定时任务' })}</p><p className="mt-0.5 text-xs text-neutral-500 dark:text-zinc-500">{t('schedule.cronJobsHint', { defaultValue: '按计划唤醒这个智能体处理指定事项。' })}</p></div><button type="button" onClick={() => setOpen(value => !value)} className={secondaryButtonCls}>{t('schedule.addCron')}</button></div>
+      {open && <div className="mt-3 grid gap-3 border-t border-neutral-100 pt-3 dark:border-zinc-800 md:grid-cols-2"><WorkspaceField label={t('schedule.project', { defaultValue: '执行上下文' })}><select value={project} onChange={event => setProject(event.target.value)} className={workspaceInputCls}>{projectIds.map(item => <option key={item} value={item}>{item}</option>)}</select></WorkspaceField><WorkspaceField label={t('schedule.frequency', { defaultValue: '执行频率' })}><select value={frequency} onChange={event => setFrequency(event.target.value)} className={workspaceInputCls}><option value="daily">{t('schedule.frequencyDaily', { defaultValue: '每天' })}</option><option value="weekdays">{t('schedule.frequencyWeekdays', { defaultValue: '工作日' })}</option>{[['1', '周一'], ['2', '周二'], ['3', '周三'], ['4', '周四'], ['5', '周五'], ['6', '周六'], ['0', '周日']].map(([value, label]) => <option key={value} value={`weekly-${value}`}>{label}</option>)}<option value="every-days">每隔几天</option><option value="monthly">{t('schedule.frequencyMonthly', { defaultValue: '每月 1 日' })}</option></select></WorkspaceField>{frequency === 'every-days' && <WorkspaceField label="间隔天数"><input type="number" min={1} max={31} value={everyDays} onChange={event => setEveryDays(Number(event.target.value))} className={workspaceInputCls} /></WorkspaceField>}<WorkspaceField label={t('schedule.runAt', { defaultValue: '执行时间' })}><input type="time" value={runAt} onChange={event => setRunAt(event.target.value)} className={workspaceInputCls} /></WorkspaceField><WorkspaceField label={t('schedule.jitter', { defaultValue: '随机抖动' })}><div className="flex gap-2"><input type="number" min={0} value={jitterNum} onChange={event => setJitterNum(Number(event.target.value))} className={cn(workspaceInputCls, 'w-24')} /><select value={jitterUnit} onChange={event => setJitterUnit(event.target.value as 'm' | 'h')} className={workspaceInputCls}><option value="m">分钟</option><option value="h">小时</option></select></div></WorkspaceField><WorkspaceField label={t('schedule.cronTitle', { defaultValue: '名称' })}><input value={title} onChange={event => setTitle(event.target.value)} className={workspaceInputCls} /></WorkspaceField><label className="text-xs font-medium text-neutral-600 dark:text-zinc-400 md:col-span-2">{t('schedule.cronPrompt', { defaultValue: '唤醒内容' })}<textarea value={prompt} onChange={event => setPrompt(event.target.value)} rows={5} className={cn(workspaceInputCls, 'mt-1 resize-y')} placeholder={t('schedule.cronPromptPlaceholder', { defaultValue: '告诉智能体到时间后需要检查或推进什么。' })} /></label><div className="flex justify-end gap-2 md:col-span-2"><button type="button" onClick={() => { setOpen(false); setEditingId(null) }} className={secondaryButtonCls}>{t('forms.cancel')}</button><button type="button" disabled={busy || !title.trim() || !prompt.trim()} onClick={() => void create()} className={primaryButtonCls}>{busy ? t('forms.saving') : t('common.save')}</button></div></div>}
+      {crons.length === 0 && !open ? <p className="mt-3 text-sm text-neutral-500 dark:text-zinc-500">{t('schedule.noCrons')}</p> : crons.length > 0 && <div className="mt-3 divide-y divide-neutral-100 border-t border-neutral-100 dark:divide-zinc-800 dark:border-zinc-800">{crons.map(cron => <div key={`${cron.project}/${cron.id}`} className="flex items-center justify-between gap-3 py-2"><div className="min-w-0"><p className="truncate text-sm text-neutral-700 dark:text-zinc-300">{cron.title}</p><p className="font-mono text-xs text-neutral-400">{cron.project} · {cron.schedule}</p></div><div className="flex shrink-0 gap-1"><button type="button" onClick={() => edit(cron)} className={secondaryButtonCls}>{t('schedule.editCron', { defaultValue: '编辑' })}</button><button type="button" onClick={() => void toggle(cron)} className={secondaryButtonCls}>{cron.enabled ? t('schedule.pauseCron', { defaultValue: '暂停' }) : t('schedule.resumeCron', { defaultValue: '恢复' })}</button><button type="button" onClick={() => void remove(cron)} className="rounded-md px-2 py-1 text-xs text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30">{t('common.delete')}</button></div></div>)}</div>}
+    </div>
   )
 }
 
@@ -583,10 +762,11 @@ function ScheduleSummaryItem({ label, value, mono }: { label: string; value: str
   )
 }
 
-function WorkspaceAgentScheduleDialog({ agentId, agentName, schedule, onClose, onSaved }: {
+function WorkspaceAgentScheduleDialog({ agentId, agentName, schedule, attentionPolicy, onClose, onSaved }: {
   agentId: string
   agentName: string
   schedule: ReturnType<typeof normalizeWorkerSchedule>
+  attentionPolicy: ReturnType<typeof normalizeAttentionPolicy>
   onClose: () => void
   onSaved: () => void
 }) {
@@ -611,6 +791,12 @@ function WorkspaceAgentScheduleDialog({ agentId, agentName, schedule, onClose, o
   const [useScriptCondition, setUseScriptCondition] = useState(Boolean(schedule.wakeupCondition))
   const [sessionScope, setSessionScope] = useState(schedule.sessionScope || 'cycle')
   const [sessionId, setSessionId] = useState(schedule.sessionId)
+  const firstRule = attentionPolicy.rules[0] ?? emptyAttentionRule()
+  const [useCustomWakeRules, setUseCustomWakeRules] = useState(attentionPolicy.rules.length > 0)
+  const [wakeFromUsers, setWakeFromUsers] = useState(listToText(firstRule.fromUsers))
+  const [wakeChannels, setWakeChannels] = useState(listToText(firstRule.channels))
+  const [wakeIncludeKeywords, setWakeIncludeKeywords] = useState(listToText(firstRule.includeKeywords))
+  const [wakeExcludeKeywords, setWakeExcludeKeywords] = useState(listToText(firstRule.excludeKeywords))
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
@@ -666,6 +852,13 @@ function WorkspaceAgentScheduleDialog({ agentId, agentName, schedule, onClose, o
           SessionID: sessionId,
           triggers,
         },
+        attentionPolicy: useCustomWakeRules ? buildAttentionPolicy({
+          triggers,
+          fromUsers: textToList(wakeFromUsers),
+          channels: textToList(wakeChannels),
+          includeKeywords: textToList(wakeIncludeKeywords),
+          excludeKeywords: textToList(wakeExcludeKeywords),
+        }) : {},
       })
       showToast(t('agents.scheduleSaved'), 'success')
       onSaved()
@@ -763,6 +956,32 @@ function WorkspaceAgentScheduleDialog({ agentId, agentName, schedule, onClose, o
             </div>
             <p className="mt-1 text-xs text-neutral-400 dark:text-zinc-500">{t('schedule.triggersHint')}</p>
           </ScheduleDialogField>
+
+          <div className="rounded-lg border border-neutral-200 bg-neutral-50/50 px-4 py-3 dark:border-zinc-700/60 dark:bg-zinc-800/30">
+            <label className="flex items-start gap-2">
+              <input type="checkbox" checked={useCustomWakeRules} onChange={event => setUseCustomWakeRules(event.target.checked)} className="mt-0.5 size-4 accent-sky-600" />
+              <span>
+                <span className="block text-xs font-medium text-neutral-600 dark:text-zinc-300">{t('schedule.customWakeRules', { defaultValue: '自定义唤醒条件' })}</span>
+                <span className="mt-0.5 block text-xs text-neutral-400 dark:text-zinc-500">{t('schedule.customWakeRulesHint', { defaultValue: '未命中时仍会记录为待处理信号，只是不立即唤醒。' })}</span>
+              </span>
+            </label>
+            {useCustomWakeRules && (
+              <div className="mt-3 grid grid-cols-1 gap-3">
+                <ScheduleDialogField label={t('schedule.wakeFromUsers', { defaultValue: '只唤醒这些发送人' })}>
+                  <input value={wakeFromUsers} onChange={event => setWakeFromUsers(event.target.value)} className={cn(panelInputCls, 'text-xs')} placeholder={t('schedule.wakeFromUsersPlaceholder', { defaultValue: '用户ID、邮箱或 open_id，逗号分隔' })} />
+                </ScheduleDialogField>
+                <ScheduleDialogField label={t('schedule.wakeChannels', { defaultValue: '只唤醒这些会话/群聊' })}>
+                  <input value={wakeChannels} onChange={event => setWakeChannels(event.target.value)} className={cn(panelInputCls, 'text-xs')} placeholder={t('schedule.wakeChannelsPlaceholder', { defaultValue: '群聊 ID 或会话 ID，逗号分隔' })} />
+                </ScheduleDialogField>
+                <ScheduleDialogField label={t('schedule.wakeIncludeKeywords', { defaultValue: '内容包含关键词' })}>
+                  <input value={wakeIncludeKeywords} onChange={event => setWakeIncludeKeywords(event.target.value)} className={cn(panelInputCls, 'text-xs')} placeholder={t('schedule.keywordPlaceholder', { defaultValue: '紧急, 需要确认, PR ready' })} />
+                </ScheduleDialogField>
+                <ScheduleDialogField label={t('schedule.wakeExcludeKeywords', { defaultValue: '内容排除关键词' })}>
+                  <input value={wakeExcludeKeywords} onChange={event => setWakeExcludeKeywords(event.target.value)} className={cn(panelInputCls, 'text-xs')} placeholder={t('schedule.excludeKeywordPlaceholder', { defaultValue: 'FYI, 不用回复, 闲聊' })} />
+                </ScheduleDialogField>
+              </div>
+            )}
+          </div>
 
           <div className="rounded-lg border border-neutral-200 bg-neutral-50/50 px-4 py-3 dark:border-zinc-700/60 dark:bg-zinc-800/30">
             <p className="mb-2.5 text-xs font-semibold uppercase tracking-wider text-neutral-500 dark:text-zinc-400">{t('session.sessionLabel')}</p>
@@ -1314,7 +1533,7 @@ export default function ProjectAgentDetailPage({ projectIdOverride, agentNameOve
               )}
 
               {workspaceAgentId && canAdminWorkspace && (
-                <WorkspaceAgentSchedulePanel agentId={workspaceAgentId} />
+                <WorkspaceAgentSchedulePanel agentId={workspaceAgentId} projectIds={projectId ? [projectId] : []} />
               )}
 
               <section data-tour-agent-wakeup-prompt>
@@ -1714,7 +1933,7 @@ function WorkspaceAgentOnlyDetail({ agent }: { agent: WorkspaceAgentSummary }) {
             </div>
           </section>
 
-          {canAdminWorkspace && <WorkspaceAgentSchedulePanel agentId={current.id} />}
+          {canAdminWorkspace && <WorkspaceAgentSchedulePanel agentId={current.id} projectIds={memberships.map(item => item.projectId)} />}
 
           <section data-tour-agent-wakeup-prompt>
             <SectionHeader icon={BookOpen} title={t('agentDetail.promptContext')} />
@@ -2698,7 +2917,7 @@ function AgentContextBindingsPanel({ project, agentName, agentWorkerId, canEdit,
     if (!docId.trim()) return
     setSaving(true)
     try {
-      await apiPost('/api/v1/context/bindings', {
+      await apiPost('/api/v1/knowledge-base/bindings', {
         docId: docId.trim(),
         scopeType: 'agent',
         scopeId: agentScopeId,
@@ -2713,7 +2932,7 @@ function AgentContextBindingsPanel({ project, agentName, agentWorkerId, canEdit,
   }
 
   async function removeBinding(id: string) {
-    await apiDelete(`/api/v1/context/bindings/${encodeURIComponent(id)}`)
+    await apiDelete(`/api/v1/knowledge-base/bindings/${encodeURIComponent(id)}`)
     setReloadKey((k) => k + 1)
     onChanged()
   }
