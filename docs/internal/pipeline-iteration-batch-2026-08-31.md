@@ -91,3 +91,15 @@ confirm(human, product-owner)        确认部署结果与观察
 
 - P0/P1 本 commit 交付;模板重新实例化由部署脚本/手动 curl 完成(模板 ≠ 可用流程);
 - P2 建议作为下一个独立任务;P3 待 P0 实例化后立项。
+
+## P2 实验结果(2026-09-01,已完结 ✅)
+
+任务 `t-20260831-tsyhis`(1test,统一交付流水线 wf-g837rxka,Lina)12 步全流程走完:
+
+- **交付**:`.gitlab-ci.yml`(lint/test/build 三 stage、6 job、全 job `tags:[docker]`、workflow rules 四源)+ changelog + gitignore worktree 修复;MR !3 合并提交 `92573d1`;Tag `v0.2.0` 指向该 SHA,tag 触发的发布流水线 #874 success。三次失败-修复循环均自主完成(镜像拉取挂 36min→换 alpine 为最典型)。
+- **实验观察目标全部兑现**:
+  1. **多轮跟进长时任务**:✅ agent 自主改 YAML→触发→有界后台轮询(30s×8min 上限)→读 trace→修复重推,无需人工干预;
+  2. **NotBefore 延时唤醒**:✅ 机制可用,但注意**新建 agent 心跳默认 disabled**,事件触发能推节点流转,cycle 失败后的"下一轮接力"无兜底,需编排者手动 `POST /api/v1/scheduler/wakeup` 补触发(或打开心跳);
+  3. **是否值得封装 `mga pipeline status`**:倾向**值得**——agent 现在靠 `curl GitLab API` 轮询,每次都要拼 project_id/编码路径/找 token;一条 `mga pipeline status --ref <branch>` 能省掉每轮 ~3 个工具调用,结论已列 HANDOFF 候选。
+- **过程性发现**(已修/已记):ArchivedAt 卡死 bug(坑 17,commit da7c88d)、wakeup API 误用(坑 16)、编排 Agent 回合预算纪律(坑 15 修订)、CI runner egress 对全量 golang 镜像不友好(任务卡已沉淀 alpine 惯例)。
+- **人工闸门体验**:三轮审核(clarify_review/code_review/qa_signoff+pr_review)全部通过 API 提交;增强后的字段描述("填什么+粒度+去向"两段式)首次实战,审批人可直接照描述填 `release_candidate`(不可变 SHA 引用)——P0 效果符合预期,P3 预填的价值进一步确认。
