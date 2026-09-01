@@ -747,7 +747,7 @@ func hotfixDeployPipelineTemplate(locale string) entity.WorkflowTemplate {
 	locale = normalizeTemplateLocale(locale)
 	text := localizedTemplateText(locale, map[string]string{
 		"name":                "Hotfix / Emergency Deploy",
-		"description":         "Lightweight emergency path: triage with a frozen base commit, human-approved fix, verified tag, deploy confirmation. For urgent production fixes that must not walk the full delivery pipeline.",
+		"description":         "Lightweight emergency path: triage with a frozen base commit, human-approved fix, human-reviewed fix effect before tagging, verified tag, deploy confirmation. For urgent production fixes that must not walk the full delivery pipeline.",
 		"approved":            "approved",
 		"changesRequested":    "changes requested",
 		"retriage":            "re-triage",
@@ -757,6 +757,9 @@ func hotfixDeployPipelineTemplate(locale string) entity.WorkflowTemplate {
 		"hotfixReviewDesc":    "Human quickly confirms the fix approach and scope. Reject vague or risky plans here before any code is written.",
 		"fixTitle":            "Implement Fix",
 		"fixDesc":             "Create a branch from base_commit, implement the minimal fix plus a regression test that fails before and passes after.",
+		"fixReviewTitle":      "Fix Effect Review",
+		"fixReviewDesc":       "Human inspects the fix before anything is tagged: branch, commits, regression-test evidence, and the preview link. Approve to proceed to tag and deploy; request changes to return to implement_fix. Never tag before this gate passes.",
+		"fixPreviewField":     "Preview link for the fix (worktree or local preview); fill none when there is no preview.",
 		"verifyTitle":         "Verify, Tag and Trigger Deploy",
 		"verifyDesc":          "Re-run the full test suite (uncached) and lint on the fix branch — never tag without real verification. Then push, create an annotated tag (first release may assume v0.1.0 and must state the assumption), and trigger the deploy pipeline on a best-effort basis (record none plus the reason when absent).",
 		"confirmTitle":        "Deploy Confirmation",
@@ -772,7 +775,7 @@ func hotfixDeployPipelineTemplate(locale string) entity.WorkflowTemplate {
 		"baseCommitField":     "Frozen main HEAD SHA the fix branch must derive from (from triage diagnosis).",
 	}, map[string]string{
 		"name":                "紧急修复与部署",
-		"description":         "轻量紧急通道：冻结基线定位问题 → 人工确认修复方案 → 实测验证打 Tag → 部署确认。适用于必须跳过完整交付流水线的线上紧急修复。",
+		"description":         "轻量紧急通道：冻结基线定位问题 → 人工确认修复方案 → 实施修复 → 人工确认修复效果 → 实测验证打 Tag → 部署确认。适用于必须跳过完整交付流水线的线上紧急修复。",
 		"approved":            "通过",
 		"changesRequested":    "需要修改",
 		"retriage":            "重新诊断",
@@ -782,6 +785,9 @@ func hotfixDeployPipelineTemplate(locale string) entity.WorkflowTemplate {
 		"hotfixReviewDesc":    "人工快速确认修复方案与影响面。模糊或高风险方案在这里打回，不要让它进入编码。",
 		"fixTitle":            "实施修复",
 		"fixDesc":             "基于 base_commit 创建分支，实施最小修复，并补充一个'修复前失败、修复后通过'的回归测试。",
+		"fixReviewTitle":      "修复效果确认",
+		"fixReviewDesc":       "人工在打标前检查修复效果：分支、提交、回归测试证据与预览链接。确认后进入验证打标；不满意打回实施修复。严禁跳过本闸门直接打标。",
+		"fixPreviewField":     "修复预览链接（worktree 或本地预览）；没有预览时如实填 none。",
 		"verifyTitle":         "验证、打 Tag 与触发部署",
 		"verifyDesc":          "在修复分支上非缓存重跑完整测试与 lint——严禁未经实测就打标。随后推送、创建附注 Tag（首次发布可取 v0.1.0 但必须声明该假设），并尽力触发部署流水线（无 CI 时如实填 none 并说明原因）。",
 		"confirmTitle":        "部署确认",
@@ -803,15 +809,22 @@ func hotfixDeployPipelineTemplate(locale string) entity.WorkflowTemplate {
 		[]entity.WorkflowStep{
 			tmplStep("triage", "agent_task", text["triageTitle"], text["triageDesc"], "triage-agent", "rose", 80, []entity.WorkflowField{field("request", "requestField")}, []entity.WorkflowField{field("diagnosis", "diagnosisField")}),
 			tmplStep("hotfix_review", "human_review", text["hotfixReviewTitle"], text["hotfixReviewDesc"], "product-owner", "amber", 360, []entity.WorkflowField{field("diagnosis", "diagnosisField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), field("approved_fix", "approvedFixField")}),
-			tmplStep("implement_fix", "agent_task", text["fixTitle"], text["fixDesc"], "developer-agent", "emerald", 640, []entity.WorkflowField{field("approved_fix", "approvedFixField"), field("base_commit", "baseCommitField"), field("review_comments", "commentsField")}, []entity.WorkflowField{field("fix_artifact", "fixArtifactField")}),
-			tmplStep("verify_and_tag", "agent_task", text["verifyTitle"], text["verifyDesc"], "developer-agent", "emerald", 920, []entity.WorkflowField{field("fix_artifact", "fixArtifactField")}, []entity.WorkflowField{field("git_tag", "tagField"), field("deploy_evidence", "deployEvidenceField")}),
-			tmplStep("confirm", "human_review", text["confirmTitle"], text["confirmDesc"], "product-owner", "amber", 1200, []entity.WorkflowField{field("git_tag", "tagField"), field("deploy_evidence", "deployEvidenceField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField")}),
+			tmplStep("implement_fix", "agent_task", text["fixTitle"], text["fixDesc"], "developer-agent", "emerald", 640, []entity.WorkflowField{field("approved_fix", "approvedFixField"), field("base_commit", "baseCommitField"), field("review_comments", "commentsField")}, []entity.WorkflowField{field("fix_artifact", "fixArtifactField"), field("preview", "fixPreviewField")}),
+			tmplStep("fix_review", "human_review", text["fixReviewTitle"], text["fixReviewDesc"], "product-owner", "amber", 920, []entity.WorkflowField{field("fix_artifact", "fixArtifactField"), field("preview", "fixPreviewField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField")}),
+			tmplStep("verify_and_tag", "agent_task", text["verifyTitle"], text["verifyDesc"], "developer-agent", "emerald", 1200, []entity.WorkflowField{field("fix_artifact", "fixArtifactField")}, []entity.WorkflowField{field("git_tag", "tagField"), field("deploy_evidence", "deployEvidenceField")}),
+			tmplStep("confirm", "human_review", text["confirmTitle"], text["confirmDesc"], "product-owner", "amber", 1480, []entity.WorkflowField{field("git_tag", "tagField"), field("deploy_evidence", "deployEvidenceField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField")}),
 		},
 		[]entity.WorkflowEdge{
 			edge("e-triage-review", "triage", "hotfix_review", "", nil, nil, true),
 			edge("e-fix-approved", "hotfix_review", "implement_fix", text["approved"], cond("decision", "eq", "approve"), map[string]string{"approved_fix": "$output.approved_fix", "base_commit": "$input.diagnosis.base_commit", "review_comments": "$output.comments"}, false),
 			edge("e-fix-rejected", "hotfix_review", "triage", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "previous_diagnosis": "$input.diagnosis"}, false),
-			edge("e-fix-verify", "implement_fix", "verify_and_tag", "", nil, nil, true),
+			edge("e-fix-review", "implement_fix", "fix_review", "", nil, nil, true),
+			// No mapping on the way in: fix_review's inputs are filled from
+			// implement_fix outputs by name (fix_artifact, preview). The tag
+			// edge must map explicitly — a bare edge only copies the SOURCE
+			// step's outputs, and fix_review outputs no fix_artifact.
+			edge("e-review-tag", "fix_review", "verify_and_tag", text["approved"], cond("decision", "eq", "approve"), map[string]string{"fix_artifact": "$input.fix_artifact"}, false),
+			edge("e-review-rework", "fix_review", "implement_fix", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "previous_fix": "$input.fix_artifact"}, false),
 			edge("e-verify-confirm", "verify_and_tag", "confirm", "", nil, nil, true),
 			edge("e-confirm-done", "confirm", "implement_fix", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "previous_fix": "$input.git_tag"}, false),
 			edge("e-confirm-retriage", "confirm", "triage", text["retriage"], cond("decision", "eq", "escalate"), map[string]string{"review_comments": "$output.comments"}, false),

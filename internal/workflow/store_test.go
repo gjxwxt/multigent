@@ -924,13 +924,13 @@ func TestHotfixDeployPipelineTemplateStructure(t *testing.T) {
 			human++
 		}
 	}
-	for _, want := range []string{"triage", "hotfix_review", "implement_fix", "verify_and_tag", "confirm"} {
+	for _, want := range []string{"triage", "hotfix_review", "implement_fix", "fix_review", "verify_and_tag", "confirm"} {
 		if !stepIDs[want] {
 			t.Fatalf("missing step %q", want)
 		}
 	}
-	if human != 2 {
-		t.Fatalf("expected 2 human_review steps (plan review, deploy confirm), got %d", human)
+	if human != 3 {
+		t.Fatalf("expected 3 human_review steps (plan review, fix effect review, deploy confirm), got %d", human)
 	}
 
 	edges := map[string]entity.WorkflowEdge{}
@@ -964,6 +964,37 @@ func TestHotfixDeployPipelineTemplateStructure(t *testing.T) {
 	retriage := edges["e-confirm-retriage"]
 	if retriage.To != "triage" || retriage.Condition == nil || retriage.Condition.Value != "escalate" {
 		t.Fatalf("retriage edge missing or wrong: %+v", retriage)
+	}
+	// Fix-effect gate sits between coding and tagging: approval must carry
+	// fix_artifact into verify_and_tag (a bare edge copies only the SOURCE
+	// step's outputs, and fix_review produces no fix_artifact); rejection
+	// returns to implement_fix with the artifact preserved for rework.
+	reviewTag := edges["e-review-tag"]
+	if reviewTag.To != "verify_and_tag" || reviewTag.Condition == nil || reviewTag.Condition.Value != "approve" {
+		t.Fatalf("fix-review approve edge missing or wrong: %+v", reviewTag)
+	}
+	if reviewTag.InputMapping["fix_artifact"] != "$input.fix_artifact" {
+		t.Fatalf("fix-review approval must pass fix_artifact through to verify_and_tag: %+v", reviewTag.InputMapping)
+	}
+	reviewRework := edges["e-review-rework"]
+	if reviewRework.To != "implement_fix" || reviewRework.Condition == nil || reviewRework.Condition.Value != "request_changes" {
+		t.Fatalf("fix-review rework edge missing or wrong: %+v", reviewRework)
+	}
+	// Fix output must include a preview field so the human gate can inspect
+	// the effect before anything is tagged.
+	for _, s := range tmpl.Steps {
+		if s.ID != "implement_fix" {
+			continue
+		}
+		hasPreview := false
+		for _, f := range s.OutputFields {
+			if f.Name == "preview" {
+				hasPreview = true
+			}
+		}
+		if !hasPreview {
+			t.Fatal("implement_fix must expose a preview output for the fix-effect gate")
+		}
 	}
 	// Gate actors: product-owner owns both human gates, distinct agents for
 	// triage vs fix so the queues do not serialize on one identity.
