@@ -1061,3 +1061,28 @@ func TestHotfixDeployPipelineTemplateStructure(t *testing.T) {
 		}
 	}
 }
+
+// Policy: a human gate decides, it does not re-author upstream artifacts.
+// Every built-in template's human_review step may only REQUIRE decision and
+// comments; any pass-through contract field (approved_scope, approved_prd,
+// release_candidate, ...) must be Optional so it can be prefilled from the
+// gate's own input and backfilled on approve-as-is. A required extra field
+// forces the reviewer to hand-type machine-known content (or invent a
+// docID), which is exactly what confused reviewers in production.
+func TestHumanReviewGateOutputsAreNeverHandRequired(t *testing.T) {
+	for _, tmpl := range Templates("en") {
+		for _, s := range tmpl.Steps {
+			if s.Type != "human_review" {
+				continue
+			}
+			for _, f := range s.OutputFields {
+				if f.Name == "decision" || f.Name == "comments" {
+					continue
+				}
+				if !f.Optional {
+					t.Errorf("template %s step %s: output %q must be optional (prefilled pass-through, not hand-authored)", tmpl.ID, s.ID, f.Name)
+				}
+			}
+		}
+	}
+}

@@ -181,6 +181,32 @@ func reviewDraftForField(ctx *reviewDraftContext, field string) (string, string)
 		// the optional contract left empty carry the clarified scope forward
 		// untouched.
 		return draftFromUpstreamOutput(ctx, "clarified")
+	case "approved_prd":
+		if v, source := draftFromUpstreamOutput(ctx, field); strings.TrimSpace(v) != "" {
+			return v, source
+		}
+		return draftFromUpstreamOutput(ctx, "prd")
+	case "approved_technical_spec":
+		if v, source := draftFromUpstreamOutput(ctx, field); strings.TrimSpace(v) != "" {
+			return v, source
+		}
+		return draftFromUpstreamOutput(ctx, "technical_spec")
+	case "qa_evidence":
+		if v, source := draftFromUpstreamOutput(ctx, field); strings.TrimSpace(v) != "" {
+			return v, source
+		}
+		return draftFromUpstreamOutput(ctx, "fix_artifact")
+	case "ship_candidate":
+		if v, source := draftFromUpstreamOutput(ctx, field); strings.TrimSpace(v) != "" {
+			return v, source
+		}
+		// The QA gate reviews the QA report, but the ship candidate is the
+		// build artifact produced upstream: pass it through so a plain
+		// "approve" names what is actually being shipped.
+		if v, ok := latestCompletedOutput(ctx, "implementation_artifact", func(s string) bool { return len(s) > 0 }); ok {
+			return v, draftSourceUpstreamOutput
+		}
+		return "", draftSourceNone
 	case "approved_fix":
 		if v, source := draftFromUpstreamOutput(ctx, field); strings.TrimSpace(v) != "" {
 			return v, source
@@ -224,6 +250,10 @@ func draftApprovedChange(ctx *reviewDraftContext) (string, string) {
 		return v, draftSourceUpstreamOutput
 	}
 	if v, ok := latestCompletedOutput(ctx, "fix_artifact", func(s string) bool { return len(s) > 0 }); ok {
+		return v, draftSourceUpstreamOutput
+	}
+	// Legacy delivery templates name the implementation output "pr".
+	if v, ok := latestCompletedOutput(ctx, "pr", func(s string) bool { return len(s) > 0 }); ok {
 		return v, draftSourceUpstreamOutput
 	}
 	if branch := strings.TrimSpace(ctx.task.BranchName); branch != "" {

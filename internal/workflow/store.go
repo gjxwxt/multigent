@@ -120,7 +120,7 @@ func (s *Store) SeedDefaults() error {
 				Description:  "Product and engineering stakeholders review scope, non-goals, and acceptance criteria.",
 				ActorRole:    "product-owner",
 				InputFields:  []entity.WorkflowField{{Name: "prd", Description: "PRD draft to review."}},
-				OutputFields: []entity.WorkflowField{{Name: "decision", Description: "approve or request_changes."}, {Name: "comments", Description: "Review comments."}, {Name: "approved_prd", Description: "Final PRD when approved."}},
+				OutputFields: []entity.WorkflowField{{Name: "decision", Description: "approve or request_changes."}, {Name: "comments", Description: "Review comments."}, {Name: "approved_prd", Description: "The PRD handed to the tech-spec node. Prefilled with the draft under review: approve as-is when nothing changes, edit only to adjust scope or acceptance criteria.", Optional: true}},
 				ReviewPolicy: "manual",
 				Position:     entity.WorkflowPosition{X: 920, Y: 180},
 				Config:       map[string]string{"color": "amber"},
@@ -139,7 +139,7 @@ func (s *Store) SeedDefaults() error {
 				Description:  "Responsible engineers review the plan before implementation starts.",
 				ActorRole:    "tech-lead",
 				InputFields:  []entity.WorkflowField{{Name: "technical_spec", Description: "Technical plan to review."}},
-				OutputFields: []entity.WorkflowField{{Name: "decision", Description: "approve or request_changes."}, {Name: "comments", Description: "Review comments."}, {Name: "approved_technical_spec", Description: "Final technical spec when approved."}},
+				OutputFields: []entity.WorkflowField{{Name: "decision", Description: "approve or request_changes."}, {Name: "comments", Description: "Review comments."}, {Name: "approved_technical_spec", Description: "The plan handed to implementation. Prefilled with the spec under review: approve as-is when nothing changes, edit only to adjust the plan.", Optional: true}},
 				ReviewPolicy: "manual",
 				Position:     entity.WorkflowPosition{X: 1480, Y: 180},
 				Config:       map[string]string{"color": "amber"},
@@ -158,7 +158,7 @@ func (s *Store) SeedDefaults() error {
 				Description:  "The responsible human reviews code quality, risk, and whether the output matches the approved spec.",
 				ActorRole:    "owner-engineer",
 				InputFields:  []entity.WorkflowField{{Name: "pr", Description: "PR or patch to review."}, {Name: "approved_technical_spec", Description: "Approved implementation plan."}},
-				OutputFields: []entity.WorkflowField{{Name: "decision", Description: "approve or request_changes."}, {Name: "comments", Description: "Code review comments."}, {Name: "approved_change", Description: "Approved code artifact."}},
+				OutputFields: []entity.WorkflowField{{Name: "decision", Description: "approve or request_changes."}, {Name: "comments", Description: "Code review comments."}, {Name: "approved_change", Description: "The code artifact handed downstream. Prefilled from the reviewed PR/branch: approve as-is when nothing changes, edit only to override.", Optional: true}},
 				ReviewPolicy: "manual",
 				Position:     entity.WorkflowPosition{X: 2040, Y: 180},
 				Config:       map[string]string{"color": "amber"},
@@ -213,7 +213,7 @@ func (s *Store) SeedDefaults() error {
 				Description:  "Human QA or owner reviews the test report and decides whether release can proceed.",
 				ActorRole:    "qa-owner",
 				InputFields:  []entity.WorkflowField{{Name: "test_report", Description: "Test report to review."}},
-				OutputFields: []entity.WorkflowField{{Name: "decision", Description: "approve or request_changes."}, {Name: "comments", Description: "QA feedback."}, {Name: "release_candidate", Description: "Approved release candidate."}},
+				OutputFields: []entity.WorkflowField{{Name: "decision", Description: "approve or request_changes."}, {Name: "comments", Description: "QA feedback."}, {Name: "release_candidate", Description: "What release may ship. Prefilled with the merged SHA: approve as-is when nothing changes; must stay an immutable reference (SHA or pushed tag), never a branch name.", Optional: true}},
 				ReviewPolicy: "manual",
 				Position:     entity.WorkflowPosition{X: 3720, Y: 180},
 				Config:       map[string]string{"color": "amber"},
@@ -344,6 +344,13 @@ func softwareDeliveryTemplate(locale string) entity.WorkflowTemplate {
 	field := func(name, descKey string) entity.WorkflowField {
 		return entity.WorkflowField{Name: name, Description: text[descKey]}
 	}
+	// optionalField marks human-review outputs the reviewer may leave empty;
+	// the review handler backfills them from the deterministic draft rules.
+	optionalField := func(name, descKey string) entity.WorkflowField {
+		f := field(name, descKey)
+		f.Optional = true
+		return f
+	}
 	return entity.WorkflowTemplate{
 		ID:          "agentic-software-delivery",
 		Name:        text["name"],
@@ -355,17 +362,17 @@ func softwareDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			step("requirement_draft", "agent_task", "requirementDraftTitle", "requirementDraftDesc", "pm-agent", "sky", 80, []entity.WorkflowField{field("request", "requestField"), field("context", "contextField")}, []entity.WorkflowField{field("requirement_draft", "requirementDraftField"), field("open_questions", "openQuestionsField")}),
 			step("requirement_review", "human_review", "requirementReviewTitle", "requirementReviewDesc", "product-owner", "amber", 360, []entity.WorkflowField{field("requirement_draft", "requirementDraftReviewField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField")}),
 			step("prd_draft", "agent_task", "prdDraftTitle", "prdDraftDesc", "pm-agent", "sky", 640, []entity.WorkflowField{field("approved_requirement", "approvedRequirementField")}, []entity.WorkflowField{field("prd", "prdField"), field("acceptance_criteria", "acceptanceCriteriaField")}),
-			step("prd_review", "human_review", "prdReviewTitle", "prdReviewDesc", "product-owner", "amber", 920, []entity.WorkflowField{field("prd", "prdReviewField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), field("approved_prd", "approvedPRDField")}),
+			step("prd_review", "human_review", "prdReviewTitle", "prdReviewDesc", "product-owner", "amber", 920, []entity.WorkflowField{field("prd", "prdReviewField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("approved_prd", "approvedPRDField")}),
 			step("tech_spec_draft", "agent_task", "techSpecDraftTitle", "techSpecDraftDesc", "engineering-agent", "violet", 1200, []entity.WorkflowField{field("approved_prd", "approvedPRDInputField")}, []entity.WorkflowField{field("technical_spec", "technicalSpecField"), field("task_split", "taskSplitField")}),
-			step("tech_spec_review", "human_review", "techSpecReviewTitle", "techSpecReviewDesc", "tech-lead", "amber", 1480, []entity.WorkflowField{field("technical_spec", "technicalSpecReviewField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), field("approved_technical_spec", "approvedTechnicalSpecField")}),
+			step("tech_spec_review", "human_review", "techSpecReviewTitle", "techSpecReviewDesc", "tech-lead", "amber", 1480, []entity.WorkflowField{field("technical_spec", "technicalSpecReviewField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("approved_technical_spec", "approvedTechnicalSpecField")}),
 			step("implementation", "agent_task", "implementationTitle", "implementationDesc", "developer-agent", "emerald", 1760, []entity.WorkflowField{field("approved_technical_spec", "approvedTechnicalSpecInputField"), field("review_comments", "reviewCommentsInputField"), field("previous_pr", "previousPRInputField")}, []entity.WorkflowField{field("pr", "prField"), field("tests_run", "testsRunField"), field("risks", "risksField")}),
-			step("code_review", "human_review", "codeReviewTitle", "codeReviewDesc", "owner-engineer", "amber", 2040, []entity.WorkflowField{field("pr", "prReviewField"), field("approved_technical_spec", "approvedTechnicalSpecInputField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), field("approved_change", "approvedChangeField")}),
+			step("code_review", "human_review", "codeReviewTitle", "codeReviewDesc", "owner-engineer", "amber", 2040, []entity.WorkflowField{field("pr", "prReviewField"), field("approved_technical_spec", "approvedTechnicalSpecInputField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("approved_change", "approvedChangeField")}),
 			step("changelog_cleanup", "agent_task", "changelogCleanupTitle", "changelogCleanupDesc", "developer-agent", "sky", 2320, []entity.WorkflowField{field("approved_change", "approvedChangeInputField"), field("approved_technical_spec", "approvedTechnicalSpecInputField")}, []entity.WorkflowField{field("changelog", "changelogField"), field("branch_summary", "branchSummaryField")}),
 			step("create_pr", "agent_task", "createPRTitle", "createPRDesc", "developer-agent", "violet", 2600, []entity.WorkflowField{field("approved_change", "approvedChangeInputField"), field("approved_technical_spec", "approvedTechnicalSpecInputField"), field("changelog", "changelogField"), field("branch_summary", "branchSummaryField")}, []entity.WorkflowField{field("pr_url", "prURLField"), field("pr_number", "prNumberField"), field("pr_diff_summary", "prDiffSummaryField"), field("preview_url", "previewURLField")}),
 			step("pr_review", "human_review", "prReviewTitle", "prReviewDesc", "owner-engineer", "amber", 2880, []entity.WorkflowField{field("approved_change", "approvedChangeInputField"), field("pr_url", "prURLField"), field("pr_number", "prNumberField"), field("pr_diff_summary", "prDiffSummaryField"), field("preview_url", "previewURLField"), field("approved_technical_spec", "approvedTechnicalSpecInputField"), field("branch_summary", "branchSummaryField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField")}),
 			step("merge_and_sync", "agent_task", "mergeAndSyncTitle", "mergeAndSyncDesc", "developer-agent", "emerald", 3160, []entity.WorkflowField{field("branch_summary", "branchSummaryField"), field("approved_change", "approvedChangeInputField"), field("pr_url", "prURLField")}, []entity.WorkflowField{field("merged_sha", "mergedSHAField"), field("merge_status", "mergeStatusField")}),
 			step("qa", "agent_task", "qaTitle", "qaDesc", "qa-agent", "rose", 3440, []entity.WorkflowField{field("approved_change", "approvedChangeInputField")}, []entity.WorkflowField{field("test_cases", "testCasesField"), field("test_report", "testReportField")}),
-			step("qa_review", "human_review", "qaReviewTitle", "qaReviewDesc", "qa-owner", "amber", 3720, []entity.WorkflowField{field("test_report", "testReportReviewField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), field("release_candidate", "releaseCandidateField")}),
+			step("qa_review", "human_review", "qaReviewTitle", "qaReviewDesc", "qa-owner", "amber", 3720, []entity.WorkflowField{field("test_report", "testReportReviewField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("release_candidate", "releaseCandidateField")}),
 			step("release", "agent_task", "releaseTitle", "releaseDesc", "release-agent", "emerald", 4000, []entity.WorkflowField{field("release_candidate", "releaseCandidateInputField")}, []entity.WorkflowField{field("release_report", "releaseReportField")}),
 		},
 		Edges: []entity.WorkflowEdge{
@@ -426,7 +433,7 @@ func garryStyleDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"buildField":         "PR, patch, artifact, or implementation summary.",
 		"testsField":         "Tests executed and evidence.",
 		"qaReportField":      "QA report docID with findings and fixes.",
-		"shipCandidateField": "Approved release candidate or artifact summary.",
+		"shipCandidateField": "What the docs step will ship. Prefilled with the build artifact under review: approve as-is when nothing changes, edit only to adjust.",
 		"docsField":          "Documentation update docID or changed docs summary.",
 		"releaseField":       "Release decision, release notes, and monitoring checks.",
 		"learnField":         "Learning record docID and future workflow improvements.",
@@ -461,13 +468,20 @@ func garryStyleDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"buildField":         "PR、补丁、产物或实现摘要。",
 		"testsField":         "已执行测试和证据。",
 		"qaReportField":      "包含问题与修复情况的 QA 报告 docID。",
-		"shipCandidateField": "审核通过的发布候选或产物摘要。",
+		"shipCandidateField": "交给文档步骤的发布候选。已自动带入被审核的实现产物：不修改就直接通过；仅当要调整时编辑本字段。",
 		"docsField":          "文档更新 docID 或变更文档摘要。",
 		"releaseField":       "发布决策、发布说明和监控检查。",
 		"learnField":         "经验沉淀 docID 和后续流程优化建议。",
 	})
 	field := func(name, descKey string) entity.WorkflowField {
 		return entity.WorkflowField{Name: name, Description: text[descKey]}
+	}
+	// optionalField marks human-review outputs the reviewer may leave empty;
+	// the review handler backfills them from the deterministic draft rules.
+	optionalField := func(name, descKey string) entity.WorkflowField {
+		f := field(name, descKey)
+		f.Optional = true
+		return f
 	}
 	return templateFromParts("garry-style-completeness-delivery", text["name"], text["description"], locale, "intent_frame",
 		[]entity.WorkflowStep{
@@ -476,9 +490,9 @@ func garryStyleDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			tmplStep("plan_tune_review", "human_review", text["planReviewTitle"], text["planReviewDesc"], "owner", "amber", 640, []entity.WorkflowField{field("plan_doc_id", "planField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField")}),
 			tmplStep("complete_slice", "agent_task", text["buildTitle"], text["buildDesc"], "developer-agent", "emerald", 920, []entity.WorkflowField{field("plan_doc_id", "planField")}, []entity.WorkflowField{field("implementation_artifact", "buildField"), field("tests_run", "testsField")}),
 			tmplStep("qa_sweep", "agent_task", text["qaTitle"], text["qaDesc"], "qa-agent", "rose", 1200, []entity.WorkflowField{field("implementation_artifact", "buildField")}, []entity.WorkflowField{field("qa_report_doc_id", "qaReportField")}),
-			tmplStep("qa_gate", "human_review", text["qaReviewTitle"], text["qaReviewDesc"], "qa-owner", "amber", 1480, []entity.WorkflowField{field("qa_report_doc_id", "qaReportField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), field("ship_candidate", "shipCandidateField")}),
+			tmplStep("qa_gate", "human_review", text["qaReviewTitle"], text["qaReviewDesc"], "qa-owner", "amber", 1480, []entity.WorkflowField{field("qa_report_doc_id", "qaReportField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("ship_candidate", "shipCandidateField")}),
 			tmplStep("post_ship_docs", "agent_task", text["docsTitle"], text["docsDesc"], "docs-agent", "sky", 1760, []entity.WorkflowField{field("ship_candidate", "shipCandidateField")}, []entity.WorkflowField{field("docs_update_doc_id", "docsField")}),
-			tmplStep("ship_review", "human_review", text["shipReviewTitle"], text["shipReviewDesc"], "owner", "amber", 2040, []entity.WorkflowField{field("docs_update_doc_id", "docsField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), field("release_report_doc_id", "releaseField")}),
+			tmplStep("ship_review", "human_review", text["shipReviewTitle"], text["shipReviewDesc"], "owner", "amber", 2040, []entity.WorkflowField{field("docs_update_doc_id", "docsField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField")}),
 			tmplStep("observe_learn", "agent_task", text["observeTitle"], text["observeDesc"], "ops-agent", "emerald", 2320, []entity.WorkflowField{field("release_report_doc_id", "releaseField")}, []entity.WorkflowField{field("learning_doc_id", "learnField")}),
 		},
 		[]entity.WorkflowEdge{
@@ -491,7 +505,7 @@ func garryStyleDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			edge("e-qa-approved", "qa_gate", "post_ship_docs", text["approved"], cond("decision", "eq", "approve"), map[string]string{"ship_candidate": "$output.ship_candidate"}, false),
 			edge("e-qa-rework", "qa_gate", "complete_slice", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"qa_comments": "$output.comments", "qa_report_doc_id": "$input.qa_report_doc_id"}, false),
 			edge("e-docs-review", "post_ship_docs", "ship_review", "", nil, nil, true),
-			edge("e-ship-approved", "ship_review", "observe_learn", text["approved"], cond("decision", "eq", "approve"), map[string]string{"release_report_doc_id": "$output.release_report_doc_id"}, false),
+			edge("e-ship-approved", "ship_review", "observe_learn", text["approved"], cond("decision", "eq", "approve"), map[string]string{"release_report_doc_id": "$input.docs_update_doc_id"}, false),
 			edge("e-ship-rework", "ship_review", "post_ship_docs", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"ship_comments": "$output.comments", "docs_update_doc_id": "$input.docs_update_doc_id"}, false),
 		})
 }
@@ -572,7 +586,7 @@ func mattPocockStyleEngineeringTemplate(locale string) entity.WorkflowTemplate {
 			tmplStep("test_seams", "agent_task", text["seamTitle"], text["seamDesc"], "developer-agent", "violet", 920, []entity.WorkflowField{field("spec_doc_id", "specField")}, []entity.WorkflowField{field("test_seam_doc_id", "seamField")}),
 			tmplStep("seam_review", "human_review", text["seamReviewTitle"], text["seamReviewDesc"], "tech-lead", "amber", 1200, []entity.WorkflowField{field("test_seam_doc_id", "seamField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField")}),
 			tmplStep("vertical_slice", "agent_task", text["implTitle"], text["implDesc"], "developer-agent", "emerald", 1480, []entity.WorkflowField{field("test_seam_doc_id", "seamField")}, []entity.WorkflowField{field("change_artifact", "changeField"), field("tests_run", "testsField")}),
-			tmplStep("two_axis_review", "human_review", text["reviewTitle"], text["reviewDesc"], "owner-engineer", "amber", 1760, []entity.WorkflowField{field("change_artifact", "changeField"), field("tests_run", "testsField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), field("review_report_doc_id", "reviewField")}),
+			tmplStep("two_axis_review", "human_review", text["reviewTitle"], text["reviewDesc"], "owner-engineer", "amber", 1760, []entity.WorkflowField{field("change_artifact", "changeField"), field("tests_run", "testsField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField")}),
 			tmplStep("handoff_learning", "agent_task", text["handoffTitle"], text["handoffDesc"], "delivery-agent", "emerald", 2040, []entity.WorkflowField{field("review_report_doc_id", "reviewField")}, []entity.WorkflowField{field("handoff_doc_id", "handoffField")}),
 		},
 		[]entity.WorkflowEdge{
@@ -584,7 +598,7 @@ func mattPocockStyleEngineeringTemplate(locale string) entity.WorkflowTemplate {
 			edge("e-seams-approved", "seam_review", "vertical_slice", text["approved"], cond("decision", "eq", "approve"), map[string]string{"test_seam_doc_id": "$input.test_seam_doc_id"}, false),
 			edge("e-seams-rework", "seam_review", "test_seams", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "previous_test_seam_doc_id": "$input.test_seam_doc_id"}, false),
 			edge("e-slice-review", "vertical_slice", "two_axis_review", "", nil, nil, true),
-			edge("e-review-approved", "two_axis_review", "handoff_learning", text["approved"], cond("decision", "eq", "approve"), map[string]string{"review_report_doc_id": "$output.review_report_doc_id"}, false),
+			edge("e-review-approved", "two_axis_review", "handoff_learning", text["approved"], cond("decision", "eq", "approve"), map[string]string{"review_report_doc_id": "$input.change_artifact"}, false),
 			edge("e-review-rework", "two_axis_review", "vertical_slice", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "previous_change_artifact": "$input.change_artifact"}, false),
 		})
 }
@@ -645,7 +659,7 @@ func tddReviewLoopTemplate(locale string) entity.WorkflowTemplate {
 			tmplStep("seam_review", "human_review", text["reviewTitle"], text["reviewDesc"], "tech-lead", "amber", 360, []entity.WorkflowField{field("test_seam_doc_id", "seamField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField")}),
 			tmplStep("failing_test", "agent_task", text["testTitle"], text["testDesc"], "developer-agent", "rose", 640, []entity.WorkflowField{field("test_seam_doc_id", "seamField")}, []entity.WorkflowField{field("failing_test", "testField")}),
 			tmplStep("make_pass", "agent_task", text["implTitle"], text["implDesc"], "developer-agent", "emerald", 920, []entity.WorkflowField{field("failing_test", "testField")}, []entity.WorkflowField{field("change_artifact", "changeField")}),
-			tmplStep("evidence_review", "human_review", text["finalTitle"], text["finalDesc"], "owner-engineer", "amber", 1200, []entity.WorkflowField{field("change_artifact", "changeField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), field("evidence_report_doc_id", "reportField")}),
+			tmplStep("evidence_review", "human_review", text["finalTitle"], text["finalDesc"], "owner-engineer", "amber", 1200, []entity.WorkflowField{field("change_artifact", "changeField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField")}),
 		},
 		[]entity.WorkflowEdge{
 			edge("e-seam-review", "choose_seam", "seam_review", "", nil, nil, true),
@@ -684,7 +698,7 @@ func bugTriageLoopTemplate(locale string) entity.WorkflowTemplate {
 		"decisionField":    "approve or request_changes.",
 		"commentsField":    "Review comments.",
 		"fixField":         "Fix artifact, regression test, and command output.",
-		"qaField":          "QA evidence and risk summary.",
+		"qaField":          "QA conclusion handed to the close-report step. Prefilled with the fix artifact under review: approve as-is when nothing changes, edit only to add risk notes or walkthrough results.",
 		"closeField":       "Bug receipt docID.",
 	}, map[string]string{
 		"name":             "Agent 缺陷分流修复流程",
@@ -711,11 +725,18 @@ func bugTriageLoopTemplate(locale string) entity.WorkflowTemplate {
 		"decisionField":    "approve 或 request_changes。",
 		"commentsField":    "审核意见。",
 		"fixField":         "修复产物、回归测试和命令输出。",
-		"qaField":          "QA 证据和风险摘要。",
+			"qaField":          "交给关闭报告的 QA 结论。已自动带入被审核的修复产物：不修改就直接通过；仅当要补充风险或走查结论时编辑本字段。",
 		"closeField":       "缺陷回执 docID。",
 	})
 	field := func(name, descKey string) entity.WorkflowField {
 		return entity.WorkflowField{Name: name, Description: text[descKey]}
+	}
+	// optionalField marks human-review outputs the reviewer may leave empty;
+	// the review handler backfills them from the deterministic draft rules.
+	optionalField := func(name, descKey string) entity.WorkflowField {
+		f := field(name, descKey)
+		f.Optional = true
+		return f
 	}
 	return templateFromParts("agentic-bug-triage-loop", text["name"], text["description"], locale, "bug_intake",
 		[]entity.WorkflowStep{
@@ -724,7 +745,7 @@ func bugTriageLoopTemplate(locale string) entity.WorkflowTemplate {
 			tmplStep("diagnosis", "agent_task", text["diagTitle"], text["diagDesc"], "developer-agent", "violet", 640, []entity.WorkflowField{field("reproduction_doc_id", "reproField")}, []entity.WorkflowField{field("diagnosis_doc_id", "diagField")}),
 			tmplStep("fix_plan_review", "human_review", text["reviewTitle"], text["reviewDesc"], "owner-engineer", "amber", 920, []entity.WorkflowField{field("diagnosis_doc_id", "diagField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField")}),
 			tmplStep("fix_regression", "agent_task", text["fixTitle"], text["fixDesc"], "developer-agent", "emerald", 1200, []entity.WorkflowField{field("diagnosis_doc_id", "diagField")}, []entity.WorkflowField{field("fix_artifact", "fixField")}),
-			tmplStep("bug_qa_review", "human_review", text["qaTitle"], text["qaDesc"], "qa-owner", "amber", 1480, []entity.WorkflowField{field("fix_artifact", "fixField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), field("qa_evidence", "qaField")}),
+			tmplStep("bug_qa_review", "human_review", text["qaTitle"], text["qaDesc"], "qa-owner", "amber", 1480, []entity.WorkflowField{field("fix_artifact", "fixField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("qa_evidence", "qaField")}),
 			tmplStep("close_report", "agent_task", text["closeTitle"], text["closeDesc"], "qa-agent", "sky", 1760, []entity.WorkflowField{field("qa_evidence", "qaField")}, []entity.WorkflowField{field("bug_receipt_doc_id", "closeField")}),
 		},
 		[]entity.WorkflowEdge{
@@ -1104,18 +1125,18 @@ func softwareDeliveryText(locale string) map[string]string {
 		"prdField":                        "Product requirements document or spec.",
 		"acceptanceCriteriaField":         "Observable acceptance criteria.",
 		"prdReviewField":                  "PRD draft to review.",
-		"approvedPRDField":                "Final PRD when approved.",
+		"approvedPRDField":                "The PRD handed to the tech-spec node. Prefilled with the draft under review: approve as-is when nothing changes, edit only to adjust scope or acceptance criteria.",
 		"approvedPRDInputField":           "Reviewed product spec.",
 		"technicalSpecField":              "Implementation plan and technical decisions.",
 		"taskSplitField":                  "Optional child task split for parallel work.",
 		"technicalSpecReviewField":        "Technical plan to review.",
-		"approvedTechnicalSpecField":      "Final technical spec when approved.",
+		"approvedTechnicalSpecField":      "The plan handed to implementation. Prefilled with the spec under review: approve as-is when nothing changes, edit only to adjust the plan.",
 		"approvedTechnicalSpecInputField": "Approved implementation plan.",
 		"prField":                         "Pull request, patch, or change summary.",
 		"testsRunField":                   "Tests executed by the agent.",
 		"risksField":                      "Known risks or manual checks needed.",
 		"prReviewField":                   "PR or patch to review.",
-		"approvedChangeField":             "Approved code artifact.",
+		"approvedChangeField":             "The code artifact handed downstream. Prefilled from the reviewed PR/branch: approve as-is when nothing changes, edit only to override.",
 		"approvedChangeInputField":        "Code artifact approved for testing.",
 		"reviewCommentsInputField":        "Structured feedback from the previous review round.",
 		"previousPRInputField":            "Existing pull request or patch reference to update.",
@@ -1128,7 +1149,7 @@ func softwareDeliveryText(locale string) map[string]string {
 		"testCasesField":                  "Test cases.",
 		"testReportField":                 "Automated and manual test result summary.",
 		"testReportReviewField":           "Test report to review.",
-		"releaseCandidateField":           "Approved release candidate.",
+		"releaseCandidateField":           "What release may ship. Prefilled with the merged SHA: approve as-is when nothing changes; must stay an immutable reference (SHA or pushed tag), never a branch name.",
 		"releaseCandidateInputField":      "Approved release candidate.",
 		"releaseReportField":              "Release result, monitoring checks, and follow-up items.",
 		"approveAndPush":                  "approve and push",
@@ -1197,18 +1218,18 @@ func softwareDeliveryText(locale string) map[string]string {
 			"prdField":                        "产品需求文档或规格说明。",
 			"acceptanceCriteriaField":         "可观察的验收标准。",
 			"prdReviewField":                  "待审核的产品文档草稿。",
-			"approvedPRDField":                "审核通过后的最终产品文档。",
+			"approvedPRDField":                "交给技术方案节点的产品文档。已自动带入待审草稿：不修改就直接通过；仅当要调整范围或验收标准时编辑本字段。",
 			"approvedPRDInputField":           "已审核的产品规格。",
 			"technicalSpecField":              "实现方案和技术决策。",
 			"taskSplitField":                  "可选的并行子任务拆分。",
 			"technicalSpecReviewField":        "待审核的技术方案。",
-			"approvedTechnicalSpecField":      "审核通过后的最终技术方案。",
+			"approvedTechnicalSpecField":      "交给实现节点的技术方案。已自动带入待审方案：不修改就直接通过；仅当要调整方案时编辑本字段。",
 			"approvedTechnicalSpecInputField": "已通过的实现方案。",
 			"prField":                         "PR、补丁或变更摘要。",
 			"testsRunField":                   "Agent 已执行的测试。",
 			"risksField":                      "已知风险或需要人工检查的事项。",
 			"prReviewField":                   "待审核的 PR 或补丁。",
-			"approvedChangeField":             "已审核通过的代码产物。",
+			"approvedChangeField":             "交给下游的代码产物。已自动带入被审核的 PR/分支：确认无误直接通过；仅在人工改判产物时编辑。",
 			"approvedChangeInputField":        "已通过代码审核的产物。",
 			"reviewCommentsInputField":        "上一轮审核产生的结构化修改意见。",
 			"previousPRInputField":            "需要继续更新的现有 PR 或补丁引用。",
@@ -1221,7 +1242,7 @@ func softwareDeliveryText(locale string) map[string]string {
 			"testCasesField":                  "测试用例。",
 			"testReportField":                 "自动化和人工测试结果摘要。",
 			"testReportReviewField":           "待审核的测试报告。",
-			"releaseCandidateField":           "已通过测试准出的发布候选。",
+			"releaseCandidateField":           "允许发布的候选。已自动带入合并 SHA：确认无误直接通过；必须保持不可变引用（SHA 或已推送 Tag），严禁写分支名。",
 			"releaseCandidateInputField":      "已通过测试准出的发布候选。",
 			"releaseReportField":              "发布结果、监控检查和后续事项。",
 		})

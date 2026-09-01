@@ -156,6 +156,47 @@ func TestDraftApprovedScopeFallsBackToClarified(t *testing.T) {
 	}
 }
 
+func TestDraftPassThroughGateFieldsFallBackToGateInput(t *testing.T) {
+	// Every "approved X" gate field with no same-named upstream falls back
+	// to the artifact actually under review at that gate, so approve-as-is
+	// forwards it untouched (same pattern as approved_scope -> clarified).
+	cases := []struct {
+		field, inputKey, value string
+	}{
+		{"approved_prd", "prd", "PRD 草稿文本"},
+		{"approved_technical_spec", "technical_spec", "技术方案文本"},
+		{"qa_evidence", "fix_artifact", "修复产物文本"},
+	}
+	for _, c := range cases {
+		ctx := draftTestContext()
+		ctx.instance = entity.WorkflowStepInstance{InputValues: map[string]string{c.inputKey: c.value}}
+		v, src := reviewDraftForField(ctx, c.field)
+		if v != c.value || src != draftSourceUpstreamOutput {
+			t.Errorf("%s draft = %q/%q, want %q passthrough from %s", c.field, v, src, c.value, c.inputKey)
+		}
+	}
+}
+
+func TestDraftShipCandidateFromBuildArtifact(t *testing.T) {
+	ctx := draftTestContext()
+	// The QA gate's own input is the QA report; the ship candidate is the
+	// build artifact produced upstream — the draft names what ships.
+	ctx.instance = entity.WorkflowStepInstance{InputValues: map[string]string{"qa_report_doc_id": "doc-20260831-aaa111"}}
+	ctx.events = []entity.WorkflowStepEvent{
+		{StepID: "complete_slice", Status: "completed", OutputValues: map[string]string{"implementation_artifact": "PR #42: 完整切片实现"}},
+	}
+	v, src := reviewDraftForField(ctx, "ship_candidate")
+	if v != "PR #42: 完整切片实现" || src != draftSourceUpstreamOutput {
+		t.Fatalf("ship_candidate draft = %q/%q, want build artifact passthrough", v, src)
+	}
+	// No build artifact anywhere: empty, never fabricated.
+	ctx.events = nil
+	v2, src2 := reviewDraftForField(ctx, "ship_candidate")
+	if v2 != "" || src2 != draftSourceNone {
+		t.Fatalf("missing build artifact must be empty/none, got %q/%q", v2, src2)
+	}
+}
+
 func TestDraftApprovedFixFallsBackToDiagnosis(t *testing.T) {
 	ctx := draftTestContext()
 	// Hotfix plan gate: the step input carries the triage diagnosis and no
