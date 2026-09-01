@@ -751,6 +751,7 @@
       "noFields": "暂无字段",
       "fieldName": "字段名",
       "fieldDescription": "字段说明",
+      "fieldOptional": "可选（审核人可留空）",
       "notifyAssignee": "通知实际负责人",
       "notifyAssigneeHint": "当任务流转到这个人工审核节点时，通过已绑定的协作账号通知该任务实际负责人。",
       "notifyChannel": "通知渠道",

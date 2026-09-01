@@ -953,16 +953,16 @@ func TestHotfixDeployPipelineTemplateStructure(t *testing.T) {
 	if human != 3 {
 		t.Fatalf("expected 3 human_review steps (plan review, fix effect review, deploy confirm), got %d", human)
 	}
-	// The plan gate must be approvable without the reviewer authoring a
-	// plan: approved_fix is optional and backfilled from the triage
-	// diagnosis (same auto-reference contract as the unified pipeline).
+	// The plan gate decides, it does not re-author the plan: it must not
+	// expose an approved_fix output at all (a pure pass-through field only
+	// invites "what do I type here?"). Decision + comments is the contract.
 	for _, s := range tmpl.Steps {
 		if s.ID != "hotfix_review" {
 			continue
 		}
 		for _, f := range s.OutputFields {
-			if f.Name == "approved_fix" && !f.Optional {
-				t.Fatal("hotfix_review.approved_fix must be optional (auto-referenced from diagnosis)")
+			if f.Name == "approved_fix" {
+				t.Fatal("hotfix_review must not output approved_fix; approval passes the diagnosis through the edge")
 			}
 		}
 	}
@@ -979,6 +979,9 @@ func TestHotfixDeployPipelineTemplateStructure(t *testing.T) {
 	}
 	if approve.InputMapping["base_commit"] != "$input.diagnosis.base_commit" {
 		t.Fatalf("approve edge must carry frozen base_commit from diagnosis: %+v", approve.InputMapping)
+	}
+	if approve.InputMapping["approved_fix"] != "$input.diagnosis" {
+		t.Fatalf("approve edge must pass the triage diagnosis through as the approved fix: %+v", approve.InputMapping)
 	}
 	// Plan-rejection recycles into triage with the prior diagnosis preserved.
 	reject := edges["e-fix-rejected"]

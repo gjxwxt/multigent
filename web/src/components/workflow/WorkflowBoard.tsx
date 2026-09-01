@@ -1806,6 +1806,7 @@ export function WorkflowBoard({
                   title={t('workflows.detail.output')}
                   fields={stepDraft.outputFields ?? []}
                   onChange={(fields) => updateStepDraftFields('outputFields', fields)}
+                  allowOptional={stepDraft.type === 'human_review'}
                 />
               )}
               {stepDraft.type === 'parallel_stage' ? (
@@ -1906,7 +1907,7 @@ function Detail({ label, value, mono = false }: { label: string; value: string; 
   )
 }
 
-function FieldTable({ title, fields, onChange }: { title: string; fields: WorkflowField[]; onChange: (fields: WorkflowField[]) => void }) {
+function FieldTable({ title, fields, onChange, allowOptional = false }: { title: string; fields: WorkflowField[]; onChange: (fields: WorkflowField[]) => void; allowOptional?: boolean }) {
   const { t } = useTranslation()
 
   function updateField(index: number, patch: Partial<WorkflowField>) {
@@ -1948,7 +1949,20 @@ function FieldTable({ title, fields, onChange }: { title: string; fields: Workfl
                   placeholder={t('workflows.detail.fieldDescription')}
                   className="w-full rounded-md border border-neutral-300 bg-white px-2 py-1.5 text-xs text-neutral-900 outline-none focus:border-sky-400 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-100"
                 />
-                <div className="flex justify-end">
+                <div className="flex items-center justify-between gap-2">
+                  {allowOptional ? (
+                    <label className="flex items-center gap-1.5 text-xs text-neutral-500 dark:text-zinc-400">
+                      <input
+                        type="checkbox"
+                        checked={field.optional === true}
+                        onChange={(event) => updateField(index, { optional: event.target.checked })}
+                        className="h-3.5 w-3.5 rounded border-neutral-300 accent-sky-500 dark:border-zinc-600"
+                      />
+                      {t('workflows.detail.fieldOptional')}
+                    </label>
+                  ) : (
+                    <span />
+                  )}
                   <button type="button" onClick={() => removeField(index)} className="text-xs text-red-500 hover:text-red-600 dark:text-red-400">
                     {t('common.delete')}
                   </button>

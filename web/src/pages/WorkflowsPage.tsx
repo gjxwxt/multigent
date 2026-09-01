@@ -615,9 +615,9 @@ function normalizeImportedFields(value: unknown) {
       const record = item as Record<string, unknown>
       const name = typeof record.name === 'string' ? record.name.trim() : ''
       if (!name) return null
-      return { name, description: typeof record.description === 'string' ? record.description : '' }
+      return { name, description: typeof record.description === 'string' ? record.description : '', ...(record.optional === true ? { optional: true } : {}) }
     })
-    .filter((item): item is { name: string; description?: string } => Boolean(item))
+    .filter((item): item is { name: string; description?: string; optional?: boolean } => Boolean(item))
 }
 
 function normalizeImportedConfig(value: unknown) {

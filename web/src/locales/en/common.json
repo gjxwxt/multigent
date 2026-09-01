@@ -751,6 +751,7 @@
       "noFields": "No fields",
       "fieldName": "Field name",
       "fieldDescription": "Description",
+      "fieldOptional": "Optional (reviewer may leave empty)",
       "notifyAssignee": "Notify actual assignee",
       "notifyAssigneeHint": "When a task reaches this human review node, notify the task's assigned reviewer through their linked collaboration account.",
       "notifyChannel": "Notification channel",

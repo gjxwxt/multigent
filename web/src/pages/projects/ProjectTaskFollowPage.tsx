@@ -335,7 +335,12 @@ export default function ProjectTaskFollowPage() {
     const comments = (outputs.comments ?? reviewComments).trim()
     if (outputFieldNames.includes('comments')) outputs.comments = comments
     const decisionOptional = isOptionalTerminalReviewDecision(activeStep, workflowData?.definition)
-    const missingField = outputFieldNames.find((name) => !(name === 'decision' && decisionOptional) && !String(outputs[name] ?? '').trim())
+    // Optional fields never block submit: left empty, the server backfills
+    // them from the deterministic draft rules.
+    const missingField = (activeStep.outputFields ?? [])
+      .filter((field) => field.name && !field.optional)
+      .map((field) => field.name)
+      .find((name) => !(name === 'decision' && decisionOptional) && !String(outputs[name] ?? '').trim())
     if (missingField) {
       setMissingReviewField(missingField)
       setReviewErr(`${t('forms.fillRequired')} ${missingField}`)

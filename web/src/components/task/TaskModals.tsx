@@ -396,7 +396,11 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
     const comments = (outputs.comments ?? reviewComments).trim()
     if (outputFieldNames.includes('comments')) outputs.comments = comments
     const decisionOptional = isOptionalTerminalReviewDecision(activeWorkflowStep, workflowState.status === 'ok' ? workflowState.data.definition : undefined)
-    const missingField = outputFieldNames
+    // Optional fields never block submit: left empty, the server backfills
+    // them from the deterministic draft rules.
+    const missingField = (activeWorkflowStep?.outputFields ?? [])
+      .filter((field) => field.name && !field.optional)
+      .map((field) => field.name)
       .find((name) => !(name === 'decision' && decisionOptional) && !String(outputs[name] ?? '').trim())
     if (missingField) {
       setMissingReviewField(missingField)
