@@ -3,6 +3,7 @@ package gitworktree
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -322,6 +323,7 @@ func (m *Manager) ensureWorktree(projectRoot, taskID, baseBranch, baseCommit, fe
 	if _, err := os.Stat(gitDir); err != nil {
 		return "", "", fmt.Errorf("project root is not a git repository: %w", err)
 	}
+	sanitizeSharedGitConfig(projectRoot)
 
 	targetDir := WorktreeDir(projectRoot, taskID)
 	if _, err := os.Stat(targetDir); err == nil {
@@ -511,6 +513,7 @@ func (m *Manager) FetchRemoteUpdates(projectRoot string) error {
 	}
 	defer unlock()
 
+	sanitizeSharedGitConfig(projectRoot)
 	cmdRemote := exec.Command("git", "remote")
 	cmdRemote.Dir = projectRoot
 	out, err := cmdRemote.Output()
@@ -676,6 +679,7 @@ func (m *Manager) PushBranch(projectRoot, branch, expectedCommit string) error {
 	if projectRoot == "" || branch == "" || expectedCommit == "" {
 		return fmt.Errorf("project root, branch, and expected commit are required")
 	}
+	sanitizeSharedGitConfig(projectRoot)
 
 	cmd := exec.Command("git", "push", "origin", "refs/heads/"+branch+":refs/heads/"+branch)
 	cmd.Dir = projectRoot
@@ -731,6 +735,41 @@ func (m *Manager) IsAncestor(projectRoot, ancestor, descendant string) (bool, er
 		return false, nil
 	}
 	return false, fmt.Errorf("check ancestor relationship: %w", err)
+}
+
+// sanitizeSharedGitConfig removes stale credential.helper entries that point
+// into per-run runtime-tools directories from the shared repository config.
+// Such entries appear when an agent configures a helper with a container-
+// internal path (e.g. /workspace/.multigent/runtime-tools/<run>/...) inside a
+// sandbox; that path never exists on the host or in later containers, so
+// every credential lookup afterwards — including the platform's own fetch and
+// push — fails. The platform injects credentials per run via GIT_CONFIG_GLOBAL,
+// so the shared config must stay free of run-scoped helpers.
+func sanitizeSharedGitConfig(projectRoot string) {
+	cfgPath := filepath.Join(strings.TrimSpace(projectRoot), ".git", "config")
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(string(raw), "\n")
+	kept := lines[:0]
+	changed := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "helper") && strings.Contains(trimmed, ".multigent/runtime-tools/") {
+			changed = true
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if !changed {
+		return
+	}
+	if err := os.WriteFile(cfgPath, []byte(strings.Join(kept, "\n")), 0644); err != nil {
+		log.Printf("[gitworktree] sanitize shared git config failed for %s: %v", projectRoot, err)
+		return
+	}
+	log.Printf("[gitworktree] removed stale runtime-tools credential.helper from %s", cfgPath)
 }
 
 func redactGitOutput(value string) string {

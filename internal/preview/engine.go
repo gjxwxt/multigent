@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/multigent/multigent/internal/sandbox"
 )
 
 // ProjectType defines the detected type of application in a workspace.
@@ -300,6 +302,13 @@ func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktree
 		"-e", "GOFLAGS=-buildvcs=false",
 		"-e", "NPM_CONFIG_PREFIX=/opt/multigent/toolchains/npm",
 		"-e", "PATH=/opt/multigent/toolchains/npm/bin:/usr/local/go/bin:/root/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+	}
+	// Linked worktrees record their parent gitdir as an absolute host path;
+	// mount the parent repo at the same path so git inside the preview
+	// container can resolve it (otherwise every git command fails with
+	// "not a git repository" — see sandbox.WorktreeParentMount).
+	if parentMount := sandbox.WorktreeParentMount(worktreeDir, readOnly); parentMount != "" {
+		dockerArgs = append(dockerArgs, "-v", parentMount)
 	}
 	if backendHostPort > 0 {
 		dockerArgs = append(dockerArgs, "-p", fmt.Sprintf("127.0.0.1:%d:%d", backendHostPort, backendContainerPort))

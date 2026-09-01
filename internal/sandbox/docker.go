@@ -144,6 +144,13 @@ func BuildArgs(agentDir string, model entity.AgentModel, cfg *entity.DockerSandb
 		"-v", absAgentDir+":"+WorkspaceMount,
 		"-w", WorkspaceMount,
 	)
+	// When the workspace is a linked git worktree, its `.git` file records the
+	// parent gitdir as an absolute host path that is otherwise invisible in
+	// the container — git then fails outright and marks sibling worktrees as
+	// prunable. Mount the parent repo at its recorded path so git resolves it.
+	if parentMount := WorktreeParentMount(absAgentDir, false); parentMount != "" {
+		args = append(args, "-v", parentMount)
+	}
 
 	// ── User bin directory ────────────────────────────────────────────────────
 	// If <root>/bin/ exists, mount it to /multigent/bin and add to PATH so

@@ -454,7 +454,7 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 		if base == "" {
 			base = "main"
 		}
-		scopedBoundary = fmt.Sprintf("【Git Worktree 独立分支安全边界约束】\n- 你当前工作在独立特性分支 `%s` (基于 `%s`) 的专用工作区 (Worktree) 中。\n- 你的工作根目录已映射至 `/workspace`。所有代码修改、新增文件与单测验证必须严格限定在 `/workspace` 内部。\n- 严禁执行 git checkout 切换到其他分支，严禁修改父仓库或其他任务的文件。\n- 【工作区环境与依赖状态】当前工作区的所有代码、Git 历史与已安装依赖（如 node_modules）均已持久化就绪。严禁执行 rm -rf .git 或重新 git init，严禁无故全量重装依赖。请直接在现有代码库上进行增量改动、构建和测试。\n\n", task.BranchName, base)
+		scopedBoundary = fmt.Sprintf("【Git Worktree 独立分支安全边界约束】\n- 你当前工作在独立特性分支 `%s` (基于 `%s`) 的专用工作区 (Worktree) 中。\n- 你的工作根目录已映射至 `/workspace`。所有代码修改、新增文件与单测验证必须严格限定在 `/workspace` 内部。\n- 严禁执行 git checkout 切换到其他分支，严禁修改父仓库或其他任务的文件。\n- 严禁执行 `git worktree prune`、`git worktree remove` 或任何修改父仓库 `.git` 目录与共享 Git 配置（含 credential.helper、remote URL）的命令——这些元数据由平台统一管理，破坏会同时毁掉其他任务的工作区。\n- 严禁向 git 配置写入任何凭据（token/密码）；推送凭据由平台在推送瞬时注入，无需也不允许你自行配置。\n- 【工作区环境与依赖状态】当前工作区的所有代码、Git 历史与已安装依赖（如 node_modules）均已持久化就绪。严禁执行 rm -rf .git 或重新 git init，严禁无故全量重装依赖。请直接在现有代码库上进行增量改动、构建和测试。\n\n", task.BranchName, base)
 	}
 
 	fullPrompt := scopedBoundary + r.taskPromptWithWorkflowContext(project, agentName, task) + fmt.Sprintf(systemMetaFooter,

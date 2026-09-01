@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"log"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -53,6 +54,18 @@ func (s *Server) recordTaskAttentionSignal(workspaceID, project, agent string, t
 		"assignee":    task.Assignee,
 		"reason":      reason,
 	})
+	// A signaled task may be handled inside a run whose container mounts a
+	// different workspace (e.g. the agent's parent repo picked up by the
+	// scheduler cycle). Without the worktree location the agent cannot know
+	// where this task's code actually lives and may edit/commit in the wrong
+	// checkout, so always carry the isolation context when present.
+	if worktreeDir := strings.TrimSpace(task.WorktreeDir); worktreeDir != "" {
+		payload["worktreeDir"] = worktreeDir
+		if branch := strings.TrimSpace(task.BranchName); branch != "" {
+			payload["branchName"] = branch
+		}
+		payload["workspaceInstruction"] = taskWorktreeWorkspaceInstruction(task.ID, worktreeDir)
+	}
 	refsRaw, _ := json.Marshal(refs)
 	now := time.Now().UTC()
 	summary := strings.TrimSpace(task.Title)
@@ -275,6 +288,19 @@ func (s *Server) taskWorkflowRun(workspaceID, project, taskID string) (entity.Wo
 		return updated, true
 	}
 	return run, true
+}
+
+// taskWorktreeWorkspaceInstruction tells an agent handling a signaled task
+// from an unrelated run exactly where the task's isolated checkout lives.
+// Worktrees are created under <agentDir>/.multigent/worktrees/<id>, so when
+// the current container mounts the parent agent directory at /workspace the
+// worktree is reachable at the container-relative path below.
+func taskWorktreeWorkspaceInstruction(taskID, worktreeDir string) string {
+	containerPath := "/workspace/.multigent/worktrees/" + filepath.Base(strings.TrimRight(worktreeDir, "/"))
+	return "【工作区定位】任务 " + taskID + " 拥有专用 Git worktree 工作区（宿主路径 " + worktreeDir +
+		"）。若你当前容器的 /workspace 不是该目录（例如挂载的是父仓库主工作区），必须进入该 worktree 目录完成本任务的全部代码修改与提交" +
+		"（父仓库挂载时其容器内路径为 " + containerPath + "）；严禁在父仓库主工作区或错误分支上修改、提交代码，" +
+		"严禁执行 git worktree prune/remove 等会破坏共享 Git 元数据的命令。"
 }
 
 func normalizeTaskAttentionReason(reason string) string {
