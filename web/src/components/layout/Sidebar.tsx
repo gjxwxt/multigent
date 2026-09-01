@@ -11,6 +11,7 @@ import {
 import { cn } from '../../lib/cn'
 import { useWorkspaceAccess } from '../../lib/workspace-access'
 import { WORKSPACE_ID_KEY, apiFetch, apiPost } from '../../lib/api'
+import { isImeComposing } from '../../utils/ime'
 
 type WorkspaceSummary = {
   id: string
@@ -216,7 +217,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
                     value={newWorkspaceName}
                     onChange={e => setNewWorkspaceName(e.target.value)}
                     onKeyDown={e => {
-                      if (e.key === 'Enter') {
+                      if (e.key === 'Enter' && !isImeComposing(e)) {
                         e.preventDefault()
                         createWorkspace()
                       }

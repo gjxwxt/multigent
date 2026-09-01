@@ -1,5 +1,6 @@
 import { AlertTriangle, X } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
+import { overlayDismissProps } from './overlay'
 
 type Props = {
   open: boolean
@@ -80,7 +81,7 @@ export function ConfirmDialog({
     <div
       className="fixed inset-0 z-[80] flex items-center justify-center bg-black/45 p-4 backdrop-blur-[1px]"
       role="presentation"
-      onClick={() => !busy && onCancel()}
+      {...overlayDismissProps(() => !busy && onCancel())}
     >
       <div
         className="w-full max-w-md animate-scale-in rounded-xl border border-neutral-200 bg-white shadow-xl dark:border-zinc-700 dark:bg-zinc-900"

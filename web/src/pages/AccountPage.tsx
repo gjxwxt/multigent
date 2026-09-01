@@ -8,6 +8,7 @@ import { useFormatDateTime } from '../lib/format-datetime'
 import type { ThemeMode } from '../theme/ThemeProvider'
 import { useTheme } from '../theme/ThemeProvider'
 import { confirmDialog } from '../components/ui/ConfirmDialog'
+import { overlayDismissProps } from '../components/ui/overlay'
 
 const selectCls =
   'h-9 w-52 rounded-md border border-neutral-200/80 bg-white px-2.5 text-sm text-neutral-800 outline-none transition-colors focus:border-sky-400 dark:border-zinc-700/60 dark:bg-zinc-900 dark:text-zinc-200 dark:[color-scheme:dark] [&>option]:dark:bg-zinc-900 [&>option]:dark:text-zinc-200'
@@ -231,7 +232,7 @@ function AvatarCropDialog({
 }) {
   const { t } = useTranslation()
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" onClick={onCancel}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" {...overlayDismissProps(onCancel)}>
       <div className="w-full max-w-md rounded-xl border border-neutral-200 bg-white shadow-xl dark:border-zinc-700 dark:bg-zinc-900" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-neutral-100 px-5 py-4 dark:border-zinc-800">
           <div>

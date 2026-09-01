@@ -5,6 +5,8 @@ import { apiFetch, apiPost, apiPut, apiDelete } from '../lib/api'
 import { cn } from '../lib/cn'
 import { confirmDialog } from '../components/ui/ConfirmDialog'
 import { useWorkspaceAccess } from '../lib/workspace-access'
+import { overlayDismissProps } from '../components/ui/overlay'
+import { isImeComposing } from '../utils/ime'
 
 type KR = {
   id: string; description: string; metricType: string
@@ -284,7 +286,7 @@ export default function OKRPage() {
                                     <input autoFocus value={editingKRDesc.value}
                                       onChange={e => setEditingKRDesc({ ...editingKRDesc, value: e.target.value })}
                                       onBlur={() => saveKRDesc(okr.id, kr.id, editingKRDesc.value)}
-                                      onKeyDown={e => { if (e.key === 'Enter') saveKRDesc(okr.id, kr.id, editingKRDesc.value); if (e.key === 'Escape') setEditingKRDesc(null) }}
+                                      onKeyDown={e => { if (e.key === 'Enter' && !isImeComposing(e)) saveKRDesc(okr.id, kr.id, editingKRDesc.value); if (e.key === 'Escape') setEditingKRDesc(null) }}
                                       className="w-full rounded border border-sky-400 bg-white px-2 py-0.5 text-xs dark:bg-zinc-800 dark:text-zinc-200" />
                                   ) : (
                                     <span className={`rounded px-1 py-0.5 font-medium text-neutral-700 dark:text-zinc-300 ${canAdmin ? 'cursor-pointer hover:bg-neutral-100 dark:hover:bg-zinc-800' : ''}`}
@@ -493,7 +495,7 @@ function OKRFormModal({ people, projects, allOKRs, okr, onClose, onSaved, quarte
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" {...overlayDismissProps(onClose)}>
       <div className="w-full max-w-md rounded-xl border border-neutral-200 bg-white p-6 shadow-xl dark:border-zinc-700 dark:bg-zinc-900" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between pb-4">
           <h3 className="text-base font-semibold text-neutral-900 dark:text-zinc-100">

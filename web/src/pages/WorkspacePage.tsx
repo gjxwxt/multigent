@@ -7,6 +7,7 @@ import { PlaceholderCard } from '../components/ui/PlaceholderCard'
 import { apiDelete, apiPut } from '../lib/api'
 import { useApiJson } from '../lib/use-api'
 import { useFormatDateTime } from '../lib/format-datetime'
+import { overlayDismissProps } from '../components/ui/overlay'
 
 type WorkspaceSummary = {
   id: string
@@ -193,9 +194,9 @@ export default function WorkspacePage() {
         <div
           className="fixed inset-0 z-[80] flex items-center justify-center bg-black/45 p-4 backdrop-blur-[1px]"
           role="presentation"
-          onClick={() => {
+          {...overlayDismissProps(() => {
             if (!deleting) setDeleteModalOpen(false)
-          }}
+          })}
         >
           <div
             className="w-full max-w-lg animate-scale-in rounded-xl border border-neutral-200 bg-white shadow-xl dark:border-zinc-700 dark:bg-zinc-900"

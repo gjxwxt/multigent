@@ -14,6 +14,8 @@ import { useAuth } from '../../lib/auth'
 import { formatGoDuration, taskElapsedLabel } from '../../lib/task-duration'
 import { showToast } from '../ui/Toast'
 import { WorkflowBoard, type WorkflowBranchInstance, type WorkflowDefinition, type WorkflowField, type WorkflowRun, type WorkflowStep, type WorkflowStepEvent, type WorkflowStepInstance } from '../workflow/WorkflowBoard'
+import { overlayDismissProps } from '../ui/overlay'
+import { isImeComposing } from '../../utils/ime'
 
 export type TaskRow = {
   id: string
@@ -173,7 +175,7 @@ export function EditTaskModal({ task, taskOptions = [], onClose, onSaved }: { ta
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" onClick={() => !busy && onClose()}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" {...overlayDismissProps(() => !busy && onClose())}>
       <div className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-xl border border-neutral-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-900 animate-scale-in" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-neutral-200 px-5 py-3 dark:border-zinc-700">
           <h2 className="text-base font-semibold text-neutral-900 dark:text-zinc-100">{t('tasks.edit')}</h2>
@@ -861,7 +863,7 @@ function TaskCommentsSection({ project, agent, taskId }: { project: string; agen
         <input
           value={body}
           onChange={(e) => setBody(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void handleAdd() } }}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !isImeComposing(e)) { e.preventDefault(); void handleAdd() } }}
           placeholder={t('tasks.commentPlaceholder')}
           className="flex-1 rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm outline-none transition-colors focus:border-sky-400 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-100"
           disabled={busy}

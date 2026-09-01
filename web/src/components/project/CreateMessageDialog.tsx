@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { X } from 'lucide-react'
 import { apiPost } from '../../lib/api'
 import { cn } from '../../lib/cn'
+import { overlayDismissProps } from '../ui/overlay'
 
 type AgentOpt = { name: string }
 
@@ -104,7 +105,7 @@ export function CreateMessageDialog({ projectId, agents, onSent }: Props) {
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4"
           role="presentation"
-          onClick={() => !busy && setOpen(false)}
+          {...overlayDismissProps(() => !busy && setOpen(false))}
         >
           <div
             className="max-h-[min(90vh,640px)] w-full max-w-lg overflow-y-auto rounded-xl border border-neutral-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-900 animate-scale-in"

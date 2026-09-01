@@ -5,6 +5,7 @@ import { apiFetch, apiPost, apiPut } from '../lib/api'
 import { cn } from '../lib/cn'
 import { useFormatDateTime } from '../lib/format-datetime'
 import { useWorkspaceAccess } from '../lib/workspace-access'
+import { overlayDismissProps } from '../components/ui/overlay'
 
 type PersonRow = {
   username: string; role: string; systemRole?: string; displayName?: string
@@ -541,7 +542,7 @@ export default function PeoplePage() {
 
       {/* Create Person Dialog */}
       {creating && !isExample && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" onClick={() => !saving && setCreating(false)}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" {...overlayDismissProps(() => !saving && setCreating(false))}>
           <div className="w-full max-w-md rounded-xl border border-neutral-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-900 animate-scale-in" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b border-neutral-200 px-5 py-3 dark:border-zinc-700">
               <h2 className="text-base font-semibold text-neutral-900 dark:text-zinc-100">{t('people.invite')}</h2>
@@ -638,7 +639,7 @@ export default function PeoplePage() {
       )}
 
       {accessEditing && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" onClick={() => !saving && setAccessEditing(null)}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" {...overlayDismissProps(() => !saving && setAccessEditing(null))}>
           <div className="w-full max-w-2xl rounded-xl border border-neutral-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-900 animate-scale-in" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b border-neutral-200 px-5 py-3 dark:border-zinc-700">
               <div>

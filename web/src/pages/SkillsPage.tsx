@@ -9,6 +9,7 @@ import { useApiJson } from '../lib/use-api'
 import { apiFetch, apiPatch, apiPost, apiPut } from '../lib/api'
 import { primaryOutlineButton } from '../lib/button-styles'
 import { useWorkspaceAccess } from '../lib/workspace-access'
+import { isImeComposing } from '../utils/ime'
 
 type Provenance = { playbookId: string; playbookName: string; templateVersion?: string; customized?: boolean }
 type SkillRow = {
@@ -178,7 +179,7 @@ function SkillItem({ skill, defaultOpen, canAdmin }: { skill: SkillRow; defaultO
                     onChange={(e) => setDisplayName(e.target.value)}
                     onBlur={() => void saveDisplayName()}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
+                      if (e.key === 'Enter' && !isImeComposing(e)) {
                         e.currentTarget.blur()
                       }
                       if (e.key === 'Escape') {

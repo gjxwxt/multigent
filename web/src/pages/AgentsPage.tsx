@@ -10,6 +10,7 @@ import { cn } from '../lib/cn'
 import { showToast } from '../components/ui/Toast'
 import { primaryOutlineButton } from '../lib/button-styles'
 import { useWorkspaceAccess } from '../lib/workspace-access'
+import { overlayDismissProps } from '../components/ui/overlay'
 
 type AgentWorker = {
   id: string
@@ -579,7 +580,7 @@ export function AgentDetailDialog({ agent, onClose, onSaved }: {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4 backdrop-blur-sm" role="presentation" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4 backdrop-blur-sm" role="presentation" {...overlayDismissProps(onClose)}>
       <div
         className="flex max-h-[min(92vh,760px)] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-xl dark:border-zinc-800 dark:bg-zinc-950"
         role="dialog"

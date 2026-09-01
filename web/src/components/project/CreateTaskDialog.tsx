@@ -5,6 +5,7 @@ import { apiPost } from '../../lib/api'
 import { cn } from '../../lib/cn'
 import { useApiJson } from '../../lib/use-api'
 import type { TaskOption } from '../task/TaskModals'
+import { overlayDismissProps } from '../ui/overlay'
 
 const TASK_TYPES = ['chore', 'feature', 'bug', 'review', 'triage', 'test', 'research'] as const
 const TEMPLATE_VAR_RE = /\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}/g
@@ -474,7 +475,7 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4"
           role="presentation"
-          onClick={() => !busy && setOpen(false)}
+          {...overlayDismissProps(() => !busy && setOpen(false))}
         >
           <div
             className="max-h-[min(90vh,760px)] w-full max-w-2xl overflow-y-auto rounded-xl border border-neutral-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-900 animate-scale-in"

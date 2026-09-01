@@ -7,6 +7,7 @@ import { cn } from '../../lib/cn'
 import { confirmDialog } from '../../components/ui/ConfirmDialog'
 import { canManageProject, useAuth } from '../../lib/auth'
 import { useWorkspaceAccess } from '../../lib/workspace-access'
+import { isImeComposing } from '../../utils/ime'
 
 type KR = {
   id: string; description: string; metricType: string
@@ -211,7 +212,7 @@ export default function ProjectOKRPage() {
                                     <input autoFocus value={editingKRDesc.value}
                                       onChange={e => setEditingKRDesc({ ...editingKRDesc, value: e.target.value })}
                                       onBlur={() => saveKRDesc(okr.id, kr.id, editingKRDesc.value)}
-                                      onKeyDown={e => { if (e.key === 'Enter') saveKRDesc(okr.id, kr.id, editingKRDesc.value); if (e.key === 'Escape') setEditingKRDesc(null) }}
+                                      onKeyDown={e => { if (e.key === 'Enter' && !isImeComposing(e)) saveKRDesc(okr.id, kr.id, editingKRDesc.value); if (e.key === 'Escape') setEditingKRDesc(null) }}
                                       className="w-full rounded border border-sky-400 bg-white px-2 py-0.5 text-xs dark:bg-zinc-800 dark:text-zinc-200" />
                                   ) : (
                                     <span className={`rounded px-1 py-0.5 font-medium text-neutral-700 dark:text-zinc-300 ${canManage ? 'cursor-pointer hover:bg-neutral-100 dark:hover:bg-zinc-800' : ''}`}

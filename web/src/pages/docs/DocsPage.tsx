@@ -16,6 +16,7 @@ import { getStoredToken } from '../../lib/auth'
 import { confirmDialog } from '../../components/ui/ConfirmDialog'
 import { primaryOutlineButton } from '../../lib/button-styles'
 import { useWorkspaceAccess } from '../../lib/workspace-access'
+import { isImeComposing } from '../../utils/ime'
 
 function stripFrontmatter(md: string): string {
   const trimmed = md.trimStart()
@@ -1163,7 +1164,7 @@ function DocViewer({ doc, content, onBack, onRemove, onUpdated, onOpenDoc, prevD
                       <input
                         value={refInput}
                         onChange={e => setRefInput(e.target.value)}
-                        onKeyDown={e => { if (e.key === 'Enter') void addRef() }}
+                        onKeyDown={e => { if (e.key === 'Enter' && !isImeComposing(e)) void addRef() }}
                         placeholder="doc-id..."
                         className="flex-1 rounded-lg border border-neutral-200 px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
                         autoFocus

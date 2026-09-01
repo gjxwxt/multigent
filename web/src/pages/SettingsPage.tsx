@@ -7,6 +7,8 @@ import { apiFetch, apiPost, apiPut, apiDelete } from '../lib/api'
 import { cn } from '../lib/cn'
 import { useFormatDateTime } from '../lib/format-datetime'
 import { confirmDialog } from '../components/ui/ConfirmDialog'
+import { overlayDismissProps } from '../components/ui/overlay'
+import { isImeComposing } from '../utils/ime'
 
 const selectCls =
   'max-w-xs rounded-md border border-neutral-200/80 bg-neutral-50/50 px-3 py-2 text-sm text-neutral-800 outline-none transition-colors focus:border-sky-400 dark:border-zinc-700/60 dark:bg-zinc-800 dark:text-zinc-200 dark:[color-scheme:dark] [&>option]:dark:bg-zinc-800 [&>option]:dark:text-zinc-200'
@@ -1158,7 +1160,7 @@ function OAuthSetupGuideDialog({ lang, onClose }: { lang: string; onClose: () =>
   const { t } = useTranslation()
   const guide = oauthSetupGuideContent(lang)
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" {...overlayDismissProps(onClose)}>
       <div className="max-h-[88vh] w-full max-w-4xl overflow-y-auto rounded-xl border border-neutral-200 bg-white shadow-xl dark:border-zinc-700 dark:bg-zinc-900" onClick={e => e.stopPropagation()}>
         <div className="sticky top-0 z-10 flex items-center justify-between border-b border-neutral-200 bg-white px-5 py-3 dark:border-zinc-700 dark:bg-zinc-900">
           <h2 className="text-base font-semibold text-neutral-900 dark:text-zinc-100">{guide.title}</h2>
@@ -1236,7 +1238,7 @@ function OAuthClientConfigDialog({ config, onClose, onSaved }: { config: OAuthCl
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" {...overlayDismissProps(onClose)}>
       <div className="max-h-[88vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-neutral-200 bg-white shadow-xl dark:border-zinc-700 dark:bg-zinc-900" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-neutral-200 px-5 py-3 dark:border-zinc-700">
           <h2 className="text-base font-semibold text-neutral-900 dark:text-zinc-100">{t('settings.oauthClientTitle', { name: config.displayName })}</h2>
@@ -1454,7 +1456,7 @@ export function UsersSection() {
       )}
 
       {editing && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" onClick={() => !saving && setEditing(null)}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" {...overlayDismissProps(() => !saving && setEditing(null))}>
           <div className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-xl border border-neutral-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-900 animate-scale-in" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b border-neutral-200 px-5 py-3 dark:border-zinc-700">
               <h2 className="text-base font-semibold text-neutral-900 dark:text-zinc-100">
@@ -2146,7 +2148,7 @@ function ProvidersSection() {
         )}
 
       {editing && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" onClick={closeProviderDialog}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" {...overlayDismissProps(closeProviderDialog)}>
           <div className="flex max-h-[88vh] w-full max-w-md flex-col overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-900 animate-scale-in" onClick={e => e.stopPropagation()}>
             <div className="shrink-0 flex items-center justify-between border-b border-neutral-200 px-5 py-3 dark:border-zinc-700">
               <h2 className="text-base font-semibold text-neutral-900 dark:text-zinc-100">
@@ -2346,7 +2348,7 @@ function ProvidersSection() {
         </div>
       )}
       {!trustedProxyMode && ccSwitch && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" onClick={() => !ccSwitchImporting && setCCSwitch(null)}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" {...overlayDismissProps(() => !ccSwitchImporting && setCCSwitch(null))}>
           <div className="w-full max-w-2xl rounded-xl border border-neutral-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-900 animate-scale-in" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b border-neutral-200 px-5 py-3 dark:border-zinc-700">
               <div>
@@ -2631,7 +2633,7 @@ function ModelChipsEditor({
             value={draft}
             onChange={e => setDraft(e.target.value)}
             onKeyDown={e => {
-              if (e.key === 'Enter') {
+              if (e.key === 'Enter' && !isImeComposing(e)) {
                 e.preventDefault()
                 addModel()
               }

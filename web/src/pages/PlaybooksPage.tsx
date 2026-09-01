@@ -9,6 +9,7 @@ import { showToast } from '../components/ui/Toast'
 import { apiPost } from '../lib/api'
 import { cn } from '../lib/cn'
 import { useApiJson } from '../lib/use-api'
+import { overlayDismissProps } from '../components/ui/overlay'
 
 type PlaybookRoleTemplate = {
   id: string
@@ -438,7 +439,7 @@ function WorkflowStepCard({ step, index, onPreview }: { step: WorkflowStep; inde
 function ContentPreviewModal({ preview, onClose }: { preview: ContentPreview; onClose: () => void }) {
   const { t } = useTranslation()
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" {...overlayDismissProps(onClose)}>
       <div
         className="flex max-h-[82vh] w-full max-w-3xl flex-col rounded-xl border border-neutral-200 bg-white shadow-xl dark:border-zinc-700 dark:bg-zinc-900"
         role="dialog"

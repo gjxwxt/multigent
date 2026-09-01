@@ -5,6 +5,7 @@ import { ConversationLog } from '../ui/ConversationLog'
 import { apiBase } from '../../lib/api'
 import { getStoredToken } from '../../lib/auth'
 import { cn } from '../../lib/cn'
+import { isImeComposing } from '../../utils/ime'
 
 type ChatMsg =
   | { role: 'user'; content: string }
@@ -234,7 +235,7 @@ export default function AssistantWidget({ hidden = false, onHide }: AssistantWid
   }
 
   function handleKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !isImeComposing(e)) {
       e.preventDefault()
       void send()
     }

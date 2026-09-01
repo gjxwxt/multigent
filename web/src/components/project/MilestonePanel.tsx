@@ -4,6 +4,7 @@ import { Milestone as MsIcon, Trash2, X, Calendar, User, CheckCircle2, Tag, Penc
 import { apiFetch, apiPost, apiPut, apiDelete } from '../../lib/api'
 import { cn } from '../../lib/cn'
 import { confirmDialog } from '../ui/ConfirmDialog'
+import { overlayDismissProps } from '../ui/overlay'
 
 type Milestone = {
   id: string; title: string; description: string; status: string
@@ -249,7 +250,7 @@ function MilestoneFormModal({ project, agents, ms, onClose, onSaved }: {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" {...overlayDismissProps(onClose)}>
       <div className="w-full max-w-md rounded-xl border border-neutral-200 bg-white p-6 shadow-xl dark:border-zinc-700 dark:bg-zinc-900" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between pb-4">
           <h3 className="text-base font-semibold text-neutral-900 dark:text-zinc-100">

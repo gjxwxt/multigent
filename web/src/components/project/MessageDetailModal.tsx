@@ -6,6 +6,7 @@ import { CheckCircle2, Reply, Send, X } from 'lucide-react'
 import { apiPost } from '../../lib/api'
 import { useFormatDateTime } from '../../lib/format-datetime'
 import { confirmDialog } from '../ui/ConfirmDialog'
+import { overlayDismissProps } from '../ui/overlay'
 
 export type MessageDetailModel = {
   id: string
@@ -139,7 +140,7 @@ export function MessageDetailModal({ open, message, onClose, onMutated, canMutat
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm animate-fade-in"
       role="presentation"
-      onClick={onClose}
+      {...overlayDismissProps(onClose)}
     >
       <div
         className="max-h-[min(85vh,720px)] w-full max-w-lg flex flex-col overflow-hidden rounded-xl border border-neutral-200/80 bg-white shadow-xl animate-scale-in dark:border-zinc-700/60 dark:bg-zinc-900"

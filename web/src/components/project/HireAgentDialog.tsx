@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { apiPost, apiFetch } from '../../lib/api'
 import { apiTeamPath } from '../../lib/api'
+import { overlayDismissProps } from '../ui/overlay'
 
 const MODELS = [
   'claudecode',
@@ -133,7 +134,7 @@ export function HireAgentDialog({ projectId, onHired, existingMemberNames = [], 
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4"
           role="presentation"
-          onClick={() => !busy && setOpen(false)}
+          {...overlayDismissProps(() => !busy && setOpen(false))}
         >
           <div
             className="max-h-[min(90vh,640px)] w-full max-w-md overflow-y-auto rounded-xl border border-neutral-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-900 animate-scale-in"

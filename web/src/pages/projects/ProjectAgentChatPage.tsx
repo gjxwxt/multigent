@@ -6,6 +6,7 @@ import { ConversationLog } from '../../components/ui/ConversationLog'
 import { apiFetch, apiDelete, apiUrl } from '../../lib/api'
 import { getStoredToken, isSystemAdmin, isTrustedProxyMode, useAuth } from '../../lib/auth'
 import { cn } from '../../lib/cn'
+import { isImeComposing } from '../../utils/ime'
 
 type HistoryResp = {
   sessionId?: string
@@ -636,7 +637,7 @@ export default function ProjectAgentChatPage() {
   }
 
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !isImeComposing(e)) {
       e.preventDefault()
       void send()
     }
