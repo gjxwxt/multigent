@@ -12,6 +12,7 @@ import { cn } from '../../lib/cn'
 import { apiFetch, apiDelete, apiPatch, apiPost, apiPut } from '../../lib/api'
 import { canManageProject, useAuth } from '../../lib/auth'
 import { useFormatDateTime } from '../../lib/format-datetime'
+import { isAtBottom, stickToBottom } from '../../utils/stickToBottom'
 import { useApiJson } from '../../lib/use-api'
 import { useWorkspaceAccess } from '../../lib/workspace-access'
 
@@ -1198,6 +1199,7 @@ function LiveLogModal({ projectId, agentName, onClose }: { projectId: string; ag
   const [content, setContent] = useState('')
   const [finished, setFinished] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const stickToBottomRef = useRef(true)
 
   useEffect(() => {
     let active = true
@@ -1209,9 +1211,8 @@ function LiveLogModal({ projectId, agentName, onClose }: { projectId: string; ag
         if (!active) return
         setContent(data.content)
         setFinished(data.finished)
-        if (scrollRef.current) {
-          scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-        }
+        // Only follow the log tail while the reader is at the bottom.
+        if (stickToBottomRef.current && scrollRef.current) stickToBottom(scrollRef.current)
       } catch { /* ignore poll errors */ }
     }
     void poll()
@@ -1237,7 +1238,7 @@ function LiveLogModal({ projectId, agentName, onClose }: { projectId: string; ag
           </div>
           <button type="button" onClick={onClose} className="rounded-md p-1 text-neutral-400 hover:bg-neutral-100 dark:text-zinc-500 dark:hover:bg-zinc-800"><X className="size-4" /></button>
         </div>
-        <div ref={scrollRef} className="flex-1 overflow-auto px-5 py-4">
+        <div ref={scrollRef} onScroll={(e) => { stickToBottomRef.current = isAtBottom(e.currentTarget) }} className="flex-1 overflow-auto px-5 py-4">
           {content ? (
             <div className="space-y-4">
               <section className="rounded-lg border border-neutral-200/80 bg-white px-4 py-3 dark:border-zinc-700/50 dark:bg-zinc-900/30">

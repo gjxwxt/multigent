@@ -26,6 +26,7 @@ import { useFormatDateTime } from '../../lib/format-datetime'
 import { useApiJson } from '../../lib/use-api'
 import { useWorkspaceAccess } from '../../lib/workspace-access'
 import { showToast } from '../../components/ui/Toast'
+import { isAtBottom, stickToBottom } from '../../utils/stickToBottom'
 
 type SafeUser = { username: string; displayName?: string; email?: string }
 type ProjectMember = { name: string; model?: string; avatar?: string }
@@ -59,6 +60,10 @@ export default function ProjectTaskFollowPage() {
   const sidePanelRef = useRef<HTMLElement>(null)
   const liveSectionRef = useRef<HTMLElement>(null)
   const liveOutputRef = useRef<HTMLDivElement>(null)
+  // Follow-mode flags: heartbeat updates may only pull the view to the
+  // bottom while the reader is already there (tracked from scroll events).
+  const outputStickRef = useRef(true)
+  const panelStickRef = useRef(true)
 
   const refresh = useCallback(() => setReloadKey((value) => value + 1), [])
   const pollRefresh = useCallback(() => setPollKey((value) => value + 1), [])
@@ -250,6 +255,9 @@ export default function ProjectTaskFollowPage() {
     setReviewComments('')
     setReviewOutputs({})
     setReviewErr(null)
+    // New step/run: re-engage follow mode so the fresh output is visible.
+    outputStickRef.current = true
+    panelStickRef.current = true
   }, [activeStep?.id, activeInstance?.id])
 
   useEffect(() => {
@@ -267,13 +275,13 @@ export default function ProjectTaskFollowPage() {
     return () => window.clearTimeout(timer)
   }, [liveLogContent, liveOutputRunning])
 
+  // Inner live-output: follow the tail on heartbeat updates, but only while
+  // the reader is at the bottom — scrolling up to re-read must not be hijacked.
   useEffect(() => {
     if (!shouldPollActiveRun || !liveOutputRef.current) return
     const outputEl = liveOutputRef.current
-    const panelEl = sidePanelRef.current
     const scroll = () => {
-      if (panelEl) panelEl.scrollTop = panelEl.scrollHeight
-      outputEl.scrollTop = outputEl.scrollHeight
+      if (outputStickRef.current) stickToBottom(outputEl)
     }
     scroll()
     const raf = window.requestAnimationFrame(scroll)
@@ -283,6 +291,15 @@ export default function ProjectTaskFollowPage() {
       window.clearTimeout(timer)
     }
   }, [activeRun?.logPath, activeRun?.sessionId, activeStep?.id, liveLogContent, liveOutputRunning, remoteLogContent, shouldPollActiveRun])
+
+  // Outer side panel: reveal the live-output section when a new run/step
+  // starts, but never on heartbeat content updates — that yanked the reader
+  // away from the upstream-outputs / current-step sections above it.
+  useEffect(() => {
+    if (!shouldPollActiveRun) return
+    const panelEl = sidePanelRef.current
+    if (panelEl && panelStickRef.current) stickToBottom(panelEl)
+  }, [activeRun?.sessionId, activeRun?.logPath, activeStep?.id, shouldPollActiveRun])
 
   async function startCurrentAgent() {
     if (!displayTask || !startAgent || !canStart) return
@@ -468,7 +485,7 @@ export default function ProjectTaskFollowPage() {
           )}
         </section>
 
-        <aside ref={sidePanelRef} className="min-w-0 overflow-y-auto bg-white dark:bg-zinc-950">
+        <aside ref={sidePanelRef} onScroll={(e) => { panelStickRef.current = isAtBottom(e.currentTarget) }} className="min-w-0 overflow-y-auto bg-white dark:bg-zinc-950">
           {stepTransition && (
             <div className="sticky top-0 z-10 border-b border-sky-100 bg-sky-50/95 px-4 py-2 text-xs font-medium text-sky-700 shadow-sm backdrop-blur-sm dark:border-sky-900/50 dark:bg-sky-950/80 dark:text-sky-300">
               <div className="flex items-center gap-2">
@@ -551,7 +568,7 @@ export default function ProjectTaskFollowPage() {
                 </div>
                 {activeRun?.sessionId && <span className="font-mono text-[11px] text-neutral-400 dark:text-zinc-500">{activeRun.sessionId.slice(0, 8)}…</span>}
               </div>
-              <div ref={liveOutputRef} className="max-h-[calc(100dvh-25rem)] min-h-72 overflow-y-auto overscroll-contain pr-1 transition-opacity duration-300">
+              <div ref={liveOutputRef} onScroll={(e) => { outputStickRef.current = isAtBottom(e.currentTarget) }} className="max-h-[calc(100dvh-25rem)] min-h-72 overflow-y-auto overscroll-contain pr-1 transition-opacity duration-300">
                 {remoteLogContent ? (
                   <div className="pb-16">
                     <ConversationLog

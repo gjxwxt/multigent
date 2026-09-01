@@ -7,6 +7,7 @@ import { apiFetch, apiDelete, apiUrl } from '../../lib/api'
 import { getStoredToken, isSystemAdmin, isTrustedProxyMode, useAuth } from '../../lib/auth'
 import { cn } from '../../lib/cn'
 import { isImeComposing } from '../../utils/ime'
+import { isAtBottom, stickToBottom } from '../../utils/stickToBottom'
 
 type HistoryResp = {
   sessionId?: string
@@ -183,6 +184,7 @@ export default function ProjectAgentChatPage() {
   const [sessionOptions, setSessionOptions] = useState<ChatSessionOption[]>([])
   const [sessionsLoading, setSessionsLoading] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const stickToBottomRef = useRef(true)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const mountedRef = useRef(true)
@@ -441,7 +443,8 @@ export default function ProjectAgentChatPage() {
         suppressNextAutoScrollRef.current = false
         return
       }
-      if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+      // Only follow the stream while the reader is at the bottom.
+      if (stickToBottomRef.current && scrollRef.current) stickToBottom(scrollRef.current)
     })
   }, [content, loading])
 
@@ -449,6 +452,7 @@ export default function ProjectAgentChatPage() {
     const node = scrollRef.current
     if (!node) return
     const onScroll = () => {
+      stickToBottomRef.current = isAtBottom(node)
       if (node.scrollTop <= 32) void loadOlderHistory()
     }
     node.addEventListener('scroll', onScroll, { passive: true })
@@ -484,6 +488,8 @@ export default function ProjectAgentChatPage() {
   async function send() {
     const text = input.trim()
     if (!text || loading || !projectId || !agentName) return
+    // Sending always re-engages follow mode, even if the reader had scrolled up.
+    stickToBottomRef.current = true
     const runProject = projectId
     const runAgent = agentName
     const runKey = `${runProject}/${runAgent}`

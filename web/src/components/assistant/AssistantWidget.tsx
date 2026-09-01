@@ -6,6 +6,7 @@ import { apiBase } from '../../lib/api'
 import { getStoredToken } from '../../lib/auth'
 import { cn } from '../../lib/cn'
 import { isImeComposing } from '../../utils/ime'
+import { isAtBottom, stickToBottom } from '../../utils/stickToBottom'
 
 type ChatMsg =
   | { role: 'user'; content: string }
@@ -76,6 +77,7 @@ export default function AssistantWidget({ hidden = false, onHide }: AssistantWid
   const [statusErr, setStatusErr] = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const stickToBottomRef = useRef(true)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
   const [pos, setPos] = useState<{ x: number; y: number }>(() => loadPos() ?? { x: -1, y: -1 })
@@ -111,7 +113,9 @@ export default function AssistantWidget({ hidden = false, onHide }: AssistantWid
 
   const scrollToBottom = useCallback(() => {
     requestAnimationFrame(() => {
-      if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+      // Only follow the stream while the reader is at the bottom; scrolling
+      // up to re-read earlier answers must not be hijacked by new tokens.
+      if (stickToBottomRef.current && scrollRef.current) stickToBottom(scrollRef.current)
     })
   }, [])
 
@@ -147,6 +151,8 @@ export default function AssistantWidget({ hidden = false, onHide }: AssistantWid
   async function send() {
     const text = input.trim()
     if (!text || loading) return
+    // Sending always re-engages follow mode, even if the reader had scrolled up.
+    stickToBottomRef.current = true
     if (!status?.canUse) {
       const nextStatus = await refreshStatus()
       if (!nextStatus?.canUse) return
@@ -294,7 +300,7 @@ export default function AssistantWidget({ hidden = false, onHide }: AssistantWid
           </div>
 
           {/* Messages */}
-          <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+          <div ref={scrollRef} onScroll={(e) => { stickToBottomRef.current = isAtBottom(e.currentTarget) }} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
             {(statusLoading || statusErr || (status && !status.canUse)) && (
               <div className="rounded-xl border border-amber-200/70 bg-amber-50/80 p-3 text-sm text-amber-900 dark:border-amber-700/50 dark:bg-amber-950/30 dark:text-amber-200">
                 <p className="font-medium">
