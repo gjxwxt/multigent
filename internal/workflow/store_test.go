@@ -24,6 +24,27 @@ func TestNormalizeWorkflowOutputValuesRequiresStructuredOutputs(t *testing.T) {
 	}
 }
 
+func TestNormalizeWorkflowOutputValuesSkipsRequiredCheckForOptionalFields(t *testing.T) {
+	step := entity.WorkflowStep{
+		Title: "人工代码审核",
+		OutputFields: []entity.WorkflowField{
+			{Name: "decision", Description: "approve 或 request_changes。"},
+			{Name: "approved_change", Description: "人工审核通过的代码产物。", Optional: true},
+		},
+	}
+	values, err := normalizeWorkflowOutputValues(step, map[string]string{"decision": "approve"}, "", "", false)
+	if err != nil {
+		t.Fatalf("optional field left empty should pass validation: %v", err)
+	}
+	if _, ok := values["approved_change"]; ok {
+		t.Fatalf("optional field should stay absent when empty, got %q", values["approved_change"])
+	}
+	// A required field missing still fails, even alongside an optional one.
+	if _, err := normalizeWorkflowOutputValues(step, map[string]string{"approved_change": "feat/x @ abc1234"}, "", "", false); err == nil {
+		t.Fatal("expected required decision error")
+	}
+}
+
 func TestNormalizeWorkflowOutputValuesValidatesDocIDFields(t *testing.T) {
 	step := entity.WorkflowStep{
 		Title: "PM Spec",

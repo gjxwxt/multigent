@@ -123,6 +123,45 @@ func (s *Server) handleGetTaskWorkflowReviewDraft(w http.ResponseWriter, r *http
 	_ = json.NewEncoder(w).Encode(out)
 }
 
+// backfillOptionalReviewOutputs fills empty optional human_review output
+// fields from the same deterministic draft rules the dialog prefills with,
+// so a reviewer can confirm a gate without retyping machine-known values
+// (branch+SHA carried from upstream, merged SHA...). A field the rules
+// cannot derive stays empty and still fails validation: the human must
+// supply it. Runs before summary/WillComplete so downstream edges see the
+// backfilled contract values.
+func backfillOptionalReviewOutputs(wfStore *workflowstore.Store, run entity.WorkflowRun, def entity.WorkflowDefinition, step entity.WorkflowStep, task *entity.Task, outputs map[string]string) {
+	needs := false
+	for _, f := range step.OutputFields {
+		if f.Optional && strings.TrimSpace(outputs[f.Name]) == "" {
+			needs = true
+			break
+		}
+	}
+	if !needs {
+		return
+	}
+	steps, err := wfStore.ListStepInstances(run.ID)
+	if err != nil {
+		return
+	}
+	instance, instOK := workflowStepInstanceByStepID(steps, run.ActiveStepID)
+	if !instOK {
+		return
+	}
+	events, _ := wfStore.ListStepEvents(run.ID)
+	ctx := &reviewDraftContext{run: run, def: def, steps: steps, events: events, step: step, instance: instance, task: task}
+	for _, f := range step.OutputFields {
+		name := strings.TrimSpace(f.Name)
+		if !f.Optional || name == "" || strings.TrimSpace(outputs[name]) != "" {
+			continue
+		}
+		if value, _ := reviewDraftForField(ctx, name); strings.TrimSpace(value) != "" {
+			outputs[name] = value
+		}
+	}
+}
+
 // reviewDraftForField dispatches on the output field name. The table covers
 // the gate fields that exist across built-in templates; unknown fields fall
 // through to the generic upstream-output lookup.

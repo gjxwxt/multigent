@@ -605,7 +605,6 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 			return taskWorkflowResponse{}, http.StatusInternalServerError, err
 		}
 	}
-	summary := formatWorkflowReviewFields(outputs)
 	workflowStore := wfStore
 	run, runFound, err := workflowStore.RunForTask(project, taskID)
 	if err != nil {
@@ -622,8 +621,12 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 					break
 				}
 			}
+			if currentStep.Type == "human_review" {
+				backfillOptionalReviewOutputs(workflowStore, run, def, currentStep, t, outputs)
+			}
 		}
 	}
+	summary := formatWorkflowReviewFields(outputs)
 
 	// Terminal delivery has external side effects. Complete those side effects
 	// before committing the workflow terminal state, otherwise a failed merge

@@ -28,6 +28,9 @@ export type WorkflowPosition = { x: number; y: number }
 export type WorkflowField = {
   name: string
   description?: string
+  /** Human-review output the reviewer may leave empty; the server backfills
+   * it from deterministic draft rules (branch+SHA carried from upstream). */
+  optional?: boolean
 }
 
 export type WorkflowBranch = {

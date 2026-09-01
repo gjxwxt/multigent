@@ -62,6 +62,11 @@ type WorkflowBranch struct {
 type WorkflowField struct {
 	Name        string `json:"name" yaml:"name"`
 	Description string `json:"description,omitempty" yaml:"description,omitempty"`
+	// Optional output fields may be left empty by a human reviewer: the
+	// review handler backfills them from the deterministic draft rules
+	// (e.g. branch+SHA carried from upstream outputs). Validation only
+	// fails when the backfill also finds nothing.
+	Optional bool `json:"optional,omitempty" yaml:"optional,omitempty"`
 }
 
 type WorkflowPosition struct {

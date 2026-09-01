@@ -929,7 +929,8 @@ func unifiedDeliveryPipelineTemplate(locale string) entity.WorkflowTemplate {
 		"roundsField":         "已消耗的 Agent 初审轮次（打回时递增；三为升级上限）。",
 		"selfReviewField":     "初审结论（pass / issues_fixed / escalate）、证据与逐项验收结果。",
 		"escalationField":     "达到轮次上限后供人工审核的遗留问题案卷。",
-		"approvedChangeField": "人工审核通过的代码产物。写明：分支名 + 提交 SHA，未提交时注明'审核通过时自动收编'，供 changelog/PR 节点引用。",
+		"approvedChangeField":      "人工审核通过的代码产物。默认自动引用上游实现产物（分支+提交 SHA；未提交改动在通过时自动收编为 checkpoint commit），确认无误即可；仅在人工改判产物时修改。",
+		"approvedChangeInputField": "人工审核确认的代码产物引用（分支+提交 SHA），变更日志与 PR 均以此为准。",
 		"changelogField":      "更新后的变更日志条目或发布说明。",
 		"branchSummaryField":  "分支名、提交摘要与交付证据。",
 		"prURLField":          "Pull Request 链接。",
@@ -938,7 +939,8 @@ func unifiedDeliveryPipelineTemplate(locale string) entity.WorkflowTemplate {
 		"mergedSHAField":      "默认分支上的合并提交 SHA。",
 		"mergeStatusField":    "合并与同步状态报告。",
 		"testReportField":     "自动化与人工测试结果摘要。",
-		"candidateField":      "发布节点唯一可见的发运契约。必须写具体不可变引用——合并 SHA 或已推送的 Tag（例：f01efb9b (main HEAD, merged for t-xxx)）；严禁写分支名（准出后 main 可能漂移）。",
+		"candidateField":      "发布节点唯一可见的发运契约。默认自动引用合并 SHA/已推送 Tag，确认无误即可；必须是具体不可变引用，严禁写分支名（准出后 main 可能漂移）。",
+		"candidateInputField": "QA 准出批准的发布候选：具体不可变引用（合并 SHA 或已推送 Tag）。严禁按分支名发运（准出后 main 可能漂移）。",
 		"gitTagField":         "已推送到远端的发布 Tag。",
 		"pipelineURLField":    "CI/CD 流水线链接；无权限时填 none 并说明原因。",
 		"releaseReportField":  "发布结果、发布后观察与回滚预案。",
@@ -946,20 +948,27 @@ func unifiedDeliveryPipelineTemplate(locale string) entity.WorkflowTemplate {
 	field := func(name, descKey string) entity.WorkflowField {
 		return entity.WorkflowField{Name: name, Description: text[descKey]}
 	}
+	// optionalField marks human-review outputs the reviewer may leave empty;
+	// the review handler backfills them from the deterministic draft rules.
+	optionalField := func(name, descKey string) entity.WorkflowField {
+		f := field(name, descKey)
+		f.Optional = true
+		return f
+	}
 	return templateFromParts("unified-delivery-pipeline", text["name"], text["description"], locale, "clarify",
 		[]entity.WorkflowStep{
 			tmplStep("clarify", "agent_task", text["clarifyTitle"], text["clarifyDesc"], "pm-agent", "sky", 80, []entity.WorkflowField{field("request", "requestField")}, []entity.WorkflowField{field("clarified", "clarifiedField")}),
 			tmplStep("clarify_review", "human_review", text["clarifyReviewTitle"], text["clarifyReviewDesc"], "product-owner", "amber", 360, []entity.WorkflowField{field("clarified", "clarifiedField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), field("approved_scope", "approvedScopeField")}),
 			tmplStep("implement", "agent_task", text["implementTitle"], text["implementDesc"], "developer-agent", "emerald", 640, []entity.WorkflowField{field("approved_scope", "approvedScopeField"), field("review_comments", "commentsField"), field("review_rounds", "roundsField")}, []entity.WorkflowField{field("implementation", "implementationField"), field("review_rounds", "roundsField")}),
 			tmplStep("agent_self_review", "agent_task", text["selfReviewTitle"], text["selfReviewDesc"], "reviewer-agent", "rose", 920, []entity.WorkflowField{field("implementation", "implementationField"), field("approved_scope", "approvedScopeField"), field("review_rounds", "roundsField")}, []entity.WorkflowField{field("self_review", "selfReviewField"), field("escalation_case", "escalationField"), field("review_rounds", "roundsField")}),
-			tmplStep("code_review", "human_review", text["codeReviewTitle"], text["codeReviewDesc"], "owner-engineer", "amber", 1200, []entity.WorkflowField{field("self_review", "selfReviewField"), field("escalation_case", "escalationField"), field("implementation", "implementationField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), field("approved_change", "approvedChangeField")}),
-			tmplStep("changelog", "agent_task", text["changelogTitle"], text["changelogDesc"], "developer-agent", "sky", 1480, []entity.WorkflowField{field("approved_change", "approvedChangeField"), field("approved_scope", "approvedScopeField")}, []entity.WorkflowField{field("changelog", "changelogField"), field("branch_summary", "branchSummaryField")}),
-			tmplStep("create_pr", "agent_task", text["prTitle"], text["prDesc"], "developer-agent", "violet", 1760, []entity.WorkflowField{field("approved_change", "approvedChangeField"), field("changelog", "changelogField"), field("branch_summary", "branchSummaryField")}, []entity.WorkflowField{field("pr_url", "prURLField"), field("pr_diff_summary", "prDiffSummaryField"), field("preview_url", "previewURLField")}),
+			tmplStep("code_review", "human_review", text["codeReviewTitle"], text["codeReviewDesc"], "owner-engineer", "amber", 1200, []entity.WorkflowField{field("self_review", "selfReviewField"), field("escalation_case", "escalationField"), field("implementation", "implementationField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("approved_change", "approvedChangeField")}),
+			tmplStep("changelog", "agent_task", text["changelogTitle"], text["changelogDesc"], "developer-agent", "sky", 1480, []entity.WorkflowField{field("approved_change", "approvedChangeInputField"), field("approved_scope", "approvedScopeField")}, []entity.WorkflowField{field("changelog", "changelogField"), field("branch_summary", "branchSummaryField")}),
+			tmplStep("create_pr", "agent_task", text["prTitle"], text["prDesc"], "developer-agent", "violet", 1760, []entity.WorkflowField{field("approved_change", "approvedChangeInputField"), field("changelog", "changelogField"), field("branch_summary", "branchSummaryField")}, []entity.WorkflowField{field("pr_url", "prURLField"), field("pr_diff_summary", "prDiffSummaryField"), field("preview_url", "previewURLField")}),
 			tmplStep("pr_review", "human_review", text["prReviewTitle"], text["prReviewDesc"], "owner-engineer", "amber", 2040, []entity.WorkflowField{field("pr_url", "prURLField"), field("pr_diff_summary", "prDiffSummaryField"), field("preview_url", "previewURLField"), field("branch_summary", "branchSummaryField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField")}),
 			tmplStep("merge_sync", "agent_task", text["mergeTitle"], text["mergeDesc"], "developer-agent", "emerald", 2320, []entity.WorkflowField{field("pr_url", "prURLField"), field("branch_summary", "branchSummaryField")}, []entity.WorkflowField{field("merged_sha", "mergedSHAField"), field("merge_status", "mergeStatusField")}),
 			tmplStep("qa", "agent_task", text["qaTitle"], text["qaDesc"], "qa-agent", "rose", 2600, []entity.WorkflowField{field("merged_sha", "mergedSHAField")}, []entity.WorkflowField{field("test_report", "testReportField")}),
-			tmplStep("qa_signoff", "human_review", text["qaReviewTitle"], text["qaReviewDesc"], "qa-owner", "amber", 2880, []entity.WorkflowField{field("test_report", "testReportField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), field("release_candidate", "candidateField")}),
-			tmplStep("release", "agent_task", text["releaseTitle"], text["releaseDesc"], "release-agent", "emerald", 3160, []entity.WorkflowField{field("release_candidate", "candidateField")}, []entity.WorkflowField{field("git_tag", "gitTagField"), field("pipeline_url", "pipelineURLField"), field("release_report", "releaseReportField")}),
+			tmplStep("qa_signoff", "human_review", text["qaReviewTitle"], text["qaReviewDesc"], "qa-owner", "amber", 2880, []entity.WorkflowField{field("test_report", "testReportField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("release_candidate", "candidateField")}),
+			tmplStep("release", "agent_task", text["releaseTitle"], text["releaseDesc"], "release-agent", "emerald", 3160, []entity.WorkflowField{field("release_candidate", "candidateInputField")}, []entity.WorkflowField{field("git_tag", "gitTagField"), field("pipeline_url", "pipelineURLField"), field("release_report", "releaseReportField")}),
 		},
 		[]entity.WorkflowEdge{
 			edge("e-clarify-review", "clarify", "clarify_review", "", nil, nil, true),
@@ -2220,6 +2229,9 @@ func normalizeWorkflowOutputValues(step entity.WorkflowStep, values map[string]s
 			continue
 		}
 		if strings.TrimSpace(out[name]) == "" {
+			if field.Optional {
+				continue
+			}
 			return nil, fmt.Errorf("workflow output field %q is required for step %q", name, step.Title)
 		}
 		if workflowFieldRequiresDocID(field) && !workflowDocIDValueValid(out[name]) {

@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next'
 import ReactMarkdown from 'react-markdown'
 import type { Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { ClipboardCopy, ExternalLink, GitPullRequest, Globe, MessageSquare, Pencil, Play, RotateCw, Send, Trash2, X } from 'lucide-react'
+import { ClipboardCopy, ExternalLink, GitPullRequest, Globe, Info, MessageSquare, Pencil, Play, RotateCw, Send, Trash2, X } from 'lucide-react'
 import { cn } from '../../lib/cn'
 import { apiDelete, apiFetch, apiPost, apiPut } from '../../lib/api'
 import { useFormatDateTime } from '../../lib/format-datetime'
@@ -1085,7 +1085,7 @@ export function WorkflowRuntimePanel({
                   <label key={field.name} className="block">
                     <div className="flex items-center justify-between gap-2 mb-1">
                       <div className="flex items-center gap-1.5 min-w-0">
-                        <WorkflowFieldTitle fieldName={field.name} description={field.description} required />
+                        <WorkflowFieldTitle fieldName={field.name} description={field.description} required={!field.optional} />
                         {draftSource && (
                           <span
                             title={t('workflows.review.draftSource', { defaultValue: '草稿来源' }) + ': ' + draftSource}
@@ -1130,7 +1130,7 @@ export function WorkflowRuntimePanel({
                       value={field.name === 'comments' ? reviewComments : reviewOutputs[field.name] || ''}
                       onChange={(e) => onChangeOutput(field.name, e.target.value)}
                       rows={field.name === 'comments' ? 3 : 2}
-                      placeholder={field.description || field.name}
+                      placeholder={field.optional ? t('workflows.review.optionalAutoRef', { defaultValue: '可留空：自动引用上游产物（ⓘ 查看说明）' }) : field.name}
                       className={cn(reviewInputClass(field.name), 'resize-y')}
                     />
                   </label>
@@ -1380,23 +1380,28 @@ function WorkflowFieldList({ fields, values }: { fields: WorkflowField[]; values
 
 function WorkflowFieldTitle({ fieldName, description, required = false }: { fieldName: string; description?: string; required?: boolean }) {
   const raw = description?.trim()
-  const title = raw || fieldName
-  // Two-part descriptions (lead sentence + "必须包含:" detail) render the
-  // detail as quiet small text so long gate guidance doesn't crowd the dialog.
-  const splitIdx = raw ? raw.search(/[。．]\s*(?=必须包含|要包含|应包含|包含:|包含：)/) : -1
-  const lead = splitIdx > 0 ? raw!.slice(0, splitIdx + 1) : null
-  const detail = splitIdx > 0 ? raw!.slice(splitIdx + 1).trim() : null
+  // Short visible label: the text before the first colon/period (gate copy is
+  // written as "标签：完整指引"). The full description moves into the info-icon
+  // tooltip so long gate guidance doesn't crowd the review dialog.
+  const headMatch = raw ? raw.match(/^([^：:。．]{2,28})[：:。．]/) : null
+  const label = headMatch ? headMatch[1].trim() : fieldName
+  const showInfo = Boolean(raw && raw !== label)
   return (
-    <div>
+    <div className="flex items-center gap-1.5">
       <p className="text-sm font-semibold leading-snug text-neutral-800 dark:text-zinc-200" title={fieldName}>
-        {lead ?? title}
+        {label}
         {required && <span className="ml-1 text-red-500">*</span>}
       </p>
-      {detail && (
-        <p className="mt-0.5 text-[11px] leading-snug text-neutral-500 dark:text-zinc-500">{detail}</p>
+      {showInfo && (
+        <span className="group/info relative inline-flex shrink-0 cursor-help text-neutral-400 hover:text-neutral-600 dark:text-zinc-500 dark:hover:text-zinc-300">
+          <Info className="size-3.5" />
+          <span className="pointer-events-none invisible absolute left-0 top-full z-50 mt-1 w-80 max-w-[min(20rem,80vw)] whitespace-pre-wrap rounded-lg border border-neutral-200 bg-white p-2.5 text-xs leading-relaxed text-neutral-700 opacity-0 shadow-lg transition-opacity group-hover/info:visible group-hover/info:opacity-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
+            {raw}
+          </span>
+        </span>
       )}
       {raw && (
-        <p className="mt-0.5 font-mono text-[10px] uppercase tracking-wide text-neutral-400 dark:text-zinc-600">{fieldName}</p>
+        <span className="font-mono text-[10px] uppercase tracking-wide text-neutral-400 dark:text-zinc-600">{fieldName}</span>
       )}
     </div>
   )
