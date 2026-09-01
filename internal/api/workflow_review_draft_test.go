@@ -131,6 +131,31 @@ func TestDraftFromUpstreamOutput(t *testing.T) {
 	}
 }
 
+func TestDraftApprovedScopeFallsBackToClarified(t *testing.T) {
+	ctx := draftTestContext()
+	// Requirement gate: the step input carries the clarification result and
+	// no same-named approved_scope — the draft passes the clarification
+	// through so a plain "approve" (optional field left empty) forwards the
+	// clarified scope untouched.
+	ctx.instance = entity.WorkflowStepInstance{InputValues: map[string]string{"clarified": "范围A; 验收标准B; 非目标C"}}
+	v, src := reviewDraftForField(ctx, "approved_scope")
+	if v != "范围A; 验收标准B; 非目标C" || src != draftSourceUpstreamOutput {
+		t.Fatalf("approved_scope draft = %q/%q, want clarified passthrough", v, src)
+	}
+	// A same-named upstream value still wins over the fallback.
+	ctx.instance = entity.WorkflowStepInstance{InputValues: map[string]string{"approved_scope": "人工改判的范围", "clarified": "旧澄清"}}
+	v2, _ := reviewDraftForField(ctx, "approved_scope")
+	if v2 != "人工改判的范围" {
+		t.Fatalf("same-named upstream must win, got %q", v2)
+	}
+	// Neither present: empty, never fabricated.
+	ctx.instance = entity.WorkflowStepInstance{InputValues: map[string]string{}}
+	v3, src3 := reviewDraftForField(ctx, "approved_scope")
+	if v3 != "" || src3 != draftSourceNone {
+		t.Fatalf("missing both must be empty/none, got %q/%q", v3, src3)
+	}
+}
+
 func TestDraftApprovedFixFallsBackToDiagnosis(t *testing.T) {
 	ctx := draftTestContext()
 	// Hotfix plan gate: the step input carries the triage diagnosis and no

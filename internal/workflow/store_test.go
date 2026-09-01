@@ -923,6 +923,23 @@ func TestUnifiedDeliveryPipelineTemplateStructure(t *testing.T) {
 	if rel.InputMapping["release_candidate"] != "$output.release_candidate" {
 		t.Fatalf("qa approval must pass release_candidate: %+v", rel.InputMapping)
 	}
+	// Scope gate: the contract is optional (empty = execute as clarified,
+	// backfilled from the clarification input), and the verdict comments
+	// ride along to implement as context, not as a second contract.
+	scope := edges["e-clarify-approved"]
+	if scope.InputMapping["approved_scope"] != "$output.approved_scope" || scope.InputMapping["review_comments"] != "$output.comments" {
+		t.Fatalf("scope approval must pass approved_scope and comments: %+v", scope.InputMapping)
+	}
+	for _, s := range tmpl.Steps {
+		if s.ID != "clarify_review" {
+			continue
+		}
+		for _, f := range s.OutputFields {
+			if f.Name == "approved_scope" && !f.Optional {
+				t.Fatal("approved_scope must be optional: approve-as-is should not require retyping the clarification")
+			}
+		}
+	}
 }
 
 func TestHotfixDeployPipelineTemplateStructure(t *testing.T) {

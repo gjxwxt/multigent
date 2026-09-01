@@ -172,7 +172,15 @@ func reviewDraftForField(ctx *reviewDraftContext, field string) (string, string)
 	case "approved_change":
 		return draftApprovedChange(ctx)
 	case "approved_scope":
-		return draftFromUpstreamOutput(ctx, field)
+		if v, source := draftFromUpstreamOutput(ctx, field); strings.TrimSpace(v) != "" {
+			return v, source
+		}
+		// The requirement gate receives the clarification result as its
+		// input and has no same-named value: the scope under approval IS the
+		// clarification, so passing it through lets a plain "approve" with
+		// the optional contract left empty carry the clarified scope forward
+		// untouched.
+		return draftFromUpstreamOutput(ctx, "clarified")
 	case "approved_fix":
 		if v, source := draftFromUpstreamOutput(ctx, field); strings.TrimSpace(v) != "" {
 			return v, source
