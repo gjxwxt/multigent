@@ -662,6 +662,7 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
                   records={workflowRecords}
                   runs={runsState.status === 'ok' ? runsState.data.runs ?? [] : []}
                   taskID={task.id}
+                  project={task.project}
                   actorLabels={actorLabels}
                   canReview={canReviewWorkflow}
                   docTitles={workflowState.data.docTitles}
@@ -880,6 +881,7 @@ export function WorkflowRuntimePanel({
   records,
   runs,
   taskID,
+  project,
   actorLabels,
   canReview,
   hideHeader = false,
@@ -899,6 +901,7 @@ export function WorkflowRuntimePanel({
   records: WorkflowRecord[]
   runs: RunRow[]
   taskID: string
+  project?: string
   actorLabels: Map<string, string>
   canReview: boolean
   hideHeader?: boolean
@@ -927,6 +930,52 @@ export function WorkflowRuntimePanel({
   const hasStructuredInput = Object.keys(inputValues).length > 0
   const stepByIDMap = useMemo(() => new Map(steps.map((item) => [item.id, item])), [steps])
   const actorLabel = workflowActorLabel(instance?.actorType, instance?.actorId, actorLabels)
+  const [draftApplied, setDraftApplied] = useState<Record<string, string>>({})
+  const [draftBusy, setDraftBusy] = useState(false)
+  const draftLoadedFor = useRef<string | null>(null)
+
+  // Pull rule-computed prefill when the review form first opens for a step.
+  // Only fills empty fields, tags each with its source, never touches decision.
+  const loadReviewDraft = useCallback(async () => {
+    if (!canReview || !project || !taskID || !step || step.type !== 'human_review' || !instance || !isWorkflowStepOpen(instance.status)) return
+    const key = `${project}/${taskID}/${step.id}`
+    if (draftLoadedFor.current === key) return
+    draftLoadedFor.current = key
+    setDraftBusy(true)
+    try {
+      // await before first setState keeps the effect body free of synchronous
+      // state updates (cascading-render lint rule).
+      const data = await apiFetch<{ fields: Array<{ name: string; value: string; source: string; sourceLabel: string; generated: boolean }> }>(
+        `/api/v1/projects/${encodeURIComponent(project)}/tasks/${encodeURIComponent(taskID)}/workflow/review/draft`,
+      )
+      let appliedAny = false
+      for (const f of data?.fields ?? []) {
+        if (!f.generated || !f.value) continue
+        if (f.name === 'comments') {
+          if (!reviewComments.trim()) {
+            onChangeComments(f.value)
+            setDraftApplied((prev) => ({ ...prev, comments: f.sourceLabel }))
+            appliedAny = true
+          }
+        } else if (!(reviewOutputs[f.name] ?? '').trim()) {
+          onChangeOutput(f.name, f.value)
+          setDraftApplied((prev) => ({ ...prev, [f.name]: f.sourceLabel }))
+          appliedAny = true
+        }
+      }
+      if (!appliedAny) draftLoadedFor.current = null
+    } catch {
+      // Draft is best-effort; a silent failure leaves the form empty.
+      draftLoadedFor.current = null
+    } finally {
+      setDraftBusy(false)
+    }
+  }, [canReview, project, taskID, step, instance, reviewComments, reviewOutputs, onChangeComments, onChangeOutput])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => { void loadReviewDraft() }, 0)
+    return () => window.clearTimeout(timer)
+  }, [loadReviewDraft])
 
   if (!step) {
     return (
@@ -1028,22 +1077,52 @@ export function WorkflowRuntimePanel({
                 const isCommentsField = field.name === 'comments'
                 const prUrl = (inputValues['pr_url'] || '').trim()
                 const isHttpPr = Boolean(prUrl && prUrl.toLowerCase() !== 'none' && (prUrl.startsWith('http://') || prUrl.startsWith('https://')))
+                const draftSource = draftApplied[isCommentsField ? 'comments' : field.name]
 
                 return (
                   <label key={field.name} className="block">
                     <div className="flex items-center justify-between gap-2 mb-1">
-                      <WorkflowFieldTitle fieldName={field.name} description={field.description} required />
-                      {isCommentsField && isHttpPr && (
-                        <a
-                          href={prUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center gap-1 text-xs font-semibold text-sky-600 hover:text-sky-700 hover:underline dark:text-sky-400"
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <WorkflowFieldTitle fieldName={field.name} description={field.description} required />
+                        {draftSource && (
+                          <span
+                            title={t('workflows.review.draftSource', { defaultValue: '草稿来源' }) + ': ' + draftSource}
+                            className="shrink-0 rounded-full border border-amber-300/70 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:border-amber-500/40 dark:bg-amber-950/40 dark:text-amber-300"
+                          >
+                            {t('workflows.review.draftBadge', { defaultValue: '草稿' })}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {isCommentsField && isHttpPr && (
+                          <a
+                            href={prUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 text-xs font-semibold text-sky-600 hover:text-sky-700 hover:underline dark:text-sky-400"
+                          >
+                            <GitPullRequest className="size-3.5" />
+                            <span>{t('tasks.openPullRequest', { defaultValue: '打开 Pull Request ↗' })}</span>
+                          </a>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            draftLoadedFor.current = null
+                            setDraftApplied((prev) => {
+                              const next = { ...prev }
+                              delete next[isCommentsField ? 'comments' : field.name]
+                              return next
+                            })
+                            void loadReviewDraft()
+                          }}
+                          disabled={draftBusy}
+                          title={t('workflows.review.regenerateDraft', { defaultValue: '重新生成草稿' })}
+                          className="inline-flex items-center gap-1 text-xs text-neutral-400 hover:text-sky-600 disabled:opacity-50 dark:text-zinc-500 dark:hover:text-sky-400"
                         >
-                          <GitPullRequest className="size-3.5" />
-                          <span>{t('tasks.openPullRequest', { defaultValue: '打开 Pull Request ↗' })}</span>
-                        </a>
-                      )}
+                          <RotateCw className={cn('size-3', draftBusy && 'animate-spin')} />
+                        </button>
+                      </div>
                     </div>
                     <textarea
                       value={field.name === 'comments' ? reviewComments : reviewOutputs[field.name] || ''}
@@ -1298,14 +1377,23 @@ function WorkflowFieldList({ fields, values }: { fields: WorkflowField[]; values
 }
 
 function WorkflowFieldTitle({ fieldName, description, required = false }: { fieldName: string; description?: string; required?: boolean }) {
-  const title = description?.trim() || fieldName
+  const raw = description?.trim()
+  const title = raw || fieldName
+  // Two-part descriptions (lead sentence + "必须包含:" detail) render the
+  // detail as quiet small text so long gate guidance doesn't crowd the dialog.
+  const splitIdx = raw ? raw.search(/[。．]\s*(?=必须包含|要包含|应包含|包含:|包含：)/) : -1
+  const lead = splitIdx > 0 ? raw!.slice(0, splitIdx + 1) : null
+  const detail = splitIdx > 0 ? raw!.slice(splitIdx + 1).trim() : null
   return (
     <div>
       <p className="text-sm font-semibold leading-snug text-neutral-800 dark:text-zinc-200" title={fieldName}>
-        {title}
+        {lead ?? title}
         {required && <span className="ml-1 text-red-500">*</span>}
       </p>
-      {description?.trim() && (
+      {detail && (
+        <p className="mt-0.5 text-[11px] leading-snug text-neutral-500 dark:text-zinc-500">{detail}</p>
+      )}
+      {raw && (
         <p className="mt-0.5 font-mono text-[10px] uppercase tracking-wide text-neutral-400 dark:text-zinc-600">{fieldName}</p>
       )}
     </div>
