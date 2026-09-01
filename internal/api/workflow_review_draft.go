@@ -171,8 +171,17 @@ func reviewDraftForField(ctx *reviewDraftContext, field string) (string, string)
 		return draftImmutableRef(ctx)
 	case "approved_change":
 		return draftApprovedChange(ctx)
-	case "approved_scope", "approved_fix":
+	case "approved_scope":
 		return draftFromUpstreamOutput(ctx, field)
+	case "approved_fix":
+		if v, source := draftFromUpstreamOutput(ctx, field); strings.TrimSpace(v) != "" {
+			return v, source
+		}
+		// The hotfix plan gate receives the triage diagnosis as its input,
+		// not a same-named value: the plan under approval IS the diagnosis
+		// (root cause + fix approach + frozen base_commit), so passing it
+		// through lets a plain "approve" carry the agent's proposal forward.
+		return draftFromUpstreamOutput(ctx, "diagnosis")
 	case "comments":
 		return draftComments(ctx)
 	default:

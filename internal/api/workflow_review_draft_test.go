@@ -130,3 +130,27 @@ func TestDraftFromUpstreamOutput(t *testing.T) {
 		t.Fatalf("missing upstream must be empty/none, got %q/%q", v2, src2)
 	}
 }
+
+func TestDraftApprovedFixFallsBackToDiagnosis(t *testing.T) {
+	ctx := draftTestContext()
+	// Hotfix plan gate: the step input carries the triage diagnosis and no
+	// same-named approved_fix — the draft passes the diagnosis through so a
+	// plain "approve" forwards the agent's proposal untouched.
+	ctx.instance = entity.WorkflowStepInstance{InputValues: map[string]string{"diagnosis": "根因X；修复方案Y；base_commit=abc1234"}}
+	v, src := reviewDraftForField(ctx, "approved_fix")
+	if v != "根因X；修复方案Y；base_commit=abc1234" || src != draftSourceUpstreamOutput {
+		t.Fatalf("approved_fix draft = %q/%q, want diagnosis passthrough", v, src)
+	}
+	// A same-named upstream value still wins over the fallback.
+	ctx.instance = entity.WorkflowStepInstance{InputValues: map[string]string{"approved_fix": "人工改判的方案", "diagnosis": "旧诊断"}}
+	v2, _ := reviewDraftForField(ctx, "approved_fix")
+	if v2 != "人工改判的方案" {
+		t.Fatalf("same-named upstream must win, got %q", v2)
+	}
+	// Neither present: empty, never fabricated.
+	ctx.instance = entity.WorkflowStepInstance{InputValues: map[string]string{}}
+	v3, src3 := reviewDraftForField(ctx, "approved_fix")
+	if v3 != "" || src3 != draftSourceNone {
+		t.Fatalf("missing both must be empty/none, got %q/%q", v3, src3)
+	}
+}

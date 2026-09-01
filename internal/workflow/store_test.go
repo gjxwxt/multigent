@@ -953,6 +953,19 @@ func TestHotfixDeployPipelineTemplateStructure(t *testing.T) {
 	if human != 3 {
 		t.Fatalf("expected 3 human_review steps (plan review, fix effect review, deploy confirm), got %d", human)
 	}
+	// The plan gate must be approvable without the reviewer authoring a
+	// plan: approved_fix is optional and backfilled from the triage
+	// diagnosis (same auto-reference contract as the unified pipeline).
+	for _, s := range tmpl.Steps {
+		if s.ID != "hotfix_review" {
+			continue
+		}
+		for _, f := range s.OutputFields {
+			if f.Name == "approved_fix" && !f.Optional {
+				t.Fatal("hotfix_review.approved_fix must be optional (auto-referenced from diagnosis)")
+			}
+		}
+	}
 
 	edges := map[string]entity.WorkflowEdge{}
 	for _, e := range tmpl.Edges {

@@ -765,7 +765,8 @@ func hotfixDeployPipelineTemplate(locale string) entity.WorkflowTemplate {
 		"confirmTitle":        "Deploy Confirmation",
 		"confirmDesc":         "Human verifies deployment result and post-deploy signals. Fix-quality issues return to implement_fix; wrong-diagnosis issues return to triage.",
 		"diagnosisField":      "Root cause, impact scope, fix approach, and the frozen base_commit (exact main HEAD SHA).",
-		"approvedFixField":    "Human-approved fix approach, to be passed verbatim to implement_fix.",
+		"approvedFixField":    "Human-approved fix approach (with the frozen base_commit), to be implemented verbatim.",
+		"approvedFixOutField": "Approved fix plan: defaults to the triage diagnosis and its frozen baseline; confirm as-is, edit only to override.",
 		"fixArtifactField":    "Fix branch, commits, regression test evidence.",
 		"tagField":            "Annotated tag pushed to remote (immutable reference of the shipped code).",
 		"deployEvidenceField": "Deploy pipeline URL, or none with the reason; post-deploy health check results.",
@@ -793,7 +794,8 @@ func hotfixDeployPipelineTemplate(locale string) entity.WorkflowTemplate {
 		"confirmTitle":        "部署确认",
 		"confirmDesc":         "人工确认部署结果与发布后信号。修复质量问题打回实施修复；诊断方向性错误打回重新定位。",
 		"diagnosisField":      "根因、影响面、修复方案，以及冻结的 base_commit（精确 main HEAD SHA）。",
-		"approvedFixField":    "人工确认的修复方案，原样传递给实施修复节点。",
+		"approvedFixField":    "人工确认的修复方案（含冻结的 base_commit），按此实施。",
+		"approvedFixOutField": "确认的修复方案：默认自动引用问题定位中的方案与冻结基线，确认无误即可；仅在人工改判方案时修改。",
 		"fixArtifactField":    "修复分支、提交与回归测试证据。",
 		"tagField":            "已推送到远端的附注 Tag（已发运代码的不可变引用）。",
 		"deployEvidenceField": "部署流水线链接（无则填 none 并说明原因）与部署后健康检查结果。",
@@ -805,10 +807,17 @@ func hotfixDeployPipelineTemplate(locale string) entity.WorkflowTemplate {
 	field := func(name, descKey string) entity.WorkflowField {
 		return entity.WorkflowField{Name: name, Description: text[descKey]}
 	}
+	// optionalField marks human-review outputs the reviewer may leave empty;
+	// the review handler backfills them from the deterministic draft rules.
+	optionalField := func(name, descKey string) entity.WorkflowField {
+		f := field(name, descKey)
+		f.Optional = true
+		return f
+	}
 	return templateFromParts("hotfix-deploy-pipeline", text["name"], text["description"], locale, "triage",
 		[]entity.WorkflowStep{
 			tmplStep("triage", "agent_task", text["triageTitle"], text["triageDesc"], "triage-agent", "rose", 80, []entity.WorkflowField{field("request", "requestField")}, []entity.WorkflowField{field("diagnosis", "diagnosisField")}),
-			tmplStep("hotfix_review", "human_review", text["hotfixReviewTitle"], text["hotfixReviewDesc"], "product-owner", "amber", 360, []entity.WorkflowField{field("diagnosis", "diagnosisField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), field("approved_fix", "approvedFixField")}),
+			tmplStep("hotfix_review", "human_review", text["hotfixReviewTitle"], text["hotfixReviewDesc"], "product-owner", "amber", 360, []entity.WorkflowField{field("diagnosis", "diagnosisField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("approved_fix", "approvedFixOutField")}),
 			tmplStep("implement_fix", "agent_task", text["fixTitle"], text["fixDesc"], "developer-agent", "emerald", 640, []entity.WorkflowField{field("approved_fix", "approvedFixField"), field("base_commit", "baseCommitField"), field("review_comments", "commentsField")}, []entity.WorkflowField{field("fix_artifact", "fixArtifactField"), field("preview", "fixPreviewField")}),
 			tmplStep("fix_review", "human_review", text["fixReviewTitle"], text["fixReviewDesc"], "product-owner", "amber", 920, []entity.WorkflowField{field("fix_artifact", "fixArtifactField"), field("preview", "fixPreviewField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField")}),
 			tmplStep("verify_and_tag", "agent_task", text["verifyTitle"], text["verifyDesc"], "developer-agent", "emerald", 1200, []entity.WorkflowField{field("fix_artifact", "fixArtifactField")}, []entity.WorkflowField{field("git_tag", "tagField"), field("deploy_evidence", "deployEvidenceField")}),
