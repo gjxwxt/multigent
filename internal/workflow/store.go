@@ -967,7 +967,7 @@ func unifiedDeliveryPipelineTemplate(locale string) entity.WorkflowTemplate {
 			edge("e-clarify-rework", "clarify_review", "clarify", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "request": "$input.clarified"}, false),
 			edge("e-implement-review", "implement", "agent_self_review", "", nil, nil, true),
 			edge("e-self-pass", "agent_self_review", "code_review", text["approved"], cond("self_review", "neq", "escalate"), map[string]string{"review_rounds": "$output.review_rounds"}, false),
-			edge("e-self-rework", "agent_self_review", "implement", text["changesRequested"], cond("self_review", "eq", "issues_fixed_needed"), map[string]string{"review_comments": "$output.self_review", "review_rounds": "$output.review_rounds"}, false),
+			edge("e-self-rework", "agent_self_review", "implement", text["changesRequested"], cond("self_review", "eq", "issues_fixed"), map[string]string{"review_comments": "$output.self_review", "review_rounds": "$output.review_rounds"}, false),
 			edge("e-self-escalate", "agent_self_review", "code_review", "escalate", cond("self_review", "eq", "escalate"), map[string]string{"escalation_case": "$output.escalation_case", "review_rounds": "$output.review_rounds"}, false),
 			edge("e-code-approved", "code_review", "changelog", text["approved"], cond("decision", "eq", "approve"), map[string]string{"approved_change": "$output.approved_change"}, false),
 			edge("e-code-rework", "code_review", "implement", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "review_rounds": "$input.review_rounds"}, false),
