@@ -1559,7 +1559,44 @@ const documentPreviewMarkdownComponents: Components = {
 }
 
 function prepareWorkflowMarkdownValue(value: string) {
-  return linkWorkflowDocIDs(formatWorkflowReadableText(unescapeBreaks(value)))
+  return linkWorkflowDocIDs(autolinkBareURLs(formatWorkflowReadableText(unescapeBreaks(value))))
+}
+
+// GFM autolink literals extend through any non-whitespace character, so a
+// bare URL directly followed by CJK text or full-width punctuation
+// (e.g. "...b072）。改动（与批准方案...") swallows the whole sentence into one
+// link. Pre-wrap bare URLs in an explicit ASCII-bounded autolink so the link
+// stops at the URL charset and trailing sentence punctuation stays plain text.
+function autolinkBareURLs(value: string) {
+  return value.replace(
+    /https?:\/\/[A-Za-z0-9\-._~:/?#[\]!$&'()*+,;=%@]+/g,
+    (match, offset: number, full: string) => {
+      const before = offset > 0 ? full[offset - 1] : ''
+      const after = full[offset + match.length] ?? ''
+      // Already inside an explicit <...> autolink, a markdown link
+      // destination, or an inline code span — leave it untouched.
+      if (before === '<' || before === '(' || before === '[' || before === '`') return match
+      if (after === '>' || after === '`') return match
+      let url = match
+      let trailing = ''
+      // Trailing ASCII punctuation almost never belongs to the URL; an
+      // unbalanced closing paren belongs to the surrounding sentence.
+      for (;;) {
+        const last = url[url.length - 1]
+        if (last && /[.,;:!?'"]/.test(last)) {
+          trailing = last + trailing
+          url = url.slice(0, -1)
+        } else if (last === ')' && (url.match(/\(/g) || []).length < (url.match(/\)/g) || []).length) {
+          trailing = last + trailing
+          url = url.slice(0, -1)
+        } else {
+          break
+        }
+      }
+      if (!url) return match
+      return `<${url}>${trailing}`
+    },
+  )
 }
 
 function formatWorkflowReadableText(value: string) {
