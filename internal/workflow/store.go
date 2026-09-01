@@ -275,23 +275,23 @@ func (s *Store) EnsureProjectInitializationDefinition() error {
 		return entity.WorkflowStep{
 			ID: id, Type: "agent_task", Title: title, Description: description,
 			ActorRole:    "project-initializer",
-			InputFields:  []entity.WorkflowField{{Name: "initialization_request", Description: "Initialization mode, repository path, template and remote synchronization requirements."}},
-			OutputFields: []entity.WorkflowField{{Name: "result", Description: "What was executed, verification evidence, and any remaining limitation."}},
+			InputFields:  []entity.WorkflowField{{Name: "initialization_request", Description: "初始化模式、仓库路径、模板与远端同步要求。"}},
+			OutputFields: []entity.WorkflowField{{Name: "result", Description: "执行了什么、验证证据，以及任何遗留限制。"}},
 			Position:     entity.WorkflowPosition{X: x, Y: 180},
 			Config:       map[string]string{"color": "sky"},
 		}
 	}
 	def := entity.WorkflowDefinition{
 		ID:          ProjectInitializationWorkflowID,
-		Name:        "Project Initialization",
-		Description: "Deterministic project initialization: prepare the workspace, install dependencies, verify build and health, then commit and synchronize the remote repository.",
+		Name:        "项目初始化",
+		Description: "确定性的项目初始化：准备工作区、安装依赖、验证构建与健康检查，最后提交并同步远端仓库。",
 		Version:     1, Scope: "workspace", StartStepID: "prepare",
 		Steps: []entity.WorkflowStep{
-			step("prepare", "Prepare Workspace", "Follow the initialization request exactly. For a remote existing repository, clone or fetch the requested branch into the project workspace. For a system-materialized template, verify the expected files and never overwrite user files. Record the resolved repository and revision.", 80),
-			step("dependencies", "Install Dependencies", "Run the repository's deterministic dependency preparation command when present (for the standard fullstack template: `timeout 180s make install`; otherwise use the package manifests). Use bounded network timeouts, preserve caches, and report the exact command and result.", 360),
-			step("verify", "Build and Verify", "Run the repository's deterministic verification command (for the standard fullstack template: `make verify`). Confirm frontend build, backend tests, and the declared runtime contract. Do not claim readiness from a partial command.", 640),
-			step("health", "Check Runtime Health", "Start the declared backend/frontend entrypoints only as needed and verify the configured health endpoint. Confirm the preview contract can reach the backend through the frontend path. Stop any temporary processes after the check.", 920),
-			step("sync", "Commit and Synchronize", "Create or update the initial Git commit, then push the configured default branch when a remote is present. Never put credentials in a remote URL. If synchronization fails, preserve the local commit and report a retryable error.", 1200),
+			step("prepare", "准备工作区", "严格按初始化请求执行。对远端已有仓库，克隆或拉取请求的分支到项目工作区；对系统物化的模板，核对预期文件且绝不覆盖用户文件。记录最终解析出的仓库与版本。", 80),
+			step("dependencies", "安装依赖", "当仓库存在确定性依赖准备命令时执行（标准全栈模板：`timeout 180s make install`；否则依据包管理清单）。使用有界网络超时，保留缓存，并报告确切的命令与结果。", 360),
+			step("verify", "构建与验证", "运行仓库的确定性验证命令（标准全栈模板：`make verify`）。确认前端构建、后端测试与声明的运行时契约全部通过，不得凭部分成功的命令宣称就绪。", 640),
+			step("health", "运行时健康检查", "按需启动声明的后端/前端入口，验证配置的健康检查端点，确认预览契约能经前端路径访问到后端；检查完成后停止所有临时启动的进程。", 920),
+			step("sync", "提交并同步", "创建或更新初始 Git 提交，存在远端时推送配置的默认分支。严禁把凭据写进远端 URL；同步失败时保留本地提交并上报可重试错误。", 1200),
 		},
 		Edges: []entity.WorkflowEdge{
 			edge("e-prepare-dependencies", "prepare", "dependencies", "", nil, nil, true),
