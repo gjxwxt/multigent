@@ -54,3 +54,6 @@ Thumbs.db
 # Internal/private planning notes
 docs/internal/
 internal/dev/
+
+# Local agent memory (workbuddy)
+.workbuddy/

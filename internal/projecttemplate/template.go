@@ -16,10 +16,15 @@ import (
 
 const (
 	ReactGoFullstackID      = "react_go_fullstack"
-	ReactGoFullstackVersion = "1.0.0"
+	ReactGoFullstackVersion = "1.1.0"
 )
 
-//go:embed files/react_go_fullstack/* files/react_go_fullstack/.gitignore files/react_go_fullstack/.env.example files/react_go_fullstack/.multigent/* files/react_go_fullstack/web/* files/react_go_fullstack/web/src/* files/react_go_fullstack/server/*
+// CI baseline assets shipped with the starter. They are exported separately
+// (see CIBaselineFiles) so existing repositories can be upgraded to the
+// CI/CD chain without re-materializing the whole starter.
+var ciBaselinePaths = []string{".gitlab-ci.yml", "deploy/Dockerfile", "deploy/compose.yml"}
+
+//go:embed files/react_go_fullstack/* files/react_go_fullstack/.gitignore files/react_go_fullstack/.env.example files/react_go_fullstack/.gitlab-ci.yml files/react_go_fullstack/.multigent/* files/react_go_fullstack/deploy/* files/react_go_fullstack/web/* files/react_go_fullstack/web/src/* files/react_go_fullstack/server/*
 var templateFiles embed.FS
 
 type Report struct {
@@ -87,6 +92,30 @@ func templateEntries(templateID string) ([]fileEntry, Report, error) {
 		RuntimeContract: filepath.ToSlash(filepath.Join(".multigent", "runtime.json")),
 	}
 	return files, report, nil
+}
+
+// CIBaselineFiles returns the CI/CD baseline assets (repo-relative path ->
+// content) so deterministic tooling can seed them into existing repositories
+// without touching any other starter file.
+func CIBaselineFiles() (map[string][]byte, error) {
+	files, _, err := templateEntries(ReactGoFullstackID)
+	if err != nil {
+		return nil, err
+	}
+	wanted := make(map[string]bool, len(ciBaselinePaths))
+	for _, p := range ciBaselinePaths {
+		wanted[p] = true
+	}
+	out := make(map[string][]byte, len(ciBaselinePaths))
+	for _, file := range files {
+		if wanted[file.path] {
+			out[file.path] = file.data
+		}
+	}
+	if len(out) != len(ciBaselinePaths) {
+		return nil, fmt.Errorf("CI baseline incomplete: %d/%d files", len(out), len(ciBaselinePaths))
+	}
+	return out, nil
 }
 
 // Materialize writes a new template into an empty directory. Existing files

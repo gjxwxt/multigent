@@ -17,6 +17,8 @@ verify: doctor
 
 build:
 	cd web && npm run build
+	rm -rf server/webui/dist && mkdir -p server/webui/dist && cp -r web/dist/. server/webui/dist/
+	cd server && go build -o bin/app .
 
 doctor:
 	@command -v go >/dev/null || (echo "doctor: go is required" && exit 1)
@@ -24,4 +26,7 @@ doctor:
 	@test -f .multigent/runtime.json || (echo "doctor: .multigent/runtime.json is missing" && exit 1)
 	@test -f server/go.mod || (echo "doctor: server/go.mod is missing" && exit 1)
 	@test -f web/package.json || (echo "doctor: web/package.json is missing" && exit 1)
+	@test -f .gitlab-ci.yml || (echo "doctor: .gitlab-ci.yml is missing" && exit 1)
+	@test -f deploy/Dockerfile || (echo "doctor: deploy/Dockerfile is missing" && exit 1)
+	@test -f deploy/compose.yml || (echo "doctor: deploy/compose.yml is missing" && exit 1)
 	@echo "doctor: ok"

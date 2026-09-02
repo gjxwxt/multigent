@@ -203,8 +203,59 @@ func TestSeededSoftwareDeliveryHasPRReviewLoop(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("load initialization workflow: ok=%v err=%v", ok, err)
 	}
-	if len(initDef.Steps) != 5 || initDef.StartStepID != "prepare" {
+	if len(initDef.Steps) != 6 || initDef.StartStepID != "prepare" {
 		t.Fatalf("unexpected initialization workflow: %#v", initDef)
+	}
+	if initDef.Version < 3 {
+		t.Fatalf("expected initialization definition version >= 3, got %d", initDef.Version)
+	}
+	hasCIReady := false
+	for _, step := range initDef.Steps {
+		if step.ID == "ci_ready" {
+			hasCIReady = true
+		}
+	}
+	if !hasCIReady {
+		t.Fatalf("expected ci_ready step in initialization workflow: %#v", initDef.Steps)
+	}
+}
+
+func TestEnsureProjectInitializationUpgradesStrayVersionBump(t *testing.T) {
+	controlDB, err := db.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer controlDB.Close()
+	if err := controlDB.UpsertWorkspace(db.Workspace{ID: "ws-ensure", Name: "WS", Slug: "ws-ensure", Root: t.TempDir()}); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	store := NewStore(controlDB, "ws-ensure")
+	// A stray UI PUT can bump the stored version without the platform content
+	// (this happened in production: version 2 with the pre-ci_ready steps).
+	// The built-in definition must still converge on the stored copy.
+	stale := entity.WorkflowDefinition{
+		ID: ProjectInitializationWorkflowID, Name: "项目初始化", Version: 2,
+		Scope: "workspace", StartStepID: "prepare",
+		Steps: []entity.WorkflowStep{{ID: "prepare", Type: "agent_task", Title: "准备工作区"}},
+	}
+	if err := store.SaveDefinition(&stale); err != nil {
+		t.Fatalf("seed stale definition: %v", err)
+	}
+	if err := store.EnsureProjectInitializationDefinition(); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	def, ok, err := store.Definition(ProjectInitializationWorkflowID)
+	if err != nil || !ok {
+		t.Fatalf("load definition: ok=%v err=%v", ok, err)
+	}
+	hasCIReady := false
+	for _, step := range def.Steps {
+		if step.ID == "ci_ready" {
+			hasCIReady = true
+		}
+	}
+	if def.Version < 3 || !hasCIReady {
+		t.Fatalf("expected upgrade to version >= 3 with ci_ready, got version %d steps %#v", def.Version, def.Steps)
 	}
 }
 

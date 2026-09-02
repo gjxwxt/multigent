@@ -62,6 +62,7 @@ func main() {
 		newWorkflowCmd(),
 		newSessionCmd(),
 		newWakeupCmd(),
+		newCICmd(),
 	)
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
@@ -81,6 +82,43 @@ with an execution gate; the scheduler will not run it before the requested
 time.`,
 	}
 	cmd.AddCommand(newWakeupScheduleCmd())
+	return cmd
+}
+
+func newCICmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "ci",
+		Short: "Deterministic CI/CD readiness gate for the project repository",
+	}
+	cmd.AddCommand(newCIReadyCmd())
+	return cmd
+}
+
+func newCIReadyCmd() *cobra.Command {
+	var wait int
+	cmd := &cobra.Command{
+		Use:   "ready",
+		Short: "Seed the CI baseline and run every deterministic readiness check",
+		Long: `Seed the platform CI/CD baseline files into the project repository (never
+overwriting existing ones) and run the deterministic readiness checks: baseline
+files, job contract, runner tags, tag-only release gating, npm mirror, apk
+cache, interruptible default, script cross-references and health path.
+
+With --wait the server additionally polls the GitLab pipeline built for the
+current HEAD and attaches its job statuses as delivery evidence.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			q := url.Values{}
+			if wait > 0 {
+				q.Set("wait_seconds", strconv.Itoa(wait))
+			}
+			body, err := requestJSON(http.MethodPost, "/api/v1/runtime/ci-ready", q, nil)
+			if err != nil {
+				return err
+			}
+			return writeJSON(body)
+		},
+	}
+	cmd.Flags().IntVar(&wait, "wait", 0, "seconds (0-600) to wait for the first pipeline result as evidence")
 	return cmd
 }
 

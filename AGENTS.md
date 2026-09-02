@@ -133,6 +133,9 @@ multigent/
 | 六大生命周期解耦 | `HANDOFF.md` 第 6 节 | 任务/代码基线/Worktree/预览会话/容器/远程同步各自独立字段与状态机，禁止混用单一状态 |
 | 工作流双层体系 | `internal/workflow/store.go` | 代码内置 `Templates()`（只读目录）→ 经 `POST /api/v1/workflows` 实例化落库才可供任务选用；改模板后必须重新实例化才能在 UI 生效 |
 | 统一交付流水线 | 模板 ID `unified-delivery-pipeline` | 12 步闭环，核心是编码后的 Agent 初审闸门（独立 reviewer-agent、实测验证、`review_rounds` 三轮封顶）；发布步 CI 触发为 best-effort（无权限如实填 none） |
+| CI/CD 基线与 ci_ready 闸门 | `internal/ciready/` + 模板 `.gitlab-ci.yml`（模板 1.1.0） | 确定性优先：补种与十项校验全是纯函数，Agent 在 init v2 的 `ci_ready` 步骤只执行 `mga ci ready`（引擎无系统步骤类型才借道 agent_task）；端点 `POST /api/v1/runtime/ci-ready` 以 HEAD SHA 流水线为客观证据；`apk add --no-cache` 即 fail（每 job 重下 docker CLI）；release tag 必须从含优化 yml 的 main 切 |
+
+**runner tags 决策（模板 `.gitlab-ci.yml` 硬编码 `tags: [docker]`，勿"顺手参数化"）**：GitLab 的 `tags:` 字段不支持变量展开（调度早于 job 变量生效）；本环境 runner 以 `run_untagged=false` 注册，无 tags 的 job 永远 pending；tags 同时把 package/deploy 路由到挂载 docker.sock 的 runner。**内网迁移**：注册 runner 时打 `docker` 标签即可，项目级或共享 runner 绑定均可（GitLab 按标签匹配而非绑定类型）；若换标签名，只需全局替换模板 yml 中的 `tags: [docker]`。背景与 #897 复盘见 `HANDOFF.md` 第 9 节 (9)。
 
 ---
 

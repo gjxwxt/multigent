@@ -522,6 +522,96 @@ func (g *GitLabHost) MergeMR(ctx context.Context, projectID, mrIID, expectedHead
 	return nil
 }
 
+// PipelineInfo is a bounded view of a CI pipeline used for readiness evidence.
+type PipelineInfo struct {
+	ID      int64  `json:"id"`
+	SHA     string `json:"sha"`
+	Ref     string `json:"ref"`
+	Status  string `json:"status"`
+	Source  string `json:"source"`
+	WebURL  string `json:"webUrl"`
+}
+
+// PipelineJobInfo is one job inside a pipeline.
+type PipelineJobInfo struct {
+	ID     int64  `json:"id"`
+	Name   string `json:"name"`
+	Stage  string `json:"stage"`
+	Status string `json:"status"`
+}
+
+// PipelinesForSHA lists pipelines built for an exact commit SHA (newest first).
+func (g *GitLabHost) PipelinesForSHA(ctx context.Context, projectID, sha string) ([]PipelineInfo, error) {
+	endpoint := fmt.Sprintf("/projects/%s/pipelines?sha=%s&per_page=5", url.PathEscape(projectID), url.QueryEscape(sha))
+	req, err := g.newRequest(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := g.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list gitlab pipelines: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, ErrNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("list gitlab pipelines status %d: %s", resp.StatusCode, string(b))
+	}
+	var items []struct {
+		ID     int64  `json:"id"`
+		SHA    string `json:"sha"`
+		Ref    string `json:"ref"`
+		Status string `json:"status"`
+		Source string `json:"source"`
+		WebURL string `json:"web_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+		return nil, fmt.Errorf("decode gitlab pipelines: %w", err)
+	}
+	out := make([]PipelineInfo, 0, len(items))
+	for _, item := range items {
+		out = append(out, PipelineInfo{ID: item.ID, SHA: item.SHA, Ref: item.Ref, Status: item.Status, Source: item.Source, WebURL: item.WebURL})
+	}
+	return out, nil
+}
+
+// PipelineJobs lists the jobs of one pipeline.
+func (g *GitLabHost) PipelineJobs(ctx context.Context, projectID string, pipelineID int64) ([]PipelineJobInfo, error) {
+	endpoint := fmt.Sprintf("/projects/%s/pipelines/%d/jobs?per_page=100", url.PathEscape(projectID), pipelineID)
+	req, err := g.newRequest(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := g.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list gitlab pipeline jobs: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, ErrNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("list gitlab pipeline jobs status %d: %s", resp.StatusCode, string(b))
+	}
+	var items []struct {
+		ID     int64  `json:"id"`
+		Name   string `json:"name"`
+		Stage  string `json:"stage"`
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+		return nil, fmt.Errorf("decode gitlab pipeline jobs: %w", err)
+	}
+	out := make([]PipelineJobInfo, 0, len(items))
+	for _, item := range items {
+		out = append(out, PipelineJobInfo{ID: item.ID, Name: item.Name, Stage: item.Stage, Status: item.Status})
+	}
+	return out, nil
+}
+
 func (g *GitLabHost) newRequest(ctx context.Context, method, endpoint string, body io.Reader) (*http.Request, error) {
 	u := g.baseURL + endpoint
 	req, err := http.NewRequestWithContext(ctx, method, u, body)

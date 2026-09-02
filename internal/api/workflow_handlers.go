@@ -1141,6 +1141,24 @@ func (s *Server) recoverActiveWorkflowRuns() {
 	s.recoverActiveWorkflowRunsWithDelay(3 * time.Second)
 }
 
+// ensurePlatformWorkflowDefinitions converges stored platform-owned workflow
+// definitions on the built-in contract at startup (e.g. the ci_ready gate on
+// project initialization). UI PUTs can bump stored versions arbitrarily, so
+// this must run on every boot rather than relying on request-time seeding.
+func (s *Server) ensurePlatformWorkflowDefinitions() {
+	if s == nil || s.controlDB == nil {
+		return
+	}
+	workspaceID, err := s.currentWorkspaceID()
+	if err != nil || strings.TrimSpace(workspaceID) == "" {
+		return
+	}
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	if err := wfStore.EnsureProjectInitializationDefinition(); err != nil {
+		log.Printf("[workflow-definitions] ensure project initialization definition: %v", err)
+	}
+}
+
 func (s *Server) recoverActiveWorkflowRunsWithDelay(delay time.Duration) int {
 	if s == nil || s.controlDB == nil || s.ts == nil {
 		return 0

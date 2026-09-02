@@ -269,6 +269,7 @@ func (s *Server) SetDaemonStatus(fn DaemonStatusFunc) { s.daemonStatus = fn }
 func (s *Server) SetLocalRuntimeAPIURL(url string) {
 	s.localRuntimeAPIURL = strings.TrimRight(strings.TrimSpace(url), "/")
 	s.attentionRecoveryOnce.Do(func() {
+		go s.ensurePlatformWorkflowDefinitions()
 		go s.recoverPendingAttentionWakeups()
 		go s.recoverActiveWorkflowRuns()
 	})
@@ -662,6 +663,7 @@ func (s *Server) Handler() http.Handler {
 	runtimeMux.HandleFunc("GET /api/v1/runtime/tasks/{id}/workflow", s.handleRuntimeTaskWorkflow)
 	runtimeMux.HandleFunc("GET /api/v1/runtime/workflow/pending-reviews", s.handleRuntimeWorkflowPendingReviews)
 	runtimeMux.HandleFunc("POST /api/v1/runtime/workflow/decision", s.handleRuntimeWorkflowDecision)
+	runtimeMux.HandleFunc("POST /api/v1/runtime/ci-ready", s.handleRuntimeCIReady)
 	runtimeMux.HandleFunc("GET /api/v1/runtime/contacts", s.handleRuntimeContacts)
 	runtimeMux.HandleFunc("GET /api/v1/runtime/channels", s.handleRuntimeChannels)
 	runtimeMux.HandleFunc("POST /api/v1/runtime/notify", s.handleRuntimeNotify)

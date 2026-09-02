@@ -1,0 +1,156 @@
+# 全栈基线 CI/CD：lint / test / build 三 stage（push 与 MR 触发），
+# tag 流水线追加 package / deploy 两 stage（仅 $CI_COMMIT_TAG 触发，就地构建不推送）。
+#
+# 本文件是平台确定性基线（react_go_fullstack 模板 1.1.0 的一部分），
+# 全部模式来自 1test 项目实测调优（GitLab 流水线 #879/#880/#897），请勿随意改写：
+# 1. workflow:rules 去重——feature 分支 push 不建流水线，卡点收敛到 MR；
+#    保留 tag（部署链触发）、默认分支（合并后兜底）、web/api（手动触发调试）。
+# 2. 前端 job 统一 npmmirror 源 + package-lock 键控缓存（web/.npm），
+#    默认 npm CDN 在代理/fake-IP 环境下冷装一次 5-7 分钟，换源后 12 秒。
+# 3. 独立 job 用 needs: [] 打平 stage 屏障，避免 runner 并发不足时串行排队。
+# 4. default.interruptible：同分支新提交自动取消过时流水线；package/deploy 不可中断。
+# 5. apk 用 --cache-dir /cache/apk（runner 已挂载宿主 /cache 卷）：
+#    禁用 --no-cache，否则每个 package/deploy job 重复下载 docker CLI（实测 154s/361s）。
+#
+# ── runner tags 决策（内网迁移必读）────────────────────────────
+# 所有 job 硬编码 tags: [docker]。原因：
+#   a) GitLab 的 tags 字段不支持变量展开（调度发生在 job 变量生效之前），无法参数化；
+#   b) 本环境 runner 以 run_untagged=false 注册，不带 tags 的 job 会永远 pending；
+#   c) tags 同时承担路由职责：package/deploy 必须落在挂载了 docker.sock 的 runner 上。
+# 内网迁移：注册 runner 时打上 docker 标签并绑定到项目（项目级 runner 或共享 runner
+# 均可，GitLab 按标签匹配而非按绑定类型匹配）；若内网沿用其他标签名，只需全局
+# 替换本文件的 tags: [docker]，其余内容不动。
+#
+# ── 环境参数 ────────────────────────────────────────────────
+# APP_PORT：宿主发布端口，默认 8088。特殊环境在 GitLab 项目
+# Settings > CI/CD > Variables 覆盖，不改本文件。
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "api"
+
+default:
+  interruptible: true
+
+variables:
+  APP_PORT: "8088"
+
+stages:
+  - lint
+  - test
+  - build
+  - package
+  - deploy
+
+# 前端 job 公共模板：npmmirror 源 + lockfile 键控 npm 缓存
+.frontend:
+  image: node:22
+  tags: [docker]
+  cache:
+    key:
+      files:
+        - web/package-lock.json
+    paths:
+      - web/.npm
+  before_script:
+    - cd web
+    - npm config set registry https://registry.npmmirror.com
+    - npm ci --cache .npm --prefer-offline
+
+# ---------- lint ----------
+lint:backend:
+  stage: lint
+  image: golang:1.26-alpine
+  tags: [docker]
+  needs: []
+  script:
+    - cd server && go vet ./...
+
+# ---------- test ----------
+test:backend:
+  stage: test
+  image: golang:1.26-alpine
+  tags: [docker]
+  needs: []
+  script:
+    - cd server && go test ./...
+
+# ---------- build ----------
+build:frontend:
+  extends: .frontend
+  stage: build
+  needs: []
+  script:
+    - npm run build
+  artifacts:
+    paths:
+      - web/dist
+    expire_in: 1 hour
+
+build:backend:
+  stage: build
+  image: golang:1.26-alpine
+  tags: [docker]
+  needs:
+    - job: build:frontend
+      artifacts: true
+  script:
+    # 对齐 Makefile build：前端产物内嵌进后端二进制（go:embed webui/dist）
+    - rm -rf server/webui/dist && cp -r web/dist server/webui/dist
+    - cd server && go build -o bin/app .
+  artifacts:
+    paths:
+      - server/bin/app
+    expire_in: 1 hour
+
+# ---------- package（仅 tag 流水线）----------
+package:
+  stage: package
+  image: alpine:3.20
+  tags: [docker]
+  interruptible: false
+  rules:
+    - if: $CI_COMMIT_TAG
+  needs:
+    - job: build:backend
+      artifacts: true
+  script:
+    # 镜像代理无 docker:* CLI 镜像，用宿主已缓存的 alpine:3.20 + apk 装 CLI；
+    # apk 换 aliyun 源（默认 CDN 在 fake-IP 代理下挂死），并落缓存到 /cache 卷。
+    - sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories && apk add --cache-dir /cache/apk docker-cli
+    # 就地构建，不推送（GitLab 无 registry）；runner 已挂载宿主 docker.sock
+    - docker build -f deploy/Dockerfile -t "$CI_PROJECT_NAME:$CI_COMMIT_TAG" .
+    - docker images "$CI_PROJECT_NAME:$CI_COMMIT_TAG"
+
+# ---------- deploy（仅 tag 流水线）----------
+deploy:
+  stage: deploy
+  image: alpine:3.20
+  tags: [docker]
+  interruptible: false
+  rules:
+    - if: $CI_COMMIT_TAG
+  needs:
+    - job: package
+      artifacts: false
+  environment:
+    name: production
+    url: http://localhost:8088
+  script:
+    - sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories && apk add --cache-dir /cache/apk docker-cli docker-cli-compose
+    # 起容器：镜像名与 package 步一致，TAG/APP_PORT 注入本次 tag 与发布端口
+    - IMAGE_NAME="$CI_PROJECT_NAME" TAG="$CI_COMMIT_TAG" docker compose -f deploy/compose.yml up -d
+    # 探活：job 容器内 localhost 是它自己，必须走 host.docker.internal 打宿主端口
+    - |
+      ok=0
+      for i in $(seq 1 30); do
+        if wget -q -O /dev/null "http://host.docker.internal:${APP_PORT}/api/health"; then ok=1; echo "health OK after ${i} attempts"; break; fi
+        sleep 2
+      done
+      [ "$ok" = "1" ] || { echo "health check timed out (~60s)"; docker compose -f deploy/compose.yml ps; exit 1; }
+    # 证据：容器状态
+    - IMAGE_NAME="$CI_PROJECT_NAME" TAG="$CI_COMMIT_TAG" docker compose -f deploy/compose.yml ps

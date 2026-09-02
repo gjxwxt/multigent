@@ -1,11 +1,21 @@
 package main
 
 import (
+	"embed"
 	"encoding/json"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 )
+
+// webui/dist 由 `make build`（或 CI build:backend）在编译前写入：前端产物
+// 内嵌进单一二进制，部署只交付一个容器（deploy/Dockerfile）。
+// dist/placeholder.txt 保证 fresh clone（未构建前端）时 go vet/test 仍可编译。
+//
+//go:embed all:webui/dist
+var webuiDist embed.FS
 
 func main() {
 	port := os.Getenv("PORT")
@@ -28,5 +38,38 @@ func newHandler() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"message": "hello from Go"})
 	})
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "not found"})
+	})
+	mux.Handle("/", spaHandler())
 	return mux
+}
+
+// spaHandler 服务内嵌前端产物：命中文件直接返回，未命中的路径回
+// index.html（前端路由接管）；前端尚未构建时返回 503 并给出指引。
+func spaHandler() http.Handler {
+	dist, err := fs.Sub(webuiDist, "webui/dist")
+	if err != nil {
+		panic("embedded webui/dist unavailable: " + err.Error())
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		name := strings.TrimPrefix(r.URL.Path, "/")
+		if name == "" {
+			name = "index.html"
+		}
+		if _, statErr := fs.Stat(dist, name); statErr != nil {
+			if _, statErr := fs.Stat(dist, "index.html"); statErr != nil {
+				http.Error(w, "web assets not built; run `make build`", http.StatusServiceUnavailable)
+				return
+			}
+			name = "index.html"
+		}
+		http.ServeFileFS(w, r, dist, name)
+	})
 }
