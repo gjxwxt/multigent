@@ -10,6 +10,7 @@ import (
 
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
+	"github.com/multigent/multigent/internal/secretbox"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
 
@@ -20,6 +21,7 @@ type fakeODClient struct {
 	createCalls []string
 	runCalls    []string
 	deleteCalls []string
+	lastCreds   *designModelCreds
 	runStatus   string
 	failCreate  bool
 }
@@ -45,8 +47,9 @@ func (f *fakeODClient) CreateProject(_ context.Context, id, _, _, _ string) erro
 	return nil
 }
 
-func (f *fakeODClient) StartRun(_ context.Context, projectID, _, _, _ string) (string, error) {
+func (f *fakeODClient) StartRun(_ context.Context, projectID, _, _, _ string, creds *designModelCreds) (string, error) {
 	f.runCalls = append(f.runCalls, projectID)
+	f.lastCreds = creds
 	return "conv-" + projectID, nil
 }
 
@@ -63,7 +66,50 @@ func (f *fakeODClient) DeleteProject(_ context.Context, projectID string) error 
 func seedDesignTask(t *testing.T, status entity.TaskStatus) (*Server, string, *entity.Task) {
 	t.Helper()
 	s, workspaceID, task, _ := seedResourceProject(t, status)
+	seedDesignModelProvider(t, s, workspaceID)
 	return s, workspaceID, task
+}
+
+// seedDesignModelProvider wires the seeded task agent ("agent") to an
+// anthropic-protocol model account so resolveDesignModelProvider resolves it.
+func seedDesignModelProvider(t *testing.T, s *Server, workspaceID string) {
+	t.Helper()
+	key, err := secretbox.SealString("sk-gateway-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.controlDB.UpsertModelProvider(workspaceID, controldb.ModelProvider{
+		ID:         "prov-ccr-test",
+		Name:       "ccr-qwen",
+		Type:       "anthropic",
+		BaseURL:    "http://127.0.0.1:3456",
+		APIKey:     key,
+		ModelsJSON: `["qwen3.8-27b"]`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.controlDB.UpsertAgentWorker(controldb.AgentWorker{
+		ID:                    "aw-res-agent",
+		WorkspaceID:           workspaceID,
+		Name:                  "agent",
+		DisplayName:           "agent",
+		Model:                 "claudecode",
+		RuntimeModel:          "qwen3.8-27b",
+		DefaultModelAccountID: "prov-ccr-test",
+		Status:                "available",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.controlDB.UpsertProjectMembership(controldb.ProjectMembership{
+		ID:          "pm-res-agent",
+		WorkspaceID: workspaceID,
+		ProjectID:   "resproj",
+		MemberType:  "agent_worker",
+		MemberID:    "aw-res-agent",
+		Title:       "agent",
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // seedODConnection registers an opendesign connection (baseUrl in
@@ -118,6 +164,17 @@ func TestDesignStartCreatesProjectAndIsIdempotent(t *testing.T) {
 	}
 	if len(fake.runCalls) != 1 {
 		t.Fatalf("runCalls = %v", fake.runCalls)
+	}
+	// byokProvider must carry the agent's model-gateway creds (ccr-qwen),
+	// never the OD connection's own URL/token.
+	if fake.lastCreds == nil {
+		t.Fatal("StartRun received no model creds")
+	}
+	if fake.lastCreds.Protocol != "anthropic" || fake.lastCreds.BaseURL != "http://127.0.0.1:3456" {
+		t.Fatalf("creds = %+v", fake.lastCreds)
+	}
+	if fake.lastCreds.APIKey != "sk-gateway-test" {
+		t.Fatal("creds api key mismatch")
 	}
 
 	// Second start reuses the project without touching OD.

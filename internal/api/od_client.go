@@ -11,6 +11,8 @@ import (
 	"time"
 
 	controldb "github.com/multigent/multigent/internal/db"
+	"github.com/multigent/multigent/internal/entity"
+	"github.com/multigent/multigent/internal/store"
 )
 
 // OpenDesign (OD) client. Phase 0 (docs/opendesign-integration-plan.md
@@ -48,12 +50,91 @@ type odByokProvider struct {
 	Model    string `json:"model"`
 }
 
+// designModelCreds carries the LLM gateway credentials the design agent runs
+// against. They belong to the task agent's model account (e.g. a
+// Claude-Code-compatible gateway), never to the OD daemon: OD forwards them
+// to opencode as the model endpoint, so handing it the OD connection would
+// make opencode call the OD daemon itself (live incident 2026-09-02).
+type designModelCreds struct {
+	Protocol string
+	APIKey   string
+	BaseURL  string
+	Model    string
+}
+
+// odProviderProtocol maps a stored model-provider type to the BYOK protocol
+// OD's buildOpenCodeByokProviderConfig understands. Empty when unsupported.
+func odProviderProtocol(providerType string) string {
+	switch strings.TrimSpace(providerType) {
+	case "anthropic":
+		return "anthropic"
+	case "openai":
+		return "openai"
+	default:
+		return ""
+	}
+}
+
+// resolveDesignModelProvider resolves the model-account credentials for the
+// task's agent. Resolution order:
+//  1. agent's bound model account (AgentMeta.Provider → ProviderStore)
+//  2. agent env overrides (ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN or
+//     OPENAI_BASE_URL/OPENAI_API_KEY), for agents wired ad hoc
+//
+// The returned creds are for the model gateway only; the OD connection is
+// resolved separately for the OD API calls themselves.
+func (s *Server) resolveDesignModelProvider(project, agent, model string) (*designModelCreds, error) {
+	if agentMeta := s.designAgentMeta(project, agent); agentMeta != nil && agentMeta.Provider != "" {
+		prov, err := store.NewProviderStoreWithDB(s.root, s.controlDB).Get(agentMeta.Provider)
+		if err == nil && prov != nil {
+			if protocol := odProviderProtocol(prov.Type); protocol != "" && strings.TrimSpace(prov.BaseURL) != "" {
+				return &designModelCreds{
+					Protocol: protocol,
+					APIKey:   prov.APIKey,
+					BaseURL:  strings.TrimRight(strings.TrimSpace(prov.BaseURL), "/"),
+					Model:    model,
+				}, nil
+			}
+		}
+	}
+	// Fall back to agent-scoped env overrides (per-agent env beats provider
+	// env in resolveProviderEnv, so read both layers the same way).
+	if agentMeta := s.designAgentMeta(project, agent); agentMeta != nil {
+		env := agentMeta.Env
+		if base := strings.TrimSpace(env["ANTHROPIC_BASE_URL"]); base != "" && strings.TrimSpace(env["ANTHROPIC_AUTH_TOKEN"]+env["ANTHROPIC_API_KEY"]) != "" {
+			key := env["ANTHROPIC_AUTH_TOKEN"]
+			if key == "" {
+				key = env["ANTHROPIC_API_KEY"]
+			}
+			return &designModelCreds{Protocol: "anthropic", APIKey: key, BaseURL: strings.TrimRight(base, "/"), Model: model}, nil
+		}
+		if base := strings.TrimSpace(env["OPENAI_BASE_URL"]); base != "" && strings.TrimSpace(env["OPENAI_API_KEY"]) != "" {
+			return &designModelCreds{Protocol: "openai", APIKey: env["OPENAI_API_KEY"], BaseURL: strings.TrimRight(base, "/"), Model: model}, nil
+		}
+	}
+	return nil, fmt.Errorf("agent %s has no resolvable model provider for the design gate", agent)
+}
+
+func (s *Server) designAgentMeta(project, agent string) *entity.AgentMeta {
+	if s.st == nil || agent == "" {
+		return nil
+	}
+	meta, err := s.st.AgentMeta(project, agent)
+	if err != nil || meta == nil {
+		return nil
+	}
+	return meta
+}
+
 // odClientAPI is the consumption-side interface the design handlers depend
 // on; tests inject fakes instead of an HTTP client.
 type odClientAPI interface {
 	ListProjects(ctx context.Context) ([]ODProject, error)
 	CreateProject(ctx context.Context, id, name, designSystemID, pendingPrompt string) error
-	StartRun(ctx context.Context, projectID, message, designSystemID, model string) (conversationID string, err error)
+	// StartRun takes the task agent's model-gateway creds: byokProvider must
+	// point opencode at the LLM gateway (ccr-qwen etc.), never at the OD
+	// daemon itself (pitfall: OD's connection baseUrl is OD, not the model).
+	StartRun(ctx context.Context, projectID, message, designSystemID, model string, creds *designModelCreds) (conversationID string, err error)
 	LatestRunStatus(ctx context.Context, projectID string) (runID, status string, err error)
 	DeleteProject(ctx context.Context, projectID string) error
 }
@@ -210,13 +291,12 @@ func (c *odClient) CreateProject(ctx context.Context, id, name, designSystemID, 
 	return c.s.odDo(ctx, http.MethodPost, "/api/projects", body, nil)
 }
 
-func (c *odClient) StartRun(ctx context.Context, projectID, message, designSystemID, model string) (string, error) {
-	cfg, err := c.s.resolveDesignConnection()
-	if err != nil {
-		return "", err
-	}
+func (c *odClient) StartRun(ctx context.Context, projectID, message, designSystemID, model string, creds *designModelCreds) (string, error) {
 	if model == "" {
 		model = odDefaultModel
+	}
+	if creds == nil || creds.BaseURL == "" || creds.APIKey == "" {
+		return "", fmt.Errorf("design model credentials unresolved for run on %s", projectID)
 	}
 	body := map[string]any{
 		"projectId": projectID,
@@ -226,9 +306,9 @@ func (c *odClient) StartRun(ctx context.Context, projectID, message, designSyste
 		// (meta.model); byokProvider.model alone fails validation.
 		"model": model,
 		"byokProvider": odByokProvider{
-			Protocol: "openai",
-			APIKey:   cfg.APIKey,
-			BaseURL:  cfg.BaseURL,
+			Protocol: creds.Protocol,
+			APIKey:   creds.APIKey,
+			BaseURL:  creds.BaseURL,
 			Model:    model,
 		},
 	}

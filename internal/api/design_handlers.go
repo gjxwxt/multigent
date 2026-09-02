@@ -1,9 +1,9 @@
 package api
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
-	"compress/gzip"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,9 +24,9 @@ import (
 // and injected into the upstream Authorization header or byokProvider body.
 
 const (
-	designTokenQuery   = "odt"
-	designTokenCookieP = "mg_od_"
-	designTokenTTL     = 4 * time.Hour
+	designTokenQuery    = "odt"
+	designTokenCookieP  = "mg_od_"
+	designTokenTTL      = 4 * time.Hour
 	designStaticTimeout = 15 * time.Second
 )
 
@@ -166,7 +166,16 @@ func (s *Server) handleDesignStart(w http.ResponseWriter, r *http.Request) {
 		s.writeDesignUpstreamError(w, err)
 		return
 	}
-	conversationID, err := client.StartRun(r.Context(), projID, designPendingPrompt(task), body.DesignSystemID, body.Model)
+	// The design agent runs against the task agent's model account (e.g.
+	// ccr-qwen), not the OD connection: byokProvider is the model endpoint OD
+	// forwards to opencode. Sending the OD daemon's own URL made opencode
+	// POST to OD itself (live incident 2026-09-02).
+	creds, err := s.resolveDesignModelProvider(project, agent, designModelOrDefault(body.Model))
+	if err != nil {
+		s.writeDesignUpstreamError(w, err)
+		return
+	}
+	conversationID, err := client.StartRun(r.Context(), projID, designPendingPrompt(task), body.DesignSystemID, body.Model, creds)
 	if err != nil {
 		s.writeDesignUpstreamError(w, err)
 		return
@@ -267,7 +276,11 @@ func (s *Server) handleDesignChat(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusBadRequest, "message required")
 		return
 	}
-	cfg, err := s.resolveDesignConnection()
+	// The design agent runs against the task agent's model account (e.g.
+	// ccr-qwen); the OD connection itself is only used for the API call the
+	// proxy pass performs below.
+	agent := taskAgentFromAssignee(task)
+	creds, err := s.resolveDesignModelProvider(project, agent, designModelOrDefault(body.Model))
 	if err != nil {
 		s.writeDesignUpstreamError(w, err)
 		return
@@ -279,9 +292,9 @@ func (s *Server) handleDesignChat(w http.ResponseWriter, r *http.Request) {
 		"sessionMode": "design",
 		"model":       designModelOrDefault(body.Model),
 		"byokProvider": odByokProvider{
-			Protocol: "openai",
-			APIKey:   cfg.APIKey,
-			BaseURL:  cfg.BaseURL,
+			Protocol: creds.Protocol,
+			APIKey:   creds.APIKey,
+			BaseURL:  creds.BaseURL,
 			Model:    designModelOrDefault(body.Model),
 		},
 	}
