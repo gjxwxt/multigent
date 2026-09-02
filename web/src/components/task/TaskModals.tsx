@@ -15,6 +15,7 @@ import { formatGoDuration, taskElapsedLabel } from '../../lib/task-duration'
 import { showToast } from '../ui/Toast'
 import { WorkflowBoard, type WorkflowBranchInstance, type WorkflowDefinition, type WorkflowField, type WorkflowRun, type WorkflowStep, type WorkflowStepEvent, type WorkflowStepInstance } from '../workflow/WorkflowBoard'
 import { overlayDismissProps } from '../ui/overlay'
+import { DesignGateFlow } from '../design/DesignGateFlow'
 import { isImeComposing } from '../../utils/ime'
 
 export type TaskRow = {
@@ -343,6 +344,8 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
     ? workflowHistoryRecords(workflowState.data)
     : []
   const canReviewWorkflow = Boolean(activeWorkflowStep?.type === 'human_review' && isWorkflowStepOpen(activeWorkflowInst?.status) && !isTerminal(task.status))
+  const isDesignGate = Boolean(canReviewWorkflow && activeWorkflowStep?.config?.designGate === 'true')
+  const [designGateOpen, setDesignGateOpen] = useState(false)
   const startAgentName = startableAgentName(task)
   const isFailedOrCancelled = task.status === 'done_failed' || task.status === 'cancelled'
   const canStartAgent = Boolean(startAgentName && (task.status === 'pending' || isFailedOrCancelled))
@@ -388,11 +391,18 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
   }
 
   async function submitWorkflowReview(decision?: string) {
+    await submitWorkflowReviewWithOutputs(reviewOutputs, decision)
+  }
+
+  // Review submit that merges caller-supplied outputs (the design gate flows
+  // in approved_design_* fields) on top of the form state.
+  async function submitWorkflowReviewWithOutputs(extraOutputs: Record<string, string>, decision?: string) {
     setReviewErr(null)
     setMissingReviewField(null)
-    const normalizedDecision = normalizeReviewDecision(decision || reviewOutputs.decision || '')
+    const merged = { ...reviewOutputs, ...Object.fromEntries(Object.entries(extraOutputs).filter(([, v]) => String(v ?? '').trim() !== '')) }
+    const normalizedDecision = normalizeReviewDecision(decision || merged.decision || '')
     setReviewBusy(normalizedDecision || 'submit')
-    const outputs: Record<string, string> = Object.fromEntries(Object.entries(reviewOutputs).map(([key, value]) => [key, String(value ?? '').trim()]))
+    const outputs: Record<string, string> = Object.fromEntries(Object.entries(merged).map(([key, value]) => [key, String(value ?? '').trim()]))
     if (normalizedDecision) outputs.decision = normalizedDecision
     const outputFieldNames = (activeWorkflowStep?.outputFields ?? []).map((field) => field.name).filter(Boolean)
     const comments = (outputs.comments ?? reviewComments).trim()
@@ -422,6 +432,7 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
       onMutated?.()
     } catch (e) {
       setReviewErr(e instanceof Error ? e.message : String(e))
+      throw e
     } finally {
       setReviewBusy(null)
     }
@@ -663,33 +674,46 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
             <div className="grid min-h-[520px] gap-4">
               <WorkflowBoard definition={workflowState.data.definition} run={workflowState.data.run} instances={workflowState.data.steps} branches={workflowState.data.branches} focusActive compact />
               <div className="flex min-h-0 flex-col rounded-xl border border-neutral-200 bg-white dark:border-zinc-700 dark:bg-zinc-950">
-                <WorkflowRuntimePanel
-                  step={activeWorkflowStep}
-                  instance={activeWorkflowInst}
-                  steps={workflowState.data.definition.steps}
-                  records={workflowRecords}
-                  runs={runsState.status === 'ok' ? runsState.data.runs ?? [] : []}
-                  taskID={task.id}
-                  project={task.project}
-                  actorLabels={actorLabels}
-                  canReview={canReviewWorkflow}
-                  docTitles={workflowState.data.docTitles}
-                  reviewOutputs={reviewOutputs}
-                  reviewComments={reviewComments}
-                  reviewBusy={reviewBusy}
-                  reviewErr={reviewErr}
-                  missingReviewField={missingReviewField}
-                  onChangeOutput={(name, value) => {
-                    if (missingReviewField === name && String(value ?? '').trim()) setMissingReviewField(null)
-                    setReviewOutputs((current) => ({ ...current, [name]: value }))
-                    if (name === 'comments') setReviewComments(value)
-                  }}
-                  onChangeComments={(value) => {
-                    if (missingReviewField === 'comments' && value.trim()) setMissingReviewField(null)
-                    setReviewComments(value)
-                  }}
-                  onSubmitReview={(decision) => void submitWorkflowReview(decision)}
-                />
+                {isDesignGate ? (
+                  <div className="flex min-h-0 flex-1 flex-col p-4">
+                    <p className="text-sm text-neutral-700 dark:text-zinc-300">{activeWorkflowStep?.description}</p>
+                    <button
+                      type="button"
+                      onClick={() => setDesignGateOpen(true)}
+                      className="mt-3 self-start rounded-lg bg-violet-600 px-3 py-2 text-sm font-semibold text-white hover:bg-violet-700"
+                    >
+                      {t('designGate.title', { defaultValue: '设计确认' })}
+                    </button>
+                  </div>
+                ) : (
+                  <WorkflowRuntimePanel
+                    step={activeWorkflowStep}
+                    instance={activeWorkflowInst}
+                    steps={workflowState.data.definition.steps}
+                    records={workflowRecords}
+                    runs={runsState.status === 'ok' ? runsState.data.runs ?? [] : []}
+                    taskID={task.id}
+                    project={task.project}
+                    actorLabels={actorLabels}
+                    canReview={canReviewWorkflow}
+                    docTitles={workflowState.data.docTitles}
+                    reviewOutputs={reviewOutputs}
+                    reviewComments={reviewComments}
+                    reviewBusy={reviewBusy}
+                    reviewErr={reviewErr}
+                    missingReviewField={missingReviewField}
+                    onChangeOutput={(name, value) => {
+                      if (missingReviewField === name && String(value ?? '').trim()) setMissingReviewField(null)
+                      setReviewOutputs((current) => ({ ...current, [name]: value }))
+                      if (name === 'comments') setReviewComments(value)
+                    }}
+                    onChangeComments={(value) => {
+                      if (missingReviewField === 'comments' && value.trim()) setMissingReviewField(null)
+                      setReviewComments(value)
+                    }}
+                    onSubmitReview={(decision) => void submitWorkflowReview(decision)}
+                  />
+                )}
               </div>
             </div>
           </div>
@@ -732,6 +756,19 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
         <TaskCommentsSection project={task.project} agent={task.agent} taskId={task.id} />
         </div>
       </div>
+      {designGateOpen && activeWorkflowStep && (
+        <DesignGateFlow
+          project={task.project}
+          taskID={task.id}
+          taskTitle={task.title}
+          busy={Boolean(reviewBusy)}
+          submitReview={async (outputs, decision) => {
+            await submitWorkflowReviewWithOutputs(outputs, decision)
+            setDesignGateOpen(false)
+          }}
+          onClose={() => setDesignGateOpen(false)}
+        />
+      )}
     </div>
   )
 }

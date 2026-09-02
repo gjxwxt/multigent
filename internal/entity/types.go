@@ -695,6 +695,13 @@ type Task struct {
 	RemoteMRHeadSHA string `yaml:"remote_mr_head_sha,omitempty" json:"remoteMrHeadSha,omitempty"`
 	RemoteMRState   string `yaml:"remote_mr_state,omitempty" json:"remoteMrState,omitempty"`
 
+	// Design gate references (OpenDesign). Empty = no design yet; non-empty
+	// DesignProjectID means an OD project exists for this task. Flattened
+	// string fields because workflow review outputs are map[string]string.
+	DesignProjectID string `yaml:"design_project_id,omitempty" json:"designProjectId,omitempty"`
+	DesignSource    string `yaml:"design_source,omitempty" json:"designSource,omitempty"` // existing | generated
+	DesignSystemID  string `yaml:"design_system_id,omitempty" json:"designSystemId,omitempty"`
+
 	Vars map[string]string `yaml:"vars,omitempty"`
 }
 

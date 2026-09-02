@@ -770,7 +770,32 @@
       "emerald": "Green",
       "rose": "Rose"
     },
-    "autoLayout": "Auto layout"
+    "autoLayout": "Auto layout",
+    "designGate": {
+      "title": "Design Confirmation",
+      "subtitle": "Pick a design source first — nothing is generated until you choose.",
+      "choice.existing": "Choose an existing design",
+      "choice.existingDesc": "Pick from the existing project list; the design is already completed in OpenDesign.",
+      "choice.generate": "Generate from requirements",
+      "choice.generateDesc": "The platform calls OpenDesign to produce a first version from the upstream requirement; iterate via chat and version restore inside the dialog.",
+      "choice.recommended": "Recommended",
+      "confirm": "Confirm & proceed",
+      "start": "Start design",
+      "back": "Send back to requirements",
+      "chooseFirst": "Pick a source first",
+      "noExisting": "No OpenDesign projects available yet — use \"Generate from requirements\" instead.",
+      "planB.title": "Finish the design in a new tab",
+      "planB.desc": "Open OpenDesign Studio in a new tab; when done, come back here and click Confirm & proceed.",
+      "planB.open": "Open OpenDesign ↗",
+      "planB.returnHint": "Return here to confirm when finished",
+      "status.generating": "Generating…",
+      "status.done": "Completed",
+      "status.error": "Generation failed",
+      "status.idle": "Not started",
+      "chat.placeholder": "Describe the change to make; the platform forwards it to the design assistant…",
+      "chat.send": "Send",
+      "chat.reload": "Reload the design canvas"
+    }
   },
   "projectSettings": {
     "subtitle": "Project configuration and prompts.",

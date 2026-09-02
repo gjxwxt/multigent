@@ -21,6 +21,7 @@ import {
 } from '../../components/task/TaskModals'
 import { apiPost } from '../../lib/api'
 import { canOperateAgent, useAuth } from '../../lib/auth'
+import { DesignGateFlow } from '../../components/design/DesignGateFlow'
 import { cn } from '../../lib/cn'
 import { useFormatDateTime } from '../../lib/format-datetime'
 import { useApiJson } from '../../lib/use-api'
@@ -203,6 +204,8 @@ export default function ProjectTaskFollowPage() {
     (canAdmin || canOperateAgent(user, projectId, startAgent)),
   )
   const canReview = Boolean(activeStep?.type === 'human_review' && isWorkflowStepOpen(activeInstance?.status) && !isTerminal(displayTask?.status || ''))
+  const isDesignGate = Boolean(canReview && activeStep?.config?.designGate === 'true')
+  const [designGateOpen, setDesignGateOpen] = useState(false)
 
   useEffect(() => {
     if (!shouldPollActiveRun) return
@@ -324,12 +327,19 @@ export default function ProjectTaskFollowPage() {
   }
 
   async function submitWorkflowReview(decision?: string) {
+    await submitWorkflowReviewWithOutputs(reviewOutputs, decision)
+  }
+
+  // Review submit that merges caller-supplied outputs (the design gate flows
+  // in approved_design_* fields) on top of the form state.
+  async function submitWorkflowReviewWithOutputs(extraOutputs: Record<string, string>, decision?: string) {
     if (!displayTask || !activeStep) return
     setReviewErr(null)
     setMissingReviewField(null)
-    const normalizedDecision = normalizeReviewDecision(decision || reviewOutputs.decision || '')
+    const merged = { ...reviewOutputs, ...Object.fromEntries(Object.entries(extraOutputs).filter(([, v]) => String(v ?? '').trim() !== '')) }
+    const normalizedDecision = normalizeReviewDecision(decision || merged.decision || '')
     setReviewBusy(normalizedDecision || 'submit')
-    const outputs: Record<string, string> = Object.fromEntries(Object.entries(reviewOutputs).map(([key, value]) => [key, String(value ?? '').trim()]))
+    const outputs: Record<string, string> = Object.fromEntries(Object.entries(merged).map(([key, value]) => [key, String(value ?? '').trim()]))
     if (normalizedDecision) outputs.decision = normalizedDecision
     const outputFieldNames = (activeStep.outputFields ?? []).map((field) => field.name).filter(Boolean)
     const comments = (outputs.comments ?? reviewComments).trim()
@@ -362,6 +372,7 @@ export default function ProjectTaskFollowPage() {
       window.setTimeout(refresh, 1600)
     } catch (e) {
       setReviewErr(e instanceof Error ? e.message : String(e))
+      throw e
     } finally {
       setReviewBusy(null)
     }
@@ -534,7 +545,18 @@ export default function ProjectTaskFollowPage() {
             )}
           </div>
 
-          {visibleWorkflowData && (
+          {visibleWorkflowData && (isDesignGate ? (
+            <section className="rounded-xl border border-neutral-200 bg-white px-4 py-4 dark:border-zinc-700 dark:bg-zinc-950">
+              <p className="text-sm text-neutral-700 dark:text-zinc-300">{activeStep?.description}</p>
+              <button
+                type="button"
+                onClick={() => setDesignGateOpen(true)}
+                className="mt-3 rounded-lg bg-violet-600 px-3 py-2 text-sm font-semibold text-white hover:bg-violet-700"
+              >
+                {t('designGate.title', { defaultValue: '设计确认' })}
+              </button>
+            </section>
+          ) : (
             <WorkflowRuntimePanel
               step={activeStep}
               instance={visibleActiveInstance}
@@ -561,6 +583,20 @@ export default function ProjectTaskFollowPage() {
                 setReviewComments(value)
               }}
               onSubmitReview={(decision) => void submitWorkflowReview(decision)}
+            />
+          ))}
+
+          {designGateOpen && activeStep && displayTask && (
+            <DesignGateFlow
+              project={displayTask.project}
+              taskID={displayTask.id}
+              taskTitle={displayTask.title}
+              busy={Boolean(reviewBusy)}
+              submitReview={async (outputs, decision) => {
+                await submitWorkflowReviewWithOutputs(outputs, decision)
+                setDesignGateOpen(false)
+              }}
+              onClose={() => setDesignGateOpen(false)}
             />
           )}
 

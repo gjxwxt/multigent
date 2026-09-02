@@ -115,6 +115,9 @@ type Server struct {
 	previewSessions        map[string]*previewChatSession
 	previewChatMu          sync.Mutex
 	previewChatSeen        map[string]*previewChatBucket
+	designClient           odClientAPI
+	designRateMu           sync.Mutex
+	designRateSeen         map[string]*previewChatBucket
 }
 
 // NewServer builds an API server for the given workspace root.
@@ -494,6 +497,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview", s.handleGetTaskPreview)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/resources", s.handleGetTaskResources)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/resources/worktree/cleanup", s.handlePostTaskWorktreeCleanup)
+	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/design/projects", s.handleDesignListProjects)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/design/start", s.handleDesignStart)
+	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/design/status", s.handleDesignStatus)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/design/chat", s.handleDesignChat)
+	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/design/launch", s.handleDesignLaunch)
+	mux.HandleFunc("/api/v1/projects/{name}/tasks/{taskId}/design/proxy/{path...}", s.handleDesignProxy)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/start", s.handlePostTaskPreviewStart)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/stop", s.handlePostTaskPreviewStop)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/remote-sync/retry", s.handlePostTaskRemoteSyncRetry)

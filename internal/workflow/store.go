@@ -29,6 +29,7 @@ func Templates(locale string) []entity.WorkflowTemplate {
 	return []entity.WorkflowTemplate{
 		softwareDeliveryTemplate(locale),
 		unifiedDeliveryPipelineTemplate(locale),
+		greenfieldDeliveryTemplate(locale),
 		garryStyleDeliveryTemplate(locale),
 		mattPocockStyleEngineeringTemplate(locale),
 		tddReviewLoopTemplate(locale),

@@ -770,7 +770,32 @@
       "emerald": "绿色",
       "rose": "玫红"
     },
-    "autoLayout": "一键整理"
+    "autoLayout": "一键整理",
+    "designGate": {
+      "title": "设计确认",
+      "subtitle": "先选择设计来源，未做选择前不会触发生成。",
+      "choice.existing": "选择已有设计",
+      "choice.existingDesc": "从已有项目列表中选择，设计已在 OpenDesign 完成。",
+      "choice.generate": "从需求生成（推荐）",
+      "choice.generateDesc": "由平台调用 OD 基于上游需求文档自动设计出首版，可在弹窗内对话修改与版本恢复。",
+      "choice.recommended": "推荐",
+      "confirm": "确认并流转",
+      "start": "开始设计",
+      "back": "打回需求",
+      "chooseFirst": "请先选择来源",
+      "noExisting": "OpenDesign 中还没有可用项目，可改用「从需求生成」。",
+      "planB.title": "在新标签页中完成设计",
+      "planB.desc": "点击下方按钮在新标签页打开 OpenDesign Studio；完成设计后回到本弹窗点击「确认流转」。",
+      "planB.open": "打开 OpenDesign ↗",
+      "planB.returnHint": "完成后回到此处确认流转",
+      "status.generating": "生成中…",
+      "status.done": "已完成",
+      "status.error": "生成失败",
+      "status.idle": "未开始",
+      "chat.placeholder": "描述要修改的地方，由平台转发给设计助手…",
+      "chat.send": "发送",
+      "chat.reload": "重新加载设计画布"
+    }
   },
   "projectSettings": {
     "subtitle": "项目配置与提示词管理。",
