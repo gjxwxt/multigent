@@ -222,6 +222,9 @@ func (c *odClient) StartRun(ctx context.Context, projectID, message, designSyste
 		"projectId": projectID,
 		"agentId":   odAgentID,
 		"message":   message,
+		// OD validates BYOK completeness against the TOP-LEVEL model field
+		// (meta.model); byokProvider.model alone fails validation.
+		"model": model,
 		"byokProvider": odByokProvider{
 			Protocol: "openai",
 			APIKey:   cfg.APIKey,

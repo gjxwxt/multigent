@@ -273,11 +273,17 @@ func (s *Server) handleDesignChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload := map[string]any{
-		"projectId":    task.DesignProjectID,
-		"agentId":      odAgentID,
-		"message":      body.Message,
-		"sessionMode":  "design",
-		"byokProvider": odByokProvider{Protocol: "openai", APIKey: cfg.APIKey, BaseURL: cfg.BaseURL, Model: designModelOrDefault(body.Model)},
+		"projectId":   task.DesignProjectID,
+		"agentId":     odAgentID,
+		"message":     body.Message,
+		"sessionMode": "design",
+		"model":       designModelOrDefault(body.Model),
+		"byokProvider": odByokProvider{
+			Protocol: "openai",
+			APIKey:   cfg.APIKey,
+			BaseURL:  cfg.BaseURL,
+			Model:    designModelOrDefault(body.Model),
+		},
 	}
 	if body.ConversationID != "" {
 		payload["conversationId"] = body.ConversationID
