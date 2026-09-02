@@ -49,6 +49,18 @@ func (s *Server) previewTokenMAC(payload string) []byte {
 }
 
 func (s *Server) verifyPreviewToken(token, taskID string) (previewTokenClaims, bool) {
+	claims, ok := s.verifyPreviewTokenAny(token)
+	if !ok || claims.TaskID != taskID {
+		return previewTokenClaims{}, false
+	}
+	return claims, true
+}
+
+// verifyPreviewTokenAny verifies a token's MAC and expiry without knowing the
+// bound task up front — used by the root-shape design proxy, where the task
+// is derived FROM the credential (cookie name or token claims) instead of the
+// URL path.
+func (s *Server) verifyPreviewTokenAny(token string) (previewTokenClaims, bool) {
 	var claims previewTokenClaims
 	parts := strings.Split(strings.TrimSpace(token), ".")
 	if len(parts) != 2 {
@@ -61,7 +73,7 @@ func (s *Server) verifyPreviewToken(token, taskID string) (previewTokenClaims, b
 	if err != nil || json.Unmarshal(raw, &claims) != nil {
 		return claims, false
 	}
-	if claims.TaskID != taskID || time.Now().Unix() > claims.Exp {
+	if time.Now().Unix() > claims.Exp {
 		return claims, false
 	}
 	return claims, true

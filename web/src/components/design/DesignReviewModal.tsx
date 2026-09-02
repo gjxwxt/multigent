@@ -55,7 +55,15 @@ export function DesignReviewModal({
   const [stageIdx, setStageIdx] = useState(0)
   const stageTimer = useRef<number | null>(null)
 
-  const effectiveProxy = proxyUrl || liveUrls.proxyUrl || ''
+  // Latch the iframe URL: the status poll re-signs the odt token every 10s,
+  // and re-pointing src on each poll would reload the whole studio. The
+  // latched URL (with its 4h token) is only replaced by an explicit 刷新画布
+  // (reloadFrame) or a fresh modal mount.
+  const [latchedProxy, setLatchedProxy] = useState(proxyUrl || '')
+  const candidateProxy = proxyUrl || liveUrls.proxyUrl || ''
+  useEffect(() => {
+    if (!latchedProxy && candidateProxy) setLatchedProxy(candidateProxy)
+  }, [latchedProxy, candidateProxy])
   const effectiveLaunch = launchUrl || liveUrls.launchUrl || ''
   const ready = runStatus === 'succeeded' || runStatus === 'done'
   const failed = runStatus === 'failed' || runStatus === 'error'
@@ -106,6 +114,9 @@ export function DesignReviewModal({
     setFrameErr(false)
     setFrameReady(false)
     setStageIdx(0)
+    // Re-latch the freshest signed URL (polls keep liveUrls current) and
+    // remount the iframe.
+    if (candidateProxy) setLatchedProxy(candidateProxy)
     setFrameNonce((n) => n + 1)
   }
 
@@ -207,10 +218,10 @@ export function DesignReviewModal({
                 )}
               </div>
             )}
-            {effectiveProxy ? (
+            {latchedProxy ? (
               <iframe
                 key={frameNonce}
-                src={effectiveProxy}
+                src={latchedProxy}
                 title={t('designGate.title', { defaultValue: '设计确认' })}
                 className={cn('size-full border-0 transition-opacity duration-300', frameReady ? 'opacity-100' : 'opacity-0')}
                 allow="clipboard-write"

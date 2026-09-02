@@ -195,6 +195,15 @@ func newSPAHandler(apiHandler http.Handler) http.Handler {
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Root-shape design studio paths (OD on the console origin) belong to
+		// the API handler: /api non-v1, OD static assets, and the proxied
+		// design project documents. The API layer's design handlers authorize
+		// them via the scoped odt cookie/token and fall back to the SPA/404
+		// for unauthenticated requests.
+		if api.IsDesignPassthroughPath(r.URL.Path) {
+			apiHandler.ServeHTTP(w, r)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/preview/") {
 			apiHandler.ServeHTTP(w, r)
 			return

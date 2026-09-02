@@ -274,7 +274,9 @@ func (s *Server) writeDesignStartResponse(w http.ResponseWriter, project, taskID
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(designStartResponse{
 		ProjectID:      projID,
-		ProxyURL:       base + "/proxy/projects/" + projID + "?" + designTokenQuery + "=" + odt,
+		// Root-shape studio URL: OD's client router only knows native paths,
+		// so the iframe points straight at the proxied project page.
+		ProxyURL:       studioProxyURL(projID, odt),
 		LaunchURL:      base + "/launch?" + designTokenQuery + "=" + odt,
 		StudioURL:      "/projects/" + projID,
 		Regenerated:    regenerated,
@@ -315,14 +317,14 @@ func (s *Server) handleDesignStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	// A fresh signed proxy URL lets the client (re)open the studio iframe or a
 	// read-only preview without another start call when the previous otd expired.
-	base := fmt.Sprintf("/api/v1/projects/%s/tasks/%s/design", url.PathEscape(project), url.PathEscape(taskID))
+	launchBase := fmt.Sprintf("/api/v1/projects/%s/tasks/%s/design", url.PathEscape(project), url.PathEscape(taskID))
 	odt := s.signDesignToken(taskID, project)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"projectId": projID,
 		"runStatus": status,
-		"proxyUrl":  base + "/proxy/projects/" + projID + "?" + designTokenQuery + "=" + odt,
-		"launchUrl": base + "/launch?" + designTokenQuery + "=" + odt,
+		"proxyUrl":  studioProxyURL(projID, odt),
+		"launchUrl": launchBase + "/launch?" + designTokenQuery + "=" + odt,
 	})
 }
 
@@ -339,14 +341,14 @@ func (s *Server) writeDesignMockStatus(w http.ResponseWriter, project, taskID st
 			status = "running"
 		}
 	}
-	base := fmt.Sprintf("/api/v1/projects/%s/tasks/%s/design", url.PathEscape(project), url.PathEscape(taskID))
+	launchBase := fmt.Sprintf("/api/v1/projects/%s/tasks/%s/design", url.PathEscape(project), url.PathEscape(taskID))
 	odt := s.signDesignToken(taskID, project)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"projectId": "mock-" + taskID,
 		"runStatus": status,
-		"proxyUrl":  base + "/proxy/projects/mock-" + taskID + "?" + designTokenQuery + "=" + odt,
-		"launchUrl": base + "/launch?" + designTokenQuery + "=" + odt,
+		"proxyUrl":  studioProxyURL("mock-"+taskID, odt),
+		"launchUrl": launchBase + "/launch?" + designTokenQuery + "=" + odt,
 	})
 }
 
@@ -439,6 +441,12 @@ func (s *Server) handleDesignChat(w http.ResponseWriter, r *http.Request) {
 	s.designProxyPass(w, r, project, taskID, "POST", "/api/chat", payload)
 }
 
+// studioProxyURL mints the root-shape studio iframe URL: the proxied project
+// page with a fresh signed odt bootstrap token.
+func studioProxyURL(projID, odt string) string {
+	return "/projects/" + projID + "?" + designTokenQuery + "=" + odt
+}
+
 // ---- GET .../design/launch (Plan B 302) ----
 
 func (s *Server) handleDesignLaunch(w http.ResponseWriter, r *http.Request) {
@@ -480,29 +488,127 @@ func (s *Server) handleDesignLaunch(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, target, http.StatusFound)
 }
 
-// ---- method-agnostic design proxy ----
+// ---- root-shape design proxy ----
 
 const (
 	designWriteRateLimit = 60
 	designReadRateLimit  = 600
+
+	// designProjectPrefix marks OD projects minted by multigent: proj_mg_<taskID>.
+	designProjectPrefix = "proj_mg_"
 )
 
-func (s *Server) handleDesignProxy(w http.ResponseWriter, r *http.Request) {
-	project := r.PathValue("name")
-	taskID := r.PathValue("taskId")
-	task := s.designTaskGuard(w, r, project, taskID)
-	if task == nil {
+// The studio iframe previously lived under /api/v1/.../design/proxy/..., but
+// OD's Next.js router reads location.pathname and only knows root-shaped
+// routes (/projects/<id>/…), so the proxied app always fell back to its home
+// page. The design surface is therefore served at OD's native path shape on
+// the console origin:
+//
+//	/projects/proj_mg_<taskID>/…   project pages (+ session cookie)
+//	/_next/, /fonts/, /design-systems/, /logo-scan.svg   static assets
+//	/api/<anything-but-v1>         OD's own API surface
+//
+// Every request must present a valid design session credential (odt query
+// token or the mg_od_<taskID> cookie); without one the handlers fall back to
+// the console SPA / answer 404, so console routes (/projects/<name>/…) are
+// never shadowed. The OD project id is derived from the task ID, which makes
+// collisions with console project names structurally impossible.
+
+// handleDesignRootProject serves /projects/… when the path addresses a design
+// session; it reports false for anything else so the caller can fall through
+// to the console SPA.
+func (s *Server) handleDesignRootProject(w http.ResponseWriter, r *http.Request) bool {
+	seg := strings.TrimPrefix(r.URL.Path, "/projects/")
+	if i := strings.Index(seg, "/"); i >= 0 {
+		seg = seg[:i]
+	}
+	if designMockEnabled() {
+		// Mock canvas: a standalone placeholder document with no subresources.
+		if taskID, ok := strings.CutPrefix(seg, "mock-"); ok && taskID != "" {
+			if !s.designRootAuthorize(w, r, taskID) {
+				return true
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			_, _ = w.Write([]byte(designMockCanvasHTML(taskID)))
+			return true
+		}
+		return false
+	}
+	taskID, ok := strings.CutPrefix(seg, designProjectPrefix)
+	if !ok || taskID == "" {
+		return false
+	}
+	if !s.designRootAuthorize(w, r, taskID) {
+		return true
+	}
+	s.designRootProxy(w, r, taskID)
+	return true
+}
+
+// handleDesignRootAsset serves OD's root-shaped static and API surfaces for
+// requests carrying a valid design session; anything else is a plain 404
+// (the console never requests these paths).
+func (s *Server) handleDesignRootAsset(w http.ResponseWriter, r *http.Request) {
+	taskID, ok := s.designRootTaskFromCredential(r)
+	if !ok {
+		http.NotFound(w, r)
 		return
 	}
-	if !s.designRequestAuthorized(w, r, project, taskID) {
+	if !s.designRootAuthorize(w, r, taskID) {
 		return
 	}
-	subpath := r.PathValue("path")
-	if subpath == "" {
-		subpath = ""
+	s.designRootProxy(w, r, taskID)
+}
+
+// designRootTaskFromCredential resolves the task behind a root-shape static/
+// API request. The project page carries the task id in the path
+// (proj_mg_<taskID>) and mints the session cookie; these requests are
+// attributed via that cookie (or a still-present odt query token).
+func (s *Server) designRootTaskFromCredential(r *http.Request) (string, bool) {
+	if tok := strings.TrimSpace(r.URL.Query().Get(designTokenQuery)); tok != "" {
+		if claims, ok := s.verifyPreviewTokenAny(tok); ok && claims.TaskID != "" {
+			return claims.TaskID, true
+		}
 	}
-	full := "/" + strings.TrimPrefix(subpath, "/")
-	if !designPathAllowed(full) {
+	for _, c := range r.Cookies() {
+		if !strings.HasPrefix(c.Name, designTokenCookieP) {
+			continue
+		}
+		if claims, ok := s.verifyPreviewTokenAny(c.Value); ok && claims.TaskID != "" {
+			return claims.TaskID, true
+		}
+	}
+	return "", false
+}
+
+// designRootAuthorize admits a root-shape request for taskID: a valid design
+// token (query or cookie) or authenticated console traffic. On failure it has
+// already written the response.
+func (s *Server) designRootAuthorize(w http.ResponseWriter, r *http.Request, taskID string) bool {
+	if tok := strings.TrimSpace(r.URL.Query().Get(designTokenQuery)); tok != "" {
+		if _, ok := s.verifyPreviewToken(tok, taskID); ok {
+			return true
+		}
+	}
+	if cookie, err := r.Cookie(designTokenCookieP + taskID); err == nil {
+		if _, ok := s.verifyPreviewToken(cookie.Value, taskID); ok {
+			return true
+		}
+	}
+	// Console-authenticated traffic (tests, server-side callers) — resolves
+	// the owning project from the task for the RBAC check.
+	taskProject, _, task, err := s.ts.FindTaskByID(taskID)
+	if err != nil || task == nil {
+		s.jsonErrorCode(w, http.StatusUnauthorized, ErrCodeUnauthorized, "design session required")
+		return false
+	}
+	return s.previewRequestAuthorized(w, r, taskProject, taskID)
+}
+
+func (s *Server) designRootProxy(w http.ResponseWriter, r *http.Request, taskID string) {
+	odPath := r.URL.Path
+	if !designPathAllowed(odPath) {
 		s.jsonErrorCode(w, http.StatusForbidden, ErrCodeForbidden, "design proxy path not allowed")
 		return
 	}
@@ -510,23 +616,17 @@ func (s *Server) handleDesignProxy(w http.ResponseWriter, r *http.Request) {
 	// fetches dozens of /_next/ chunks, which would exhaust the per-task
 	// budget and leave the canvas stuck on its loader (2026-09-02).
 	write := r.Method != http.MethodGet && r.Method != http.MethodHead
-	if !designPathIsStatic(full) && !s.allowDesignRequest(taskID, write) {
+	if !designPathIsStatic(odPath) && !s.allowDesignRequest(taskID, write) {
 		s.jsonErrorCode(w, http.StatusTooManyRequests, ErrCodeServiceUnavailable, "design proxy rate limited")
 		return
 	}
-	if designMockEnabled() {
-		// Mock mode serves only the placeholder canvas document; it has no
-		// subresources, so anything else is a plain 404 (no OD traffic).
-		if full == "/projects/mock-"+taskID {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-store")
-			_, _ = w.Write([]byte(designMockCanvasHTML(taskID)))
-			return
-		}
-		s.jsonError(w, http.StatusNotFound, "mock canvas has no subresources")
-		return
+	// The odt credential must not leak upstream.
+	if r.URL.Query().Has(designTokenQuery) {
+		q := r.URL.Query()
+		q.Del(designTokenQuery)
+		r.URL.RawQuery = q.Encode()
 	}
-	s.designProxyPass(w, r, project, taskID, r.Method, full, nil)
+	s.designProxyPass(w, r, "", taskID, r.Method, odPath, nil)
 }
 
 func designPathAllowed(path string) bool {
@@ -558,9 +658,9 @@ func designPathIsStatic(path string) bool {
 }
 
 // designProxyPass forwards the request to OD with server-side auth injection.
-// When body is non-nil (design/chat) it replaces the incoming body; HTML
-// responses get the preview-style rewrite so root-absolute subresources stay
-// inside the proxy prefix.
+// When body is non-nil (design/chat) it replaces the incoming body. HTML
+// responses are forwarded byte-for-byte (root-shape proxy — no URL surgery)
+// and only mint the scoped session cookie.
 func (s *Server) designProxyPass(w http.ResponseWriter, r *http.Request, project, taskID, method, odPath string, body map[string]any) {
 	cfg, err := s.resolveDesignConnection()
 	if err != nil {
@@ -624,22 +724,25 @@ func (s *Server) designProxyPass(w http.ResponseWriter, r *http.Request, project
 		if err != nil {
 			return nil
 		}
+		// Root-shape proxy: the document is forwarded byte-for-byte — OD sees
+		// native paths on both sides, so no base/patcher/importmap surgery is
+		// needed (and would break OD's client-side router again). The HTML pass
+		// only mints the scoped session cookie the subresource requests carry.
 		odt := s.signDesignToken(taskID, project)
-		html := rewriteDesignHTML(string(raw), project, taskID, odt)
 		cookie := &http.Cookie{
 			Name:     designTokenCookieP + taskID,
 			Value:    odt,
-			Path:     fmt.Sprintf("/api/v1/projects/%s/tasks/%s/design/proxy/", url.PathEscape(project), url.PathEscape(taskID)),
+			Path:     "/",
 			MaxAge:   int(designTokenTTL.Seconds()),
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
 		}
 		resp.Header.Add("Set-Cookie", cookie.String())
-		out := []byte(html)
-		resp.Body = io.NopCloser(strings.NewReader(string(out)))
-		resp.ContentLength = int64(len(out))
-		resp.Header.Set("Content-Length", fmt.Sprint(len(out)))
+		resp.Header.Set("Cache-Control", "no-store")
+		resp.ContentLength = int64(len(raw))
+		resp.Header.Set("Content-Length", fmt.Sprint(len(raw)))
 		resp.Header.Del("Content-Encoding")
+		resp.Body = io.NopCloser(strings.NewReader(string(raw)))
 		return nil
 	}
 
@@ -657,161 +760,6 @@ func designPathIsStreaming(path string) bool {
 		strings.Contains(path, "/events") ||
 		strings.Contains(path, "/agui") ||
 		strings.HasPrefix(path, "/api/chat")
-}
-
-// rewriteDesignHTML ports the preview-proxy SPA mechanism: a <base> tag plus
-// a runtime interceptor that keeps root-absolute fetch/XHR/WS/history URLs
-// under the design proxy prefix.
-//
-// <base> alone is not enough: OD's Turbopack/RSC bootstrap resolves some of
-// its dynamic chunk loads against document.currentScript / module URLs and
-// bypasses the base, so those land on the console origin where the SPA
-// fallback answers 200 with index.html — the app then dies with
-// "Unexpected token '<'" and stays on its boot loader forever. To be robust
-// against any resolution strategy we also statically prefix every
-// root-absolute src/href in the HTML itself.
-//
-// Static prefixing alone is not enough either: Turbopack's registerChunk
-// identifies an executed chunk by the RAW script src attribute and resolves
-// the pending chunk promise keyed "/_next/<path>" (its hardcoded asset root).
-// A prefixed attribute never matches that key, so bootstrap hangs forever
-// with zero network requests and zero console errors — the page sits on
-// "Loading OpenDesign…" indefinitely. The patcher therefore exposes the
-// composed form on getAttribute reads, and routes runtime-created
-// script/link/Worker URLs (root-absolute, bypassing <base>) under the proxy.
-func rewriteDesignHTML(html, project, taskID, odt string) string {
-	prefix := fmt.Sprintf("/api/v1/projects/%s/tasks/%s/design/proxy/", url.PathEscape(project), url.PathEscape(taskID))
-	html = prefixRootAbsoluteAttrs(html, prefix)
-	// Import map: OD's Turbopack runtime composes chunk URLs as new URL("/_next/…",
-	// location.origin), which ignores both <base> and our attribute rewrite —
-	// those fetches land on the console origin where the SPA fallback answers
-	// HTML and hydration dies silently. A leading import map remaps the
-	// root-absolute module specifiers into the proxy prefix.
-	importmap := fmt.Sprintf(`<script type="importmap">{"imports":{"/_next/":%q,"/assets/":%q,"/design-systems/":%q}}</script>`,
-		prefix+"_next/", prefix+"assets/", prefix+"design-systems/")
-	base := fmt.Sprintf(`<base href=%q><script>(function(){
-  var prefix = %q;
-  // Normalize every URL shape to the proxy prefix: root-absolute ("/_next/…",
-  // ignores <base>), absolute same-origin ("http://console/_next/…" — what the
-  // script.src PROPERTY resolves to even when the raw attribute was relative),
-  // and already-prefixed values (idempotent). Hash/data/blob/cross-origin pass
-  // through. document.baseURI keeps plain-relative paths under the proxy.
-  function patchUrl(u){
-    if (typeof u !== 'string' || !u || u.indexOf(prefix) === 0 || u.charAt(0) === '#') return u;
-    if (u.charAt(0) === '/') return prefix + u.slice(1);
-    try {
-      var parsed = new URL(u, document.baseURI);
-      if (parsed.origin === location.origin) return prefix + (parsed.pathname + parsed.search).slice(1);
-    } catch (e) {}
-    return u;
-  }
-  // Turbopack registerChunk matches the RAW script src attribute against its
-  // "/_next/<path>" chunk key; a proxied attribute deadlocks hydration. Expose
-  // the composed form on attribute reads, and re-route runtime-created
-  // script/link/Worker URLs (root-absolute, bypassing <base>) under the proxy.
-  var unpatch = function(v){
-    if (typeof v !== 'string' || v.indexOf(prefix) !== 0) return v;
-    return '/' + v.slice(prefix.length);
-  };
-  var ga = Element.prototype.getAttribute;
-  Element.prototype.getAttribute = function(name){
-    var v = ga.call(this, name);
-    if ((name === 'src' || name === 'href') && v) v = unpatch(v);
-    return v;
-  };
-  var appendChild = Element.prototype.appendChild;
-  Element.prototype.appendChild = function(node){
-    try {
-      if (node) {
-        var tag = node.tagName;
-        if (tag === 'SCRIPT' || tag === 'LINK') {
-          var attr = tag === 'SCRIPT' ? 'src' : 'href';
-          var raw = node.getAttribute(attr);
-          if (raw) node.setAttribute(attr, patchUrl(raw));
-        }
-      }
-    } catch (e) {}
-    return appendChild.call(this, node);
-  };
-  var NativeWorker = window.Worker;
-  if (NativeWorker) {
-    function PatchedWorker(u, o){
-      if (typeof u === 'string') u = patchUrl(u);
-      return new NativeWorker(u, o);
-    }
-    PatchedWorker.prototype = NativeWorker.prototype;
-    window.Worker = PatchedWorker;
-  }
-  var of = window.fetch;
-  if (of) { window.fetch = function(i, init){
-    if (typeof i === 'string') i = patchUrl(i);
-    else if (i && typeof i.url === 'string') i = new Request(patchUrl(i.url), i);
-    return of.call(this, i, init);
-  }; }
-  var oo = XMLHttpRequest.prototype.open;
-  if (oo) { XMLHttpRequest.prototype.open = function(m, u){
-    var args = Array.prototype.slice.call(arguments);
-    args[1] = patchUrl(u);
-    return oo.apply(this, args);
-  }; }
-  var ow = window.WebSocket;
-  if (ow) { window.WebSocket = function(u, p){
-    if (typeof u === 'string') {
-      try { var parsed = new URL(u, location.origin);
-        if (parsed.origin === location.origin) u = patchUrl(parsed.pathname + parsed.search);
-      } catch(e) {}
-    }
-    return new ow(u, p);
-  }; }
-  var ops = window.history.pushState;
-  if (ops) { window.history.pushState = function(s, t, u){ return ops.call(this, s, t, patchUrl(u)); }; }
-  var ors = window.history.replaceState;
-  if (ors) { window.history.replaceState = function(s, t, u){ return ors.call(this, s, t, patchUrl(u)); };
-  }
-})();</script>`, prefix, prefix)
-	return injectAfterHead(html, importmap+base)
-}
-
-// prefixRootAbsoluteAttrs rewrites root-absolute (but not already-proxied)
-// src=/href= attribute values in the HTML to sit under the proxy prefix.
-// Attribute values only — URLs inside scripts/JSON payloads are left alone;
-// those carry their own base handling and double-prefixing them breaks the
-// runtime patcher.
-func prefixRootAbsoluteAttrs(html, prefix string) string {
-	for _, attr := range []string{"src", "href"} {
-		needle := attr + `="/`
-		idx := 0
-		for {
-			i := strings.Index(html[idx:], needle)
-			if i < 0 {
-				break
-			}
-			at := idx + i + len(needle)
-			// Skip URLs already under the proxy prefix (rewritten once must
-			// not be rewritten twice — idempotence across rewrites).
-			if strings.HasPrefix(html[at:], strings.TrimPrefix(prefix, "/")) {
-				idx = at
-				continue
-			}
-			html = html[:at] + strings.TrimPrefix(prefix, "/") + html[at:]
-			idx = at + len(prefix)
-		}
-	}
-	return html
-}
-
-func injectAfterHead(html, snippet string) string {
-	lower := strings.ToLower(html)
-	for _, tag := range []string{"<head>", "<head "} {
-		if i := strings.Index(lower, tag); i >= 0 {
-			end := strings.Index(lower[i:], ">")
-			if end >= 0 {
-				at := i + end + 1
-				return html[:at] + snippet + html[at:]
-			}
-		}
-	}
-	return snippet + html
 }
 
 // ---- shared helpers ----

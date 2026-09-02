@@ -314,21 +314,9 @@ func TestDesignProxyWhitelist(t *testing.T) {
 	}
 }
 
-func TestRewriteDesignHTMLInjectsBaseAndInterceptor(t *testing.T) {
-	in := `<html><head><title>x</title></head><body>hi</body></html>`
-	out := rewriteDesignHTML(in, "resproj", "t-res-1", "tok123")
-	if !strings.Contains(out, `<base href="/api/v1/projects/resproj/tasks/t-res-1/design/proxy/">`) {
-		t.Fatalf("base tag missing: %s", out)
-	}
-	if !strings.Contains(out, "patchUrl") || !strings.Contains(out, "window.fetch") {
-		t.Fatalf("interceptor missing")
-	}
-	// No rewrite when there is no head tag.
-	out2 := rewriteDesignHTML("<html><body>plain</body></html>", "resproj", "t-res-1", "tok")
-	if !strings.Contains(out2, "<script>") {
-		t.Fatalf("fallback injection missing")
-	}
-}
+// The root-shape studio proxy forwards OD's HTML byte-for-byte: OD sees
+// native paths on both sides, so no base/patcher surgery exists to test —
+// the HTML pass only mints the scoped session cookie.
 
 func TestDesignLaunchRedirects(t *testing.T) {
 	s, _, task := seedDesignTask(t, entity.TaskStatusAwaitingConfirmation)
@@ -356,8 +344,9 @@ func TestDesignLaunchRedirects(t *testing.T) {
 }
 
 // The iframe bootstraps with only the odt signature token (no Bearer header,
-// no _token); the proxy must admit it via handler-side validation (pitfall 6
-// pattern: these routes live on publicMux) and reject odt-less requests.
+// no _token); the root-shape proxy must admit it via handler-side validation
+// (pitfall 6 pattern: these routes live on publicMux) and reject odt-less
+// requests.
 func TestDesignProxyAdmitsSignatureTokenWithoutBearer(t *testing.T) {
 	s, _, task := seedDesignTask(t, entity.TaskStatusAwaitingConfirmation)
 	seedODConnection(t, s)
@@ -371,12 +360,11 @@ func TestDesignProxyAdmitsSignatureTokenWithoutBearer(t *testing.T) {
 	// No test OD daemon exists; reaching OD's Basic Auth challenge proves the
 	// request passed platform auth and was forwarded upstream. An odt-less
 	// request must be rejected by the platform itself and never reach OD.
-	req := httptest.NewRequest(http.MethodGet, "/design/proxy/projects/proj_mg_t-res-1?odt="+odt, nil)
-	req.SetPathValue("name", "resproj")
-	req.SetPathValue("taskId", task.ID)
-	req.SetPathValue("path", "projects/proj_mg_t-res-1")
+	req := httptest.NewRequest(http.MethodGet, "/projects/proj_mg_"+task.ID+"?odt="+odt, nil)
 	w := httptest.NewRecorder()
-	s.handleDesignProxy(w, req)
+	if !s.handleDesignRootProject(w, req) {
+		t.Fatal("design project path should be claimed by the design proxy")
+	}
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("proxy with odt: %d (expected upstream 401)", w.Code)
 	}
@@ -384,16 +372,29 @@ func TestDesignProxyAdmitsSignatureTokenWithoutBearer(t *testing.T) {
 		t.Fatalf("expected OD upstream challenge, got: %s", w.Body.String())
 	}
 
-	req2 := httptest.NewRequest(http.MethodGet, "/design/proxy/projects/proj_mg_t-res-1", nil)
-	req2.SetPathValue("name", "resproj")
-	req2.SetPathValue("taskId", task.ID)
-	req2.SetPathValue("path", "projects/proj_mg_t-res-1")
+	req2 := httptest.NewRequest(http.MethodGet, "/projects/proj_mg_"+task.ID, nil)
 	w2 := httptest.NewRecorder()
-	s.handleDesignProxy(w2, req2)
+	s.handleDesignRootProject(w2, req2)
 	if w2.Code != http.StatusUnauthorized {
 		t.Fatalf("proxy without odt: %d (expected 401)", w2.Code)
 	}
 	if strings.Contains(w2.Body.String(), "OpenDesign authentication required") {
 		t.Fatal("odt-less request must not reach the OD upstream")
+	}
+}
+
+// Console project paths must never be shadowed by the root-shape design
+// proxy: /projects/<console-name>/… falls through to the console SPA.
+func TestDesignRootProjectFallsThroughForConsolePaths(t *testing.T) {
+	s, _, task := seedDesignTask(t, entity.TaskStatusAwaitingConfirmation)
+	seedODConnection(t, s)
+	task.DesignProjectID = "proj_mg_" + task.ID
+	if err := s.ts.UpdateTask("resproj", taskAgentFromAssignee(task), task); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/projects/resproj/tasks", nil)
+	w := httptest.NewRecorder()
+	if s.handleDesignRootProject(w, req) {
+		t.Fatal("console project path must fall through to the console SPA")
 	}
 }

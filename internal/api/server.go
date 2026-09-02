@@ -655,12 +655,39 @@ func (s *Server) Handler() http.Handler {
 	publicMux.HandleFunc("GET /api/v1/health", s.handleHealth)
 	publicMux.HandleFunc("/preview/", s.handleTaskPreviewProxy)
 	// Design proxy + launch are iframe-bootstrap surfaces: the iframe carries
-	// only the task-scoped odt signature token (and later the scoped cookie),
-	// which withTokenAuth does not understand (pitfall 6 pattern). Handler-side
-	// designRequestAuthorized verifies the signature; the proxy additionally
-	// enforces the OD path whitelist and per-task rate limiting.
-	publicMux.HandleFunc("/api/v1/projects/{name}/tasks/{taskId}/design/proxy/{path...}", s.handleDesignProxy)
+	// only the task-scoped odt signature token (and the session cookie the
+	// document mint), which withTokenAuth does not understand (pitfall 6
+	// pattern). Handler-side designRootAuthorize verifies the signature; the
+	// proxy additionally enforces the OD path whitelist and per-task rate
+	// limiting. The studio is served at OD's native root path shape — OD's
+	// Next.js router only recognizes /projects/<id>/…, so a sub-path prefix
+	// made every proxied page fall back to its home screen. /projects/ and
+	// /_next/ here must NOT swallow console traffic: handleDesignRootProject
+	// only claims proj_mg_<taskID> paths (design project ids embed the task id,
+	// a namespace console project names cannot collide with) and falls through
+	// to the console SPA for everything else; asset/API handlers answer 404
+	// without a valid design session cookie.
 	publicMux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/design/launch", s.handleDesignLaunch)
+	publicMux.HandleFunc("/_next/", s.handleDesignRootAsset)
+	publicMux.HandleFunc("/fonts/", s.handleDesignRootAsset)
+	publicMux.HandleFunc("/design-systems/", s.handleDesignRootAsset)
+	publicMux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		// OD's own API surface (non-/api/v1 paths claimable by the design
+		// session); /api/v1/ stays console-owned.
+		if strings.HasPrefix(r.URL.Path, "/api/v1/") {
+			s.withTokenAuth(mux).ServeHTTP(w, r)
+			return
+		}
+		s.handleDesignRootAsset(w, r)
+	})
+	publicMux.HandleFunc("/projects/", func(w http.ResponseWriter, r *http.Request) {
+		if s.handleDesignRootProject(w, r) {
+			return
+		}
+		s.withTokenAuth(mux).ServeHTTP(w, r)
+	})
+	publicMux.HandleFunc("/logo-scan.svg", s.handleDesignRootAsset)
+	publicMux.HandleFunc("/favicon.ico", s.handleDesignRootAsset)
 	publicMux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/feedback", s.handlePostTaskPreviewFeedback)
 	publicMux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/chat", s.handlePostTaskPreviewChat)
 	publicMux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview/live", s.handleGetTaskPreviewLive)
@@ -804,17 +831,43 @@ func withJSONHeaders(next http.Handler) http.Handler {
 			!strings.HasPrefix(r.URL.Path, "/_multigent_preview/") &&
 			!strings.HasSuffix(r.URL.Path, "/preview/chat") &&
 			!strings.HasSuffix(r.URL.Path, "/preview/live") &&
-			// The design proxy/launch pass upstream OD responses through —
+			// The design passthrough surfaces forward upstream OD responses —
 			// they carry their own Content-Type (JS chunks, HTML, SSE). A
 			// pre-set application/json here produced a doubled header that
 			// made the browser module loader reject every OD chunk, leaving
 			// the studio iframe stuck on its native loader (2026-09-02).
-			!strings.Contains(r.URL.Path, "/design/proxy/") &&
+			// Root-shape surfaces: OD's static/API paths (non-/api/v1) and the
+			// proxied project documents (any /projects/… carrying an odt).
+			!IsDesignPassthroughPath(r.URL.Path) &&
 			!strings.HasSuffix(r.URL.Path, "/design/launch") {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// IsDesignPassthroughPath reports whether a request targets the root-shape
+// design proxy (OD studio surface on the console origin). Cheap shape checks
+// only — authorization happens in the handlers. Exported for the start
+// command's SPA wrapper, which must hand these paths to the API handler.
+func IsDesignPassthroughPath(path string) bool {
+	if strings.HasPrefix(path, "/_next/") ||
+		strings.HasPrefix(path, "/fonts/") ||
+		strings.HasPrefix(path, "/design-systems/") ||
+		path == "/logo-scan.svg" ||
+		path == "/favicon.ico" {
+		return true
+	}
+	if strings.HasPrefix(path, "/api/") && !strings.HasPrefix(path, "/api/v1/") {
+		return true
+	}
+	// /projects/ is shared with the console SPA; only the studio documents
+	// (proj_mg_ prefixed design projects) forward upstream, and only their
+	// content type must stay untouched.
+	if strings.HasPrefix(path, "/projects/proj_mg_") {
+		return true
+	}
+	return false
 }
 
 func (s *Server) withTokenAuth(next http.Handler) http.Handler {
