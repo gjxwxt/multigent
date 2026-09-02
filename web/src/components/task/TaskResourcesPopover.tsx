@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import { FolderGit2, Globe, Loader2, Trash2 } from 'lucide-react'
 import { apiFetch, apiPost } from '../../lib/api'
@@ -35,6 +36,8 @@ type Props = {
   hasPreview?: boolean
 }
 
+const POPOVER_WIDTH = 288 // w-72
+
 function formatBytes(bytes: number, t: (k: string, o?: Record<string, unknown>) => string): string {
   if (bytes >= 1024 * 1024 * 1024) return t('tasks.resources.sizeGB', { value: (bytes / 1024 / 1024 / 1024).toFixed(1) })
   if (bytes >= 1024 * 1024) return t('tasks.resources.sizeMB', { value: (bytes / 1024 / 1024).toFixed(0) })
@@ -49,18 +52,55 @@ export function TaskResourcesPopover({ taskId, project, hasWorktree, hasPreview 
   const [cleaning, setCleaning] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [confirmCleanup, setConfirmCleanup] = useState(false)
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
   const wrapRef = useRef<HTMLSpanElement>(null)
+  const buttonRef = useRef<HTMLButtonElement>(null)
+  const popRef = useRef<HTMLDivElement>(null)
+
+  // The table wrapper is overflow-x-auto, which clips absolutely-positioned
+  // children — the popover therefore renders through a portal with fixed
+  // positioning and must be re-placed whenever its anchor moves (table
+  // scroll, window resize).
+  const place = () => {
+    const btn = buttonRef.current
+    if (!btn) return
+    const rect = btn.getBoundingClientRect()
+    const height = popRef.current?.offsetHeight ?? 180
+    let left = rect.right - POPOVER_WIDTH
+    if (left < 8) left = Math.min(rect.left, window.innerWidth - POPOVER_WIDTH - 8)
+    if (left + POPOVER_WIDTH > window.innerWidth - 8) left = window.innerWidth - POPOVER_WIDTH - 8
+    let top = rect.bottom + 8
+    if (top + height > window.innerHeight - 8 && rect.top - height - 8 > 8) top = rect.top - height - 8
+    setPos({ top: Math.max(8, top), left: Math.max(8, left) })
+  }
 
   useEffect(() => {
     if (!open) return
     const onOutside = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
-        setOpen(false)
-      }
+      const target = e.target as Node
+      if (wrapRef.current?.contains(target)) return
+      // Portal content lives under document.body in the DOM; the React tree
+      // still routes its synthetic events through the wrapping span, so the
+      // native outside-click check must consult the popover node explicitly.
+      if (popRef.current?.contains(target)) return
+      setOpen(false)
     }
     document.addEventListener('mousedown', onOutside)
     return () => document.removeEventListener('mousedown', onOutside)
   }, [open])
+
+  useLayoutEffect(() => {
+    if (!open) return
+    place()
+    const reposition = () => place()
+    window.addEventListener('resize', reposition)
+    window.addEventListener('scroll', reposition, true)
+    return () => {
+      window.removeEventListener('resize', reposition)
+      window.removeEventListener('scroll', reposition, true)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, resources, confirmCleanup, error, loading])
 
   const load = async () => {
     setLoading(true)
@@ -137,6 +177,7 @@ export function TaskResourcesPopover({ taskId, project, hasWorktree, hasPreview 
   return (
     <span ref={wrapRef} className="relative inline-flex" onClick={(e) => e.stopPropagation()}>
       <button
+        ref={buttonRef}
         type="button"
         onClick={toggle}
         className={cn(
@@ -149,10 +190,11 @@ export function TaskResourcesPopover({ taskId, project, hasWorktree, hasPreview 
       >
         <FolderGit2 className="size-3.5" strokeWidth={1.8} />
       </button>
-      {open && (
+      {open && pos && createPortal(
         <div
-          onClick={(e) => e.stopPropagation()}
-          className="absolute right-0 top-7 z-40 w-72 rounded-lg border border-neutral-200 bg-white p-3 text-xs shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
+          ref={popRef}
+          className="fixed z-[95] w-72 rounded-lg border border-neutral-200 bg-white p-3 text-xs shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
+          style={{ top: pos.top, left: pos.left }}
         >
           {loading && !resources ? (
             <div className="flex items-center gap-2 py-2 text-neutral-500 dark:text-zinc-400">
@@ -250,7 +292,8 @@ export function TaskResourcesPopover({ taskId, project, hasWorktree, hasPreview 
               {error && <div className="text-red-600 dark:text-red-400">{error}</div>}
             </div>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </span>
   )

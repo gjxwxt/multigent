@@ -311,6 +311,21 @@ func Defaults() []Provider {
 			},
 			Enabled: true,
 		},
+		{
+			Provider:    "opendesign",
+			DisplayName: "OpenDesign",
+			Description: "Generate and iterate visual prototypes through the OpenDesign daemon; the design gate proxies runs and chat with server-side credentials.",
+			Category:    "Design And Data",
+			AuthTypes:   []string{AuthAPIKey},
+			Fields: []ProviderField{
+				{Key: "baseUrl", Label: "Daemon base URL (e.g. http://192.168.x.x:7456)", InputType: "url", Required: true, Secret: false},
+				{Key: "apiKey", Label: "OD API token", InputType: "password", Required: true, Secret: true},
+			},
+			Guides: []ProviderGuide{
+				credentialGuide("OD API token", "Use the OD_API_TOKEN value configured on the OpenDesign daemon. The token is stored encrypted and only injected server-side when proxying design requests.", "OpenDesign deployment", "https://github.com/multigent/multigent/blob/main/docs/opendesign-integration-plan.md"),
+			},
+			Enabled: true,
+		},
 		oauthOnlyProvider("gmail", "Gmail", "Communication", "Use Gmail search, email triage, draft creation, and communication workflows.", "https://accounts.google.com/o/oauth2/v2/auth", "https://oauth2.googleapis.com/token", []string{"https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.compose"}),
 		oauthOnlyProvider("google_drive", "Google Drive", "Knowledge And Docs", "Use Drive files, folders, attachments, and knowledge sources.", "https://accounts.google.com/o/oauth2/v2/auth", "https://oauth2.googleapis.com/token", []string{"https://www.googleapis.com/auth/drive.readonly"}),
 		oauthOnlyProvider("google_docs", "Google Docs", "Knowledge And Docs", "Use Google Docs documents as readable and writable knowledge artifacts.", "https://accounts.google.com/o/oauth2/v2/auth", "https://oauth2.googleapis.com/token", []string{"https://www.googleapis.com/auth/documents", "https://www.googleapis.com/auth/drive.file"}),
