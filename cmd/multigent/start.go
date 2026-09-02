@@ -227,6 +227,15 @@ func newSPAHandler(apiHandler http.Handler) http.Handler {
 
 		f, err := distFS.Open(path)
 		if err != nil {
+			// Not a console file. Loose root-level static assets belong to the
+			// OD studio when one is in play (e.g. /composer-matrix-loader.svg);
+			// the API layer proxies them for credentialed requests and 404s
+			// the rest. Console SPA routes are extension-less, so this can
+			// never shadow a console page.
+			if api.IsStudioLooseAssetPath(r.URL.Path) {
+				apiHandler.ServeHTTP(w, r)
+				return
+			}
 			serveEmbeddedFile(w, distFS, "index.html")
 			return
 		}

@@ -686,8 +686,15 @@ func (s *Server) Handler() http.Handler {
 		}
 		s.withTokenAuth(mux).ServeHTTP(w, r)
 	})
-	publicMux.HandleFunc("/logo-scan.svg", s.handleDesignRootAsset)
-	publicMux.HandleFunc("/favicon.ico", s.handleDesignRootAsset)
+	publicMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Loose OD studio assets at the origin root (composer-matrix-loader.svg
+		// and friends) for requests carrying a design session; everything else
+		// stays console-owned.
+		if s.serveDesignLooseAsset(w, r) {
+			return
+		}
+		s.withTokenAuth(mux).ServeHTTP(w, r)
+	})
 	publicMux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/feedback", s.handlePostTaskPreviewFeedback)
 	publicMux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/chat", s.handlePostTaskPreviewChat)
 	publicMux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview/live", s.handleGetTaskPreviewLive)
@@ -752,7 +759,8 @@ func (s *Server) Handler() http.Handler {
 	// Keep this outside the general Web/API auth mux so user sessions and
 	// trusted-proxy identities cannot accidentally access the ingest endpoint.
 	publicMux.Handle("/api/v1/context/ingest", s.withContextIngestAuth(http.HandlerFunc(s.handleContextIngest)))
-	publicMux.Handle("/", s.withTokenAuth(mux))
+	// (the "/" catch-all at the top of the design block falls through to
+	// withTokenAuth(mux) for non-design traffic — no second registration.)
 
 	return withCORS(withJSONHeaders(publicMux))
 }
@@ -832,13 +840,14 @@ func withJSONHeaders(next http.Handler) http.Handler {
 			!strings.HasSuffix(r.URL.Path, "/preview/chat") &&
 			!strings.HasSuffix(r.URL.Path, "/preview/live") &&
 			// The design passthrough surfaces forward upstream OD responses —
-			// they carry their own Content-Type (JS chunks, HTML, SSE). A
-			// pre-set application/json here produced a doubled header that
-			// made the browser module loader reject every OD chunk, leaving
-			// the studio iframe stuck on its native loader (2026-09-02).
-			// Root-shape surfaces: OD's static/API paths (non-/api/v1) and the
-			// proxied project documents (any /projects/… carrying an odt).
+			// they carry their own Content-Type (JS chunks, HTML, SSE, loose
+			// images). A pre-set application/json here produced a doubled
+			// header that made the browser module loader reject every OD
+			// chunk and left studio images unrenderable (2026-09-02).
+			// Root-shape surfaces: OD's static/API paths (non-/api/v1), the
+			// proxied project documents, and OD's loose root assets.
 			!IsDesignPassthroughPath(r.URL.Path) &&
+			!IsStudioLooseAssetPath(r.URL.Path) &&
 			!strings.HasSuffix(r.URL.Path, "/design/launch") {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		}
@@ -853,9 +862,7 @@ func withJSONHeaders(next http.Handler) http.Handler {
 func IsDesignPassthroughPath(path string) bool {
 	if strings.HasPrefix(path, "/_next/") ||
 		strings.HasPrefix(path, "/fonts/") ||
-		strings.HasPrefix(path, "/design-systems/") ||
-		path == "/logo-scan.svg" ||
-		path == "/favicon.ico" {
+		strings.HasPrefix(path, "/design-systems/") {
 		return true
 	}
 	if strings.HasPrefix(path, "/api/") && !strings.HasPrefix(path, "/api/v1/") {
@@ -865,6 +872,34 @@ func IsDesignPassthroughPath(path string) bool {
 	// (proj_mg_ prefixed design projects) forward upstream, and only their
 	// content type must stay untouched.
 	if strings.HasPrefix(path, "/projects/proj_mg_") {
+		return true
+	}
+	// Loose root-level files (e.g. OD's /composer-matrix-loader.svg) are NOT
+	// claimed here: they are shared shape space with the console's own root
+	// files (/favicon.ico, …). The SPA wrapper consults its embedded dist
+	// first and hands unknown ones to the API layer, which serves them only
+	// to a valid design session (IsStudioLooseAssetPath).
+	return false
+}
+
+// IsStudioLooseAssetPath reports whether a path is a loose static file OD
+// ships outside its bundler output: either at the origin root
+// (/composer-matrix-loader.svg) or in shallow directories that are not
+// console namespaces (/editor-icons/finder.png). The console SPA has no
+// extension-bearing virtual routes and its real files win by existing in the
+// embedded dist, so forwarding unknown ones to the API layer can never shadow
+// console assets.
+func IsStudioLooseAssetPath(path string) bool {
+	if !designPathIsStatic(path) {
+		return false
+	}
+	rest := strings.TrimPrefix(path, "/")
+	// Root-level single segment…
+	if !strings.Contains(rest, "/") {
+		return true
+	}
+	// …or shallow two-segment file under a non-console directory.
+	if i := strings.LastIndex(rest, "/"); i > 0 && !strings.Contains(rest[:i], "/") {
 		return true
 	}
 	return false

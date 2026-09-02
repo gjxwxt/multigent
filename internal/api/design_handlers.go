@@ -626,14 +626,55 @@ func (s *Server) designRootProxy(w http.ResponseWriter, r *http.Request, taskID 
 		q.Del(designTokenQuery)
 		r.URL.RawQuery = q.Encode()
 	}
+	// Session-scoped assets must never be cached under a shared URL shape:
+	// a cached response (e.g. a stale 401 or a doubled Content-Type from an
+	// earlier deploy) would keep breaking the studio after the fix.
+	w.Header().Set("Cache-Control", "no-store")
 	s.designProxyPass(w, r, "", taskID, r.Method, odPath, nil)
 }
 
+// serveDesignLooseAsset proxies a root-level static file (single path
+// segment, static extension) to OD when the request carries a valid design
+// session; it reports false for everything else so the caller falls through
+// to the console. This covers OD's unenumerable loose root images
+// (composer-matrix-loader.svg, …) without shadowing console routes.
+func (s *Server) serveDesignLooseAsset(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if !isRootLevelStaticAsset(r.URL.Path) {
+		return false
+	}
+	taskID, ok := s.designRootTaskFromCredential(r)
+	if !ok {
+		return false
+	}
+	if !s.designRootAuthorize(w, r, taskID) {
+		return true
+	}
+	s.designRootProxy(w, r, taskID)
+	return true
+}
+
+// isRootLevelStaticAsset matches loose OD static files outside its bundler
+// output: root-level "/name.ext" or shallow "/dir/name.ext" under a
+// non-console directory (IsStudioLooseAssetPath's server-side twin).
+func isRootLevelStaticAsset(path string) bool {
+	return IsStudioLooseAssetPath(path)
+}
+
+// designPathAllowed whitelists the OD surfaces the studio may touch.
 func designPathAllowed(path string) bool {
 	for _, d := range designDeniedPrefixes {
 		if strings.HasPrefix(path, d) {
 			return false
 		}
+	}
+	// Loose assets OD ships at its origin root (composer-matrix-loader.svg,
+	// logo-scan.svg, …) — not enumerable, so accept the whole class for
+	// credential-gated requests.
+	if isRootLevelStaticAsset(path) {
+		return true
 	}
 	for _, a := range designAllowedPrefixes {
 		if path == strings.TrimRight(a, "/") || strings.HasPrefix(path, a) {
@@ -654,7 +695,13 @@ func designPathIsStatic(path string) bool {
 		strings.HasSuffix(path, ".png") ||
 		strings.HasSuffix(path, ".svg") ||
 		strings.HasSuffix(path, ".ico") ||
-		strings.HasSuffix(path, ".woff2")
+		strings.HasSuffix(path, ".woff") ||
+		strings.HasSuffix(path, ".woff2") ||
+		strings.HasSuffix(path, ".webp") ||
+		strings.HasSuffix(path, ".gif") ||
+		strings.HasSuffix(path, ".jpg") ||
+		strings.HasSuffix(path, ".jpeg") ||
+		strings.HasSuffix(path, ".webmanifest")
 }
 
 // designProxyPass forwards the request to OD with server-side auth injection.
