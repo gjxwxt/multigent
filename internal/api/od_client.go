@@ -33,11 +33,12 @@ const (
 )
 
 // ODProject is the subset of an OD project listing the design gate needs.
+// OD timestamps are epoch millis (numbers); the UI sorts by its own fetched-at
+// ordering, so they are not decoded here at all.
 type ODProject struct {
 	ID             string `json:"id"`
 	Name           string `json:"name"`
 	DesignSystemID string `json:"designSystemId"`
-	UpdatedAt      string `json:"updatedAt"`
 }
 
 // odByokProvider mirrors the request-scoped BYOK credentials OD accepts on
