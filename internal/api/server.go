@@ -444,6 +444,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/projects/{name}/agents/{agent}/runtime-runs/exec", s.handleCreateRuntimeExecRun)
 	mux.HandleFunc("GET /api/v1/projects/{name}/agents/{agent}/runtime/connections", s.handleAgentRuntimeConnections)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tool-bindings/install", s.handleInstallProjectToolBindings)
+	mux.HandleFunc("GET /api/v1/projects/{name}/tool-bindings", s.handleListProjectToolBindings)
 	mux.HandleFunc("GET /api/v1/projects/{name}/agents/{agent}/tool-bindings", s.handleListAgentToolBindings)
 	mux.HandleFunc("POST /api/v1/projects/{name}/agents/{agent}/tool-bindings", s.handleUpsertAgentToolBinding)
 	mux.HandleFunc("DELETE /api/v1/projects/{name}/agents/{agent}/tool-bindings/{bindingId}", s.handleDeleteAgentToolBinding)

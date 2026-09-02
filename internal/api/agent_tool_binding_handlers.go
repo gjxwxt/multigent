@@ -25,6 +25,57 @@ type installProjectToolBindingsRequest struct {
 	Config       map[string]any `json:"config"`
 }
 
+// handleListProjectToolBindings answers "which connections are installed in
+// this project": every agent_tool_binding row for the project, enriched with
+// the owning connection's display name for the settings UI.
+func (s *Server) handleListProjectToolBindings(w http.ResponseWriter, r *http.Request) {
+	project := strings.TrimSpace(r.PathValue("name"))
+	if !s.checkProjectAccess(w, r, project) {
+		return
+	}
+	workspaceID, err := s.currentWorkspaceID()
+	if err != nil {
+		s.serverError(w, err)
+		return
+	}
+	bindings, err := s.controlDB.ListAgentToolBindings(controldb.AgentToolBindingFilter{
+		WorkspaceID: workspaceID,
+		ProjectID:   project,
+	})
+	if err != nil {
+		s.serverError(w, err)
+		return
+	}
+	names := map[string]string{}
+	models := make([]map[string]any, 0, len(bindings))
+	for _, binding := range bindings {
+		model := agentToolBindingToModel(binding)
+		entry := map[string]any{
+			"id":            model.ID,
+			"agentWorkerId": model.AgentWorkerID,
+			"agentId":       binding.AgentID,
+			"projectId":     binding.ProjectID,
+			"connectionId":  model.ConnectionID,
+			"provider":      model.Provider,
+			"adapterType":   model.AdapterType,
+			"status":        model.Status,
+			"createdBy":     model.CreatedBy,
+			"createdAt":     model.CreatedAt,
+			"updatedAt":     model.UpdatedAt,
+		}
+		name, ok := names[model.ConnectionID]
+		if !ok {
+			if conn, exists, err := s.controlDB.ConnectionByID(model.ConnectionID); err == nil && exists {
+				name = conn.ConnectionName
+			}
+			names[model.ConnectionID] = name
+		}
+		entry["connectionName"] = name
+		models = append(models, entry)
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"bindings": models})
+}
+
 func (s *Server) handleListAgentToolBindings(w http.ResponseWriter, r *http.Request) {
 	project, agent, workspaceID, ok := s.agentToolBindingScope(w, r)
 	if !ok {

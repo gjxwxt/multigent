@@ -12,6 +12,7 @@ type Provider struct {
 	DisplayName     string               `json:"displayName"`
 	Description     string               `json:"description,omitempty"`
 	Category        string               `json:"category,omitempty"`
+	IconURL         string               `json:"iconUrl,omitempty"`
 	AuthTypes       []string             `json:"authTypes"`
 	Fields          []ProviderField      `json:"fields,omitempty"`
 	OAuth           *OAuth2Config        `json:"oauth,omitempty"`
@@ -316,7 +317,10 @@ func Defaults() []Provider {
 			DisplayName: "OpenDesign",
 			Description: "Generate and iterate visual prototypes through the OpenDesign daemon; the design gate proxies runs and chat with server-side credentials.",
 			Category:    "Design And Data",
-			AuthTypes:   []string{AuthAPIKey},
+			// Bundled brand icon (extracted from the OD daemon's own app icon);
+			// OD runs on an intranet address with no public favicon to fall back to.
+			IconURL:   "/providers/opendesign.svg",
+			AuthTypes: []string{AuthAPIKey},
 			Fields: []ProviderField{
 				{Key: "baseUrl", Label: "Daemon base URL (e.g. http://192.168.x.x:7456)", InputType: "url", Required: true, Secret: false},
 				{Key: "apiKey", Label: "OD API token", InputType: "password", Required: true, Secret: true},

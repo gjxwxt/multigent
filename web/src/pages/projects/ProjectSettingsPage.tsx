@@ -27,6 +27,7 @@ import {
 } from 'lucide-react'
 import { cn } from '../../lib/cn'
 import { useApiJson } from '../../lib/use-api'
+import { useFormatDateTime } from '../../lib/format-datetime'
 import { ApiError, apiDelete, apiFetch, apiPost, apiPut } from '../../lib/api'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { showToast } from '../../components/ui/Toast'
@@ -98,6 +99,9 @@ export default function ProjectSettingsPage() {
             />
           )}
 
+          {/* Installed connection tools (agent tool bindings) */}
+          {projectId && <InstalledConnections projectId={projectId} />}
+
           {projectId && (
             <DangerZone
               projectId={projectId}
@@ -107,6 +111,104 @@ export default function ProjectSettingsPage() {
         </div>
       </div>
     </div>
+  )
+}
+
+type ProjectToolBinding = {
+  id: string
+  agentId?: string
+  agentWorkerId?: string
+  connectionId: string
+  connectionName?: string
+  provider: string
+  adapterType?: string
+  status: string
+  updatedAt?: string
+}
+
+// Lists every connection tool granted to this project's agent runtimes
+// (agent_tool_bindings) with a per-binding remove action. Platform features
+// (Git push, the design gate) use workspace-level connections and are
+// unaffected — the copy says so explicitly.
+function InstalledConnections({ projectId }: { projectId: string }) {
+  const { t } = useTranslation()
+  const fmt = useFormatDateTime()
+  const [reloadKey, setReloadKey] = useState(0)
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const [removing, setRemoving] = useState<ProjectToolBinding | null>(null)
+
+  const path = `/api/v1/projects/${encodeURIComponent(projectId)}/tool-bindings`
+  const state = useApiJson<{ bindings: ProjectToolBinding[] }>(path, reloadKey, { silentStatuses: [404] })
+  const bindings = state.status === 'ok' ? (state.data.bindings ?? []) : []
+
+  async function removeBinding(binding: ProjectToolBinding) {
+    setBusyId(binding.id)
+    try {
+      await apiDelete(`/api/v1/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(binding.agentId || '')}/tool-bindings/${encodeURIComponent(binding.id)}`)
+      showToast(t('projectSettings.installedRemove', { defaultValue: '移除授权' }) + ' ✓', 'success')
+      setReloadKey((k) => k + 1)
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : String(e), 'error')
+    } finally {
+      setBusyId(null)
+      setRemoving(null)
+    }
+  }
+
+  return (
+    <section className="rounded-lg border border-neutral-200/80 bg-white dark:border-zinc-700/60 dark:bg-zinc-900/40">
+      <div className="border-b border-neutral-100 px-5 py-3 dark:border-zinc-800">
+        <span className="text-sm font-semibold text-neutral-800 dark:text-zinc-100">{t('projectSettings.installedTitle', { defaultValue: '已安装的连接工具' })}</span>
+        <p className="mt-1 text-xs leading-relaxed text-neutral-500 dark:text-zinc-500">{t('projectSettings.installedDesc', { defaultValue: '这些连接已授权给本项目内的 Agent 运行时使用。' })}</p>
+      </div>
+      {state.status === 'loading' ? (
+        <div className="flex items-center gap-2 px-5 py-4 text-sm text-neutral-500 dark:text-zinc-400">
+          <Loader2 className="size-4 animate-spin" />
+          {t('common.loading', { defaultValue: '加载中…' })}
+        </div>
+      ) : bindings.length === 0 ? (
+        <p className="px-5 py-4 text-sm text-neutral-500 dark:text-zinc-500">{t('projectSettings.installedEmpty', { defaultValue: '还没有授权任何连接工具给本项目的 Agent。' })}</p>
+      ) : (
+        <ul className="divide-y divide-neutral-100 dark:divide-zinc-800">
+          {bindings.map((binding) => (
+            <li key={binding.id} className="flex items-center justify-between gap-4 px-5 py-3">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium text-neutral-800 dark:text-zinc-200">
+                  {binding.provider}
+                  {binding.connectionName ? <span className="text-neutral-400 dark:text-zinc-500"> / {binding.connectionName}</span> : null}
+                </p>
+                <p className="mt-0.5 truncate text-xs text-neutral-500 dark:text-zinc-500">
+                  {binding.agentId || binding.agentWorkerId || ''}
+                  {binding.adapterType ? ` · ${binding.adapterType}` : ''}
+                  {binding.updatedAt ? ` · ${fmt(binding.updatedAt)}` : ''}
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={busyId === binding.id}
+                onClick={() => setRemoving(binding)}
+                className="shrink-0 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-xs font-medium text-neutral-600 transition-colors hover:bg-neutral-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                {busyId === binding.id ? <Loader2 className="size-3.5 animate-spin" /> : t('projectSettings.installedRemove', { defaultValue: '移除授权' })}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <ConfirmDialog
+        open={removing !== null}
+        title={t('projectSettings.installedRemove', { defaultValue: '移除授权' })}
+        description={t('projectSettings.installedRemoveConfirm', {
+          defaultValue: `移除「${removing?.provider ?? ''}」在本项目的授权？`,
+          name: removing ? `${removing.provider}/${removing.connectionName || ''}` : '',
+        })}
+        confirmLabel={t('projectSettings.installedRemove', { defaultValue: '移除授权' })}
+        cancelLabel={t('common.cancel')}
+        busy={busyId !== null}
+        onCancel={() => setRemoving(null)}
+        onConfirm={() => { if (removing) void removeBinding(removing) }}
+      />
+    </section>
   )
 }
 

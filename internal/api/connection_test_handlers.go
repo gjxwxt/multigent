@@ -344,6 +344,8 @@ func (s *Server) testConnection(r *http.Request, connection controldb.Connection
 	switch connection.Provider {
 	case "custom-mcp":
 		return s.testCustomMCPConnection(r, connection)
+	case "opendesign":
+		return s.testOpenDesignConnection(r, connection)
 	case "ssh_key", "git_ssh", "npm_registry", "docker_registry", "aws", "gcloud", "runtime_secret":
 		return s.testStaticRuntimeCredentialConnection(connection)
 	case "custom-http", "github", "gitlab", "gitee", "linear", "notion", "figma", "airtable", "asana", "clickup", "sentry", "vercel", "cloudflare", "exa", "brave_search", "feishu", "lark", "dingtalk_bot":
@@ -434,6 +436,41 @@ func validateGCloudCredentialJSON(value string) error {
 
 func normalizePrivateCredential(value string) string {
 	return strings.TrimSpace(strings.ReplaceAll(value, "\r\n", "\n"))
+}
+
+// testOpenDesignConnection pings the OD daemon's project list with the stored
+// token — the same request shape the design gate client uses — so a pass
+// proves both reachability and credential validity. The token only appears in
+// the request header; results carry redacted bodies.
+func (s *Server) testOpenDesignConnection(r *http.Request, connection controldb.Connection) (testConnectionResult, error) {
+	values := map[string]string{}
+	secret, ok, err := s.controlDB.ConnectionSecret(connection.ID)
+	if err != nil {
+		return testConnectionResult{}, err
+	}
+	if ok {
+		values, err = openConnectionSecret(secret)
+		if err != nil {
+			return testConnectionResult{}, err
+		}
+	}
+	profile := map[string]any{}
+	_ = json.Unmarshal([]byte(connection.ProfileJSON), &profile)
+	baseURL := strings.TrimSpace(firstNonEmpty(values["baseUrl"], stringValue(profile["baseUrl"])))
+	if baseURL == "" {
+		return testConnectionResult{}, fmt.Errorf("opendesign connection is missing baseUrl")
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
+	apiKey := strings.TrimSpace(firstNonEmpty(values["apiKey"], values["token"]))
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, baseURL+"/api/projects", nil)
+	if err != nil {
+		return testConnectionResult{}, fmt.Errorf("build opendesign test request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	return executeConnectionTestRequest(req, []string{apiKey})
 }
 
 func (s *Server) testCustomMCPConnection(r *http.Request, connection controldb.Connection) (testConnectionResult, error) {
