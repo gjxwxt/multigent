@@ -271,6 +271,10 @@ func (s *Server) createProjectTaskFromBody(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		workflowDef = def
+		// API callers that omit workflowActorBindings (curl/scripts) would
+		// otherwise create runs whose agent steps never activate. Derive the
+		// same defaults the UI dialog does before any workflow machinery runs.
+		body.WorkflowActorBindings = s.defaultWorkflowActorBindings(workspaceID, name, agentName, def, body.WorkflowActorBindings)
 		if _, inst, ok := workflowStartActor(def, body.WorkflowActorBindings); ok {
 			switch inst.ActorType {
 			case "agent":
@@ -388,6 +392,81 @@ func workflowStartActor(def entity.WorkflowDefinition, bindings map[string]entit
 		return &def.Steps[i], inst, true
 	}
 	return nil, nil, false
+}
+
+// defaultWorkflowActorBindings mirrors the UI's workflowDefaultBindings
+// (CreateTaskDialog): every step's actorRole gets a binding so that agent
+// steps advance and human steps route to a reviewer. Without it, an API
+// caller that omits workflowActorBindings (curl, integrations, scripts)
+// creates runs whose agent steps never activate — the pipeline silently
+// stalls at the first agent step after a human gate (od-e2e incident).
+func (s *Server) defaultWorkflowActorBindings(workspaceID, project, taskAgent string, def entity.WorkflowDefinition, provided map[string]entity.WorkflowActorBinding) map[string]entity.WorkflowActorBinding {
+	out := map[string]entity.WorkflowActorBinding{}
+	for k, v := range provided {
+		if strings.TrimSpace(v.Type) != "" && strings.TrimSpace(v.ID) != "" {
+			out[strings.TrimSpace(k)] = v
+		}
+	}
+	agents, _ := s.projectAgentNames(workspaceID, project)
+	agentForRole := func(role string) string {
+		for _, a := range agents {
+			if strings.EqualFold(a, role) {
+				return a
+			}
+		}
+		for _, a := range agents {
+			n := strings.ToLower(strings.ReplaceAll(a, "-", " "))
+			r := strings.ToLower(strings.ReplaceAll(role, "-", " "))
+			r = strings.TrimSuffix(r, " agent")
+			if strings.Contains(r, n) || strings.Contains(n, r) {
+				return a
+			}
+		}
+		// Fall back to the task's assignee agent, then any project agent.
+		if taskAgent != "" {
+			for _, a := range agents {
+				if strings.EqualFold(a, taskAgent) {
+					return a
+				}
+			}
+		}
+		if len(agents) > 0 {
+			return agents[0]
+		}
+		return ""
+	}
+	humanForRole := func() string {
+		if members, err := s.controlDB.ListWorkspaceMembers(workspaceID); err == nil {
+			for _, m := range members {
+				if strings.TrimSpace(m.Username) != "" {
+					return strings.TrimSpace(m.Username)
+				}
+			}
+		}
+		return ""
+	}
+	for _, step := range def.Steps {
+		role := strings.TrimSpace(step.ActorRole)
+		if role == "" {
+			continue
+		}
+		if _, ok := out[role]; ok {
+			continue
+		}
+		if step.Type == "parallel_stage" {
+			continue
+		}
+		if step.Type == "human_review" {
+			if h := humanForRole(); h != "" {
+				out[role] = entity.WorkflowActorBinding{Type: "human", ID: h}
+			}
+			continue
+		}
+		if a := agentForRole(role); a != "" {
+			out[role] = entity.WorkflowActorBinding{Type: "agent", ID: a}
+		}
+	}
+	return out
 }
 
 type taskActionBody struct {

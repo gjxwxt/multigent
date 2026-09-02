@@ -128,7 +128,17 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	name := strings.TrimSpace(body.Name)
 	if strings.TrimSpace(body.TemplateID) != "" {
-		def, found := workflowstore.DefinitionFromTemplate(body.TemplateID, body.Locale, name)
+		// An empty locale would bake the English copy into the definition at
+		// instantiate time (normalizeTemplateLocale defaults to en). Fall back
+		// to the agency language so API callers that omit locale still get the
+		// workspace's language.
+		templateLocale := strings.TrimSpace(body.Locale)
+		if templateLocale == "" {
+			if agency, err := s.st.Agency(); err == nil && agency != nil {
+				templateLocale = strings.TrimSpace(agency.Lang)
+			}
+		}
+		def, found := workflowstore.DefinitionFromTemplate(body.TemplateID, templateLocale, name)
 		if !found {
 			s.jsonError(w, http.StatusNotFound, "workflow template not found")
 			return
