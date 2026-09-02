@@ -67,6 +67,50 @@ func TestGreenfieldTemplateShape(t *testing.T) {
 	}
 }
 
+// The self_review step claims to judge the implementation "against the
+// requirement and design", so the frozen design contract fields must reach
+// it: without them the reviewer agent can only guess the design from the PR
+// diff (the reviewer cannot see what the human actually approved).
+func TestGreenfieldSelfReviewCarriesDesignContract(t *testing.T) {
+	tmpl, ok := Template("greenfield-delivery-pipeline", "zh-CN")
+	if !ok {
+		t.Fatal("greenfield template not registered")
+	}
+	var selfReview *entity.WorkflowStep
+	for i := range tmpl.Steps {
+		if tmpl.Steps[i].ID == "self_review" {
+			selfReview = &tmpl.Steps[i]
+		}
+	}
+	if selfReview == nil {
+		t.Fatal("self_review step missing")
+	}
+	inputs := map[string]bool{}
+	for _, f := range selfReview.InputFields {
+		inputs[f.Name] = true
+	}
+	for _, want := range []string{"pr", "approved_requirement", "approved_design_html", "approved_design_snapshot_path", "approved_design_project_id"} {
+		if !inputs[want] {
+			t.Fatalf("self_review missing input %q", want)
+		}
+	}
+	var carryEdge bool
+	for _, e := range tmpl.Edges {
+		if e.From == "implementation" && e.To == "self_review" {
+			mapping := e.InputMapping
+			if mapping["approved_design_html"] != "$input.approved_design_html" ||
+				mapping["approved_design_snapshot_path"] != "$input.approved_design_snapshot_path" ||
+				mapping["approved_requirement"] != "$input.approved_requirement" {
+				t.Fatalf("implementation->self_review edge must carry the frozen design contract, mapping=%v", mapping)
+			}
+			carryEdge = true
+		}
+	}
+	if !carryEdge {
+		t.Fatal("implementation->self_review edge missing")
+	}
+}
+
 func TestGreenfieldTemplateEnAndZh(t *testing.T) {
 	for _, locale := range []string{"en", "zh-CN"} {
 		tmpl, ok := Template("greenfield-delivery-pipeline", locale)

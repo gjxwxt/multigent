@@ -220,3 +220,28 @@ func TestDraftApprovedFixFallsBackToDiagnosis(t *testing.T) {
 		t.Fatalf("missing both must be empty/none, got %q/%q", v3, src3)
 	}
 }
+
+func TestDraftApprovedRequirementFallsBackToDraft(t *testing.T) {
+	ctx := draftTestContext()
+	// Greenfield requirement gate: the step's own input IS requirement_draft
+	// and there is no same-named approved_requirement — a plain "approve"
+	// must carry the draft forward instead of mapping an empty value into
+	// the implementation step's approved_requirement input.
+	ctx.instance = entity.WorkflowStepInstance{InputValues: map[string]string{"requirement_draft": "问题P；目标G；范围S；非目标N"}}
+	v, src := reviewDraftForField(ctx, "approved_requirement")
+	if v != "问题P；目标G；范围S；非目标N" || src != draftSourceUpstreamOutput {
+		t.Fatalf("approved_requirement draft = %q/%q, want requirement_draft passthrough", v, src)
+	}
+	// A human-edited same-named value still wins over the fallback.
+	ctx.instance = entity.WorkflowStepInstance{InputValues: map[string]string{"approved_requirement": "人工修订后的需求", "requirement_draft": "原始草稿"}}
+	v2, _ := reviewDraftForField(ctx, "approved_requirement")
+	if v2 != "人工修订后的需求" {
+		t.Fatalf("same-named upstream must win, got %q", v2)
+	}
+	// Neither present: empty, never fabricated.
+	ctx.instance = entity.WorkflowStepInstance{InputValues: map[string]string{}}
+	v3, src3 := reviewDraftForField(ctx, "approved_requirement")
+	if v3 != "" || src3 != draftSourceNone {
+		t.Fatalf("missing both must be empty/none, got %q/%q", v3, src3)
+	}
+}

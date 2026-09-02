@@ -181,6 +181,15 @@ func reviewDraftForField(ctx *reviewDraftContext, field string) (string, string)
 		// the optional contract left empty carry the clarified scope forward
 		// untouched.
 		return draftFromUpstreamOutput(ctx, "clarified")
+	case "approved_requirement":
+		if v, source := draftFromUpstreamOutput(ctx, field); strings.TrimSpace(v) != "" {
+			return v, source
+		}
+		// The requirement gate produces the draft it is approving: there is
+		// no same-named upstream value, so an approve left empty must carry
+		// requirement_draft forward — otherwise the mapped input on the next
+		// agent step silently arrives blank.
+		return draftFromUpstreamOutput(ctx, "requirement_draft")
 	case "approved_prd":
 		if v, source := draftFromUpstreamOutput(ctx, field); strings.TrimSpace(v) != "" {
 			return v, source

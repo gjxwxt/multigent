@@ -12,7 +12,7 @@ import (
 func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 	locale = normalizeTemplateLocale(locale)
 	text := localizedTemplateText(locale, map[string]string{
-		"name":     "Greenfield Delivery Pipeline",
+		"name":     "New Project Delivery (Design Gate)",
 		"description": "First-delivery pipeline for brand-new projects: requirement clarification, a visual design gate powered by OpenDesign, then implementation, agent self-review, human code review, PR merge, first release, and go-live confirmation.",
 		"approved":         "approved",
 		"changesRequested": "changes requested",
@@ -56,7 +56,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"deployedField":      "Deployed version identifier.",
 		"healthField":        "Health probe result after deployment.",
 	}, map[string]string{
-		"name":     "Greenfield 交付流水线",
+		"name":     "新项目交付流水线（设计确认闸门）",
 		"description": "新项目首次交付专用流水线：需求澄清后先经 OpenDesign 设计确认闸门，再实现编码、Agent 初审、人工代码审核、开 PR 合并、首版发布与上线确认。",
 		"approved":         "通过",
 		"changesRequested": "需要修改",
@@ -149,7 +149,15 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				},
 				[]entity.WorkflowField{field("pr", "prField"), field("tests_run", "testsField"), field("risks", "risksField")}),
 			tmplStep("self_review", "agent_task", text["selfReviewTitle"], text["selfReviewDesc"], "owner-engineer", "rose", 1200,
-				[]entity.WorkflowField{field("pr", "prField"), field("approved_requirement", "requestField")},
+				[]entity.WorkflowField{
+					field("pr", "prField"),
+					field("approved_requirement", "requestField"),
+					optionalField("approved_design_source", "designSourceField"),
+					optionalField("approved_design_project_id", "designProjectField"),
+					optionalField("approved_design_preview_url", "designPreviewField"),
+					optionalField("approved_design_html", "designHTMLField"),
+					optionalField("approved_design_snapshot_path", "designSnapshotField"),
+				},
 				[]entity.WorkflowField{field("self_review_verdict", "verdictField"), field("review_comments", "reviewCommentsField")}),
 			tmplStep("code_review", "human_review", text["codeReviewTitle"], text["codeReviewDesc"], "owner-engineer", "amber", 1480,
 				[]entity.WorkflowField{field("pr", "prField"), field("review_comments", "reviewCommentsField")},
@@ -176,7 +184,15 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"approved_design_snapshot_path": "$output.approved_design_snapshot_path",
 			}, false),
 			edge("e-design-rework", "design_review", "requirement_draft", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "previous_draft": "$input.requirement_draft"}, false),
-			edge("e-impl-self-review", "implementation", "self_review", "", nil, nil, true),
+			edge("e-impl-self-review", "implementation", "self_review", "", nil, map[string]string{
+				"pr":                            "$output.pr",
+				"approved_requirement":          "$input.approved_requirement",
+				"approved_design_source":        "$input.approved_design_source",
+				"approved_design_project_id":    "$input.approved_design_project_id",
+				"approved_design_preview_url":   "$input.approved_design_preview_url",
+				"approved_design_html":          "$input.approved_design_html",
+				"approved_design_snapshot_path": "$input.approved_design_snapshot_path",
+			}, true),
 			edge("e-self-review-pass", "self_review", "code_review", "", nil, map[string]string{"pr": "$input.pr", "review_comments": "$output.review_comments"}, true),
 			// Rework is an explicit verdict, never inferred: the review report
 			// itself is always non-empty, so a neq-"" condition here would bounce
