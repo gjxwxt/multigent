@@ -359,9 +359,12 @@ export default function ProjectTaskFollowPage() {
       .find((name) => !(name === 'decision' && decisionOptional) && !String(outputs[name] ?? '').trim())
     if (missingField) {
       setMissingReviewField(missingField)
-      setReviewErr(`${t('forms.fillRequired')} ${missingField}`)
+      const msg = `${t('forms.fillRequired')} ${missingField}`
+      setReviewErr(msg)
       setReviewBusy(null)
-      return
+      // Throw so awaited callers (design gate submit) keep their modal open and
+      // can surface the block — resolving silently made the gate look approved.
+      throw new Error(msg)
     }
     try {
       await apiPost(`/api/v1/projects/${encodeURIComponent(displayTask.project)}/tasks/${encodeURIComponent(displayTask.id)}/workflow/review`, {
@@ -588,7 +591,9 @@ export default function ProjectTaskFollowPage() {
                 if (missingReviewField === 'comments' && value.trim()) setMissingReviewField(null)
                 setReviewComments(value)
               }}
-              onSubmitReview={(decision) => void submitWorkflowReview(decision)}
+              // reviewErr/missingReviewField are rendered by the panel itself;
+              // swallow the rejection so it doesn't surface as unhandled.
+              onSubmitReview={(decision) => submitWorkflowReview(decision).catch(() => {})}
             />
           ))}
 

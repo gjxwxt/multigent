@@ -1,4 +1,5 @@
 import { useCallback, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { apiPost } from '../../lib/api'
 import { DesignSourceChoiceModal } from './DesignSourceChoiceModal'
 import { DesignReviewModal } from './DesignReviewModal'
@@ -39,6 +40,7 @@ export function DesignGateFlow({
   const [error, setError] = useState<string | null>(null)
   const [session, setSession] = useState<StartResponse | null>(null)
   const [conversationId, setConversationId] = useState<string | undefined>(undefined)
+  const { t } = useTranslation()
 
   const designBase = `/api/v1/projects/${encodeURIComponent(project)}/tasks/${encodeURIComponent(taskID)}/design`
 
@@ -60,7 +62,7 @@ export function DesignGateFlow({
     }
   }, [designBase])
 
-  async function confirmExisting(odProjectId: string) {
+  async function confirmExisting(odProjectId: string, projectName?: string) {
     setBusyLocal(true)
     setError(null)
     try {
@@ -68,6 +70,16 @@ export function DesignGateFlow({
         {
           approved_design_source: 'existing',
           approved_design_project_id: odProjectId,
+          // The gate modal has no comments field, but the step marks comments
+          // required — without a default here the submit is blocked client-side
+          // and never reaches the server (silent no-op incident 2026-09-02).
+          // Flat dotted JSON keys are not resolved by i18next's nested-key
+          // lookup, so every t() here carries a defaultValue like the rest
+          // of the design modals.
+          comments: t('designGate.autoComments.existing', {
+            defaultValue: `选择已有设计「${projectName || odProjectId}」确认，进入实现编码。`,
+            name: projectName || odProjectId,
+          }),
         },
         'approve',
       )
@@ -86,6 +98,9 @@ export function DesignGateFlow({
         {
           approved_design_source: 'generated',
           approved_design_project_id: session.projectId,
+          comments: t('designGate.autoComments.generated', {
+            defaultValue: '确认 OD 生成的设计，进入实现编码。',
+          }),
         },
         'approve',
       )
@@ -99,7 +114,12 @@ export function DesignGateFlow({
     setBusyLocal(true)
     setError(null)
     try {
-      await submitReview({}, 'request_changes')
+      await submitReview(
+        { comments: t('designGate.autoComments.rework', {
+          defaultValue: '设计不满足预期，打回需求阶段重新梳理。',
+        }) },
+        'request_changes',
+      )
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -115,7 +135,7 @@ export function DesignGateFlow({
       busy={busy || busyLocal}
       error={error}
       onClose={onClose}
-      onConfirmExisting={(id) => void confirmExisting(id)}
+      onConfirmExisting={(id, name) => void confirmExisting(id, name)}
       onStartGenerate={() => void startGenerate()}
     />
   ) : (

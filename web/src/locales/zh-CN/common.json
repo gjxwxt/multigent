@@ -795,7 +795,10 @@
       "status.idle": "未开始",
       "chat.placeholder": "描述要修改的地方，由平台转发给设计助手…",
       "chat.send": "发送",
-      "chat.reload": "重新加载设计画布"
+      "chat.reload": "重新加载设计画布",
+      "autoComments.existing": "选择已有设计「{{name}}」确认，进入实现编码。",
+      "autoComments.generated": "确认 OD 生成的设计，进入实现编码。",
+      "autoComments.rework": "设计不满足预期，打回需求阶段重新梳理。"
     }
   },
   "projectSettings": {

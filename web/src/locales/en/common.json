@@ -795,7 +795,10 @@
       "status.idle": "Not started",
       "chat.placeholder": "Describe the change to make; the platform forwards it to the design assistant…",
       "chat.send": "Send",
-      "chat.reload": "Reload the design canvas"
+      "chat.reload": "Reload the design canvas",
+      "autoComments.existing": "Confirmed existing design \"{{name}}\"; proceed to implementation.",
+      "autoComments.generated": "Confirmed the OD-generated design; proceed to implementation.",
+      "autoComments.rework": "Design does not meet expectations; returned to the requirement stage."
     }
   },
   "projectSettings": {
