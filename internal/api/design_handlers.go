@@ -356,7 +356,14 @@ func (s *Server) handleDesignLaunch(w http.ResponseWriter, r *http.Request) {
 	if !s.designRequestAuthorized(w, r, project, taskID) {
 		return
 	}
-	if task.DesignProjectID == "" {
+	projID := task.DesignProjectID
+	if projID == "" {
+		// Existing-design path: the gate froze approved_design_project_id into
+		// the workflow outputs without persisting DesignProjectID — the launch
+		// link the follow panel shows must still resolve.
+		projID = s.approvedDesignProjectIDFromRun(project, taskID)
+	}
+	if projID == "" {
 		s.jsonError(w, http.StatusConflict, "no design project for this task; start one first")
 		return
 	}
@@ -365,7 +372,7 @@ func (s *Server) handleDesignLaunch(w http.ResponseWriter, r *http.Request) {
 		s.writeDesignUpstreamError(w, err)
 		return
 	}
-	target := cfg.BaseURL + "/projects/" + task.DesignProjectID
+	target := cfg.BaseURL + "/projects/" + projID
 	w.Header().Set("Cache-Control", "no-store")
 	http.Redirect(w, r, target, http.StatusFound)
 }
