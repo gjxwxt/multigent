@@ -223,6 +223,10 @@ export function AppShell() {
   const [workspaceScope, setWorkspaceScope] = useState('default')
   const [workspaceName, setWorkspaceName] = useState('')
   const [tourOpen, setTourOpen] = useState(false)
+  // 页脚（版本号 / 更新提示 / 计费 / 外部链接）暂时下线：目前用不到。
+  // 显式 boolean 开关而非 JSX 注释——保持变量引用以免 noUnusedLocals 报错，
+  // 恢复时改回 true 即可。
+  const footerVisible = false
   const autoCollapsedSidebar = useRef(false)
 
   useEffect(() => {
@@ -331,6 +335,7 @@ export function AppShell() {
             <main className="flex-1 overflow-y-auto overflow-x-hidden">
               <Outlet />
             </main>
+            {footerVisible && (
             <footer className="flex h-10 w-full shrink-0 items-center justify-between border-t border-neutral-200/60 px-6 dark:border-zinc-700/50">
               <div className="flex items-center gap-3">
                 <span className="text-xs font-medium text-neutral-400 dark:text-zinc-500">
@@ -377,6 +382,7 @@ export function AppShell() {
                 )}
               </div>
             </footer>
+            )}
           </div>
           <CommandPalette open={searchOpen} onOpenChange={setSearchOpen} />
           <ProductTour
