@@ -2856,6 +2856,24 @@ func materializeGitConfig(cfg runtimeConfigFileRef, secretValues map[string]stri
 	return map[string]string{"GIT_CONFIG_GLOBAL": cfg.MaterializedPath}, nil
 }
 
+// dockerHostAlias returns the equivalent loopback alias for a Docker-oriented
+// host name, or "" when the host has no other spelling. host.docker.internal
+// resolves via --add-host on stock Docker but OrbStack containers reach the
+// host through host.orb.internal, so both spellings must match the helper.
+func dockerHostAlias(host string) string {
+	h, _, err := net.SplitHostPort(host)
+	if err != nil {
+		h = host
+	}
+	switch h {
+	case "host.docker.internal":
+		return strings.Replace(host, "host.docker.internal", "host.orb.internal", 1)
+	case "host.orb.internal":
+		return strings.Replace(host, "host.orb.internal", "host.docker.internal", 1)
+	}
+	return ""
+}
+
 func materializeGitLabConfig(cfg runtimeConfigFileRef, secretValues map[string]string) (map[string]string, error) {
 	if cfg.MaterializedPath == "" || !strings.HasSuffix(strings.TrimSpace(cfg.Path), ".gitconfig") {
 		return nil, nil
@@ -2873,15 +2891,28 @@ func materializeGitLabConfig(cfg runtimeConfigFileRef, secretValues map[string]s
 	credentialHost := parsed.Host
 	credentialHost = strings.Replace(credentialHost, "localhost", "host.docker.internal", 1)
 	credentialHost = strings.Replace(credentialHost, "127.0.0.1", "host.docker.internal", 1)
+	// The credential host itself may still be unreachable from inside the
+	// sandbox (OrbStack answers on host.orb.internal, not host.docker.internal),
+	// so agents sometimes normalise the remote to a different alias before
+	// pushing. Accept every equivalent alias in the helper instead of making
+	// the agent guess which one carries credentials.
+	helperHosts := []string{credentialHost}
+	if alias := dockerHostAlias(credentialHost); alias != "" && alias != credentialHost {
+		helperHosts = append(helperHosts, alias)
+	}
 
 	helperPath := cfg.MaterializedPath + ".credential-helper"
+	cases := ""
+	for _, host := range helperHosts {
+		cases += "  *" + shellQuote("host="+host) + "*)\n" +
+			"    printf '%s\\n' 'username=oauth2' " + shellQuote("password="+token) + "\n" +
+			"    ;;\n"
+	}
 	helperBody := "#!/bin/sh\n" +
 		"if [ \"${1:-}\" != \"get\" ]; then exit 0; fi\n" +
 		"input=$(cat)\n" +
 		"case \"$input\" in\n" +
-		"  *" + shellQuote("host="+credentialHost) + "*)\n" +
-		"    printf '%s\\n' 'username=oauth2' " + shellQuote("password="+token) + "\n" +
-		"    ;;\n" +
+		cases +
 		"esac\n"
 	if err := os.WriteFile(helperPath, []byte(helperBody), 0o700); err != nil {
 		return nil, err
@@ -2893,8 +2924,7 @@ func materializeGitLabConfig(cfg runtimeConfigFileRef, secretValues map[string]s
 	return map[string]string{"GIT_CONFIG_GLOBAL": cfg.MaterializedPath}, nil
 }
 
-func materializeNPMRegistryConfig(cfg runtimeConfigFileRef, secretValues map[string]string) (map[string]string, error) {
-	if cfg.MaterializedPath == "" || !strings.HasSuffix(strings.TrimSpace(cfg.Path), ".npmrc") {
+func materializeNPMRegistryConfig(cfg runtimeConfigFileRef, secretValues map[string]string) (map[string]string, error) {	if cfg.MaterializedPath == "" || !strings.HasSuffix(strings.TrimSpace(cfg.Path), ".npmrc") {
 		return nil, nil
 	}
 	registryURL := firstNonEmpty(secretValues["registryUrl"], "https://registry.npmjs.org/")

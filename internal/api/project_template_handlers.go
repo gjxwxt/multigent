@@ -154,6 +154,13 @@ func (s *Server) handleInitializeProjectTemplate(w http.ResponseWriter, r *http.
 	if repo == "" {
 		repo = filepath.Join(s.st.ProjectDir(name), "workspace")
 	}
+	// A remote URL must survive untouched: filepath.Clean would collapse
+	// "http://" into "http:/" and later break the GitLab remote binding
+	// (ci_ready then reports the project as not bound and skips pipeline
+	// evidence). Only real filesystem paths get path-normalised.
+	if !strings.Contains(repo, "://") {
+		repo = filepath.Clean(repo)
+	}
 	templateID := strings.TrimSpace(body.TemplateID)
 	if templateID == "" {
 		templateID = projecttemplate.ReactGoFullstackID
@@ -176,7 +183,11 @@ func (s *Server) handleInitializeProjectTemplate(w http.ResponseWriter, r *http.
 			return
 		}
 	}
-	project.Repo = filepath.Clean(repo)
+	if strings.Contains(repo, "://") {
+		project.Repo = repo
+	} else {
+		project.Repo = filepath.Clean(repo)
+	}
 	project.TemplateID = report.ID
 	project.TemplateVersion = report.Version
 	project.TemplateDigest = report.Digest

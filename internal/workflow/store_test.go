@@ -203,11 +203,11 @@ func TestSeededSoftwareDeliveryHasPRReviewLoop(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("load initialization workflow: ok=%v err=%v", ok, err)
 	}
-	if len(initDef.Steps) != 6 || initDef.StartStepID != "prepare" {
+	if len(initDef.Steps) != 3 || initDef.StartStepID != "ready" {
 		t.Fatalf("unexpected initialization workflow: %#v", initDef)
 	}
-	if initDef.Version < 3 {
-		t.Fatalf("expected initialization definition version >= 3, got %d", initDef.Version)
+	if initDef.Version < 4 {
+		t.Fatalf("expected initialization definition version >= 4, got %d", initDef.Version)
 	}
 	hasCIReady := false
 	for _, step := range initDef.Steps {
@@ -254,8 +254,8 @@ func TestEnsureProjectInitializationUpgradesStrayVersionBump(t *testing.T) {
 			hasCIReady = true
 		}
 	}
-	if def.Version < 3 || !hasCIReady {
-		t.Fatalf("expected upgrade to version >= 3 with ci_ready, got version %d steps %#v", def.Version, def.Steps)
+	if def.Version < 4 || !hasCIReady {
+		t.Fatalf("expected upgrade to version >= 4 with ci_ready, got version %d steps %#v", def.Version, def.Steps)
 	}
 }
 

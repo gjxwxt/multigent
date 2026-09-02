@@ -5,3 +5,12 @@ server/webui/dist/*
 !server/webui/dist/placeholder.txt
 .env
 *.log
+
+# Platform runtime state: session keys, credential helpers, run logs.
+# Never commit these — the credential helper alone carries a live PAT.
+.multigent/
+# Compiled server binary produced by `go build` / `make build`.
+server/app
+server/multigent-fullstack
+# Nested node_modules copies are build residue.
+**/node_modules/

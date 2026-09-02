@@ -268,8 +268,15 @@ const ProjectInitializationWorkflowID = "project-initialization-v1"
 // bumped, the stored copy is upgraded in place (the ci_ready gate shipped at
 // version 3; a stray UI PUT had already bumped a stored copy to 2 without the
 // gate, so the constant must stay strictly above any version seen in the wild).
+//
+// Version 4 collapses the six per-command agent nodes of v3 into three:
+// ready (workspace+deps+verify+health as one bounded command sequence),
+// sync (git init/commit/push — kept separate because credential hygiene and
+// remote reachability genuinely need judgment), and the ci_ready gate. The
+// v3 shape spent one full container lifecycle per `make` target; the model
+// was acting as an expensive shell with no decisions to make in between.
 func (s *Store) EnsureProjectInitializationDefinition() error {
-	const definitionVersion = 3
+	const definitionVersion = 4
 	if existing, ok, err := s.Definition(ProjectInitializationWorkflowID); err != nil {
 		return err
 	} else if ok && existing.Version >= definitionVersion {
@@ -290,21 +297,15 @@ func (s *Store) EnsureProjectInitializationDefinition() error {
 	def := entity.WorkflowDefinition{
 		ID:          ProjectInitializationWorkflowID,
 		Name:        "项目初始化",
-		Description: "确定性的项目初始化：准备工作区、安装依赖、验证构建与健康检查，提交并同步远端仓库，最后通过 CI/CD 就绪闸门。",
-		Version:     definitionVersion, Scope: "workspace", StartStepID: "prepare",
+		Description: "确定性的项目初始化：一个有界的就绪命令序列（工作区、依赖、构建验证、健康检查），提交并同步远端仓库，最后通过 CI/CD 就绪闸门。",
+		Version:     definitionVersion, Scope: "workspace", StartStepID: "ready",
 		Steps: []entity.WorkflowStep{
-			step("prepare", "准备工作区", "严格按初始化请求执行。对远端已有仓库，克隆或拉取请求的分支到项目工作区；对系统物化的模板，核对预期文件且绝不覆盖用户文件。记录最终解析出的仓库与版本。", 80),
-			step("dependencies", "安装依赖", "当仓库存在确定性依赖准备命令时执行（标准全栈模板：`timeout 180s make install`；否则依据包管理清单）。使用有界网络超时，保留缓存，并报告确切的命令与结果。", 360),
-			step("verify", "构建与验证", "运行仓库的确定性验证命令（标准全栈模板：`make verify`）。确认前端构建、后端测试与声明的运行时契约全部通过，不得凭部分成功的命令宣称就绪。", 640),
-			step("health", "运行时健康检查", "按需启动声明的后端/前端入口，验证配置的健康检查端点，确认预览契约能经前端路径访问到后端；检查完成后停止所有临时启动的进程。", 920),
-			step("sync", "提交并同步", "创建或更新初始 Git 提交，存在远端时推送配置的默认分支。严禁把凭据写进远端 URL；同步失败时保留本地提交并上报可重试错误。", 1200),
-			step("ci_ready", "CI/CD 就绪", "运行 `mga ci ready --wait 300` 执行确定性 CI/CD 闸门：平台会自动补齐缺失的基线文件（.gitlab-ci.yml、deploy/），随后逐项校验基线文件、job 契约、runner 标签、tag 触发约束、npm 镜像源、apk 缓存、脚本引用与健康路径。绑定了 GitLab 远端时以返回的流水线证据为准。任何 check 为 fail 时按 detail 修复后重跑，禁止带 fail 声明完成；不要手工改写基线文件内容。", 1480),
+			step("ready", "确定性就绪", "工作区已由平台物化（对远端已有仓库则核对/拉取请求分支，绝不覆盖用户文件）。按序执行且每条都设超时上界：(1) 标准全栈模板 `timeout 180s make install`（否则依据包管理清单）；(2) `timeout 300s make verify`，确认前端构建、后端测试与声明的运行时契约全部通过，不得凭部分成功宣称就绪；(3) 按 .multigent/runtime.json 契约有界启动后端/前端入口，curl 验证健康检查端点及前端到后端的代理连通后，停止全部临时进程并确认无残留。四项全过才可 done；任一失败即如实报告失败与诊断，不进入下一步。", 80),
+			step("sync", "提交并同步", "创建或更新初始 Git 提交，存在远端时推送配置的默认分支。严禁把 .multigent/ 运行时产物（含凭据 helper、会话密钥）、编译二进制或任何密钥写进提交——先审计 `git ls-files` 再提交。严禁把凭据写进远端 URL；推送目标主机不可达时，优先使用凭据 helper 所针对的等价主机别名（如 host.orb.internal / host.docker.internal），不要凭空猜测新域名。同步失败时保留本地提交并上报可重试错误。", 440),
+			step("ci_ready", "CI/CD 就绪", "运行 `mga ci ready --wait 300` 执行确定性 CI/CD 闸门：平台会自动补齐缺失的基线文件（.gitlab-ci.yml、deploy/），随后逐项校验基线文件、job 契约、runner 标签、tag 触发约束、npm 镜像源、apk 缓存、脚本引用与健康路径。绑定了 GitLab 远端时以返回的流水线证据为准。任何 check 为 fail 时按 detail 修复后重跑，禁止带 fail 声明完成；不要手工改写基线文件内容。", 800),
 		},
 		Edges: []entity.WorkflowEdge{
-			edge("e-prepare-dependencies", "prepare", "dependencies", "", nil, nil, true),
-			edge("e-dependencies-verify", "dependencies", "verify", "", nil, nil, true),
-			edge("e-verify-health", "verify", "health", "", nil, nil, true),
-			edge("e-health-sync", "health", "sync", "", nil, nil, true),
+			edge("e-ready-sync", "ready", "sync", "", nil, nil, true),
 			edge("e-sync-ci-ready", "sync", "ci_ready", "", nil, nil, true),
 		},
 		CreatedAt: now, UpdatedAt: now,

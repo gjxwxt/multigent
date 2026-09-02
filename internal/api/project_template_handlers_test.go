@@ -51,6 +51,29 @@ func TestInitializeProjectTemplateMaterializesAndRecordsMetadata(t *testing.T) {
 	}
 }
 
+func TestInitializeProjectTemplateKeepsRemoteURLIntact(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	seedAgentWorkerForTest(t, s, workspaceID, "sample", "pm")
+	remoteURL := "http://host.orb.internal:8083/root/sample.git"
+	req := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/initialize-template", "admin", map[string]string{
+		"repo":       remoteURL,
+		"templateId": projecttemplate.ReactGoFullstackID,
+	})
+	req.SetPathValue("name", "sample")
+	rec := httptest.NewRecorder()
+	s.handleInitializeProjectTemplate(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	project, err := s.st.Project("sample")
+	if err != nil {
+		t.Fatalf("read project: %v", err)
+	}
+	if project.Repo != remoteURL {
+		t.Fatalf("remote URL mangled by path cleaning: %q", project.Repo)
+	}
+}
+
 func TestInitializeProjectTemplateDoesNotOverwriteExistingRepository(t *testing.T) {
 	s, _ := newConnectionGrantPolicyServer(t)
 	repo := filepath.Join(t.TempDir(), "existing-repo")
