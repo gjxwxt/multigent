@@ -15,9 +15,9 @@ export type DesignProjectOption = {
 
 /**
  * Stage-one modal of the design gate: pick the design source before anything
- * is generated (docs §5.1/§8.1). "Next" is always enabled; its label follows
- * the selection. Choosing an existing design fetches the OD project list and
- * swaps into a pick-one view inside the same small modal.
+ * is generated (docs §5.1/§8.1). Clicking "existing" jumps straight into the
+ * OD project list (one step — a gray dead-end button here confused users);
+ * the list view's back button only returns to the source chooser.
  */
 export function DesignSourceChoiceModal({
   project,
@@ -63,11 +63,17 @@ export function DesignSourceChoiceModal({
       .finally(() => setListBusy(false))
   }, [pickingExisting, project, taskID])
 
+  function handleSelect(value: DesignSource) {
+    setSelected(value)
+    // One-step entry: choosing "existing" is the intent to browse the list.
+    if (value === 'existing') setPickingExisting(true)
+  }
+
   const confirmLabel = pickingExisting
     ? t('designGate.confirm', { defaultValue: '确认并流转' })
     : selected === 'generate'
       ? t('designGate.start', { defaultValue: '开始设计' })
-      : t('designGate.chooseFirst', { defaultValue: '请先选择来源' })
+      : t('designGate.chooseProject', { defaultValue: '下一步：选择项目' })
 
   function handleNext() {
     if (busy) return
@@ -118,7 +124,7 @@ export function DesignSourceChoiceModal({
                 title={t('designGate.choice.existing', { defaultValue: '选择已有设计' })}
                 description={t('designGate.choice.existingDesc', { defaultValue: '从已有项目列表中选择，设计已在 OpenDesign 完成。' })}
                 selected={selected === 'existing'}
-                onSelect={setSelected}
+                onSelect={handleSelect}
               />
               <DesignChoiceCard
                 value="generate"
@@ -126,7 +132,7 @@ export function DesignSourceChoiceModal({
                 description={t('designGate.choice.generateDesc', { defaultValue: '由平台调用 OD 基于上游需求文档自动设计出首版，可在弹窗内对话修改与版本恢复。' })}
                 recommended
                 selected={selected === 'generate'}
-                onSelect={setSelected}
+                onSelect={handleSelect}
               />
             </div>
             {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
@@ -139,7 +145,7 @@ export function DesignSourceChoiceModal({
               className="inline-flex items-center gap-1 text-xs font-medium text-neutral-500 hover:text-sky-600 dark:text-zinc-400 dark:hover:text-sky-400"
             >
               <ArrowLeft className="size-3.5" />
-              {t('designGate.back', { defaultValue: '打回需求' })}
+              {t('designGate.backToSource', { defaultValue: '返回' })}
             </button>
             {listBusy ? (
               <p className="flex items-center gap-2 py-6 text-sm text-neutral-500 dark:text-zinc-400">
