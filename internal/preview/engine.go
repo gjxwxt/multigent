@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -68,6 +69,13 @@ func (e *Engine) reapLoop() {
 	defer ticker.Stop()
 	for range ticker.C {
 		e.reapExpired()
+		// Reconcile here too, not only at startup: it re-adopts labeled
+		// containers the in-memory map lost (server restarts, orphaned
+		// containers) and removes expired ones docker-side. This is what
+		// keeps an orphaned container from living for days unseen.
+		if err := e.Reconcile(context.Background()); err != nil {
+			log.Printf("[preview-reconcile] %v", err)
+		}
 	}
 }
 
@@ -412,33 +420,33 @@ func previewWorktreeMount(worktreeDir string, readOnly bool) string {
 // after a service restart. Containers are only managed when they carry the
 // Multigent preview label; unrelated Docker workloads are untouched.
 func (e *Engine) Reconcile(ctx context.Context) error {
-	idsOut, err := exec.CommandContext(ctx, "docker", "ps", "-aq", "--filter", "label=com.multigent.preview=true").Output()
+	// One docker call for the full picture: ID, state, and labels. The
+	// reaper runs this every minute, so a per-container inspect loop would
+	// multiply docker invocations across every preview container.
+	format := `{{.ID}}\t{{.State.Status}}\t{{json .Config.Labels}}`
+	out, err := exec.CommandContext(ctx, "docker", "ps", "-a", "--format", format,
+		"--filter", "label=com.multigent.preview=true").Output()
 	if err != nil {
 		return fmt.Errorf("list preview containers: %w", err)
 	}
 
 	now := time.Now().UTC()
-	for _, rawID := range strings.Split(string(idsOut), "\n") {
-		id := strings.TrimSpace(rawID)
-		if id == "" {
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
-		format := `{{.State.Status}}\t{{json .Config.Labels}}`
-		metaOut, err := exec.CommandContext(ctx, "docker", "inspect", "--format", format, id).Output()
-		if err != nil {
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) != 3 {
 			continue
 		}
-		line := strings.TrimSpace(string(metaOut))
-		parts := strings.SplitN(line, "\t", 2)
-		if len(parts) != 2 {
-			continue
-		}
+		id, state := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
 		var labels map[string]string
-		if err := json.Unmarshal([]byte(parts[1]), &labels); err != nil {
+		if err := json.Unmarshal([]byte(parts[2]), &labels); err != nil {
 			continue
 		}
 		expiresAt, err := time.Parse(time.RFC3339, strings.TrimSpace(labels["com.multigent.preview.expires_at"]))
-		if err != nil || !now.Before(expiresAt) || strings.TrimSpace(parts[0]) != "running" {
+		if err != nil || !now.Before(expiresAt) || state != "running" {
 			_ = exec.CommandContext(ctx, "docker", "rm", "-f", id).Run()
 			continue
 		}
@@ -479,6 +487,11 @@ func (e *Engine) Reconcile(ctx context.Context) error {
 }
 
 // StopEphemeralPreview stops and removes the preview container for a task.
+// It is idempotent: a missing container counts as success. A container that
+// survives rm (after one retry) is a hard error — callers must not proceed
+// with worktree cleanup while a bind-mounted preview container still exists.
+// The ground-truth "gone" check uses the task label, so name-based and
+// ID-based removal paths agree on what "removed" means.
 func (e *Engine) StopEphemeralPreview(taskID string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -486,12 +499,44 @@ func (e *Engine) StopEphemeralPreview(taskID string) error {
 	taskID = strings.TrimSpace(taskID)
 	containerName := fmt.Sprintf("multigent-preview-%s", sanitizeContainerName(taskID))
 
-	// Docker rm -f
-	cmd := exec.Command("docker", "rm", "-f", containerName)
-	_ = cmd.Run()
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		cmd := exec.Command("docker", "rm", "-f", containerName)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			lastErr = nil
+			break
+		}
+		if strings.Contains(strings.ToLower(string(out)), "no such container") {
+			lastErr = nil
+			break
+		}
+		lastErr = fmt.Errorf("docker rm %s: %w (%s)", containerName, err, strings.TrimSpace(string(out)))
+	}
+	if lastErr == nil {
+		delete(e.instances, taskID)
+		return nil
+	}
+	// Distinguish "rm failed but container is actually gone" from a real
+	// failure so retries cannot strand phantom instances in the map.
+	if exists, checkErr := containerExistsByTaskLabel(taskID); checkErr == nil && !exists {
+		delete(e.instances, taskID)
+		return nil
+	} else if checkErr != nil {
+		return fmt.Errorf("stopping preview %s: %v (container existence check failed: %w)", containerName, lastErr, checkErr)
+	}
+	delete(e.instances, taskID) // container exists but rm failed; keep map in sync with reality
+	return lastErr
+}
 
-	delete(e.instances, taskID)
-	return nil
+// containerExistsByTaskLabel reports whether any container carries the
+// preview task label, regardless of its lifecycle state.
+func containerExistsByTaskLabel(taskID string) (bool, error) {
+	out, err := exec.Command("docker", "ps", "-aq", "--filter", "label=com.multigent.preview.task="+taskID).Output()
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(string(out)) != "", nil
 }
 
 func sanitizeContainerName(s string) string {

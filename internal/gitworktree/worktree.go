@@ -264,6 +264,14 @@ func gitRevParse(projectRoot, ref string) (string, error) {
 // environment-injected credentials; private-remote fetch failures fall back
 // to the last locally known remote tip (see resolveBaseCommit).
 func gitNetworkEnv() []string {
+	return PushNetworkEnv()
+}
+
+// PushNetworkEnv is the exported form of gitNetworkEnv for callers outside
+// this package that run host-side git push (e.g. checkpoint pushes after
+// worktree cleanup). Credentials still come from the environment only —
+// never from repo config or remote URLs.
+func PushNetworkEnv() []string {
 	return append(os.Environ(),
 		"GIT_CONFIG_COUNT=1",
 		"GIT_CONFIG_KEY_0=credential.helper",
@@ -433,12 +441,22 @@ func (m *Manager) CleanupWorktree(projectRoot, taskID string) error {
 	}
 
 	// Run git worktree remove --force
+	var removeErr error
 	cmd := exec.Command("git", "worktree", "remove", "--force", targetDir)
 	cmd.Dir = projectRoot
-	_ = cmd.Run()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		removeErr = fmt.Errorf("git worktree remove: %w (%s)", err, redactGitOutput(strings.TrimSpace(string(out))))
+		log.Printf("[worktree-cleanup] %v", removeErr)
+	}
 
-	// Ensure directory is completely removed
-	_ = os.RemoveAll(targetDir)
+	// Ensure directory is completely removed; only fail when it survives both
+	// git remove and the raw delete.
+	if err := os.RemoveAll(targetDir); err != nil {
+		if removeErr != nil {
+			return fmt.Errorf("%v; rm %s: %w", removeErr, targetDir, err)
+		}
+		return fmt.Errorf("rm %s: %w", targetDir, err)
+	}
 
 	// Run git worktree prune to clean up stale metadata
 	cmdPrune := exec.Command("git", "worktree", "prune")
@@ -626,6 +644,63 @@ func (m *Manager) GetCommitHash(projectRoot, ref string) string {
 
 // CaptureSnapshot returns the full HEAD SHA when a worktree is clean. A clean
 // worktree is required so the SHA is a truthful immutable task snapshot.
+// CommitWorktreeState folds uncommitted working-tree changes into a
+// checkpoint commit on the checked-out branch. It is the reusable core of the
+// review auto-commit flow and the manual worktree cleanup: unlike
+// CaptureSnapshot it tolerates dirt — a clean tree is a no-op. The status
+// re-scan happens inside the project lock, so the dirty check and the commit
+// are atomic against other lock-holding git operations. Pushing is left to
+// the caller (credentials live at the push boundary).
+func (m *Manager) CommitWorktreeState(worktreeDir, message string) (sha string, wasDirty bool, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	unlock, err := acquireProjectLock(projectRootForWorktree(worktreeDir))
+	if err != nil {
+		return "", false, err
+	}
+	defer unlock()
+
+	return commitWorktreeStateLocked(worktreeDir, message)
+}
+
+// commitWorktreeStateLocked is the lock-free body of CommitWorktreeState;
+// callers must already hold m.mu and the project lock.
+func commitWorktreeStateLocked(worktreeDir, message string) (string, bool, error) {
+	worktreeDir = strings.TrimSpace(worktreeDir)
+	if worktreeDir == "" {
+		return "", false, fmt.Errorf("worktree directory is required")
+	}
+	status := exec.Command("git", "status", "--porcelain")
+	status.Dir = worktreeDir
+	out, err := status.Output()
+	if err != nil {
+		return "", false, fmt.Errorf("check worktree status: %w", err)
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		sha, err := gitRevParse(worktreeDir, "HEAD")
+		if err != nil {
+			return "", false, fmt.Errorf("read worktree HEAD: %w", err)
+		}
+		return sha, false, nil
+	}
+
+	add := exec.Command("git", "add", "-A")
+	add.Dir = worktreeDir
+	if addOut, err := add.CombinedOutput(); err != nil {
+		return "", true, fmt.Errorf("git add: %w (%s)", err, redactGitOutput(strings.TrimSpace(string(addOut))))
+	}
+	commit := exec.Command("git", "commit", "-m", message)
+	commit.Dir = worktreeDir
+	if commitOut, err := commit.CombinedOutput(); err != nil {
+		return "", true, fmt.Errorf("git commit: %w (%s)", err, redactGitOutput(strings.TrimSpace(string(commitOut))))
+	}
+	sha, err := gitRevParse(worktreeDir, "HEAD")
+	if err != nil {
+		return "", true, fmt.Errorf("read committed HEAD: %w", err)
+	}
+	return sha, true, nil
+}
+
 func (m *Manager) CaptureSnapshot(worktreeDir string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -779,6 +854,13 @@ func redactGitOutput(value string) string {
 	// Git helper diagnostics can contain a remote URL. Do not surface raw
 	// command output until a structured redaction layer exists.
 	return "git command returned diagnostics (details redacted)"
+}
+
+// RedactGitOutput is the exported form of redactGitOutput for callers outside
+// this package that log git command output (credentials must never reach
+// logs, task comments, or API responses).
+func RedactGitOutput(value string) string {
+	return redactGitOutput(value)
 }
 
 // MergeBranchLocally merges a feature branch into a target branch (e.g. main) locally with safety checks.

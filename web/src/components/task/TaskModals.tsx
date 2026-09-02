@@ -44,6 +44,8 @@ export type TaskRow = {
   dueDate?: string
   estimateDuration?: string
   hasWorkflow?: boolean
+  hasWorktree?: boolean
+  hasPreview?: boolean
   baseBranch?: string
   baseCommit?: string
   branchName?: string

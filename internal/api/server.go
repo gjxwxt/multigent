@@ -109,7 +109,7 @@ type Server struct {
 	modelAuthSessions      map[string]*modelAuthSession
 	telemetryUsageMu       sync.Mutex
 	telemetryUsageCache    map[string]telemetryUsageCacheEntry
-	previewEngine          *preview.Engine
+	previewEngine          previewEngineAPI
 	worktreeMgr            *gitworktree.Manager
 	previewMu              sync.Mutex
 	previewSessions        map[string]*previewChatSession
@@ -492,6 +492,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/projects/{name}/branches", s.handleListProjectBranches)
 	mux.HandleFunc("POST /api/v1/projects/{name}/branches/refresh", s.handlePostProjectBranchesRefresh)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview", s.handleGetTaskPreview)
+	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/resources", s.handleGetTaskResources)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/resources/worktree/cleanup", s.handlePostTaskWorktreeCleanup)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/start", s.handlePostTaskPreviewStart)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/stop", s.handlePostTaskPreviewStop)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/remote-sync/retry", s.handlePostTaskRemoteSyncRetry)
@@ -1383,6 +1385,8 @@ type taskRow struct {
 	NotBefore          string    `json:"notBefore,omitempty"`
 	EstimateDuration   string    `json:"estimateDuration,omitempty"`
 	HasWorkflow        bool      `json:"hasWorkflow,omitempty"`
+	HasWorktree        bool      `json:"hasWorktree,omitempty"`
+	HasPreview         bool      `json:"hasPreview,omitempty"`
 	ForkSessionID      string    `json:"forkSessionId,omitempty"`
 	BaseBranch         string    `json:"baseBranch,omitempty"`
 	BaseCommit         string    `json:"baseCommit,omitempty"`
@@ -1476,6 +1480,8 @@ func (s *Server) taskToRow(t *entity.Task, project, agent string, archived bool)
 func (s *Server) taskToRowWithWorkflow(workspaceID string, t *entity.Task, project, agent string, archived bool) taskRow {
 	row := s.taskToRow(t, project, agent, archived)
 	row.HasWorkflow = s.runtimeTaskHasWorkflow(workspaceID, project, t.ID)
+	row.HasPreview = s.taskHasPreview(t.ID)
+	row.HasWorktree = s.taskHasWorktree(t, project)
 	if view, ok := s.activeWorkflowTaskView(workspaceID, project, t.ID, t.Status); ok {
 		if view.Agent != "" {
 			row.Agent = view.Agent

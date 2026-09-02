@@ -12,6 +12,7 @@ import {
   taskIdentityLabel,
 } from './TaskModals'
 import { TaskLabel } from './TaskLabel'
+import { TaskResourcesPopover } from './TaskResourcesPopover'
 
 type Props = {
   tasks: TaskRow[]
@@ -203,6 +204,9 @@ export function TaskTable({
                       >
                         <Pencil className="size-3.5" strokeWidth={1.8} />
                       </button>
+                    )}
+                    {(row.hasWorktree || row.hasPreview) && (
+                      <TaskResourcesPopover taskId={row.id} project={row.project} hasWorktree={row.hasWorktree} hasPreview={row.hasPreview} />
                     )}
                     {canMutate && !terminal && !row.archived && (
                       <button
