@@ -35,7 +35,12 @@ const (
 // Proxy whitelist: OD SPA surface only. Admin/auth surfaces of the OD
 // daemon stay unreachable through the proxy.
 var (
-	designAllowedPrefixes = []string{"/projects/", "/api/projects/", "/api/runs", "/api/health", "/assets/", "/_next/", "/design-systems/", "/api/design-templates", "/api/templates", "/api/app-config", "/api/version", "/api/active"}
+	// Studio boot calls a fixed set of read-only endpoints before the canvas
+	// renders; a 403 on any of them (e.g. analytics/config) throws during the
+	// boot chain and leaves the iframe on "Loading OpenDesign…" forever. Keep
+	// credential-bearing surfaces (auth/admin/settings/connectors/integrations)
+	// denied — the studio tolerates their absence like any upstream outage.
+	designAllowedPrefixes = []string{"/projects/", "/api/projects/", "/api/runs", "/api/health", "/assets/", "/_next/", "/design-systems/", "/api/design-templates", "/api/templates", "/api/app-config", "/api/version", "/api/active", "/api/analytics/", "/api/workspace/", "/api/skills", "/api/agents", "/api/media/", "/api/prompt-templates", "/api/amr/", "/fonts/", "/logo-scan.svg", "/favicon.ico"}
 	designDeniedPrefixes  = []string{"/api/auth/", "/admin/", "/settings/", "/api/connectors", "/api/integrations"}
 )
 
@@ -389,7 +394,7 @@ func (s *Server) handleDesignChat(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusConflict, "no design project for this task; start one first")
 		return
 	}
-	if !s.allowDesignRequest(taskID) {
+	if !s.allowDesignRequest(taskID, true) {
 		s.jsonErrorCode(w, http.StatusTooManyRequests, ErrCodeServiceUnavailable, "too many design messages, slow down")
 		return
 	}
@@ -477,6 +482,11 @@ func (s *Server) handleDesignLaunch(w http.ResponseWriter, r *http.Request) {
 
 // ---- method-agnostic design proxy ----
 
+const (
+	designWriteRateLimit = 60
+	designReadRateLimit  = 600
+)
+
 func (s *Server) handleDesignProxy(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("name")
 	taskID := r.PathValue("taskId")
@@ -496,7 +506,11 @@ func (s *Server) handleDesignProxy(w http.ResponseWriter, r *http.Request) {
 		s.jsonErrorCode(w, http.StatusForbidden, ErrCodeForbidden, "design proxy path not allowed")
 		return
 	}
-	if !s.allowDesignRequest(taskID) {
+	// Rate-limit only OD API calls, not static assets: a single studio boot
+	// fetches dozens of /_next/ chunks, which would exhaust the per-task
+	// budget and leave the canvas stuck on its loader (2026-09-02).
+	write := r.Method != http.MethodGet && r.Method != http.MethodHead
+	if !designPathIsStatic(full) && !s.allowDesignRequest(taskID, write) {
 		s.jsonErrorCode(w, http.StatusTooManyRequests, ErrCodeServiceUnavailable, "design proxy rate limited")
 		return
 	}
@@ -527,6 +541,20 @@ func designPathAllowed(path string) bool {
 		}
 	}
 	return false
+}
+
+// designPathIsStatic reports whether a proxied path is a static asset that
+// carries no upstream side effects; those are exempt from the per-task proxy
+// rate limit (see handleDesignProxy).
+func designPathIsStatic(path string) bool {
+	return strings.HasPrefix(path, "/_next/") ||
+		strings.HasPrefix(path, "/assets/") ||
+		strings.HasSuffix(path, ".js") ||
+		strings.HasSuffix(path, ".css") ||
+		strings.HasSuffix(path, ".png") ||
+		strings.HasSuffix(path, ".svg") ||
+		strings.HasSuffix(path, ".ico") ||
+		strings.HasSuffix(path, ".woff2")
 }
 
 // designProxyPass forwards the request to OD with server-side auth injection.
@@ -634,13 +662,85 @@ func designPathIsStreaming(path string) bool {
 // rewriteDesignHTML ports the preview-proxy SPA mechanism: a <base> tag plus
 // a runtime interceptor that keeps root-absolute fetch/XHR/WS/history URLs
 // under the design proxy prefix.
+//
+// <base> alone is not enough: OD's Turbopack/RSC bootstrap resolves some of
+// its dynamic chunk loads against document.currentScript / module URLs and
+// bypasses the base, so those land on the console origin where the SPA
+// fallback answers 200 with index.html — the app then dies with
+// "Unexpected token '<'" and stays on its boot loader forever. To be robust
+// against any resolution strategy we also statically prefix every
+// root-absolute src/href in the HTML itself.
+//
+// Static prefixing alone is not enough either: Turbopack's registerChunk
+// identifies an executed chunk by the RAW script src attribute and resolves
+// the pending chunk promise keyed "/_next/<path>" (its hardcoded asset root).
+// A prefixed attribute never matches that key, so bootstrap hangs forever
+// with zero network requests and zero console errors — the page sits on
+// "Loading OpenDesign…" indefinitely. The patcher therefore exposes the
+// composed form on getAttribute reads, and routes runtime-created
+// script/link/Worker URLs (root-absolute, bypassing <base>) under the proxy.
 func rewriteDesignHTML(html, project, taskID, odt string) string {
 	prefix := fmt.Sprintf("/api/v1/projects/%s/tasks/%s/design/proxy/", url.PathEscape(project), url.PathEscape(taskID))
+	html = prefixRootAbsoluteAttrs(html, prefix)
+	// Import map: OD's Turbopack runtime composes chunk URLs as new URL("/_next/…",
+	// location.origin), which ignores both <base> and our attribute rewrite —
+	// those fetches land on the console origin where the SPA fallback answers
+	// HTML and hydration dies silently. A leading import map remaps the
+	// root-absolute module specifiers into the proxy prefix.
+	importmap := fmt.Sprintf(`<script type="importmap">{"imports":{"/_next/":%q,"/assets/":%q,"/design-systems/":%q}}</script>`,
+		prefix+"_next/", prefix+"assets/", prefix+"design-systems/")
 	base := fmt.Sprintf(`<base href=%q><script>(function(){
   var prefix = %q;
+  // Normalize every URL shape to the proxy prefix: root-absolute ("/_next/…",
+  // ignores <base>), absolute same-origin ("http://console/_next/…" — what the
+  // script.src PROPERTY resolves to even when the raw attribute was relative),
+  // and already-prefixed values (idempotent). Hash/data/blob/cross-origin pass
+  // through. document.baseURI keeps plain-relative paths under the proxy.
   function patchUrl(u){
-    if (typeof u !== 'string' || !u.startsWith('/') || u.startsWith(prefix)) return u;
-    return prefix + u.slice(1);
+    if (typeof u !== 'string' || !u || u.indexOf(prefix) === 0 || u.charAt(0) === '#') return u;
+    if (u.charAt(0) === '/') return prefix + u.slice(1);
+    try {
+      var parsed = new URL(u, document.baseURI);
+      if (parsed.origin === location.origin) return prefix + (parsed.pathname + parsed.search).slice(1);
+    } catch (e) {}
+    return u;
+  }
+  // Turbopack registerChunk matches the RAW script src attribute against its
+  // "/_next/<path>" chunk key; a proxied attribute deadlocks hydration. Expose
+  // the composed form on attribute reads, and re-route runtime-created
+  // script/link/Worker URLs (root-absolute, bypassing <base>) under the proxy.
+  var unpatch = function(v){
+    if (typeof v !== 'string' || v.indexOf(prefix) !== 0) return v;
+    return '/' + v.slice(prefix.length);
+  };
+  var ga = Element.prototype.getAttribute;
+  Element.prototype.getAttribute = function(name){
+    var v = ga.call(this, name);
+    if ((name === 'src' || name === 'href') && v) v = unpatch(v);
+    return v;
+  };
+  var appendChild = Element.prototype.appendChild;
+  Element.prototype.appendChild = function(node){
+    try {
+      if (node) {
+        var tag = node.tagName;
+        if (tag === 'SCRIPT' || tag === 'LINK') {
+          var attr = tag === 'SCRIPT' ? 'src' : 'href';
+          var raw = node.getAttribute(attr);
+          if (raw) node.setAttribute(attr, patchUrl(raw));
+        }
+      }
+    } catch (e) {}
+    return appendChild.call(this, node);
+  };
+  var NativeWorker = window.Worker;
+  if (NativeWorker) {
+    function PatchedWorker(u, o){
+      if (typeof u === 'string') u = patchUrl(u);
+      return new NativeWorker(u, o);
+    }
+    PatchedWorker.prototype = NativeWorker.prototype;
+    window.Worker = PatchedWorker;
   }
   var of = window.fetch;
   if (of) { window.fetch = function(i, init){
@@ -669,7 +769,35 @@ func rewriteDesignHTML(html, project, taskID, odt string) string {
   if (ors) { window.history.replaceState = function(s, t, u){ return ors.call(this, s, t, patchUrl(u)); };
   }
 })();</script>`, prefix, prefix)
-	return injectAfterHead(html, base)
+	return injectAfterHead(html, importmap+base)
+}
+
+// prefixRootAbsoluteAttrs rewrites root-absolute (but not already-proxied)
+// src=/href= attribute values in the HTML to sit under the proxy prefix.
+// Attribute values only — URLs inside scripts/JSON payloads are left alone;
+// those carry their own base handling and double-prefixing them breaks the
+// runtime patcher.
+func prefixRootAbsoluteAttrs(html, prefix string) string {
+	for _, attr := range []string{"src", "href"} {
+		needle := attr + `="/`
+		idx := 0
+		for {
+			i := strings.Index(html[idx:], needle)
+			if i < 0 {
+				break
+			}
+			at := idx + i + len(needle)
+			// Skip URLs already under the proxy prefix (rewritten once must
+			// not be rewritten twice — idempotence across rewrites).
+			if strings.HasPrefix(html[at:], strings.TrimPrefix(prefix, "/")) {
+				idx = at
+				continue
+			}
+			html = html[:at] + strings.TrimPrefix(prefix, "/") + html[at:]
+			idx = at + len(prefix)
+		}
+	}
+	return html
 }
 
 func injectAfterHead(html, snippet string) string {
@@ -750,27 +878,38 @@ func (s *Server) writeDesignUpstreamError(w http.ResponseWriter, err error) {
 	s.jsonError(w, http.StatusBadGateway, "OD service error: "+detail)
 }
 
-func (s *Server) allowDesignRequest(taskID string) bool {
+// allowDesignRequest caps proxied studio traffic per task per window. Writes
+// keep the tight chat-style budget; reads (the studio's boot burst, its ~5s
+// status polling and navigation) get 10× headroom — one healthy studio
+// session exceeds 60 GETs/min and would otherwise deadlock retrying against
+// its own exhausted budget.
+func (s *Server) allowDesignRequest(taskID string, write bool) bool {
+	limit := designReadRateLimit
+	seen := &s.designReadRateSeen
+	if write {
+		limit = designWriteRateLimit
+		seen = &s.designWriteRateSeen
+	}
 	s.designRateMu.Lock()
 	defer s.designRateMu.Unlock()
-	if s.designRateSeen == nil {
-		s.designRateSeen = map[string]*previewChatBucket{}
+	if *seen == nil {
+		*seen = map[string]*previewChatBucket{}
 	}
 	now := time.Now()
-	bucket, ok := s.designRateSeen[taskID]
+	bucket, ok := (*seen)[taskID]
 	if !ok || now.Sub(bucket.start) >= previewChatWindow {
-		if len(s.designRateSeen) > 1024 {
-			for k, v := range s.designRateSeen {
+		if len(*seen) > 1024 {
+			for k, v := range *seen {
 				if now.Sub(v.start) >= previewChatWindow {
-					delete(s.designRateSeen, k)
+					delete(*seen, k)
 				}
 			}
 		}
 		bucket = &previewChatBucket{start: now}
-		s.designRateSeen[taskID] = bucket
+		(*seen)[taskID] = bucket
 	}
 	bucket.count++
-	return bucket.count <= 60
+	return bucket.count <= limit
 }
 
 func (s *Server) recordDesignAudit(r *http.Request, workspaceID, action, project, taskID string, after map[string]any) {

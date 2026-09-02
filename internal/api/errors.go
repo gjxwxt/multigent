@@ -107,6 +107,10 @@ func (s *Server) writeAPIError(w http.ResponseWriter, status int, code, msg stri
 	}
 	requestID := newErrorRequestID()
 	w.Header().Set("Content-Type", "application/json")
+	// Error responses must never be served from cache: a cached 429/503 would
+	// keep the client retrying against a stale failure after the condition
+	// cleared (design canvas showed this as a permanent loader).
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Multigent-Error-Code", code)
 	w.Header().Set("X-Multigent-Request-ID", requestID)
 	w.WriteHeader(status)

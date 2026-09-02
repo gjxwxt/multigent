@@ -117,7 +117,8 @@ type Server struct {
 	previewChatSeen        map[string]*previewChatBucket
 	designClient           odClientAPI
 	designRateMu           sync.Mutex
-	designRateSeen         map[string]*previewChatBucket
+	designReadRateSeen     map[string]*previewChatBucket
+	designWriteRateSeen    map[string]*previewChatBucket
 }
 
 // NewServer builds an API server for the given workspace root.
@@ -802,7 +803,14 @@ func withJSONHeaders(next http.Handler) http.Handler {
 			!strings.HasPrefix(r.URL.Path, "/preview/") &&
 			!strings.HasPrefix(r.URL.Path, "/_multigent_preview/") &&
 			!strings.HasSuffix(r.URL.Path, "/preview/chat") &&
-			!strings.HasSuffix(r.URL.Path, "/preview/live") {
+			!strings.HasSuffix(r.URL.Path, "/preview/live") &&
+			// The design proxy/launch pass upstream OD responses through —
+			// they carry their own Content-Type (JS chunks, HTML, SSE). A
+			// pre-set application/json here produced a doubled header that
+			// made the browser module loader reject every OD chunk, leaving
+			// the studio iframe stuck on its native loader (2026-09-02).
+			!strings.Contains(r.URL.Path, "/design/proxy/") &&
+			!strings.HasSuffix(r.URL.Path, "/design/launch") {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		}
 		next.ServeHTTP(w, r)
