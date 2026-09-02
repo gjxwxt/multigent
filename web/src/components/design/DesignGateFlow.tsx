@@ -23,6 +23,7 @@ export function DesignGateFlow({
   taskID,
   taskTitle,
   busy,
+  initialStage = 'choose',
   submitReview,
   onClose,
 }: {
@@ -30,11 +31,14 @@ export function DesignGateFlow({
   taskID: string
   taskTitle?: string
   busy?: boolean
+  /** 'review' skips the source chooser — the follow page uses it for the
+   * open-canvas shortcut when design/status already reports a session. */
+  initialStage?: 'choose' | 'review'
   /** Submits the workflow review; decision/comments merged by the caller. */
   submitReview: (outputs: Record<string, string>, decision: 'approve' | 'request_changes') => Promise<void> | void
   onClose: () => void
 }) {
-  const [stage, setStage] = useState<'choose' | 'review'>('choose')
+  const [stage, setStage] = useState<'choose' | 'review'>(initialStage)
   const [busyLocal, setBusyLocal] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [session, setSession] = useState<StartResponse | null>(null)
