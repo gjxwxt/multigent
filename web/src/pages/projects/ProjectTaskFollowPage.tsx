@@ -554,48 +554,57 @@ export default function ProjectTaskFollowPage() {
             )}
           </div>
 
-          {visibleWorkflowData && (isDesignGate ? (
-            <section className="rounded-xl border border-neutral-200 bg-white px-4 py-4 dark:border-zinc-700 dark:bg-zinc-950">
-              <p className="text-sm text-neutral-700 dark:text-zinc-300">{activeStep?.description}</p>
-              <button
-                type="button"
-                onClick={() => setDesignGateOpen(true)}
-                className="mt-3 rounded-lg bg-violet-600 px-3 py-2 text-sm font-semibold text-white hover:bg-violet-700"
-              >
-                {t('designGate.title', { defaultValue: '设计确认' })}
-              </button>
-            </section>
-          ) : (
-            <WorkflowRuntimePanel
-              step={activeStep}
-              instance={visibleActiveInstance}
-              steps={visibleWorkflowData.definition.steps}
-              records={visibleWorkflowRecords}
-              runs={runs}
-              taskID={taskId}
-              actorLabels={actorLabels}
-              canReview={canReview}
-              hideHeader
-              reviewOutputs={reviewOutputs}
-              reviewComments={reviewComments}
-              reviewBusy={reviewBusy}
-              reviewErr={reviewErr}
-              missingReviewField={missingReviewField}
-              docTitles={visibleWorkflowData.docTitles}
-              onChangeOutput={(name, value) => {
-                if (missingReviewField === name && String(value ?? '').trim()) setMissingReviewField(null)
-                setReviewOutputs((current) => ({ ...current, [name]: value }))
-                if (name === 'comments') setReviewComments(value)
-              }}
-              onChangeComments={(value) => {
-                if (missingReviewField === 'comments' && value.trim()) setMissingReviewField(null)
-                setReviewComments(value)
-              }}
-              // reviewErr/missingReviewField are rendered by the panel itself;
-              // swallow the rejection so it doesn't surface as unhandled.
-              onSubmitReview={(decision) => submitWorkflowReview(decision).catch(() => {})}
-            />
-          ))}
+          {visibleWorkflowData && (
+            <>
+              {/* The gate replaces only the decision editor, never the context:
+                  inputs and previous step outputs stay visible like any other
+                  step; the chooser card below is the sole submit entry. */}
+              <WorkflowRuntimePanel
+                step={activeStep}
+                instance={visibleActiveInstance}
+                steps={visibleWorkflowData.definition.steps}
+                records={visibleWorkflowRecords}
+                runs={runs}
+                taskID={taskId}
+                actorLabels={actorLabels}
+                canReview={canReview && !isDesignGate}
+                hideHeader
+                reviewOutputs={reviewOutputs}
+                reviewComments={reviewComments}
+                reviewBusy={reviewBusy}
+                reviewErr={reviewErr}
+                missingReviewField={missingReviewField}
+                docTitles={visibleWorkflowData.docTitles}
+                onChangeOutput={(name, value) => {
+                  if (missingReviewField === name && String(value ?? '').trim()) setMissingReviewField(null)
+                  setReviewOutputs((current) => ({ ...current, [name]: value }))
+                  if (name === 'comments') setReviewComments(value)
+                }}
+                onChangeComments={(value) => {
+                  if (missingReviewField === 'comments' && value.trim()) setMissingReviewField(null)
+                  setReviewComments(value)
+                }}
+                // reviewErr/missingReviewField are rendered by the panel itself;
+                // swallow the rejection so it doesn't surface as unhandled.
+                onSubmitReview={(decision) => submitWorkflowReview(decision).catch(() => {})}
+              />
+              {isDesignGate && (
+                <section className="mx-4 mb-4 rounded-xl border border-neutral-200 bg-white px-4 py-4 dark:border-zinc-700 dark:bg-zinc-950">
+                  <p className="text-sm text-neutral-700 dark:text-zinc-300">{activeStep?.description}</p>
+                  <p className="mt-1 text-xs text-neutral-500 dark:text-zinc-400">
+                    {t('designGate.openHint', { defaultValue: '打开设计来源选择弹窗；在弹窗内确认前不会流转。' })}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setDesignGateOpen(true)}
+                    className="mt-3 rounded-lg border border-sky-600 bg-white px-3 py-2 text-sm font-medium text-sky-700 hover:bg-sky-50 dark:border-sky-500 dark:bg-zinc-900 dark:text-sky-400 dark:hover:bg-zinc-800"
+                  >
+                    {t('designGate.open', { defaultValue: '选择设计方案' })}
+                  </button>
+                </section>
+              )}
+            </>
+          )}
 
           {designGateOpen && activeStep && displayTask && (
             <DesignGateFlow

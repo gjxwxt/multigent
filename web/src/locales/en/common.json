@@ -798,7 +798,9 @@
       "chat.reload": "Reload the design canvas",
       "autoComments.existing": "Confirmed existing design \"{{name}}\"; proceed to implementation.",
       "autoComments.generated": "Confirmed the OD-generated design; proceed to implementation.",
-      "autoComments.rework": "Design does not meet expectations; returned to the requirement stage."
+      "autoComments.rework": "Design does not meet expectations; returned to the requirement stage.",
+      "open": "Choose a design",
+      "openHint": "Open the design source chooser; nothing advances until you confirm inside the dialog."
     }
   },
   "projectSettings": {
