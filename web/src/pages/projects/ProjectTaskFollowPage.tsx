@@ -589,6 +589,21 @@ export default function ProjectTaskFollowPage() {
                 // swallow the rejection so it doesn't surface as unhandled.
                 onSubmitReview={(decision) => submitWorkflowReview(decision).catch(() => {})}
               />
+              {isDesignGate && (
+                <section className="mx-4 mb-4 rounded-xl border border-neutral-200 bg-white px-4 py-4 dark:border-zinc-700 dark:bg-zinc-950">
+                  <p className="text-sm text-neutral-700 dark:text-zinc-300">{activeStep?.description}</p>
+                  <p className="mt-1 text-xs text-neutral-500 dark:text-zinc-400">
+                    {t('designGate.openHint', { defaultValue: '打开设计来源选择弹窗；在弹窗内确认前不会流转。' })}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setDesignGateOpen(true)}
+                    className="mt-3 rounded-lg border border-sky-600 bg-white px-3 py-2 text-sm font-medium text-sky-700 hover:bg-sky-50 dark:border-sky-500 dark:bg-zinc-900 dark:text-sky-400 dark:hover:bg-zinc-800"
+                  >
+                    {t('designGate.open', { defaultValue: '选择设计方案' })}
+                  </button>
+                </section>
+              )}
             </>
           )}
 
