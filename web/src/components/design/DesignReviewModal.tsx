@@ -125,7 +125,7 @@ export function DesignReviewModal({
   return (
     <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/45 p-4 backdrop-blur-[1px]" role="presentation" {...overlayDismissProps(onClose)}>
       <div
-        className="flex max-h-[94vh] w-full max-w-6xl animate-scale-in flex-col overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-2xl dark:border-zinc-700 dark:bg-zinc-900"
+        className="flex h-[min(85vh,860px)] w-[min(1080px,92vw)] animate-scale-in flex-col overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-2xl dark:border-zinc-700 dark:bg-zinc-900"
         role="dialog"
         aria-modal="true"
         onClick={(e) => e.stopPropagation()}
