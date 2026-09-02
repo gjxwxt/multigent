@@ -26,7 +26,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"implTitle":       "Implementation",
 		"implDesc":        "Implement the approved requirement following the approved design references. Record the PR, tests executed, and any risks.",
 		"selfReviewTitle": "Agent Self Review",
-		"selfReviewDesc":  "An independent reviewer agent inspects the implementation against the requirement and design, requesting fixes up to three rounds.",
+		"selfReviewDesc":  "An independent reviewer agent inspects the implementation against the requirement and design, requesting fixes up to three rounds. Write the verdict to self_review_verdict: pass when the acceptance criteria are met, issues_fixed when the implementation must be reworked.",
 		"codeReviewTitle": "Human Code Review",
 		"codeReviewDesc":  "A human reviews the implementation evidence and decides whether it can proceed to PR and merge.",
 		"prMergeTitle":    "Open PR and Merge",
@@ -47,6 +47,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"testsField":         "Tests executed with evidence.",
 		"risksField":         "Known risks and follow-ups.",
 		"reviewCommentsField":"Findings from the agent self review.",
+		"verdictField":       "Self-review verdict: pass (proceed to human review) or issues_fixed (rework).",
 		"mergedField":        "Merged commit SHA on the integration branch.",
 		"prURLField":         "URL of the opened merge request.",
 		"tagField":           "Release tag (e.g. v0.1.0).",
@@ -67,7 +68,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"implTitle":       "实现编码",
 		"implDesc":        "以已确认的设计产物为参考实现需求。记录 PR、执行的测试与风险。",
 		"selfReviewTitle": "Agent 初审",
-		"selfReviewDesc":  "独立 reviewer agent 依据需求与设计检查实现，最多三轮返工。",
+		"selfReviewDesc":  "独立 reviewer agent 依据需求与设计检查实现，最多三轮返工。初审结论写入 self_review_verdict：验收达标写 pass，需要返工写 issues_fixed。",
 		"codeReviewTitle": "人工代码审核",
 		"codeReviewDesc":  "人工审核实现证据，决定是否进入开 PR 与合并。",
 		"prMergeTitle":    "开 PR 并合并",
@@ -88,6 +89,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"testsField":         "已执行的测试与证据。",
 		"risksField":         "已知风险与后续事项。",
 		"reviewCommentsField":"Agent 初审发现的问题。",
+		"verdictField":       "初审结论：pass（进入人工审核）或 issues_fixed（返工）。",
 		"mergedField":        "集成分支上的合并提交 SHA。",
 		"prURLField":         "合并请求地址。",
 		"tagField":           "发布 tag（如 v0.1.0）。",
@@ -136,7 +138,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				[]entity.WorkflowField{field("pr", "prField"), field("tests_run", "testsField"), field("risks", "risksField")}),
 			tmplStep("self_review", "agent_task", text["selfReviewTitle"], text["selfReviewDesc"], "owner-engineer", "rose", 1200,
 				[]entity.WorkflowField{field("pr", "prField"), field("approved_requirement", "requestField")},
-				[]entity.WorkflowField{field("review_comments", "reviewCommentsField")}),
+				[]entity.WorkflowField{field("self_review_verdict", "verdictField"), field("review_comments", "reviewCommentsField")}),
 			tmplStep("code_review", "human_review", text["codeReviewTitle"], text["codeReviewDesc"], "owner-engineer", "amber", 1480,
 				[]entity.WorkflowField{field("pr", "prField"), field("review_comments", "reviewCommentsField")},
 				[]entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("approved_change", "prField")}),
@@ -162,7 +164,12 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			edge("e-design-rework", "design_review", "requirement_draft", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "previous_draft": "$input.requirement_draft"}, false),
 			edge("e-impl-self-review", "implementation", "self_review", "", nil, nil, true),
 			edge("e-self-review-pass", "self_review", "code_review", "", nil, map[string]string{"pr": "$input.pr", "review_comments": "$output.review_comments"}, true),
-			edge("e-self-review-rework", "self_review", "implementation", text["changesRequested"], cond("review_comments", "neq", ""), map[string]string{"review_comments": "$output.review_comments", "previous_pr": "$input.pr"}, false),
+			// Rework is an explicit verdict, never inferred: the review report
+			// itself is always non-empty, so a neq-"" condition here would bounce
+			// every self-review back to implementation forever (od-e2e incident).
+			// A missing verdict falls through to the default pass edge — human
+			// code review can still send it back.
+			edge("e-self-review-rework", "self_review", "implementation", text["changesRequested"], cond("self_review_verdict", "eq", "issues_fixed"), map[string]string{"review_comments": "$output.review_comments", "previous_pr": "$input.pr"}, false),
 			edge("e-code-review-approve", "code_review", "pr_open_and_merge", text["approved"], cond("decision", "eq", "approve"), map[string]string{"approved_change": "$output.approved_change"}, false),
 			edge("e-code-review-rework", "code_review", "implementation", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "previous_pr": "$input.pr"}, false),
 			edge("e-pr-merge-release", "pr_open_and_merge", "release", "", nil, map[string]string{"merged_sha": "$output.merged_sha", "pr_url": "$output.pr_url"}, true),

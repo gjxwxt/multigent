@@ -2,6 +2,8 @@ package workflow
 
 import (
 	"testing"
+
+	"github.com/multigent/multigent/internal/entity"
 )
 
 func TestGreenfieldTemplateShape(t *testing.T) {
@@ -79,5 +81,58 @@ func TestGreenfieldTemplateEnAndZh(t *testing.T) {
 				t.Fatalf("step %s has empty title/description for %s", s.ID, locale)
 			}
 		}
+	}
+}
+
+// The self_review rework edge must key on the explicit self_review_verdict
+// output: the review report itself is always non-empty, so a neq-"" condition
+// on review_comments bounces every self-review back to implementation forever
+// (od-e2e incident). A missing verdict must fall through to the default pass
+// edge so the human code review gate stays in the loop.
+func TestGreenfieldSelfReviewRouting(t *testing.T) {
+	tmpl, ok := Template("greenfield-delivery-pipeline", "zh-CN")
+	if !ok {
+		t.Fatal("greenfield template not registered")
+	}
+	var verdictField *entity.WorkflowField
+	for _, s := range tmpl.Steps {
+		if s.ID != "self_review" {
+			continue
+		}
+		for i := range s.OutputFields {
+			if s.OutputFields[i].Name == "self_review_verdict" {
+				verdictField = &s.OutputFields[i]
+			}
+		}
+	}
+	if verdictField == nil {
+		t.Fatal("self_review missing self_review_verdict output field")
+	}
+	reworkFound, defaultFound := false, false
+	for _, e := range tmpl.Edges {
+		if e.From != "self_review" {
+			continue
+		}
+		if e.To == "implementation" {
+			if e.Condition == nil || e.Condition.Field != "self_review_verdict" || e.Condition.Operator != "eq" || e.Condition.Value != "issues_fixed" {
+				t.Fatalf("self_review rework edge condition = %+v, want self_review_verdict eq issues_fixed", e.Condition)
+			}
+			reworkFound = true
+		}
+		if e.To == "code_review" && e.IsDefault {
+			defaultFound = true
+		}
+	}
+	if !reworkFound || !defaultFound {
+		t.Fatalf("self_review edges: rework=%v default=%v", reworkFound, defaultFound)
+	}
+	// Simulate the incident: report present, verdict absent -> default pass.
+	edge, ok := chooseNextEdge(tmpl.Edges, "self_review", map[string]string{"review_comments": "评审报告：全部通过"}, "")
+	if !ok || edge.To != "code_review" {
+		t.Fatalf("missing verdict should default to code_review, got %q ok=%v", edge.To, ok)
+	}
+	edge, ok = chooseNextEdge(tmpl.Edges, "self_review", map[string]string{"self_review_verdict": "issues_fixed", "review_comments": "需修复"}, "")
+	if !ok || edge.To != "implementation" {
+		t.Fatalf("explicit issues_fixed should rework, got %q ok=%v", edge.To, ok)
 	}
 }
