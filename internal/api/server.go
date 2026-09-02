@@ -501,8 +501,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/design/start", s.handleDesignStart)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/design/status", s.handleDesignStatus)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/design/chat", s.handleDesignChat)
-	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/design/launch", s.handleDesignLaunch)
-	mux.HandleFunc("/api/v1/projects/{name}/tasks/{taskId}/design/proxy/{path...}", s.handleDesignProxy)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/start", s.handlePostTaskPreviewStart)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/stop", s.handlePostTaskPreviewStop)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/remote-sync/retry", s.handlePostTaskRemoteSyncRetry)
@@ -654,6 +652,13 @@ func (s *Server) Handler() http.Handler {
 	publicMux.HandleFunc("POST /api/v1/im/{provider}/events", s.handleIMEvent)
 	publicMux.HandleFunc("GET /api/v1/health", s.handleHealth)
 	publicMux.HandleFunc("/preview/", s.handleTaskPreviewProxy)
+	// Design proxy + launch are iframe-bootstrap surfaces: the iframe carries
+	// only the task-scoped odt signature token (and later the scoped cookie),
+	// which withTokenAuth does not understand (pitfall 6 pattern). Handler-side
+	// designRequestAuthorized verifies the signature; the proxy additionally
+	// enforces the OD path whitelist and per-task rate limiting.
+	publicMux.HandleFunc("/api/v1/projects/{name}/tasks/{taskId}/design/proxy/{path...}", s.handleDesignProxy)
+	publicMux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/design/launch", s.handleDesignLaunch)
 	publicMux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/feedback", s.handlePostTaskPreviewFeedback)
 	publicMux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/chat", s.handlePostTaskPreviewChat)
 	publicMux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview/live", s.handleGetTaskPreviewLive)

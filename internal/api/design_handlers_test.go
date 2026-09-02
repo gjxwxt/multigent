@@ -341,3 +341,46 @@ func TestDesignLaunchRedirects(t *testing.T) {
 		t.Fatalf("cache-control missing")
 	}
 }
+
+// The iframe bootstraps with only the odt signature token (no Bearer header,
+// no _token); the proxy must admit it via handler-side validation (pitfall 6
+// pattern: these routes live on publicMux) and reject odt-less requests.
+func TestDesignProxyAdmitsSignatureTokenWithoutBearer(t *testing.T) {
+	s, _, task := seedDesignTask(t, entity.TaskStatusAwaitingConfirmation)
+	seedODConnection(t, s)
+	s.designClient = newFakeODClient()
+	task.DesignProjectID = "proj_mg_t-res-1"
+	if err := s.ts.UpdateTask("resproj", taskAgentFromAssignee(task), task); err != nil {
+		t.Fatal(err)
+	}
+	odt := s.signDesignToken(task.ID, "resproj")
+
+	// No test OD daemon exists; reaching OD's Basic Auth challenge proves the
+	// request passed platform auth and was forwarded upstream. An odt-less
+	// request must be rejected by the platform itself and never reach OD.
+	req := httptest.NewRequest(http.MethodGet, "/design/proxy/projects/proj_mg_t-res-1?odt="+odt, nil)
+	req.SetPathValue("name", "resproj")
+	req.SetPathValue("taskId", task.ID)
+	req.SetPathValue("path", "projects/proj_mg_t-res-1")
+	w := httptest.NewRecorder()
+	s.handleDesignProxy(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("proxy with odt: %d (expected upstream 401)", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "OpenDesign authentication required") {
+		t.Fatalf("expected OD upstream challenge, got: %s", w.Body.String())
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/design/proxy/projects/proj_mg_t-res-1", nil)
+	req2.SetPathValue("name", "resproj")
+	req2.SetPathValue("taskId", task.ID)
+	req2.SetPathValue("path", "projects/proj_mg_t-res-1")
+	w2 := httptest.NewRecorder()
+	s.handleDesignProxy(w2, req2)
+	if w2.Code != http.StatusUnauthorized {
+		t.Fatalf("proxy without odt: %d (expected 401)", w2.Code)
+	}
+	if strings.Contains(w2.Body.String(), "OpenDesign authentication required") {
+		t.Fatal("odt-less request must not reach the OD upstream")
+	}
+}
