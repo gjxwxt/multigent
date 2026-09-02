@@ -1438,7 +1438,10 @@ function WorkflowFieldTitle({ fieldName, description, required = false }: { fiel
       {showInfo && (
         <span className="group/info relative inline-flex shrink-0 cursor-help text-neutral-400 hover:text-neutral-600 dark:text-zinc-500 dark:hover:text-zinc-300">
           <Info className="size-3.5" />
-          <span className="pointer-events-none invisible absolute left-0 top-full z-50 mt-1 w-80 max-w-[min(20rem,80vw)] whitespace-pre-wrap rounded-lg border border-neutral-200 bg-white p-2.5 text-xs leading-relaxed text-neutral-700 opacity-0 shadow-lg transition-opacity group-hover/info:visible group-hover/info:opacity-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
+          {/* hidden (not invisible): a hidden-but-laid-out tooltip still
+              occupies overflow space, which gave the narrow side panel a
+              permanent horizontal scrollbar. */}
+          <span className="pointer-events-none hidden absolute left-0 top-full z-50 mt-1 w-80 max-w-[min(20rem,80vw)] whitespace-pre-wrap rounded-lg border border-neutral-200 bg-white p-2.5 text-xs leading-relaxed text-neutral-700 shadow-lg group-hover/info:block dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
             {raw}
           </span>
         </span>

@@ -280,6 +280,8 @@ export default function ProjectTaskFollowPage() {
 
   // Inner live-output: follow the tail on heartbeat updates, but only while
   // the reader is at the bottom — scrolling up to re-read must not be hijacked.
+  // The latest message also types out over ~0.8s after each poll, so keep
+  // re-sticking on a short interval while the run is streaming.
   useEffect(() => {
     if (!shouldPollActiveRun || !liveOutputRef.current) return
     const outputEl = liveOutputRef.current
@@ -289,20 +291,24 @@ export default function ProjectTaskFollowPage() {
     scroll()
     const raf = window.requestAnimationFrame(scroll)
     const timer = window.setTimeout(scroll, 80)
+    const tail = liveOutputRunning ? window.setInterval(scroll, 300) : null
     return () => {
       window.cancelAnimationFrame(raf)
       window.clearTimeout(timer)
+      if (tail) window.clearInterval(tail)
     }
   }, [activeRun?.logPath, activeRun?.sessionId, activeStep?.id, liveLogContent, liveOutputRunning, remoteLogContent, shouldPollActiveRun])
 
   // Outer side panel: reveal the live-output section when a new run/step
-  // starts, but never on heartbeat content updates — that yanked the reader
-  // away from the upstream-outputs / current-step sections above it.
+  // starts, and keep following content updates while the reader stays parked
+  // at the bottom — otherwise the growing live-output box slides below the
+  // panel fold and its newest lines are never seen. Once the reader scrolls
+  // up (panelStickRef false) heartbeat updates must not yank the panel.
   useEffect(() => {
     if (!shouldPollActiveRun) return
     const panelEl = sidePanelRef.current
     if (panelEl && panelStickRef.current) stickToBottom(panelEl)
-  }, [activeRun?.sessionId, activeRun?.logPath, activeStep?.id, shouldPollActiveRun])
+  }, [activeRun?.sessionId, activeRun?.logPath, activeStep?.id, liveLogContent, remoteLogContent, shouldPollActiveRun])
 
   async function startCurrentAgent() {
     if (!displayTask || !startAgent || !canStart) return
@@ -501,7 +507,7 @@ export default function ProjectTaskFollowPage() {
           )}
         </section>
 
-        <aside ref={sidePanelRef} onScroll={(e) => { panelStickRef.current = isAtBottom(e.currentTarget) }} className="min-w-0 overflow-y-auto bg-white dark:bg-zinc-950">
+        <aside ref={sidePanelRef} onScroll={(e) => { panelStickRef.current = isAtBottom(e.currentTarget) }} className="min-w-0 overflow-y-auto overflow-x-hidden bg-white dark:bg-zinc-950">
           {stepTransition && (
             <div className="sticky top-0 z-10 border-b border-sky-100 bg-sky-50/95 px-4 py-2 text-xs font-medium text-sky-700 shadow-sm backdrop-blur-sm dark:border-sky-900/50 dark:bg-sky-950/80 dark:text-sky-300">
               <div className="flex items-center gap-2">
