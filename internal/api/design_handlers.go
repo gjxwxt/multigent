@@ -110,9 +110,15 @@ func (s *Server) handleDesignStart(w http.ResponseWriter, r *http.Request) {
 	if task == nil {
 		return
 	}
+	// A task parked at a human_review workflow step still reports Status
+	// in_progress (pitfall 7); accept awaiting_confirmation or an active run
+	// stopped at any human_review step, fail-closed otherwise.
 	if task.Status != entity.TaskStatusAwaitingConfirmation {
-		s.jsonError(w, http.StatusConflict, "task is not awaiting confirmation at the design gate")
-		return
+		workspaceID, _ := s.currentWorkspaceID()
+		if !s.isTaskAtHumanReviewStep(workspaceID, project, taskID) {
+			s.jsonError(w, http.StatusConflict, "task is not awaiting confirmation at the design gate")
+			return
+		}
 	}
 	var body designStartRequest
 	if err := s.readJSON(w, r, &body); err != nil {

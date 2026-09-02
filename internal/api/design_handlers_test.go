@@ -6,9 +6,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
+	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
 
 // fakeODClient records calls so idempotency and guards can be asserted
@@ -58,10 +60,10 @@ func (f *fakeODClient) DeleteProject(_ context.Context, projectID string) error 
 	return nil
 }
 
-func seedDesignTask(t *testing.T, status entity.TaskStatus) (*Server, *entity.Task) {
+func seedDesignTask(t *testing.T, status entity.TaskStatus) (*Server, string, *entity.Task) {
 	t.Helper()
-	s, _, task, _ := seedResourceProject(t, status)
-	return s, task
+	s, workspaceID, task, _ := seedResourceProject(t, status)
+	return s, workspaceID, task
 }
 
 // seedODConnection registers an opendesign connection (baseUrl in
@@ -103,7 +105,7 @@ func designPost(t *testing.T, s *Server, path, body string) *httptest.ResponseRe
 }
 
 func TestDesignStartCreatesProjectAndIsIdempotent(t *testing.T) {
-	s, task := seedDesignTask(t, entity.TaskStatusAwaitingConfirmation)
+	s, _, task := seedDesignTask(t, entity.TaskStatusAwaitingConfirmation)
 	fake := newFakeODClient()
 	s.designClient = fake
 
@@ -135,7 +137,7 @@ func TestDesignStartCreatesProjectAndIsIdempotent(t *testing.T) {
 }
 
 func TestDesignStartRejectsNonAwaitingTask(t *testing.T) {
-	s, _ := seedDesignTask(t, entity.TaskStatusDoneSuccess)
+	s, _, _ := seedDesignTask(t, entity.TaskStatusDoneSuccess)
 	fake := newFakeODClient()
 	s.designClient = fake
 
@@ -148,8 +150,68 @@ func TestDesignStartRejectsNonAwaitingTask(t *testing.T) {
 	}
 }
 
+// A task parked at a human_review workflow step reports Status in_progress
+// (pitfall 7); the design start must admit it via the workflow-state check.
+func TestDesignStartAllowsTaskAtHumanReviewStep(t *testing.T) {
+	s, workspaceID, task := seedDesignTask(t, entity.TaskStatusInProgress)
+	fake := newFakeODClient()
+	s.designClient = fake
+	seedODConnection(t, s)
+
+	// Start a greenfield-shaped workflow run stopped at a human_review step.
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	def, ok := workflowstore.DefinitionFromTemplate("greenfield-delivery-pipeline", "en", "design gate test")
+	if !ok {
+		t.Fatal("greenfield template missing")
+	}
+	if err := wfStore.SaveDefinition(&def); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := wfStore.StartRunWithInput("resproj", task.ID, def.ID, nil, map[string]string{}); err != nil {
+		t.Fatal(err)
+	}
+	// Park the run on the design_review (human_review) step with an open instance.
+	run, found, err := wfStore.RunForTask("resproj", task.ID)
+	if err != nil || !found {
+		t.Fatalf("run not found: %v", err)
+	}
+	stepID := "design_review"
+	run.ActiveStepID = stepID
+	run.Status = "active"
+	if err := wfStore.SaveRun(&run); err != nil {
+		t.Fatal(err)
+	}
+	instances, err := wfStore.ListStepInstances(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	parked := false
+	for i := range instances {
+		if instances[i].StepID == stepID {
+			instances[i].Status = "open"
+			instances[i].StartedAt = now
+			if err := wfStore.SaveStepInstance(&instances[i]); err != nil {
+				t.Fatal(err)
+			}
+			parked = true
+		}
+	}
+	if !parked {
+		t.Fatal("design_review instance not created by StartRun")
+	}
+
+	w := designPost(t, s, "/api/v1/projects/resproj/tasks/t-res-1/design/start", `{"designSystemId":"ant"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected start allowed at human_review step, got %d %s", w.Code, w.Body.String())
+	}
+	if len(fake.createCalls) != 1 {
+		t.Fatalf("createCalls = %v", fake.createCalls)
+	}
+}
+
 func TestDesignStartRegeneratesWithDelete(t *testing.T) {
-	s, task := seedDesignTask(t, entity.TaskStatusAwaitingConfirmation)
+	s, _, task := seedDesignTask(t, entity.TaskStatusAwaitingConfirmation)
 	fake := newFakeODClient()
 	s.designClient = fake
 
@@ -199,7 +261,7 @@ func TestRewriteDesignHTMLInjectsBaseAndInterceptor(t *testing.T) {
 }
 
 func TestDesignLaunchRedirects(t *testing.T) {
-	s, task := seedDesignTask(t, entity.TaskStatusAwaitingConfirmation)
+	s, _, task := seedDesignTask(t, entity.TaskStatusAwaitingConfirmation)
 	seedODConnection(t, s)
 	task.DesignProjectID = "proj_mg_t-res-1"
 	if err := s.ts.UpdateTask("resproj", taskAgentFromAssignee(task), task); err != nil {
