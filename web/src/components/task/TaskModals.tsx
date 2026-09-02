@@ -1083,6 +1083,8 @@ export function WorkflowRuntimePanel({
                     step={itemStep}
                     run={run}
                     actorLabels={actorLabels}
+                    project={project}
+                    taskID={taskID}
                   />
                 )
               })}
@@ -1249,7 +1251,7 @@ function workflowRunForRecord(runs: RunRow[], taskID: string, record: WorkflowRe
     .sort((a, b) => a.distance - b.distance)[0]?.run ?? null
 }
 
-function WorkflowRecordCard({ record, step, run, actorLabels }: { record: WorkflowRecord; step?: WorkflowStep; run: RunRow | null; actorLabels: Map<string, string> }) {
+function WorkflowRecordCard({ record, step, run, actorLabels, project, taskID }: { record: WorkflowRecord; step?: WorkflowStep; run: RunRow | null; actorLabels: Map<string, string>; project?: string; taskID?: string }) {
   const { t } = useTranslation()
   const fmt = useFormatDateTime()
   const [open, setOpen] = useState(false)
@@ -1260,6 +1262,7 @@ function WorkflowRecordCard({ record, step, run, actorLabels }: { record: Workfl
   const time = record.finishedAt || record.startedAt || ('updatedAt' in record ? record.updatedAt : record.createdAt)
   const inputCount = Object.keys(inputValues).filter((key) => String(inputValues[key] ?? '').trim()).length
   const outputCount = Object.keys(outputValues).filter((key) => String(outputValues[key] ?? '').trim()).length
+  const isDesignConfirm = Boolean(String(outputValues['approved_design_project_id'] ?? '').trim())
 
   return (
     <div className={cn('overflow-hidden rounded-lg border transition-colors', open ? 'border-sky-200 bg-white dark:border-sky-900/70 dark:bg-zinc-950' : 'border-neutral-100 bg-neutral-50 dark:border-zinc-800 dark:bg-zinc-900')}>
@@ -1281,6 +1284,11 @@ function WorkflowRecordCard({ record, step, run, actorLabels }: { record: Workfl
                 {time ? ` · ${fmt(time)}` : ''}
               </p>
               <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {isDesignConfirm && (
+                  <span className="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-[11px] font-medium text-sky-700 dark:border-sky-900/60 dark:bg-sky-950/60 dark:text-sky-300">
+                    {t('designGate.title', { defaultValue: '设计确认' })}
+                  </span>
+                )}
                 {hasInput && <WorkflowPayloadBadge label={t('workflows.detail.input')} count={inputCount} />}
                 {hasOutput && <WorkflowPayloadBadge label={t('workflows.detail.output')} count={outputCount} />}
               </div>
@@ -1302,10 +1310,77 @@ function WorkflowRecordCard({ record, step, run, actorLabels }: { record: Workfl
           <div>
             <p className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-neutral-400 dark:text-zinc-500">{t('workflows.detail.output')}</p>
             <WorkflowValuesOrArtifact values={outputValues} fields={step?.outputFields} artifact={hasWorkflowValues(outputValues) ? undefined : record.outputArtifact || record.summary} />
+            {isDesignConfirm && project && taskID && (
+              <div className="mt-2 border-t border-neutral-100 pt-2 dark:border-zinc-800">
+                <DesignLaunchLink project={project} taskID={taskID} />
+              </div>
+            )}
           </div>
         )}
       </div>}
     </div>
+  )
+}
+
+/**
+ * Minted on view: design links carry a signed odt token with a 4h TTL, so the
+ * URL is never persisted — the record card fetches a fresh one from
+ * design/status each time it is expanded.
+ */
+function DesignLaunchLink({ project, taskID }: { project: string; taskID: string }) {
+  const { t } = useTranslation()
+  const [state, setState] = useState<'loading' | 'ok' | 'error'>('loading')
+  const [url, setUrl] = useState('')
+  const [reloadKey, setReloadKey] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    setState('loading')
+    apiFetch<{ launchUrl?: string }>(
+      `/api/v1/projects/${encodeURIComponent(project)}/tasks/${encodeURIComponent(taskID)}/design/status`,
+      { silentStatuses: [404, 500, 502, 503, 504] },
+    )
+      .then((data) => {
+        if (cancelled) return
+        if (data?.launchUrl) {
+          setUrl(data.launchUrl)
+          setState('ok')
+        } else {
+          setState('error')
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setState('error')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [project, taskID, reloadKey])
+
+  if (state === 'loading') {
+    return <p className="text-xs text-neutral-400 dark:text-zinc-500">{t('workflows.designGate.approved.linkLoading', { defaultValue: '正在获取设计链接…' })}</p>
+  }
+  if (state === 'error') {
+    return (
+      <button
+        type="button"
+        onClick={() => setReloadKey((key) => key + 1)}
+        className="text-xs text-neutral-500 transition-colors hover:text-neutral-700 dark:text-zinc-500 dark:hover:text-zinc-300"
+      >
+        {t('workflows.designGate.approved.linkUnavailable', { defaultValue: '设计链接获取失败，点击重试。' })}
+      </button>
+    )
+  }
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noreferrer"
+      className="inline-flex items-center gap-1.5 text-xs font-medium text-sky-700 transition-colors hover:text-sky-800 dark:text-sky-400 dark:hover:text-sky-300"
+    >
+      <ExternalLink className="size-3.5" />
+      {t('workflows.designGate.approved.view', { defaultValue: '查看设计' })}
+    </a>
   )
 }
 

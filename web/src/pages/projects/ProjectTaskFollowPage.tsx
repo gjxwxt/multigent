@@ -22,7 +22,6 @@ import {
 import { apiPost } from '../../lib/api'
 import { canOperateAgent, useAuth } from '../../lib/auth'
 import { DesignGateFlow } from '../../components/design/DesignGateFlow'
-import { ApprovedDesignCard, approvedDesignValuesFromSteps } from '../../components/task/ApprovedDesignCard'
 import { cn } from '../../lib/cn'
 import { useFormatDateTime } from '../../lib/format-datetime'
 import { useApiJson } from '../../lib/use-api'
@@ -206,13 +205,6 @@ export default function ProjectTaskFollowPage() {
   )
   const canReview = Boolean(activeStep?.type === 'human_review' && isWorkflowStepOpen(activeInstance?.status) && !isTerminal(displayTask?.status || ''))
   const isDesignGate = Boolean(canReview && activeStep?.config?.designGate === 'true')
-  // The design gate froze the approved design into its outputs at confirm
-  // time; once present (existing choice or after the run advanced), surface
-  // the OD project id with a view link in this panel.
-  const approvedDesign = useMemo(
-    () => (visibleWorkflowData ? approvedDesignValuesFromSteps(visibleWorkflowData.steps) : null),
-    [visibleWorkflowData],
-  )
   const [designGateOpen, setDesignGateOpen] = useState(false)
 
   useEffect(() => {
@@ -574,6 +566,7 @@ export default function ProjectTaskFollowPage() {
                 records={visibleWorkflowRecords}
                 runs={runs}
                 taskID={taskId}
+                project={projectId}
                 actorLabels={actorLabels}
                 canReview={canReview && !isDesignGate}
                 hideHeader
@@ -596,24 +589,6 @@ export default function ProjectTaskFollowPage() {
                 // swallow the rejection so it doesn't surface as unhandled.
                 onSubmitReview={(decision) => submitWorkflowReview(decision).catch(() => {})}
               />
-              {isDesignGate && (
-                <section className="mx-4 mb-4 rounded-xl border border-neutral-200 bg-white px-4 py-4 dark:border-zinc-700 dark:bg-zinc-950">
-                  <p className="text-sm text-neutral-700 dark:text-zinc-300">{activeStep?.description}</p>
-                  <p className="mt-1 text-xs text-neutral-500 dark:text-zinc-400">
-                    {t('designGate.openHint', { defaultValue: '打开设计来源选择弹窗；在弹窗内确认前不会流转。' })}
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => setDesignGateOpen(true)}
-                    className="mt-3 rounded-lg border border-sky-600 bg-white px-3 py-2 text-sm font-medium text-sky-700 hover:bg-sky-50 dark:border-sky-500 dark:bg-zinc-900 dark:text-sky-400 dark:hover:bg-zinc-800"
-                  >
-                    {t('designGate.open', { defaultValue: '选择设计方案' })}
-                  </button>
-                </section>
-              )}
-              {approvedDesign && projectId && taskId && (
-                <ApprovedDesignCard project={projectId} taskID={taskId} values={approvedDesign} />
-              )}
             </>
           )}
 
