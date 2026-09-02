@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -103,6 +104,56 @@ type designStartResponse struct {
 
 var designLocks sync.Map // taskID -> *sync.Mutex
 
+// designMockWait simulates the OD CreateProject+StartRun latency so the gate
+// UI can be exercised end-to-end without a live OD daemon. Enabled by env
+// MULTIGENT_DESIGN_MOCK=1; responses carry the same shape as the real path
+// but no OD project is created and no run is started.
+func designMockEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("MULTIGENT_DESIGN_MOCK")), "1")
+}
+
+// designMockReadyAfter is how long after a mock start the fake run flips from
+// "running" to "succeeded", so the gate's ready/confirm UI states stay
+// drivable in mock mode without a real OD run.
+const designMockReadyAfter = 15 * time.Second
+
+// designMockStarts records the last mock start per task; mock status derives
+// its fake run status from the elapsed time. In-memory only — a restart drops
+// the mock sessions, which is fine for a UI-acceptance switch.
+var designMockStarts sync.Map // taskID -> time.Time
+
+// designMockCanvasHTML is the placeholder document served as the mock studio
+// (iframe proxy target and launch redirect target). Self-contained: no
+// external subresources, so the proxy needs no HTML rewrite in mock mode.
+func designMockCanvasHTML(taskID string) string {
+	return `<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>Mock 设计画布</title>
+<style>
+ body{margin:0;font-family:system-ui,-apple-system,"PingFang SC",sans-serif;background:#f4f5f7;color:#374151}
+ .bar{height:48px;background:#fff;border-bottom:1px solid #e5e7eb;display:flex;align-items:center;padding:0 16px;gap:8px}
+ .dot{width:10px;height:10px;border-radius:50%;background:#0ea5e9}
+ .wrap{max-width:720px;margin:40px auto;padding:0 24px}
+ .card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:24px}
+ h1{font-size:16px;margin:0 0 8px}
+ p{font-size:13px;line-height:1.7;margin:6px 0;color:#6b7280}
+ .sk{height:12px;border-radius:6px;background:#e5e7eb;margin:10px 0;animation:p 1.2s ease-in-out infinite}
+ @keyframes p{50%{opacity:.45}}
+</style></head>
+<body>
+<div class="bar"><span class="dot"></span><strong style="font-size:13px">Mock 设计画布</strong></div>
+<div class="wrap"><div class="card">
+<h1>Mock 模式占位画布</h1>
+<p>服务当前以 MULTIGENT_DESIGN_MOCK=1 运行，未连接真实 OpenDesign。</p>
+<p>任务：<b>` + taskID + `</b></p>
+<div class="sk" style="width:80%"></div>
+<div class="sk" style="width:60%"></div>
+<div class="sk" style="width:70%"></div>
+</div></div>
+</body></html>
+`
+}
+
 func (s *Server) handleDesignStart(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("name")
 	taskID := r.PathValue("taskId")
@@ -146,6 +197,17 @@ func (s *Server) handleDesignStart(w http.ResponseWriter, r *http.Request) {
 		project = freshProject
 	}
 	agent = freshAgent
+	if designMockEnabled() {
+		// Mock mode: deterministic fake session, ~2.5s latency so the staged
+		// loading UI is observable. No OD calls, no task mutation; status
+		// derives its fake run state from the timer below so both the
+		// "generating" and "ready" confirm variants can be exercised.
+		time.Sleep(2500 * time.Millisecond)
+		designMockStarts.Store(taskID, time.Now())
+		s.recordDesignAudit(r, workspaceIDOfProject(project), "design.start.mock", project, taskID, nil)
+		s.writeDesignStartResponse(w, project, taskID, "mock-"+taskID, body.Regenerate, "mock-conv-"+taskID)
+		return
+	}
 	client := s.defaultODClient()
 
 	if task.DesignProjectID != "" && !body.Regenerate {
@@ -224,6 +286,10 @@ func (s *Server) handleDesignStatus(w http.ResponseWriter, r *http.Request) {
 	if task == nil {
 		return
 	}
+	if designMockEnabled() {
+		s.writeDesignMockStatus(w, project, taskID)
+		return
+	}
 	projID := task.DesignProjectID
 	if projID == "" {
 		// The "existing design" confirm path never persists DesignProjectID on
@@ -251,6 +317,30 @@ func (s *Server) handleDesignStatus(w http.ResponseWriter, r *http.Request) {
 		"projectId": projID,
 		"runStatus": status,
 		"proxyUrl":  base + "/proxy/projects/" + projID + "?" + designTokenQuery + "=" + odt,
+		"launchUrl": base + "/launch?" + designTokenQuery + "=" + odt,
+	})
+}
+
+// writeDesignMockStatus answers design/status in mock mode: the fake run is
+// "running" right after a mock start and flips to "succeeded" once
+// designMockReadyAfter has elapsed; before any start it reports "none". URLs
+// are always re-minted so a reopen/refresh recovers the placeholder session.
+func (s *Server) writeDesignMockStatus(w http.ResponseWriter, project, taskID string) {
+	status := "none"
+	if v, ok := designMockStarts.Load(taskID); ok {
+		if time.Since(v.(time.Time)) >= designMockReadyAfter {
+			status = "succeeded"
+		} else {
+			status = "running"
+		}
+	}
+	base := fmt.Sprintf("/api/v1/projects/%s/tasks/%s/design", url.PathEscape(project), url.PathEscape(taskID))
+	odt := s.signDesignToken(taskID, project)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"projectId": "mock-" + taskID,
+		"runStatus": status,
+		"proxyUrl":  base + "/proxy/projects/mock-" + taskID + "?" + designTokenQuery + "=" + odt,
 		"launchUrl": base + "/launch?" + designTokenQuery + "=" + odt,
 	})
 }
@@ -356,6 +446,14 @@ func (s *Server) handleDesignLaunch(w http.ResponseWriter, r *http.Request) {
 	if !s.designRequestAuthorized(w, r, project, taskID) {
 		return
 	}
+	if designMockEnabled() {
+		// Mock mode has no OD to redirect to; serve the placeholder canvas so
+		// the new-tab flow stays observable.
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write([]byte(designMockCanvasHTML(taskID)))
+		return
+	}
 	projID := task.DesignProjectID
 	if projID == "" {
 		// Existing-design path: the gate froze approved_design_project_id into
@@ -400,6 +498,18 @@ func (s *Server) handleDesignProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.allowDesignRequest(taskID) {
 		s.jsonErrorCode(w, http.StatusTooManyRequests, ErrCodeServiceUnavailable, "design proxy rate limited")
+		return
+	}
+	if designMockEnabled() {
+		// Mock mode serves only the placeholder canvas document; it has no
+		// subresources, so anything else is a plain 404 (no OD traffic).
+		if full == "/projects/mock-"+taskID {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			_, _ = w.Write([]byte(designMockCanvasHTML(taskID)))
+			return
+		}
+		s.jsonError(w, http.StatusNotFound, "mock canvas has no subresources")
 		return
 	}
 	s.designProxyPass(w, r, project, taskID, r.Method, full, nil)

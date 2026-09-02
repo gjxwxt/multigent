@@ -10,7 +10,6 @@ type StartResponse = {
   launchUrl: string
   studioUrl: string
   regenerated?: boolean
-  conversationId?: string
 }
 
 /**
@@ -39,7 +38,6 @@ export function DesignGateFlow({
   const [busyLocal, setBusyLocal] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [session, setSession] = useState<StartResponse | null>(null)
-  const [conversationId, setConversationId] = useState<string | undefined>(undefined)
   const { t } = useTranslation()
 
   const designBase = `/api/v1/projects/${encodeURIComponent(project)}/tasks/${encodeURIComponent(taskID)}/design`
@@ -53,7 +51,6 @@ export function DesignGateFlow({
     try {
       const data = await apiPost<StartResponse>(`${designBase}/start`, {}, { suppressToast: true })
       setSession(data)
-      setConversationId(data.conversationId || undefined)
       setStage('review')
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -143,11 +140,8 @@ export function DesignGateFlow({
       project={project}
       taskID={taskID}
       taskTitle={taskTitle}
-      projectId={session?.projectId || ''}
       proxyUrl={session?.proxyUrl || ''}
       launchUrl={session?.launchUrl || ''}
-      conversationId={conversationId}
-      onConversationId={setConversationId}
       onConfirm={() => void confirmGenerated()}
       onRework={() => void rework()}
       onClose={onClose}
