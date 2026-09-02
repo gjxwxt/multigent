@@ -1492,6 +1492,18 @@ function nextDocPreviewZIndex() {
 
 function WorkflowValueText({ value }: { value: string }) {
   const text = String(value ?? '')
+  // The frozen design-gate snapshot inlines the approved page HTML (up to
+  // 512KiB). Rendering that through the markdown view is unreadable; show a
+  // compact receipt instead — the design card link is the way to view it.
+  if (text.trimStart().startsWith('<!DOCTYPE') || text.trimStart().startsWith('<!doctype') || text.trimStart().startsWith('<html')) {
+    const sizeKB = Math.max(1, Math.round(new Blob([text]).size / 1024))
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs text-neutral-500 dark:text-zinc-400">
+        <span className="inline-block size-1.5 shrink-0 rounded-full bg-emerald-500" />
+        HTML · {sizeKB} KB（已冻结快照）
+      </span>
+    )
+  }
   const structured = parseWorkflowStructuredValue(text)
   if (structured !== null) {
     return <WorkflowStructuredValue value={structured} />

@@ -17,13 +17,15 @@ import (
 // fakeODClient records calls so idempotency and guards can be asserted
 // without a live OD daemon.
 type fakeODClient struct {
-	projects    map[string]bool
-	createCalls []string
-	runCalls    []string
-	deleteCalls []string
-	lastCreds   *designModelCreds
-	runStatus   string
-	failCreate  bool
+	projects     map[string]bool
+	createCalls  []string
+	runCalls     []string
+	deleteCalls  []string
+	lastCreds    *designModelCreds
+	runStatus    string
+	failCreate   bool
+	files        []ODProjectFile
+	fileContents map[string][]byte
 }
 
 func newFakeODClient() *fakeODClient {
@@ -61,6 +63,17 @@ func (f *fakeODClient) DeleteProject(_ context.Context, projectID string) error 
 	f.deleteCalls = append(f.deleteCalls, projectID)
 	delete(f.projects, projectID)
 	return nil
+}
+
+func (f *fakeODClient) ListProjectFiles(_ context.Context, _ string) ([]ODProjectFile, error) {
+	return f.files, nil
+}
+
+func (f *fakeODClient) GetProjectFile(_ context.Context, _, path string) ([]byte, error) {
+	if raw, ok := f.fileContents[path]; ok {
+		return raw, nil
+	}
+	return nil, &odAPIError{Status: 404, Detail: "not found"}
 }
 
 func seedDesignTask(t *testing.T, status entity.TaskStatus) (*Server, string, *entity.Task) {

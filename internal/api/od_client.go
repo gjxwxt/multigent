@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -138,6 +139,12 @@ type odClientAPI interface {
 	StartRun(ctx context.Context, projectID, message, designSystemID, model string, creds *designModelCreds) (conversationID string, err error)
 	LatestRunStatus(ctx context.Context, projectID string) (runID, status string, err error)
 	DeleteProject(ctx context.Context, projectID string) error
+	// Snapshot surface: ListProjectFiles + GetProjectFile feed the frozen
+	// design snapshot taken at confirm time (design_gate_snapshot.go). The
+	// implementation agent consumes the frozen copy, so later OD edits do not
+	// retroactively change what downstream steps see.
+	ListProjectFiles(ctx context.Context, projectID string) ([]ODProjectFile, error)
+	GetProjectFile(ctx context.Context, projectID, path string) ([]byte, error)
 }
 
 type odClient struct {
@@ -348,4 +355,58 @@ func (c *odClient) LatestRunStatus(ctx context.Context, projectID string) (strin
 
 func (c *odClient) DeleteProject(ctx context.Context, projectID string) error {
 	return c.s.odDo(ctx, http.MethodDelete, "/api/projects/"+projectID, nil, nil)
+}
+
+// ODProjectFile is one artifact in an OD project's file listing (Phase 0
+// probe: GET /api/projects/{id}/files). Only the snapshot fields we rely on
+// are decoded; OD may add more at any time.
+type ODProjectFile struct {
+	Path string `json:"path"`
+	Kind string `json:"kind"`
+	Size int64  `json:"size"`
+}
+
+func (c *odClient) ListProjectFiles(ctx context.Context, projectID string) ([]ODProjectFile, error) {
+	var out struct {
+		Files []ODProjectFile `json:"files"`
+	}
+	if err := c.s.odDo(ctx, http.MethodGet, "/api/projects/"+projectID+"/files", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Files, nil
+}
+
+// GetProjectFile fetches one artifact's raw bytes (GET
+// /api/projects/{id}/files/{path}); HTML artifacts answer text/html.
+func (c *odClient) GetProjectFile(ctx context.Context, projectID, path string) ([]byte, error) {
+	cfg, err := c.s.resolveDesignConnection()
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		cfg.BaseURL+"/api/projects/"+url.PathEscape(projectID)+"/files/"+pathEscapeSegment(path), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build od file request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
+	client := &http.Client{Timeout: odHTTPTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("od service unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &odAPIError{Status: resp.StatusCode, Detail: resp.Status}
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+}
+
+// pathEscapeSegment escapes each slash-separated segment so directory-ish
+// artifact paths survive while keeping the slash structure.
+func pathEscapeSegment(path string) string {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	return strings.Join(parts, "/")
 }

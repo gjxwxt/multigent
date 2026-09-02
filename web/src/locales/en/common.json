@@ -800,7 +800,18 @@
       "autoComments.generated": "Confirmed the OD-generated design; proceed to implementation.",
       "autoComments.rework": "Design does not meet expectations; returned to the requirement stage.",
       "open": "Choose a design",
-      "openHint": "Open the design source chooser; nothing advances until you confirm inside the dialog."
+      "openHint": "Open the design source chooser; nothing advances until you confirm inside the dialog.",
+      "approved": {
+        "title": "Approved design",
+        "projectId": "OpenDesign project",
+        "view": "View design",
+        "sourceExisting": "Source: existing design",
+        "sourceGenerated": "Source: OD-generated",
+        "frozenHtml": "The design HTML snapshot is frozen; the implementation step consumes this copy, immune to later OD edits.",
+        "snapshotPath": "Snapshot bundle",
+        "linkLoading": "Fetching the design link…",
+        "linkUnavailable": "Could not fetch the design link; click refresh to retry."
+      }
     }
   },
   "projectSettings": {

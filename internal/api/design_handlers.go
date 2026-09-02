@@ -15,6 +15,7 @@ import (
 
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
+	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
 
 // Design gate endpoints (OpenDesign integration, docs/opendesign-integration-plan.md).
@@ -223,12 +224,20 @@ func (s *Server) handleDesignStatus(w http.ResponseWriter, r *http.Request) {
 	if task == nil {
 		return
 	}
-	if task.DesignProjectID == "" {
+	projID := task.DesignProjectID
+	if projID == "" {
+		// The "existing design" confirm path never persists DesignProjectID on
+		// the task — the frozen outputs are the only record. Fall back to the
+		// approved_design_project_id the gate wrote so the follow panel can
+		// still mint a fresh signed link to that design.
+		projID = s.approvedDesignProjectIDFromRun(project, taskID)
+	}
+	if projID == "" {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"projectId": "", "runStatus": "none"})
 		return
 	}
-	_, status, err := s.defaultODClient().LatestRunStatus(r.Context(), task.DesignProjectID)
+	_, status, err := s.defaultODClient().LatestRunStatus(r.Context(), projID)
 	if err != nil {
 		s.writeDesignUpstreamError(w, err)
 		return
@@ -239,11 +248,42 @@ func (s *Server) handleDesignStatus(w http.ResponseWriter, r *http.Request) {
 	odt := s.signDesignToken(taskID, project)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"projectId": task.DesignProjectID,
+		"projectId": projID,
 		"runStatus": status,
-		"proxyUrl":  base + "/proxy/projects/" + task.DesignProjectID + "?" + designTokenQuery + "=" + odt,
+		"proxyUrl":  base + "/proxy/projects/" + projID + "?" + designTokenQuery + "=" + odt,
 		"launchUrl": base + "/launch?" + designTokenQuery + "=" + odt,
 	})
+}
+
+// approvedDesignProjectIDFromRun reads the approved_design_project_id output
+// from the task's workflow run design_review step, if any. Read-only fallback;
+// misses just leave the status response without a project.
+func (s *Server) approvedDesignProjectIDFromRun(project, taskID string) string {
+	workspaceID, err := s.currentWorkspaceID()
+	if err != nil {
+		return ""
+	}
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	run, found, err := wfStore.RunForTask(project, taskID)
+	if err != nil || !found {
+		return ""
+	}
+	insts, err := wfStore.ListStepInstances(run.ID)
+	if err != nil {
+		return ""
+	}
+	// Scan newest-first; the first completed step that carries a non-empty
+	// approved_design_project_id wins.
+	for i := len(insts) - 1; i >= 0; i-- {
+		inst := insts[i]
+		if inst.Status != "completed" {
+			continue
+		}
+		if v := strings.TrimSpace(inst.OutputValues["approved_design_project_id"]); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // ---- POST .../design/chat (multi-turn modification via platform, A.5-3) ----

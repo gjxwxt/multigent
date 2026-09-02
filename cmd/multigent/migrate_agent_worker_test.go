@@ -470,7 +470,13 @@ func TestAgentWorkerMigrationKeepsHumanMembersOutOfWorkers(t *testing.T) {
 }
 
 func TestCreateWorkspaceBackupArchive(t *testing.T) {
-	root := t.TempDir()
+	// macOS caps unix socket paths at 104 bytes; t.TempDir() nests under the
+	// long $TMPDIR and can blow past it (pitfall 12) — use a short root.
+	root, err := os.MkdirTemp("/tmp", "mgbackup-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
 	writeYAMLForTest(t, filepath.Join(root, ".agencycli", "agency.yaml"), map[string]string{"name": "Legacy"})
 	if err := os.WriteFile(filepath.Join(root, "notes.md"), []byte("hello backup"), 0o644); err != nil {
 		t.Fatalf("write note: %v", err)

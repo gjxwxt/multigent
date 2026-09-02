@@ -657,6 +657,19 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 			deliveryPrepared = true
 		}
 	}
+	// Freeze the design reference at the moment of approval: the OD project
+	// keeps evolving, so the HTML the human approved is captured once and
+	// carried in the outputs. Best-effort — a failed capture leaves the
+	// transition untouched (the project id stays the contract).
+	if runFound && isDesignGateStep(currentStep) && isApprovalDecision(outputs["decision"]) && outputs["approved_design_project_id"] != "" && outputs["approved_design_html"] == "" {
+		inline, snapPath := s.captureDesignGateSnapshot(r, project, agent, t, outputs["approved_design_project_id"])
+		if inline != "" {
+			outputs["approved_design_html"] = inline
+		}
+		if snapPath != "" {
+			outputs["approved_design_snapshot_path"] = snapPath
+		}
+	}
 	if isApprovalDecision(outputs["decision"]) {
 		s.commitAndPushReviewChanges(project, agent, t)
 	}
@@ -723,6 +736,13 @@ func isPullRequestReviewStep(step entity.WorkflowStep) bool {
 	id := strings.ToLower(strings.TrimSpace(step.ID))
 	title := strings.ToLower(strings.TrimSpace(step.Title))
 	return strings.Contains(id, "pr_review") || strings.Contains(id, "mr_review") || strings.Contains(id, "merge_and_sync") || strings.Contains(id, "push_to_gitlab") || strings.Contains(title, "pull request") || strings.Contains(title, "merge request") || strings.Contains(title, "merge and sync")
+}
+
+// isDesignGateStep reports whether the step carries the design gate flag
+// (greenfield design_review). Used to freeze the approved design snapshot at
+// confirm time.
+func isDesignGateStep(step entity.WorkflowStep) bool {
+	return step.Config != nil && step.Config["designGate"] == "true"
 }
 
 func isApprovalDecision(decision string) bool {

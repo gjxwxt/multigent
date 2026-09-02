@@ -43,6 +43,8 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"designSourceField":  "Optional. existing (pick a listed design) or generated (created from the requirement). Empty on rework.",
 		"designProjectField": "Optional. OpenDesign project id backing the approved design.",
 		"designPreviewField": "Optional. Preview URL of the approved design for downstream reference.",
+		"designHTMLField":    "Optional. Frozen HTML of the approved design captured at confirm time; consumers must use this copy, not the live OD project.",
+		"designSnapshotField":"Optional. Workspace-relative path of the frozen design snapshot bundle (see manifest.json).",
 		"prField":            "PR or patch summary produced by implementation.",
 		"testsField":         "Tests executed with evidence.",
 		"risksField":         "Known risks and follow-ups.",
@@ -85,6 +87,8 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"designSourceField":  "可选。existing（选择已有设计）或 generated（由需求生成）。打回时留空。",
 		"designProjectField": "可选。支撑已确认设计的 OpenDesign 项目 ID。",
 		"designPreviewField": "可选。已确认设计的预览地址，供下游参考。",
+		"designHTMLField":    "可选。确认时冻结的已确认设计 HTML 快照；下游一律使用此副本，不读 OD 实时项目。",
+		"designSnapshotField":"可选。冻结设计快照包的工作区相对路径（见 manifest.json）。",
 		"prField":            "实现产出的 PR 或补丁摘要。",
 		"testsField":         "已执行的测试与证据。",
 		"risksField":         "已知风险与后续事项。",
@@ -113,6 +117,12 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			optionalField("approved_design_source", "designSourceField"),
 			optionalField("approved_design_project_id", "designProjectField"),
 			optionalField("approved_design_preview_url", "designPreviewField"),
+			// Frozen at confirm time by the server (design_gate_snapshot.go):
+			// the HTML the human saw and the workspace-relative snapshot bundle
+			// path. Downstream steps consume these, never the live OD project,
+			// so later OD edits cannot retroactively change what was approved.
+			optionalField("approved_design_html", "designHTMLField"),
+			optionalField("approved_design_snapshot_path", "designSnapshotField"),
 		})
 	if designStep.Config == nil {
 		designStep.Config = map[string]string{}
@@ -134,6 +144,8 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 					optionalField("approved_design_source", "designSourceField"),
 					optionalField("approved_design_project_id", "designProjectField"),
 					optionalField("approved_design_preview_url", "designPreviewField"),
+					optionalField("approved_design_html", "designHTMLField"),
+					optionalField("approved_design_snapshot_path", "designSnapshotField"),
 				},
 				[]entity.WorkflowField{field("pr", "prField"), field("tests_run", "testsField"), field("risks", "risksField")}),
 			tmplStep("self_review", "agent_task", text["selfReviewTitle"], text["selfReviewDesc"], "owner-engineer", "rose", 1200,
@@ -157,9 +169,11 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			edge("e-req-review-design", "requirement_review", "design_review", text["approved"], cond("decision", "eq", "approve"), map[string]string{"approved_requirement": "$output.approved_requirement"}, false),
 			edge("e-req-review-rework", "requirement_review", "requirement_draft", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "previous_draft": "$input.requirement_draft"}, false),
 			edge("e-design-approve", "design_review", "implementation", text["approved"], cond("decision", "eq", "approve"), map[string]string{
-				"approved_design_source":      "$output.approved_design_source",
-				"approved_design_project_id":  "$output.approved_design_project_id",
-				"approved_design_preview_url": "$output.approved_design_preview_url",
+				"approved_design_source":        "$output.approved_design_source",
+				"approved_design_project_id":    "$output.approved_design_project_id",
+				"approved_design_preview_url":   "$output.approved_design_preview_url",
+				"approved_design_html":          "$output.approved_design_html",
+				"approved_design_snapshot_path": "$output.approved_design_snapshot_path",
 			}, false),
 			edge("e-design-rework", "design_review", "requirement_draft", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "previous_draft": "$input.requirement_draft"}, false),
 			edge("e-impl-self-review", "implementation", "self_review", "", nil, nil, true),

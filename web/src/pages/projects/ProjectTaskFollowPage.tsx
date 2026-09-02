@@ -22,6 +22,7 @@ import {
 import { apiPost } from '../../lib/api'
 import { canOperateAgent, useAuth } from '../../lib/auth'
 import { DesignGateFlow } from '../../components/design/DesignGateFlow'
+import { ApprovedDesignCard, approvedDesignValuesFromSteps } from '../../components/task/ApprovedDesignCard'
 import { cn } from '../../lib/cn'
 import { useFormatDateTime } from '../../lib/format-datetime'
 import { useApiJson } from '../../lib/use-api'
@@ -205,6 +206,13 @@ export default function ProjectTaskFollowPage() {
   )
   const canReview = Boolean(activeStep?.type === 'human_review' && isWorkflowStepOpen(activeInstance?.status) && !isTerminal(displayTask?.status || ''))
   const isDesignGate = Boolean(canReview && activeStep?.config?.designGate === 'true')
+  // The design gate froze the approved design into its outputs at confirm
+  // time; once present (existing choice or after the run advanced), surface
+  // the OD project id with a view link in this panel.
+  const approvedDesign = useMemo(
+    () => (visibleWorkflowData ? approvedDesignValuesFromSteps(visibleWorkflowData.steps) : null),
+    [visibleWorkflowData],
+  )
   const [designGateOpen, setDesignGateOpen] = useState(false)
 
   useEffect(() => {
@@ -602,6 +610,9 @@ export default function ProjectTaskFollowPage() {
                     {t('designGate.open', { defaultValue: '选择设计方案' })}
                   </button>
                 </section>
+              )}
+              {approvedDesign && projectId && taskId && (
+                <ApprovedDesignCard project={projectId} taskID={taskId} values={approvedDesign} />
               )}
             </>
           )}
