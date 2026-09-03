@@ -741,7 +741,7 @@ function InstallToolToProjectDialog({
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} disabled={saving} className="rounded-lg border border-neutral-300 px-3 py-2 text-sm dark:border-zinc-600">{t('common.cancel')}</button>
           <button type="button" onClick={() => void submit()} disabled={saving || loading || !project} className="rounded-lg bg-sky-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50">
-            {saving ? t('common.saving') : t('connections.installToProjectConfirm')}
+            {saving ? t('common.saving') : isCodeHostProvider(connection.provider) ? t('connections.installCodeHostConfirm') : t('connections.installToProjectConfirm')}
           </button>
         </div>
       </div>
