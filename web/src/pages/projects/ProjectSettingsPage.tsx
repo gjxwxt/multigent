@@ -148,16 +148,18 @@ function InstalledConnections({ projectId }: { projectId: string }) {
   const [addingFor, setAddingFor] = useState<string | null>(null)
 
   const path = `/api/v1/projects/${encodeURIComponent(projectId)}/tool-bindings`
-  const state = useApiJson<{ bindings: ProjectToolBinding[] }>(path, reloadKey, { silentStatuses: [404] })
+  const state = useApiJson<{ bindings: ProjectToolBinding[] }>(path, reloadKey, { silentStatuses: [404], keepPreviousDataOnReload: true })
   const bindings = state.status === 'ok' ? (state.data.bindings ?? []) : []
 
   const agentsPath = `/api/v1/projects/${encodeURIComponent(projectId)}/agents`
-  const agentsState = useApiJson<ProjectAgentSummary[]>(agentsPath, reloadKey, { silentStatuses: [404] })
+  const agentsState = useApiJson<ProjectAgentSummary[]>(agentsPath, reloadKey, { silentStatuses: [404], keepPreviousDataOnReload: true })
   const agents = agentsState.status === 'ok' ? (agentsState.data ?? []) : []
+  const isAgentsReady = agentsState.status === 'ok'
 
   // One entry per distinct connection, preserving first-seen order. Stale
   // bindings whose agent no longer sits in the project are flagged so admins
   // can clean them up instead of wondering why a ghost agent shows up.
+  // Never flag stale during loading/revalidation before member list resolves.
   const cards = useMemo(() => {
     const byConnection = new Map<string, ProjectToolBinding[]>()
     for (const binding of bindings) {
@@ -165,17 +167,19 @@ function InstalledConnections({ projectId }: { projectId: string }) {
       if (list) list.push(binding)
       else byConnection.set(binding.connectionId, [binding])
     }
-    const memberNames = new Set(agents.map((a) => a.name))
+    const memberNames = new Set(agents.map((a) => a.name).filter(Boolean))
     return Array.from(byConnection.entries()).map(([connectionId, rows]) => {
       const first = rows[0]
       const covered = new Set(rows.map((r) => (r.agentId || r.agentWorkerId || '').trim()).filter(Boolean))
-      const stale = rows.filter((r) => {
-        const name = (r.agentId || '').trim()
-        return name !== '' && !memberNames.has(name)
-      })
+      const stale = isAgentsReady
+        ? rows.filter((r) => {
+            const name = (r.agentId || '').trim()
+            return name !== '' && !memberNames.has(name)
+          })
+        : []
       return { connectionId, rows, first, covered, stale }
     })
-  }, [bindings, agents])
+  }, [bindings, agents, isAgentsReady])
 
   const refresh = useCallback(() => setReloadKey((k) => k + 1), [])
 
@@ -240,7 +244,7 @@ function InstalledConnections({ projectId }: { projectId: string }) {
         <span className="text-sm font-semibold text-neutral-800 dark:text-zinc-100">{t('projectSettings.installedTitle', { defaultValue: '已安装的连接工具' })}</span>
         <p className="mt-1 text-xs leading-relaxed text-neutral-500 dark:text-zinc-500">{t('projectSettings.installedDesc', { defaultValue: '这些连接已授权给本项目内的 Agent 运行时使用。' })}</p>
       </div>
-      {state.status === 'loading' ? (
+      {state.status === 'loading' && bindings.length === 0 ? (
         <div className="flex items-center gap-2 px-5 py-4 text-sm text-neutral-500 dark:text-zinc-400">
           <Loader2 className="size-4 animate-spin" />
           {t('common.loading', { defaultValue: '加载中…' })}
