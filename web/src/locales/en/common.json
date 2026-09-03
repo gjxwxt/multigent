@@ -344,6 +344,8 @@
     "installCodeHostTitle": "Use {{connection}} for project code hosting and CI pipelines",
     "installCodeHostHint": "The {{tool}} connection serves primarily as the platform's code-hosting infrastructure: remote repositories, Git push, and the CI/CD readiness gate all work through it. This step also lets agents in the selected project call the {{tool}} CLI tools (e.g. glab) at runtime.",
     "installCodeHostConfirm": "Add to project",
+    "resolvePriorityDefault": "New projects resolve to it by default",
+    "resolvePriorityHint": "Falls back to most-recently-updated when no default is set; pinned projects are unaffected",
     "newMCPTool": "New MCP tool",
     "customMCPTools": "Custom MCP tools",
     "mcpToolName": "Tool name",
@@ -910,7 +912,10 @@
     "installedEmpty": "No connection tools are granted to this project's agents yet.",
     "installedRemove": "Remove grant",
     "installedRemoveConfirm": "Remove the grant of \"{{name}}\" from this project? Agents in this project will no longer be able to call its tools.",
-    "installedAdapter": "Adapter"
+    "installedUninstallConfirmDetail": "Uninstalling \"{{name}}\" will delete {{bindings}} agent bindings ({{agents}}) and 1 project-level grant; agents in this project will no longer be able to call its tools.",
+    "installedPartialError": "Uninstall did not fully succeed: removed {{bindings}} bindings and {{grants}} project grants; {{count}} step(s) failed. Errors: {{errors}}",
+    "installedAdapter": "Adapter",
+    "installedCodeHostNote": "Code-host connection: the remote repo, Git push, and CI pipelines run through the workspace-level connection and are unaffected by uninstalling."
   },
   "sidebar": {
     "footer": "Teams hold your roster; projects are where tasks and messages run. Data will connect to multigent later.",

@@ -1621,15 +1621,29 @@ func (s *Server) handleCreateConnectionGrant(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleDeleteConnectionGrant(w http.ResponseWriter, r *http.Request) {
-	connection, ok := s.connectionByIDWithAccess(w, r)
+	// Unlike connectionByIDWithAccess, workspace-member access is enough to
+	// reach this handler: the actual authorisation happens below, and the
+	// project-manager carve-out must be reachable for callers who cannot read
+	// the connection itself (deleting a grant only removes access, never adds).
+	workspaceID, ok := s.connectionWorkspace(w, r)
 	if !ok {
 		return
 	}
-	if !s.canManageConnection(r, connection, s.currentUser(r)) {
-		s.jsonErrorCode(w, http.StatusForbidden, ErrCodeConnectionManagementRequired, "connection management access required")
+	connectionID := strings.TrimSpace(r.PathValue("id"))
+	connection, exists, err := s.controlDB.ConnectionByID(connectionID)
+	if err != nil {
+		s.serverError(w, err)
+		return
+	}
+	if !exists || connection.WorkspaceID != workspaceID {
+		s.jsonErrorCode(w, http.StatusNotFound, ErrCodeConnectionNotFound, "connection not found")
 		return
 	}
 	grantID := strings.TrimSpace(r.PathValue("grantId"))
+	if !s.canReadConnection(r, connection, s.currentUser(r)) && !s.canManageConnection(r, connection, s.currentUser(r)) && !s.projectManagerMayRevokeGrant(r, connection, grantID) {
+		s.jsonErrorCode(w, http.StatusForbidden, ErrCodeConnectionManagementRequired, "connection management access required")
+		return
+	}
 	grants, err := s.controlDB.ListConnectionGrants(connection.ID)
 	if err != nil {
 		s.serverError(w, err)
@@ -1723,6 +1737,30 @@ func (s *Server) canManageConnection(r *http.Request, connection controldb.Conne
 	default:
 		return false
 	}
+}
+
+// projectManagerMayRevokeGrant reports whether the caller may delete one
+// specific grant purely as a project manager. Installing a connection to a
+// project only requires project-manager access
+// (handleInstallProjectToolBindings), so revoking the same project-scoped
+// grant must stay symmetric — otherwise a project manager could connect a
+// tool but could never uninstall it. Scope stays narrow: workspace-owned
+// connections, project-targeted grants, and only projects the caller manages.
+func (s *Server) projectManagerMayRevokeGrant(r *http.Request, connection controldb.Connection, grantID string) bool {
+	if connection.OwnerType != ConnectionOwnerWorkspace {
+		return false
+	}
+	grants, err := s.controlDB.ListConnectionGrants(connection.ID)
+	if err != nil {
+		return false
+	}
+	for _, grant := range grants {
+		if grant.ID != grantID {
+			continue
+		}
+		return grant.TargetType == ConnectionTargetProject && s.canManageProject(r, grant.TargetID)
+	}
+	return false
 }
 
 func (s *Server) validateConnectionGrantTarget(r *http.Request, connection controldb.Connection, targetType, targetID string) error {

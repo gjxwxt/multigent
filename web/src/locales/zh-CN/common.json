@@ -344,6 +344,8 @@
     "installCodeHostTitle": "将 {{connection}} 用于项目代码托管与 CI 流水线",
     "installCodeHostHint": "{{tool}} 连接主要作为平台的代码托管基础设施：项目的远端仓库、Git 推送、CI/CD 就绪闸门都通过它工作，这一步同时会让所选项目的 Agent 在运行时调用 {{tool}} 的 CLI 工具（如 glab）。",
     "installCodeHostConfirm": "确认接入",
+    "resolvePriorityDefault": "新项目默认解析到它",
+    "resolvePriorityHint": "未设默认时按最近更新兜底；项目一旦钉定连接则不再受此影响",
     "newMCPTool": "新建 MCP 工具",
     "customMCPTools": "自定义 MCP 工具",
     "mcpToolName": "工具名",
@@ -910,7 +912,10 @@
     "installedEmpty": "还没有授权任何连接工具给本项目的 Agent。",
     "installedRemove": "移除授权",
     "installedRemoveConfirm": "移除「{{name}}」在本项目的授权？移除后本项目 Agent 将无法再调用该连接的工具。",
-    "installedAdapter": "工具形态"
+    "installedUninstallConfirmDetail": "卸载「{{name}}」将删除 {{bindings}} 条 Agent 绑定（{{agents}}）和 1 条项目级授权；之后本项目 Agent 将无法再调用该连接的工具。",
+    "installedPartialError": "卸载未完全成功：已移除 {{bindings}} 条绑定、{{grants}} 条项目授权；{{count}} 项失败。错误：{{errors}}",
+    "installedAdapter": "工具形态",
+    "installedCodeHostNote": "代码托管类连接：远端仓库、Git 推送与 CI 流水线走工作区级连接，不受卸载影响。"
   },
   "sidebar": {
     "footer": "团队维护编制与 Agent；项目承载具体任务与消息。后续对接 multigent 数据。",

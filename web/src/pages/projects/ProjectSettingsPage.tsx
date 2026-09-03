@@ -135,6 +135,10 @@ type ConnectionGrant = {
   targetId: string
 }
 
+// Code-host providers whose repo/push/CI role runs through the workspace-level
+// connection regardless of project bindings (kept in sync with ConnectionsPage).
+const codeHostProviders = new Set(['gitlab', 'github', 'gitee'])
+
 // Aggregates the project's agent tool bindings by connection: one card per
 // installed connection with the covered agents as removable chips. Platform
 // features (Git push, the design gate) use workspace-level connections and are
@@ -183,6 +187,14 @@ function InstalledConnections({ projectId }: { projectId: string }) {
 
   const refresh = useCallback(() => setReloadKey((k) => k + 1), [])
 
+  function agentsCoveredLabels(connectionId: string): string {
+    const names = bindings
+      .filter((b) => b.connectionId === connectionId)
+      .map((b) => (b.agentId || b.agentWorkerId || '').trim())
+      .filter(Boolean)
+    return names.length > 0 ? names.join('、') : '—'
+  }
+
   async function removeBinding(binding: ProjectToolBinding) {
     setBusyId(binding.id)
     try {
@@ -198,20 +210,52 @@ function InstalledConnections({ projectId }: { projectId: string }) {
   // Uninstall = delete every binding under this connection plus the
   // project-level grant (otherwise the runtime would still admit the
   // connection via grant matching with no binding left to narrow it).
+  // Server errors stop the loop: a silent half-uninstall is the worst
+  // outcome (bindings gone, grant still admits the connection at runtime).
   async function uninstallConnection(connectionId: string, label: string) {
     setBusyId(connectionId)
     try {
       const rows = bindings.filter((b) => b.connectionId === connectionId)
+      let deletedBindings = 0
+      let deletedGrants = 0
+      const errors: string[] = []
       for (const row of rows) {
-        await apiDelete(`/api/v1/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(row.agentId || '')}/tool-bindings/${encodeURIComponent(row.id)}`)
-      }
-      const grantsState = await apiFetch<{ grants: ConnectionGrant[] }>(`/api/v1/connections/${encodeURIComponent(connectionId)}/grants`)
-      for (const grant of grantsState.grants ?? []) {
-        if (grant.targetType === 'project' && grant.targetId === projectId) {
-          await apiDelete(`/api/v1/connections/${encodeURIComponent(connectionId)}/grants/${encodeURIComponent(grant.id)}`)
+        try {
+          await apiDelete(`/api/v1/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(row.agentId || '')}/tool-bindings/${encodeURIComponent(row.id)}`)
+          deletedBindings += 1
+        } catch (e) {
+          errors.push(e instanceof Error ? e.message : String(e))
         }
       }
-      showToast(t('projectSettings.installedRemovedToast', { defaultValue: '已卸载' }) + ' ✓', 'success')
+      let grantsState: { grants: ConnectionGrant[] } | null = null
+      try {
+        grantsState = await apiFetch<{ grants: ConnectionGrant[] }>(`/api/v1/connections/${encodeURIComponent(connectionId)}/grants`)
+      } catch (e) {
+        errors.push(e instanceof Error ? e.message : String(e))
+      }
+      if (grantsState) {
+        for (const grant of grantsState.grants ?? []) {
+          if (grant.targetType === 'project' && grant.targetId === projectId) {
+            try {
+              await apiDelete(`/api/v1/connections/${encodeURIComponent(connectionId)}/grants/${encodeURIComponent(grant.id)}`)
+              deletedGrants += 1
+            } catch (e) {
+              errors.push(e instanceof Error ? e.message : String(e))
+            }
+          }
+        }
+      }
+      if (errors.length > 0) {
+        showToast(t('projectSettings.installedPartialError', {
+          defaultValue: '卸载未完全成功：已移除 {{bindings}} 条绑定、{{grants}} 条项目授权；{{count}} 项失败。错误：{{errors}}',
+          bindings: deletedBindings,
+          grants: deletedGrants,
+          count: errors.length,
+          errors: errors.slice(0, 2).join('；'),
+        }), 'error')
+      } else {
+        showToast(t('projectSettings.installedRemovedToast', { defaultValue: '已卸载' }) + ' ✓', 'success')
+      }
       setRemoving(null)
       refresh()
     } catch (e) {
@@ -269,6 +313,11 @@ function InstalledConnections({ projectId }: { projectId: string }) {
                       {card.first.adapterType ? ` · ${card.first.adapterType}` : ''}
                       {card.first.updatedAt ? ` · ${fmt(card.first.updatedAt)}` : ''}
                     </p>
+                    {codeHostProviders.has(card.first.provider) && (
+                      <p className="mt-1 text-[11px] text-sky-700/80 dark:text-sky-400/80">
+                        {t('projectSettings.installedCodeHostNote', { defaultValue: '代码托管类连接：远端仓库、Git 推送与 CI 流水线走工作区级连接，不受卸载影响。' })}
+                      </p>
+                    )}
                   </div>
                   <button
                     type="button"
@@ -342,10 +391,14 @@ function InstalledConnections({ projectId }: { projectId: string }) {
       <ConfirmDialog
         open={removing !== null}
         title={t('projectSettings.installedUninstall', { defaultValue: '卸载' })}
-        description={t('projectSettings.installedUninstallConfirm', {
-          defaultValue: `卸载「${removing?.label ?? ''}」将移除本项目全部 Agent 的该工具授权。`,
-          name: removing?.label ?? '',
-        })}
+        description={removing
+          ? t('projectSettings.installedUninstallConfirmDetail', {
+              defaultValue: `卸载「${removing.label}」将删除 {{bindings}} 条 Agent 绑定（{{agents}}）和 1 条项目级授权；之后本项目 Agent 将无法再调用该连接的工具。`,
+              name: removing.label,
+              bindings: bindings.filter((b) => b.connectionId === removing.connectionId).length,
+              agents: agentsCoveredLabels(removing.connectionId),
+            })
+          : ''}
         confirmLabel={t('projectSettings.installedUninstall', { defaultValue: '卸载' })}
         cancelLabel={t('common.cancel')}
         busy={busyId !== null}

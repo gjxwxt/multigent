@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -194,4 +195,118 @@ func TestUserOwnedConnectionCanGrantToOperatedProjectAgents(t *testing.T) {
 	if viewerRec.Code != http.StatusBadRequest {
 		t.Fatalf("viewer grant status=%d body=%s", viewerRec.Code, viewerRec.Body.String())
 	}
+}
+
+// A project manager can install a workspace connection into their project
+// (handleInstallProjectToolBindings only requires project-manager access), so
+// deleting the same project-scoped grant must stay symmetric. Without this a
+// project manager could connect a tool but never uninstall it — and the
+// settings-page uninstall would half-fail: bindings deleted, grant stuck.
+func TestProjectManagerCanDeleteProjectGrantOnWorkspaceConnection(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	connection := controldb.Connection{
+		ID:             "conn-gl",
+		WorkspaceID:    workspaceID,
+		Provider:       "gitlab",
+		ConnectionName: "default",
+		OwnerType:      ConnectionOwnerWorkspace,
+		OwnerID:        workspaceID,
+		AuthType:       ConnectionAuthAPIKey,
+		Status:         "active",
+		ProfileJSON:    `{}`,
+		CreatedBy:      "admin",
+	}
+	if err := s.controlDB.UpsertConnection(connection); err != nil {
+		t.Fatalf("connection: %v", err)
+	}
+	seedSeq := 0
+	seedProjectGrant := func(t *testing.T, connectionID, project string) string {
+		t.Helper()
+		seedSeq++
+		grant := controldb.ConnectionGrant{
+			ID:           fmt.Sprintf("grant-%s-%d", project, seedSeq),
+			WorkspaceID:  workspaceID,
+			ConnectionID: connectionID,
+			TargetType:   ConnectionTargetProject,
+			TargetID:     project,
+			CreatedBy:    "admin",
+			CreatedAt:    "2026-08-31T00:00:00Z",
+		}
+		if err := s.controlDB.CreateConnectionGrant(grant); err != nil {
+			t.Fatalf("create grant: %v", err)
+		}
+		return grant.ID
+	}
+
+	// pm manages "sample" only; sample2 exists but is not managed by them.
+	if err := st_SaveProjectForTest(s, "sample"); err != nil {
+		t.Fatalf("save sample: %v", err)
+	}
+	if err := st_SaveProjectForTest(s, "sample2"); err != nil {
+		t.Fatalf("save sample2: %v", err)
+	}
+	grantProjectRoleForTest(t, s, workspaceID, "pm", ProjectRoleManager)
+	grantProjectRoleForTest(t, s, workspaceID, "operator", ProjectRoleOperator)
+
+	deleteGrant := func(username, grantID, connectionID string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := providerTestRequest(http.MethodDelete, "/api/v1/connections/"+connectionID+"/grants/"+grantID, username, nil)
+		req.SetPathValue("id", connectionID)
+		req.SetPathValue("grantId", grantID)
+		s.handleDeleteConnectionGrant(rec, req)
+		return rec
+	}
+
+	// Project manager may revoke the project-scoped grant on their project.
+	sampleGrant := seedProjectGrant(t, "conn-gl", "sample")
+	if rec := deleteGrant("pm", sampleGrant, "conn-gl"); rec.Code != http.StatusOK {
+		t.Fatalf("pm delete project grant status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Same role, different project: must stay forbidden.
+	sample2Grant := seedProjectGrant(t, "conn-gl", "sample2")
+	if rec := deleteGrant("pm", sample2Grant, "conn-gl"); rec.Code != http.StatusForbidden {
+		t.Fatalf("pm delete other-project grant status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Operator is below manager level: forbidden.
+	sampleGrant2 := seedProjectGrant(t, "conn-gl", "sample")
+	if rec := deleteGrant("operator", sampleGrant2, "conn-gl"); rec.Code != http.StatusForbidden {
+		t.Fatalf("operator delete grant status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Workspace-targeted grants are infrastructure-level: project manager must
+	// not be able to revoke them even for a managed project.
+	wsGrant := controldb.ConnectionGrant{
+		ID:           "grant-ws",
+		WorkspaceID:  workspaceID,
+		ConnectionID: "conn-gl",
+		TargetType:   ConnectionTargetWorkspace,
+		TargetID:     workspaceID,
+		CreatedBy:    "admin",
+		CreatedAt:    "2026-08-31T00:00:00Z",
+	}
+	if err := s.controlDB.CreateConnectionGrant(wsGrant); err != nil {
+		t.Fatalf("create ws grant: %v", err)
+	}
+	if rec := deleteGrant("pm", "grant-ws", "conn-gl"); rec.Code != http.StatusForbidden {
+		t.Fatalf("pm delete workspace grant status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// User-owned connections keep the strict rule entirely.
+	userConn := connection
+	userConn.ID = "conn-user"
+	userConn.OwnerType = ConnectionOwnerUser
+	userConn.OwnerID = "owner"
+	if err := s.controlDB.UpsertConnection(userConn); err != nil {
+		t.Fatalf("user conn: %v", err)
+	}
+	userGrant := seedProjectGrant(t, "conn-user", "sample")
+	if rec := deleteGrant("pm", userGrant, "conn-user"); rec.Code != http.StatusForbidden {
+		t.Fatalf("pm delete user-connection grant status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func st_SaveProjectForTest(s *Server, name string) error {
+	return s.st.SaveProject(name, &entity.Project{Name: name})
 }

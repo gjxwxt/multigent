@@ -636,6 +636,7 @@ function ProviderConnectionsDialog({
                       </div>
                       <p className="mt-1 text-xs text-neutral-400 dark:text-zinc-500">
                         {authTypeLabel(connection.authType, t)} · {t('connections.grantCountValue', { count: connection.grants?.length ?? 0 })}
+                        {connection.isDefault ? ` · ${t('connections.resolvePriorityDefault', { defaultValue: '新项目默认解析到它' })}` : ''}
                         {validation ? ` · ${validation.ok ? t('connections.healthy') : t('connections.failed')} ${validation.atLabel}` : ''}
                       </p>
                       {testState?.message && (
