@@ -347,6 +347,28 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
   const canReviewWorkflow = Boolean(activeWorkflowStep?.type === 'human_review' && isWorkflowStepOpen(activeWorkflowInst?.status) && !isTerminal(task.status))
   const isDesignGate = Boolean(canReviewWorkflow && activeWorkflowStep?.config?.designGate === 'true')
   const [designGateOpen, setDesignGateOpen] = useState(false)
+  const [designGateStage, setDesignGateStage] = useState<'choose' | 'review'>('choose')
+  const [designSession, setDesignSession] = useState<{ projectId: string } | null>(null)
+  useEffect(() => {
+    if (!isDesignGate) {
+      setDesignSession(null)
+      return
+    }
+    // Mirror the follow page: probe for an existing design session so the
+    // modal can offer a one-click "open canvas" shortcut next to the chooser.
+    let alive = true
+    apiFetch<{ projectId?: string }>(
+      `/api/v1/projects/${encodeURIComponent(task.project)}/tasks/${encodeURIComponent(task.id)}/design/status`,
+      { silentStatuses: [401, 403, 404, 500, 502, 503, 504] },
+    )
+      .then((d) => {
+        if (alive) setDesignSession(d?.projectId ? { projectId: d.projectId } : null)
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [isDesignGate, task.project, task.id, designGateOpen])
   const startAgentName = startableAgentName(task)
   const isFailedOrCancelled = task.status === 'done_failed' || task.status === 'cancelled'
   const canStartAgent = Boolean(startAgentName && (task.status === 'pending' || isFailedOrCancelled))
@@ -678,13 +700,34 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
                 {isDesignGate ? (
                   <div className="flex min-h-0 flex-1 flex-col p-4">
                     <p className="text-sm text-neutral-700 dark:text-zinc-300">{activeWorkflowStep?.description}</p>
-                    <button
-                      type="button"
-                      onClick={() => setDesignGateOpen(true)}
-                      className="mt-3 self-start rounded-lg bg-violet-600 px-3 py-2 text-sm font-semibold text-white hover:bg-violet-700"
-                    >
-                      {t('designGate.title', { defaultValue: '设计确认' })}
-                    </button>
+                    <p className="mt-1 text-xs text-neutral-500 dark:text-zinc-400">
+                      {t('designGate.openHint', { defaultValue: '打开设计来源选择弹窗；在弹窗内确认前不会流转。' })}
+                    </p>
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDesignGateStage('choose')
+                          setDesignGateOpen(true)
+                        }}
+                        className="rounded-lg border border-sky-600 bg-white px-3 py-2 text-sm font-medium text-sky-700 hover:bg-sky-50 dark:border-sky-500 dark:bg-zinc-900 dark:text-sky-400 dark:hover:bg-zinc-800"
+                      >
+                        {t('designGate.open', { defaultValue: '选择设计方案' })}
+                      </button>
+                      {designSession && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDesignGateStage('review')
+                            setDesignGateOpen(true)
+                          }}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-2 text-sm font-semibold text-white hover:bg-sky-700"
+                        >
+                          <ExternalLink className="size-3.5" />
+                          {t('designGate.openCanvas', { defaultValue: '打开设计画布' })}
+                        </button>
+                      )}
+                    </div>
                   </div>
                 ) : (
                   <WorkflowRuntimePanel
@@ -763,6 +806,7 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
           taskID={task.id}
           taskTitle={task.title}
           busy={Boolean(reviewBusy)}
+          initialStage={designGateStage}
           submitReview={async (outputs, decision) => {
             await submitWorkflowReviewWithOutputs(outputs, decision)
             setDesignGateOpen(false)
