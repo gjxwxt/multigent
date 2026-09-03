@@ -10,6 +10,7 @@ import { ConversationLog, TechnicalLog } from '../../components/ui/ConversationL
 import { confirmDialog } from '../../components/ui/ConfirmDialog'
 import { cn } from '../../lib/cn'
 import { apiFetch, apiDelete, apiPatch, apiPost, apiPut } from '../../lib/api'
+import { copyTextToClipboard } from '../../lib/clipboard'
 import { canManageProject, useAuth } from '../../lib/auth'
 import { useFormatDateTime } from '../../lib/format-datetime'
 import { isAtBottom, stickToBottom } from '../../utils/stickToBottom'
@@ -1279,7 +1280,8 @@ function CopySessionCmd({ model, sessionId, agentDir }: { model?: string; sessio
 
   function doCopy() {
     const cmd = buildResumeCmd(model, sessionId, agentDir)
-    void navigator.clipboard.writeText(cmd).then(() => {
+    void copyTextToClipboard(cmd).then((ok) => {
+      if (!ok) return
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     })

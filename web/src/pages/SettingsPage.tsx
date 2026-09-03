@@ -4,6 +4,7 @@ import { KeyRound, Plus, Server, Trash2, Pencil, X, Eye, EyeOff, Users, Shield, 
 import { isTrustedProxyMode, useAuth } from '../lib/auth'
 import { useWorkspaceAccess } from '../lib/workspace-access'
 import { apiFetch, apiPost, apiPut, apiDelete } from '../lib/api'
+import { copyTextToClipboard } from '../lib/clipboard'
 import { cn } from '../lib/cn'
 import { useFormatDateTime } from '../lib/format-datetime'
 import { confirmDialog } from '../components/ui/ConfirmDialog'
@@ -357,7 +358,7 @@ function RuntimeNodesSection() {
       setJoin(data)
       await refresh()
       if (copyOnly && data.installCommand) {
-        await navigator.clipboard?.writeText(data.installCommand)
+        await copyTextToClipboard(data.installCommand)
       }
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
@@ -375,7 +376,7 @@ function RuntimeNodesSection() {
         name: node.name,
         kind: node.kind || 'personal_computer',
       })
-      await navigator.clipboard?.writeText(data.installCommand)
+      await copyTextToClipboard(data.installCommand)
       setJoin(data)
       setCopiedNodeId(node.id)
       window.setTimeout(() => setCopiedNodeId(current => current === node.id ? '' : current), 2000)
@@ -416,7 +417,7 @@ function RuntimeNodesSection() {
 
   async function copyJoinCommand() {
     if (!join?.installCommand) return
-    await navigator.clipboard?.writeText(join.installCommand)
+    await copyTextToClipboard(join.installCommand)
     setJoinCopied(true)
     window.setTimeout(() => setJoinCopied(false), 2000)
   }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { User, X, Copy, Check } from 'lucide-react'
 import { apiFetch, apiPost, apiPut } from '../lib/api'
+import { copyTextToClipboard } from '../lib/clipboard'
 import { cn } from '../lib/cn'
 import { useFormatDateTime } from '../lib/format-datetime'
 import { useWorkspaceAccess } from '../lib/workspace-access'
@@ -117,34 +118,6 @@ function roleKey(role: string): string {
       return `people.workspaceRole_${role}`
     default:
       return 'people.workspaceRole_member'
-  }
-}
-
-async function writeClipboardText(text: string): Promise<boolean> {
-  if (!text) return false
-  try {
-    if (navigator.clipboard?.writeText && window.isSecureContext) {
-      await navigator.clipboard.writeText(text)
-      return true
-    }
-  } catch {
-    // Fall through to the legacy selection-based copy path below.
-  }
-  try {
-    const textarea = document.createElement('textarea')
-    textarea.value = text
-    textarea.setAttribute('readonly', '')
-    textarea.style.position = 'fixed'
-    textarea.style.left = '-9999px'
-    textarea.style.top = '0'
-    document.body.appendChild(textarea)
-    textarea.focus()
-    textarea.select()
-    const ok = document.execCommand('copy')
-    document.body.removeChild(textarea)
-    return ok
-  } catch {
-    return false
   }
 }
 
@@ -265,7 +238,7 @@ export default function PeoplePage() {
 
   async function copyInviteLink(link: string, key: string) {
     if (!link) return
-    const ok = await writeClipboardText(link)
+    const ok = await copyTextToClipboard(link)
     if (!ok) {
       setErr(t('people.copyInviteFailed'))
       return

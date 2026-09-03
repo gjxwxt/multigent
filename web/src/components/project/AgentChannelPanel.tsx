@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { QRCodeSVG } from 'qrcode.react'
 import { CheckCircle2, Copy, Loader2, MessageSquare, X } from 'lucide-react'
 import { apiDelete, apiFetch, apiPost } from '../../lib/api'
+import { copyTextToClipboard } from '../../lib/clipboard'
 import { cn } from '../../lib/cn'
 import { confirmDialog } from '../ui/ConfirmDialog'
 import { useFormatDateTime } from '../../lib/format-datetime'
@@ -296,7 +297,7 @@ export function AgentChannelPanel({ project, agentName, agentWorkerId }: { proje
   }
 
   async function copyBindCommand(command: string) {
-    await navigator.clipboard?.writeText(command)
+    if (!await copyTextToClipboard(command)) return
     setCopiedBind(true)
     window.setTimeout(() => setCopiedBind(false), 1400)
   }

@@ -15,13 +15,20 @@ export function useApiJson<T>(path: string | null, reloadKey = 0, options?: UseA
   const [state, setState] = useState<ApiState<T>>({ status: 'loading' })
   const prevPath = useRef(path)
   const prevReloadKey = useRef(reloadKey)
-  const silentStatuses = options?.silentStatuses
+  // Callers often pass options inline (`{ silentStatuses: [403] }`), so the array
+  // identity changes on every render. Depend on a serialized key instead and read
+  // the live options through a ref — otherwise the effect re-runs (refetches) on
+  // every render, hammering the endpoint in a loop.
+  const optionsRef = useRef(options)
+  optionsRef.current = options
+  const silentStatusesKey = options?.silentStatuses ? options.silentStatuses.join(',') : ''
   const keepPreviousDataOnReload = options?.keepPreviousDataOnReload ?? false
 
   useEffect(() => {
     if (path == null) {
       return
     }
+    const silentStatuses = optionsRef.current?.silentStatuses
     let cancelled = false
     const pathChanged = prevPath.current !== path
     const reloadChanged = prevReloadKey.current !== reloadKey
@@ -48,7 +55,7 @@ export function useApiJson<T>(path: string | null, reloadKey = 0, options?: UseA
     return () => {
       cancelled = true
     }
-  }, [path, reloadKey, silentStatuses, keepPreviousDataOnReload])
+  }, [path, reloadKey, silentStatusesKey, keepPreviousDataOnReload])
 
   if (path == null) {
     return { status: 'error', error: new Error('no path') }

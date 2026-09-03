@@ -7,6 +7,7 @@ import { confirmDialog } from '../components/ui/ConfirmDialog'
 import { showToast } from '../components/ui/Toast'
 import { WorkflowBoard, type WorkflowDefinition, type WorkflowStep } from '../components/workflow/WorkflowBoard'
 import { apiDelete, apiPost, apiPut } from '../lib/api'
+import { copyTextToClipboard } from '../lib/clipboard'
 import { useApiJson } from '../lib/use-api'
 import { useWorkspaceAccess } from '../lib/workspace-access'
 
@@ -219,8 +220,9 @@ export default function WorkflowsPage() {
   }
 
   async function copyWorkflowJSON(wf: WorkflowDefinition) {
-    await navigator.clipboard.writeText(workflowExportJSON(wf))
-    showToast(t('workflows.copyJSONSuccess'), 'success')
+    const ok = await copyTextToClipboard(workflowExportJSON(wf))
+    if (ok) showToast(t('workflows.copyJSONSuccess'), 'success')
+    else showToast(t('common.copyFailed'), 'error')
   }
 
   async function deleteWorkflow(wf: WorkflowDefinition) {

@@ -6,6 +6,7 @@ import { confirmDialog } from '../../components/ui/ConfirmDialog'
 import { PlaceholderCard } from '../../components/ui/PlaceholderCard'
 import { showToast } from '../../components/ui/Toast'
 import { apiDelete, apiPost, apiPut } from '../../lib/api'
+import { copyTextToClipboard } from '../../lib/clipboard'
 import { cn } from '../../lib/cn'
 import { useApiJson } from '../../lib/use-api'
 
@@ -195,7 +196,7 @@ export default function ProjectTaskTemplatesPage() {
   }
 
   async function copyID(id: string) {
-    await navigator.clipboard.writeText(id)
+    if (!await copyTextToClipboard(id)) return
     showToast(t('taskTemplates.idCopied'), 'success')
   }
 

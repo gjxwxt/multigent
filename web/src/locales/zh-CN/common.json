@@ -17,7 +17,8 @@
     "saving": "保存中…",
     "saved": "已保存",
     "copied": "已复制",
-    "copy": "复制"
+    "copy": "复制",
+    "copyFailed": "复制失败，请手动选择内容后复制"
   },
   "apiErrors": {
     "bad_request": "请求无法处理。",

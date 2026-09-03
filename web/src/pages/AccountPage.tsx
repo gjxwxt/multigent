@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { Camera, Check, Copy, ImagePlus, KeyRound, Plus, Trash2, X } from 'lucide-react'
 import { i18n } from '../i18n'
 import { WORKSPACE_ID_KEY, apiDelete, apiFetch, apiPost, apiPut } from '../lib/api'
+import { copyTextToClipboard } from '../lib/clipboard'
 import { getStoredToken, useAuth, type AuthUser } from '../lib/auth'
 import { useFormatDateTime } from '../lib/format-datetime'
 import type { ThemeMode } from '../theme/ThemeProvider'
@@ -351,7 +352,7 @@ function ClientTokensSection() {
   ].join('\n') : ''
 
   async function copyText(text: string, key: string) {
-    await navigator.clipboard?.writeText(text)
+    if (!await copyTextToClipboard(text)) return
     setCopied(key)
     window.setTimeout(() => setCopied(current => current === key ? '' : current), 1600)
   }

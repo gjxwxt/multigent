@@ -5,6 +5,7 @@ import {
   List, Music, Trash2, X, ZoomIn, ZoomOut, Maximize2, Download, Play,
 } from 'lucide-react'
 import { apiFetch, apiPost, apiUrl } from '../lib/api'
+import { copyTextToClipboard } from '../lib/clipboard'
 import { getStoredToken } from '../lib/auth'
 import { confirmDialog } from '../components/ui/ConfirmDialog'
 import { primaryOutlineButton } from '../lib/button-styles'
@@ -74,7 +75,8 @@ function CopyPathBtn({ path, className }: { path: string; className?: string }) 
   const [copied, setCopied] = useState(false)
   function copy(e: React.MouseEvent) {
     e.stopPropagation()
-    navigator.clipboard.writeText(path).then(() => {
+    void copyTextToClipboard(path).then((ok) => {
+      if (!ok) return
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     })

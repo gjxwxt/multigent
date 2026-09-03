@@ -17,7 +17,8 @@
     "saving": "Saving…",
     "saved": "Saved",
     "copied": "Copied",
-    "copy": "Copy"
+    "copy": "Copy",
+    "copyFailed": "Copy failed — please select the content and copy manually"
   },
   "apiErrors": {
     "bad_request": "The request could not be processed.",

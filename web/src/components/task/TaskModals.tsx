@@ -8,6 +8,7 @@ import remarkGfm from 'remark-gfm'
 import { ClipboardCopy, ExternalLink, GitPullRequest, Globe, Info, MessageSquare, Pencil, Play, RotateCw, Send, Trash2, X } from 'lucide-react'
 import { cn } from '../../lib/cn'
 import { apiDelete, apiFetch, apiPost, apiPut } from '../../lib/api'
+import { copyTextToClipboard } from '../../lib/clipboard'
 import { useFormatDateTime } from '../../lib/format-datetime'
 import { useApiJson } from '../../lib/use-api'
 import { useAuth } from '../../lib/auth'
@@ -2137,7 +2138,8 @@ function CopyRunResumeCmd({ model, sessionId, agent, project }: { model?: string
   const [copied, setCopied] = useState(false)
   function doCopy() {
     const cmd = buildRunResumeCmd(model, sessionId, agent, project)
-    void navigator.clipboard.writeText(cmd).then(() => {
+    void copyTextToClipboard(cmd).then((ok) => {
+      if (!ok) return
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     })
