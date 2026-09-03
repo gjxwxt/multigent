@@ -647,7 +647,7 @@ function ProviderConnectionsDialog({
                     <div className="flex flex-wrap justify-end gap-2">
                       <button type="button" onClick={() => onOpenConnection(connection)} className="rounded-lg border border-neutral-300 px-3 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50 dark:border-zinc-600 dark:text-zinc-200 dark:hover:bg-zinc-800">{t('connections.details')}</button>
                       {connection.ownerType === 'workspace' && (
-                        <button type="button" onClick={() => onInstallToProject(connection)} className="rounded-lg border border-neutral-300 px-3 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50 dark:border-zinc-600 dark:text-zinc-200 dark:hover:bg-zinc-800">{t('connections.installToProject')}</button>
+                        <button type="button" onClick={() => onInstallToProject(connection)} className="rounded-lg border border-neutral-300 px-3 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50 dark:border-zinc-600 dark:text-zinc-200 dark:hover:bg-zinc-800">{isCodeHostProvider(connection.provider) ? t('connections.installCodeHost') : t('connections.installToProject')}</button>
                       )}
                       {connection.ownerType === 'workspace' && !connection.isDefault && (
                         <button type="button" onClick={() => onSetDefault(connection)} className="rounded-lg border border-neutral-300 px-3 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50 dark:border-zinc-600 dark:text-zinc-200 dark:hover:bg-zinc-800">{t('connections.setDefault', { defaultValue: '设为默认' })}</button>
@@ -712,10 +712,12 @@ function InstallToolToProjectDialog({
   }
 
   return (
-    <Modal title={t('connections.installToProjectTitle')} onClose={onClose}>
+    <Modal title={isCodeHostProvider(connection.provider) ? t('connections.installCodeHostTitle', { connection: connection.connectionName }) : t('connections.installToProjectTitle')} onClose={onClose}>
       <div className="space-y-4">
         <div className="rounded-lg bg-neutral-50 px-3 py-2 text-sm text-neutral-600 dark:bg-zinc-800/50 dark:text-zinc-300">
-          {t('connections.installToProjectHint', { tool: connection.provider, connection: connection.connectionName })}
+          {isCodeHostProvider(connection.provider)
+            ? t('connections.installCodeHostHint', { tool: connection.provider, connection: connection.connectionName })
+            : t('connections.installToProjectHint', { tool: connection.provider, connection: connection.connectionName })}
         </div>
         {loading ? (
           <div className="flex items-center gap-2 py-6 text-sm text-neutral-500">
@@ -777,6 +779,13 @@ function providerDescription(provider: Provider, t: TFn): string {
   const value = t(key)
   if (value !== key) return value
   return provider.description || t('connections.externalToolDefaultDescription')
+}
+
+// Code-host providers are consumed mostly by platform features (remote repo,
+// Git push, the CI readiness gate) rather than by agent runtime calls, so the
+// install-to-project framing reads differently for them.
+function isCodeHostProvider(providerId: string): boolean {
+  return providerId === 'gitlab' || providerId === 'github' || providerId === 'gitee'
 }
 
 function normalizeToolSearch(value: string): string {
