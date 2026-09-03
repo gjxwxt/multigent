@@ -1250,6 +1250,7 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		"remoteUrl":        p.RemoteURL,
 		"cloneUrl":         p.CloneURL,
 		"defaultBranch":    p.DefaultBranch,
+		"deployPort":       p.DeployPort,
 	})
 }
 
@@ -1301,10 +1302,22 @@ func (s *Server) handlePutProject(w http.ResponseWriter, r *http.Request) {
 	if body.DefaultBranch != "" {
 		p.DefaultBranch = body.DefaultBranch
 	}
+	// Lazy deploy-port allocation: covers projects initialized before the
+	// port pool existed. Only template-initialized projects deploy via the
+	// starter pipeline, so only they need a reserved port.
+	if p.TemplateID != "" {
+		if _, err := s.ensureDeployPort(p); err != nil {
+			s.serverError(w, err)
+			return
+		}
+	}
 	if err := s.st.SaveProject(name, p); err != nil {
 		s.serverError(w, err)
 		return
 	}
+	// Re-push APP_PORT so a freshly bound (or rebound) GitLab remote picks
+	// up the reserved port. Best-effort, no-op without port+remote.
+	s.pushDeployPortVariable(r.Context(), name, p)
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 

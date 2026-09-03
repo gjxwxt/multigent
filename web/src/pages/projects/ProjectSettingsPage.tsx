@@ -47,6 +47,7 @@ type ProjectDetail = {
   templateId?: string
   templateVersion?: string
   templateDigest?: string
+  deployPort?: number
 }
 type PromptData = { content: string }
 
@@ -87,6 +88,7 @@ export default function ProjectSettingsPage() {
               remoteUrl={detail.remoteUrl}
               cloneUrl={detail.cloneUrl}
               defaultBranch={detail.defaultBranch}
+              deployPort={detail.deployPort}
               onReload={() => setReloadKey((k) => k + 1)}
             />
           )}
@@ -473,6 +475,7 @@ function BasicInfoEditor({
   remoteConnection,
   remoteProjectId,
   defaultBranch,
+  deployPort,
   onReload,
 }: {
   projectId: string
@@ -486,6 +489,7 @@ function BasicInfoEditor({
   remoteUrl?: string
   cloneUrl?: string
   defaultBranch?: string
+  deployPort?: number
   onReload: () => void
 }) {
   const { t } = useTranslation()
@@ -732,6 +736,22 @@ function BasicInfoEditor({
                 <span>{remoteProvider === 'gitlab' ? t('projectSettings.viewOnGitlab', { defaultValue: '在 GitLab 查看' }) : t('projectSettings.viewOnRemote', { defaultValue: '在远程查看' })}</span>
                 <ArrowRight className="size-3" />
               </a>
+            </dd>
+          </div>
+        )}
+
+        {/* Reserved deploy port (platform port pool, mirrored to GitLab APP_PORT) */}
+        {Boolean(deployPort) && (
+          <div className="flex items-center justify-between gap-4 px-5 py-3 bg-emerald-50/40 dark:bg-emerald-950/20">
+            <dt className="w-32 shrink-0 text-xs font-medium text-emerald-800 dark:text-emerald-300 flex items-center gap-1.5">
+              <Globe className="size-3.5" />
+              <span>{t('projectSettings.deployPort', { defaultValue: '部署端口' })}</span>
+            </dt>
+            <dd className="flex-1 min-w-0">
+              <span className="font-mono text-xs text-neutral-700 dark:text-zinc-300">{deployPort}</span>
+              <span className="ml-2 text-[10px] text-neutral-400 dark:text-zinc-500">
+                {t('projectSettings.deployPortHint', { defaultValue: '平台端口池自动预留，已同步为 GitLab CI 变量 APP_PORT' })}
+              </span>
             </dd>
           </div>
         )}

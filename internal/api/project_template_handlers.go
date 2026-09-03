@@ -191,10 +191,20 @@ func (s *Server) handleInitializeProjectTemplate(w http.ResponseWriter, r *http.
 	project.TemplateID = report.ID
 	project.TemplateVersion = report.Version
 	project.TemplateDigest = report.Digest
+	// Reserve a stable deploy port from the platform pool. The port only
+	// persists with the SaveProject below, so a failed initialization
+	// leaks nothing back into the pool.
+	if _, err := s.ensureDeployPort(project); err != nil {
+		s.serverError(w, err)
+		return
+	}
 	if err := s.st.SaveProject(name, project); err != nil {
 		s.serverError(w, err)
 		return
 	}
+	// Best-effort: no-op until the project has a bound GitLab remote (the
+	// initialization workflow binds it later; handlePutProject re-pushes).
+	s.pushDeployPortVariable(r.Context(), name, project)
 	s.auditLog(auditLogInput{
 		Action:       "project.template_initialize",
 		ResourceType: "project",
@@ -206,6 +216,7 @@ func (s *Server) handleInitializeProjectTemplate(w http.ResponseWriter, r *http.
 			"templateId":      report.ID,
 			"templateVersion": report.Version,
 			"templateDigest":  report.Digest,
+			"deployPort":      project.DeployPort,
 		},
 		Request: r,
 	})

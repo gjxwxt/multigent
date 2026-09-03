@@ -272,6 +272,52 @@ func (g *GitLabHost) DeleteRepository(ctx context.Context, projectID string) err
 	return nil
 }
 
+// SetProjectVariable creates or updates a CI/CD project variable. GitLab
+// rejects duplicate keys on POST, so a 400/409 falls back to PUT on the
+// keyed endpoint to update the value in place.
+func (g *GitLabHost) SetProjectVariable(ctx context.Context, projectID, key, value string) error {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" || strings.TrimSpace(key) == "" {
+		return fmt.Errorf("project ID and variable key are required")
+	}
+	endpoint := fmt.Sprintf("/projects/%s/variables", url.PathEscape(projectID))
+	form := url.Values{"key": {key}, "value": {value}}
+	req, err := g.newRequest(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := g.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("create gitlab variable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusOK {
+		return nil
+	}
+	if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusConflict {
+		updateEndpoint := fmt.Sprintf("/projects/%s/variables/%s", url.PathEscape(projectID), url.PathEscape(key))
+		updateForm := url.Values{"value": {value}}
+		updateReq, err := g.newRequest(ctx, http.MethodPut, updateEndpoint, strings.NewReader(updateForm.Encode()))
+		if err != nil {
+			return err
+		}
+		updateReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		updateResp, err := g.client.Do(updateReq)
+		if err != nil {
+			return fmt.Errorf("update gitlab variable: %w", err)
+		}
+		defer updateResp.Body.Close()
+		if updateResp.StatusCode == http.StatusOK {
+			return nil
+		}
+		b, _ := io.ReadAll(updateResp.Body)
+		return fmt.Errorf("update gitlab variable %s status %d: %s", key, updateResp.StatusCode, string(b))
+	}
+	b, _ := io.ReadAll(resp.Body)
+	return fmt.Errorf("create gitlab variable %s status %d: %s", key, resp.StatusCode, string(b))
+}
+
 type gitlabMRResp struct {
 	ID           int64  `json:"id"`
 	IID          int64  `json:"iid"`

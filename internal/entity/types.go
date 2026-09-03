@@ -162,6 +162,12 @@ type Project struct {
 	TemplateVersion string `yaml:"template_version,omitempty" json:"templateVersion,omitempty"`
 	TemplateDigest  string `yaml:"template_digest,omitempty" json:"templateDigest,omitempty"`
 
+	// DeployPort is the host port reserved for CI deployments of this
+	// project (mirrored into the GitLab CI/CD variable APP_PORT). Assigned
+	// once from the platform port pool and never auto-recycled; see
+	// internal/api/deploy_port.go.
+	DeployPort int `yaml:"deploy_port,omitempty" json:"deployPort,omitempty"`
+
 	// Remote code host integration metadata
 	RemoteProvider   string `yaml:"remote_provider,omitempty" json:"remoteProvider,omitempty"`     // "gitlab" | "github" | "gitee"
 	RemoteConnection string `yaml:"remote_connection,omitempty" json:"remoteConnection,omitempty"` // Connector ID
