@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import Markdown from 'react-markdown'
@@ -16,6 +16,7 @@ import {
   Layers,
   Loader2,
   Lock,
+  Plus,
   RotateCw,
   Save,
   Sparkles,
@@ -126,32 +127,110 @@ type ProjectToolBinding = {
   updatedAt?: string
 }
 
-// Lists every connection tool granted to this project's agent runtimes
-// (agent_tool_bindings) with a per-binding remove action. Platform features
-// (Git push, the design gate) use workspace-level connections and are
+type ProjectAgentSummary = { name: string }
+
+type ConnectionGrant = {
+  id: string
+  targetType: string
+  targetId: string
+}
+
+// Aggregates the project's agent tool bindings by connection: one card per
+// installed connection with the covered agents as removable chips. Platform
+// features (Git push, the design gate) use workspace-level connections and are
 // unaffected — the copy says so explicitly.
 function InstalledConnections({ projectId }: { projectId: string }) {
   const { t } = useTranslation()
   const fmt = useFormatDateTime()
   const [reloadKey, setReloadKey] = useState(0)
   const [busyId, setBusyId] = useState<string | null>(null)
-  const [removing, setRemoving] = useState<ProjectToolBinding | null>(null)
+  const [removing, setRemoving] = useState<{ connectionId: string; label: string } | null>(null)
+  const [addingFor, setAddingFor] = useState<string | null>(null)
 
   const path = `/api/v1/projects/${encodeURIComponent(projectId)}/tool-bindings`
   const state = useApiJson<{ bindings: ProjectToolBinding[] }>(path, reloadKey, { silentStatuses: [404] })
   const bindings = state.status === 'ok' ? (state.data.bindings ?? []) : []
 
+  const agentsPath = `/api/v1/projects/${encodeURIComponent(projectId)}/agents`
+  const agentsState = useApiJson<ProjectAgentSummary[]>(agentsPath, reloadKey, { silentStatuses: [404] })
+  const agents = agentsState.status === 'ok' ? (agentsState.data ?? []) : []
+
+  // One entry per distinct connection, preserving first-seen order. Stale
+  // bindings whose agent no longer sits in the project are flagged so admins
+  // can clean them up instead of wondering why a ghost agent shows up.
+  const cards = useMemo(() => {
+    const byConnection = new Map<string, ProjectToolBinding[]>()
+    for (const binding of bindings) {
+      const list = byConnection.get(binding.connectionId)
+      if (list) list.push(binding)
+      else byConnection.set(binding.connectionId, [binding])
+    }
+    const memberNames = new Set(agents.map((a) => a.name))
+    return Array.from(byConnection.entries()).map(([connectionId, rows]) => {
+      const first = rows[0]
+      const covered = new Set(rows.map((r) => (r.agentId || r.agentWorkerId || '').trim()).filter(Boolean))
+      const stale = rows.filter((r) => {
+        const name = (r.agentId || '').trim()
+        return name !== '' && !memberNames.has(name)
+      })
+      return { connectionId, rows, first, covered, stale }
+    })
+  }, [bindings, agents])
+
+  const refresh = useCallback(() => setReloadKey((k) => k + 1), [])
+
   async function removeBinding(binding: ProjectToolBinding) {
     setBusyId(binding.id)
     try {
       await apiDelete(`/api/v1/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(binding.agentId || '')}/tool-bindings/${encodeURIComponent(binding.id)}`)
-      showToast(t('projectSettings.installedRemove', { defaultValue: '移除授权' }) + ' ✓', 'success')
-      setReloadKey((k) => k + 1)
+      refresh()
     } catch (e) {
       showToast(e instanceof Error ? e.message : String(e), 'error')
     } finally {
       setBusyId(null)
+    }
+  }
+
+  // Uninstall = delete every binding under this connection plus the
+  // project-level grant (otherwise the runtime would still admit the
+  // connection via grant matching with no binding left to narrow it).
+  async function uninstallConnection(connectionId: string, label: string) {
+    setBusyId(connectionId)
+    try {
+      const rows = bindings.filter((b) => b.connectionId === connectionId)
+      for (const row of rows) {
+        await apiDelete(`/api/v1/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(row.agentId || '')}/tool-bindings/${encodeURIComponent(row.id)}`)
+      }
+      const grantsState = await apiFetch<{ grants: ConnectionGrant[] }>(`/api/v1/connections/${encodeURIComponent(connectionId)}/grants`)
+      for (const grant of grantsState.grants ?? []) {
+        if (grant.targetType === 'project' && grant.targetId === projectId) {
+          await apiDelete(`/api/v1/connections/${encodeURIComponent(connectionId)}/grants/${encodeURIComponent(grant.id)}`)
+        }
+      }
+      showToast(t('projectSettings.installedRemovedToast', { defaultValue: '已卸载' }) + ' ✓', 'success')
       setRemoving(null)
+      refresh()
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : String(e), 'error')
+      refresh()
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function addAgentToConnection(connectionId: string, agentName: string) {
+    setBusyId(connectionId)
+    try {
+      await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentName)}/tool-bindings`, {
+        connectionId,
+        status: 'enabled',
+      })
+      setAddingFor(null)
+      refresh()
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : String(e), 'error')
+    } finally {
+      setBusyId(null)
     }
   }
 
@@ -166,47 +245,108 @@ function InstalledConnections({ projectId }: { projectId: string }) {
           <Loader2 className="size-4 animate-spin" />
           {t('common.loading', { defaultValue: '加载中…' })}
         </div>
-      ) : bindings.length === 0 ? (
+      ) : cards.length === 0 ? (
         <p className="px-5 py-4 text-sm text-neutral-500 dark:text-zinc-500">{t('projectSettings.installedEmpty', { defaultValue: '还没有授权任何连接工具给本项目的 Agent。' })}</p>
       ) : (
         <ul className="divide-y divide-neutral-100 dark:divide-zinc-800">
-          {bindings.map((binding) => (
-            <li key={binding.id} className="flex items-center justify-between gap-4 px-5 py-3">
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium text-neutral-800 dark:text-zinc-200">
-                  {binding.provider}
-                  {binding.connectionName ? <span className="text-neutral-400 dark:text-zinc-500"> / {binding.connectionName}</span> : null}
-                </p>
-                <p className="mt-0.5 truncate text-xs text-neutral-500 dark:text-zinc-500">
-                  {binding.agentId || binding.agentWorkerId || ''}
-                  {binding.adapterType ? ` · ${binding.adapterType}` : ''}
-                  {binding.updatedAt ? ` · ${fmt(binding.updatedAt)}` : ''}
-                </p>
-              </div>
-              <button
-                type="button"
-                disabled={busyId === binding.id}
-                onClick={() => setRemoving(binding)}
-                className="shrink-0 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-xs font-medium text-neutral-600 transition-colors hover:bg-neutral-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
-              >
-                {busyId === binding.id ? <Loader2 className="size-3.5 animate-spin" /> : t('projectSettings.installedRemove', { defaultValue: '移除授权' })}
-              </button>
-            </li>
-          ))}
+          {cards.map((card) => {
+            const candidates = agents.filter((a) => !card.covered.has(a.name))
+            const label = `${card.first.provider}${card.first.connectionName ? ` / ${card.first.connectionName}` : ''}`
+            return (
+              <li key={card.connectionId} className="px-5 py-3">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-neutral-800 dark:text-zinc-200">
+                      {card.first.provider}
+                      {card.first.connectionName ? <span className="text-neutral-400 dark:text-zinc-500"> / {card.first.connectionName}</span> : null}
+                    </p>
+                    <p className="mt-0.5 text-xs text-neutral-500 dark:text-zinc-500">
+                      {card.rows.length} agent{card.rows.length > 1 ? 's' : ''}
+                      {card.first.adapterType ? ` · ${card.first.adapterType}` : ''}
+                      {card.first.updatedAt ? ` · ${fmt(card.first.updatedAt)}` : ''}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={busyId === card.connectionId}
+                    onClick={() => setRemoving({ connectionId: card.connectionId, label })}
+                    className="shrink-0 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-xs font-medium text-neutral-600 transition-colors hover:bg-neutral-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                  >
+                    {busyId === card.connectionId ? <Loader2 className="size-3.5 animate-spin" /> : t('projectSettings.installedUninstall', { defaultValue: '卸载' })}
+                  </button>
+                </div>
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  {card.rows.map((row) => {
+                    const agentName = row.agentId || row.agentWorkerId || ''
+                    const isStale = card.stale.some((s) => s.id === row.id)
+                    return (
+                      <span
+                        key={row.id}
+                        className={cn(
+                          'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs',
+                          isStale
+                            ? 'border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-700/60 dark:bg-amber-900/20 dark:text-amber-300'
+                            : 'border-neutral-200 bg-neutral-50 text-neutral-600 dark:border-zinc-700 dark:bg-zinc-800/60 dark:text-zinc-300'
+                        )}
+                        title={isStale ? t('projectSettings.installedStaleTip', { defaultValue: '该 Agent 已不在项目成员中，建议移除' }) : undefined}
+                      >
+                        {agentName}
+                        {isStale ? <AlertTriangle className="size-3" /> : null}
+                        <button
+                          type="button"
+                          aria-label={t('projectSettings.installedRemove', { defaultValue: '移除授权' })}
+                          disabled={busyId === card.connectionId}
+                          onClick={() => void removeBinding(row)}
+                          className="ml-0.5 rounded-full p-0.5 text-neutral-400 transition-colors hover:bg-neutral-200 hover:text-neutral-700 disabled:opacity-40 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+                        >
+                          <X className="size-3" />
+                        </button>
+                      </span>
+                    )
+                  })}
+                  <span className="relative inline-flex">
+                    <button
+                      type="button"
+                      disabled={busyId === card.connectionId || candidates.length === 0}
+                      onClick={() => setAddingFor(addingFor === card.connectionId ? null : card.connectionId)}
+                      className="inline-flex items-center gap-1 rounded-full border border-dashed border-neutral-300 px-2 py-0.5 text-xs text-neutral-500 transition-colors hover:border-neutral-400 hover:text-neutral-700 disabled:opacity-40 dark:border-zinc-600 dark:text-zinc-400 dark:hover:border-zinc-500 dark:hover:text-zinc-200"
+                    >
+                      <Plus className="size-3" />
+                      {t('projectSettings.installedAddAgent', { defaultValue: '添加 Agent' })}
+                    </button>
+                    {addingFor === card.connectionId && candidates.length > 0 ? (
+                      <span className="absolute left-0 top-full z-10 mt-1 w-44 rounded-lg border border-neutral-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
+                        {candidates.map((agent) => (
+                          <button
+                            key={agent.name}
+                            type="button"
+                            onClick={() => void addAgentToConnection(card.connectionId, agent.name)}
+                            className="block w-full px-3 py-1.5 text-left text-xs text-neutral-700 transition-colors hover:bg-neutral-50 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                          >
+                            {agent.name}
+                          </button>
+                        ))}
+                      </span>
+                    ) : null}
+                  </span>
+                </div>
+              </li>
+            )
+          })}
         </ul>
       )}
       <ConfirmDialog
         open={removing !== null}
-        title={t('projectSettings.installedRemove', { defaultValue: '移除授权' })}
-        description={t('projectSettings.installedRemoveConfirm', {
-          defaultValue: `移除「${removing?.provider ?? ''}」在本项目的授权？`,
-          name: removing ? `${removing.provider}/${removing.connectionName || ''}` : '',
+        title={t('projectSettings.installedUninstall', { defaultValue: '卸载' })}
+        description={t('projectSettings.installedUninstallConfirm', {
+          defaultValue: `卸载「${removing?.label ?? ''}」将移除本项目全部 Agent 的该工具授权。`,
+          name: removing?.label ?? '',
         })}
-        confirmLabel={t('projectSettings.installedRemove', { defaultValue: '移除授权' })}
+        confirmLabel={t('projectSettings.installedUninstall', { defaultValue: '卸载' })}
         cancelLabel={t('common.cancel')}
         busy={busyId !== null}
         onCancel={() => setRemoving(null)}
-        onConfirm={() => { if (removing) void removeBinding(removing) }}
+        onConfirm={() => { if (removing) void uninstallConnection(removing.connectionId, removing.label) }}
       />
     </section>
   )
