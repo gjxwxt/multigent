@@ -990,9 +990,9 @@ func (s *Server) prepareTaskDelivery(r *http.Request, project string, task *enti
 		var host codehost.CodeHost
 		var err error
 		if p.RemoteProvider == "gitlab" {
-			host, _, err = s.resolveGitLabHost(p.RemoteConnection)
+			host, _, err = s.pinnedCodeHost(r.Context(), project, p, "gitlab")
 		} else {
-			host, _, err = s.resolveGitHubHost(p.RemoteConnection)
+			host, _, err = s.pinnedCodeHost(r.Context(), project, p, "github")
 		}
 		if err != nil {
 			return fmt.Errorf("resolve %s connection: %w", p.RemoteProvider, err)

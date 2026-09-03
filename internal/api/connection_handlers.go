@@ -2127,7 +2127,8 @@ func (s *Server) handleSetDefaultConnection(w http.ResponseWriter, r *http.Reque
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "connectionId": connection.ID, "provider": connection.Provider})
 }
 
-func grantsToResponse(grants []controldb.ConnectionGrant) []connectionGrantModel {	out := make([]connectionGrantModel, 0, len(grants))
+func grantsToResponse(grants []controldb.ConnectionGrant) []connectionGrantModel {
+	out := make([]connectionGrantModel, 0, len(grants))
 	for _, grant := range grants {
 		out = append(out, grantToResponse(grant))
 	}

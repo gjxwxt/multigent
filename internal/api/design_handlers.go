@@ -234,6 +234,13 @@ func (s *Server) handleDesignStart(w http.ResponseWriter, r *http.Request) {
 		s.writeDesignUpstreamError(w, err)
 		return
 	}
+	// Which OD connection this design session uses is part of the audit trail:
+	// multi-connection workspaces need to answer "which OD did this talk to".
+	odCfg, odCfgErr := s.resolveDesignConnectionForProject(project)
+	var odAudit map[string]any
+	if odCfgErr == nil {
+		odAudit = designConnectionAuditFields(odCfg)
+	}
 	// The design agent runs against the task agent's model account (e.g.
 	// ccr-qwen), not the OD connection: byokProvider is the model endpoint OD
 	// forwards to opencode. Sending the OD daemon's own URL made opencode
@@ -262,9 +269,13 @@ func (s *Server) handleDesignStart(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusInternalServerError, "persist design reference failed")
 		return
 	}
-	s.recordDesignAudit(r, workspaceIDOfProject(project), "design.start", project, taskID, map[string]any{
+	auditAfter := map[string]any{
 		"projectId": projID, "regenerated": task.DesignProjectID != "" && body.Regenerate,
-	})
+	}
+	for k, v := range odAudit {
+		auditAfter[k] = v
+	}
+	s.recordDesignAudit(r, workspaceIDOfProject(project), "design.start", project, taskID, auditAfter)
 	s.writeDesignStartResponse(w, project, taskID, projID, body.Regenerate, conversationID)
 }
 
@@ -273,7 +284,7 @@ func (s *Server) writeDesignStartResponse(w http.ResponseWriter, project, taskID
 	odt := s.signDesignToken(taskID, project)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(designStartResponse{
-		ProjectID:      projID,
+		ProjectID: projID,
 		// Root-shape studio URL: OD's client router only knows native paths,
 		// so the iframe points straight at the proxied project page.
 		ProxyURL:       studioProxyURL(projID, odt),

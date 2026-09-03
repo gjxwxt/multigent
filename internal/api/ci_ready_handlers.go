@@ -28,10 +28,10 @@ type ciReadyResponse struct {
 }
 
 type ciReadyPipelineEvidence struct {
-	SHA    string                    `json:"sha"`
-	ID     int64                     `json:"id"`
-	Status string                    `json:"status"`
-	WebURL string                    `json:"webUrl,omitempty"`
+	SHA    string                     `json:"sha"`
+	ID     int64                      `json:"id"`
+	Status string                     `json:"status"`
+	WebURL string                     `json:"webUrl,omitempty"`
 	Jobs   []codehost.PipelineJobInfo `json:"jobs,omitempty"`
 }
 
@@ -101,7 +101,7 @@ func (s *Server) ciReadyPipelineEvidence(r *http.Request, project *entity.Projec
 	if sha == "" {
 		return nil, errNoCommits
 	}
-	host, _, err := s.resolveGitLabHost(project.RemoteConnection)
+	host, _, err := s.pinnedGitLabHost(r.Context(), project.Name, project)
 	if err != nil {
 		return nil, err
 	}
