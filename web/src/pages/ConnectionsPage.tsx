@@ -7,6 +7,7 @@ import { apiDelete, apiFetch, apiPost } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { cn } from '../lib/cn'
 import { confirmDialog } from '../components/ui/ConfirmDialog'
+import { showToast } from '../components/ui/Toast'
 import { primaryOutlineButton } from '../lib/button-styles'
 import { formatDateTimeForLanguage, useFormatDateTime } from '../lib/format-datetime'
 
@@ -36,6 +37,7 @@ type Connection = {
   ownerId: string
   authType: string
   status: string
+  isDefault?: boolean
   profile?: Record<string, unknown>
   profileSummary?: ConnectionProfileSummary
   grants?: ConnectionGrant[]
@@ -163,8 +165,18 @@ export default function ConnectionsPage() {
     setReloadKey(k => k + 1)
   }
 
-  async function testConnection(connection: Connection) {
-    setTestResults(prev => ({ ...prev, [connection.id]: { loading: true } }))
+  async function setDefaultConnection(connection: Connection) {
+    try {
+      await apiPost(`/api/v1/connections/${encodeURIComponent(connection.id)}/set-default`, {})
+      showToast(t('connections.setDefaultDone', { defaultValue: '已设为该工具的默认连接' }) + ' ✓', 'success')
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : String(e), 'error')
+    } finally {
+      setReloadKey(k => k + 1)
+    }
+  }
+
+  async function testConnection(connection: Connection) {    setTestResults(prev => ({ ...prev, [connection.id]: { loading: true } }))
     try {
       const result = await apiPost<ConnectionTestResult>(`/api/v1/connections/${encodeURIComponent(connection.id)}/test`, {})
       setTestResults(prev => ({
@@ -399,6 +411,7 @@ export default function ConnectionsPage() {
           onTest={connection => void testConnection(connection)}
           onDelete={connection => void removeConnection(connection)}
           onInstallToProject={connection => { setManagingProvider(null); setInstallingConnection(connection) }}
+          onSetDefault={connection => void setDefaultConnection(connection)}
         />
       )}
       {managingCustomMCPTool && customMCPProvider && (
@@ -417,6 +430,7 @@ export default function ConnectionsPage() {
           onTest={connection => void testConnection(connection)}
           onDelete={connection => void removeConnection(connection)}
           onInstallToProject={connection => { setManagingCustomMCPTool(null); setInstallingConnection(connection) }}
+          onSetDefault={connection => void setDefaultConnection(connection)}
         />
       )}
       {editing && (
@@ -559,6 +573,7 @@ function ProviderConnectionsDialog({
   onTest,
   onDelete,
   onInstallToProject,
+  onSetDefault,
 }: {
   provider?: Provider
   connections: Connection[]
@@ -570,6 +585,7 @@ function ProviderConnectionsDialog({
   onTest: (connection: Connection) => void
   onDelete: (connection: Connection) => void
   onInstallToProject: (connection: Connection) => void
+  onSetDefault: (connection: Connection) => void
 }) {
   const { t } = useTranslation()
   const fmtDateTime = useFormatDateTime()
@@ -604,6 +620,11 @@ function ProviderConnectionsDialog({
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <p className="truncate text-sm font-semibold text-neutral-900 dark:text-zinc-100">{connectionDisplayName(connection, t)}</p>
+                        {connection.isDefault && (
+                          <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
+                            {t('connections.defaultBadge', { defaultValue: '默认' })}
+                          </span>
+                        )}
                         <span className={cn(
                           'rounded-full px-2 py-0.5 text-[11px] font-medium',
                           connection.status === 'active'
@@ -627,6 +648,9 @@ function ProviderConnectionsDialog({
                       <button type="button" onClick={() => onOpenConnection(connection)} className="rounded-lg border border-neutral-300 px-3 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50 dark:border-zinc-600 dark:text-zinc-200 dark:hover:bg-zinc-800">{t('connections.details')}</button>
                       {connection.ownerType === 'workspace' && (
                         <button type="button" onClick={() => onInstallToProject(connection)} className="rounded-lg border border-neutral-300 px-3 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50 dark:border-zinc-600 dark:text-zinc-200 dark:hover:bg-zinc-800">{t('connections.installToProject')}</button>
+                      )}
+                      {connection.ownerType === 'workspace' && !connection.isDefault && (
+                        <button type="button" onClick={() => onSetDefault(connection)} className="rounded-lg border border-neutral-300 px-3 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50 dark:border-zinc-600 dark:text-zinc-200 dark:hover:bg-zinc-800">{t('connections.setDefault', { defaultValue: '设为默认' })}</button>
                       )}
                       <button type="button" onClick={() => onTest(connection)} disabled={testState?.loading} className="rounded-lg border border-neutral-300 px-3 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-200 dark:hover:bg-zinc-800">{testState?.loading ? t('common.loading') : t('connections.test')}</button>
                       <button type="button" onClick={() => onDelete(connection)} className="rounded-lg border border-red-200 px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50 dark:border-red-900/60 dark:text-red-300 dark:hover:bg-red-900/20">{t('common.delete')}</button>

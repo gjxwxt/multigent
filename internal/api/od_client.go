@@ -184,7 +184,15 @@ func (s *Server) resolveDesignConnection() (*designConnectionConfig, error) {
 	if len(connections) == 0 {
 		return nil, fmt.Errorf("no opendesign connection configured in this workspace")
 	}
+	// Prefer the provider's marked default connection; fall back to the
+	// newest-updated one for legacy workspaces without an explicit default.
 	conn := connections[0]
+	for _, c := range connections {
+		if c.IsDefault {
+			conn = c
+			break
+		}
+	}
 
 	values := map[string]string{}
 	secret, ok, err := s.controlDB.ConnectionSecret(conn.ID)

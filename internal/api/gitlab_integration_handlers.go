@@ -52,7 +52,16 @@ func (s *Server) resolveCodeHost(provider, connectionID string) (codehost.CodeHo
 		return nil, "", fmt.Errorf("no %s connection configured in this workspace", provider)
 	}
 
+	// Connection selection: explicit ID wins; otherwise the provider's
+	// marked default; otherwise the newest-updated connection as a final
+	// fallback for legacy workspaces that never picked one.
 	conn := connections[0]
+	for _, c := range connections {
+		if c.IsDefault {
+			conn = c
+			break
+		}
+	}
 	if connectionID != "" {
 		found := false
 		for _, c := range connections {

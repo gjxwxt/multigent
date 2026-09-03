@@ -66,6 +66,7 @@ type Store interface {
 	UpdateConnection(connection Connection) error
 	ConnectionByID(id string) (Connection, bool, error)
 	ListConnections(filter ConnectionFilter) ([]Connection, error)
+	SetDefaultConnection(workspaceID, connectionID string) error
 	DeleteConnection(id string) error
 	UpsertConnectionSecret(secret ConnectionSecret) error
 	ConnectionSecret(connectionID string) (ConnectionSecret, bool, error)
@@ -262,6 +263,7 @@ type Connection struct {
 	CreatedAt      string
 	UpdatedAt      string
 	LastUsedAt     string
+	IsDefault      bool
 }
 
 type ConnectorProvider struct {

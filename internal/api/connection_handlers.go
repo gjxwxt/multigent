@@ -2031,6 +2031,7 @@ type connectionResponse struct {
 	OwnerID        string                   `json:"ownerId"`
 	AuthType       string                   `json:"authType"`
 	Status         string                   `json:"status"`
+	IsDefault      bool                     `json:"isDefault"`
 	Profile        map[string]any           `json:"profile"`
 	ProfileSummary connectionProfileSummary `json:"profileSummary"`
 	Grants         []connectionGrantModel   `json:"grants,omitempty"`
@@ -2060,6 +2061,7 @@ func connectionToResponse(connection controldb.Connection, grants []controldb.Co
 		OwnerID:        connection.OwnerID,
 		AuthType:       connection.AuthType,
 		Status:         connection.Status,
+		IsDefault:      connection.IsDefault,
 		Profile:        sanitizeConnectionProfile(connection.Provider, profile),
 		ProfileSummary: summarizeConnectionProfile(connection, profile),
 		Grants:         grantsToResponse(grants),
@@ -2085,8 +2087,47 @@ func isAgentChannelConnectionProfile(connectionName string, profile map[string]a
 		strings.HasPrefix(strings.TrimSpace(connectionName), "channel/")
 }
 
-func grantsToResponse(grants []controldb.ConnectionGrant) []connectionGrantModel {
-	out := make([]connectionGrantModel, 0, len(grants))
+// handleSetDefaultConnection marks a connection as its provider's workspace
+// default. Platform-side resolution (code host pushes, the design gate) falls
+// back to this connection when no explicit per-project connection is set.
+func (s *Server) handleSetDefaultConnection(w http.ResponseWriter, r *http.Request) {
+	connection, ok := s.connectionByIDWithAccess(w, r)
+	if !ok {
+		return
+	}
+	if !s.canManageConnection(r, connection, s.currentUser(r)) {
+		s.jsonErrorCode(w, http.StatusForbidden, ErrCodeConnectionManagementRequired, "connection management access required")
+		return
+	}
+	workspaceID, err := s.currentWorkspaceID()
+	if err != nil {
+		s.serverError(w, err)
+		return
+	}
+	if connection.OwnerType != ConnectionOwnerWorkspace {
+		s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeValidationFailed, "only workspace-owned connections can be the provider default")
+		return
+	}
+	if err := s.controlDB.SetDefaultConnection(workspaceID, connection.ID); err != nil {
+		s.serverError(w, err)
+		return
+	}
+	s.auditLog(auditLogInput{
+		WorkspaceID:  workspaceID,
+		Action:       "connection.set_default",
+		ResourceType: "connection",
+		ResourceID:   connection.ID,
+		Summary:      "Connection marked as provider default",
+		After: map[string]any{
+			"connectionId": connection.ID,
+			"provider":     connection.Provider,
+		},
+		Request: r,
+	})
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "connectionId": connection.ID, "provider": connection.Provider})
+}
+
+func grantsToResponse(grants []controldb.ConnectionGrant) []connectionGrantModel {	out := make([]connectionGrantModel, 0, len(grants))
 	for _, grant := range grants {
 		out = append(out, grantToResponse(grant))
 	}

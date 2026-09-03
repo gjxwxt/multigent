@@ -38,7 +38,7 @@ ON CONFLICT(workspace_id, provider, owner_type, owner_id, connection_name) DO UP
 
 func (db *SQLiteStore) ConnectionByID(id string) (Connection, bool, error) {
 	row := db.sql.QueryRow(`SELECT id, workspace_id, provider, connection_name, owner_type, owner_id,
-auth_type, status, profile_json, created_by, created_at, updated_at, last_used_at
+auth_type, status, profile_json, created_by, created_at, updated_at, last_used_at, is_default
 FROM connections WHERE id = ?`, id)
 	c, err := scanConnection(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -48,6 +48,35 @@ FROM connections WHERE id = ?`, id)
 		return Connection{}, false, err
 	}
 	return c, true, nil
+}
+
+// SetDefaultConnection marks connectionID as the workspace's default for its
+// provider, clearing the previous default in one transaction. The partial
+// unique index on (workspace_id, provider) WHERE is_default = 1 enforces the
+// one-default-per-provider invariant even under races.
+func (db *SQLiteStore) SetDefaultConnection(workspaceID, connectionID string) error {
+	conn, exists, err := db.ConnectionByID(connectionID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return errors.New("connection not found")
+	}
+	if conn.WorkspaceID != workspaceID {
+		return errors.New("connection belongs to a different workspace")
+	}
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE connections SET is_default = 0 WHERE workspace_id = ? AND provider = ? AND is_default = 1`, workspaceID, conn.Provider); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE connections SET is_default = 1, updated_at = ? WHERE id = ? AND workspace_id = ?`, nowUTC(), connectionID, workspaceID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (db *SQLiteStore) UpdateConnection(c Connection) error {
@@ -87,7 +116,7 @@ WHERE id = ? AND workspace_id = ?`,
 
 func (db *SQLiteStore) ListConnections(filter ConnectionFilter) ([]Connection, error) {
 	query := `SELECT id, workspace_id, provider, connection_name, owner_type, owner_id,
-auth_type, status, profile_json, created_by, created_at, updated_at, last_used_at
+auth_type, status, profile_json, created_by, created_at, updated_at, last_used_at, is_default
 FROM connections WHERE 1=1`
 	args := make([]any, 0, 5)
 	if strings.TrimSpace(filter.WorkspaceID) != "" {
@@ -202,7 +231,11 @@ type connectionScanner interface {
 
 func scanConnection(row connectionScanner) (Connection, error) {
 	var c Connection
+	var isDefault int
 	err := row.Scan(&c.ID, &c.WorkspaceID, &c.Provider, &c.ConnectionName, &c.OwnerType, &c.OwnerID,
-		&c.AuthType, &c.Status, &c.ProfileJSON, &c.CreatedBy, &c.CreatedAt, &c.UpdatedAt, &c.LastUsedAt)
+		&c.AuthType, &c.Status, &c.ProfileJSON, &c.CreatedBy, &c.CreatedAt, &c.UpdatedAt, &c.LastUsedAt, &isDefault)
+	if err == nil && isDefault != 0 {
+		c.IsDefault = true
+	}
 	return c, err
 }

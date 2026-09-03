@@ -347,6 +347,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v1/connections/{id}", s.handleUpdateConnection)
 	mux.HandleFunc("DELETE /api/v1/connections/{id}", s.handleDeleteConnection)
 	mux.HandleFunc("POST /api/v1/connections/{id}/test", s.handleTestConnection)
+	mux.HandleFunc("POST /api/v1/connections/{id}/set-default", s.handleSetDefaultConnection)
 	mux.HandleFunc("POST /api/v1/connections/health-check", s.handleRunConnectionHealthChecks)
 	mux.HandleFunc("GET /api/v1/connections/{id}/grants", s.handleListConnectionGrants)
 	mux.HandleFunc("POST /api/v1/connections/{id}/grants", s.handleCreateConnectionGrant)
