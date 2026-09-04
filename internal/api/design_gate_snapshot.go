@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,6 +37,18 @@ type designSnapshotFile struct {
 	Path string `json:"path"`
 	Kind string `json:"kind"`
 	Size int64  `json:"size"`
+}
+
+// fetchedDesignFile caches the raw bytes of an artifact, aligned 1:1 with the
+// `artifacts` slice from designSnapshotArtifacts. Capturing bytes once (instead
+// of re-indexing artifacts[i] during persist) removes the former index-
+// misalignment bug, where a mid-list fetch failure shrank manifest.Files but
+// left artifacts untouched, causing artifacts[i] to resolve to the wrong file.
+type fetchedDesignFile struct {
+	Path string
+	Kind string
+	Size int64
+	Raw  []byte
 }
 
 type designSnapshotManifest struct {
@@ -81,6 +94,12 @@ func (s *Server) captureDesignGateSnapshot(r *http.Request, project, agent strin
 		TakenAt:   time.Now().UTC(),
 		Entry:     artifacts[0].Path,
 	}
+
+	// Fetch each artifact exactly once and cache the raw bytes aligned 1:1 with
+	// `artifacts`. The former code re-fetched during persist via
+	// `artifacts[i]` indexed by manifest.Files, which misaligned when a mid-list
+	// fetch failed (manifest.Files shrank, artifacts did not).
+	fetched := make([]fetchedDesignFile, len(artifacts))
 	var inline string
 	for i, art := range artifacts {
 		raw, err := client.GetProjectFile(ctx, odProjectID, art.Path)
@@ -91,10 +110,13 @@ func (s *Server) captureDesignGateSnapshot(r *http.Request, project, agent strin
 		if int64(len(raw)) > designSnapshotFetchCap {
 			raw = raw[:designSnapshotFetchCap]
 		}
-		manifest.Files = append(manifest.Files, designSnapshotFile{
-			Path: art.Path, Kind: art.Kind, Size: int64(len(raw)),
-		})
-		if i == 0 {
+		kind := strings.ToLower(strings.TrimSpace(art.Kind))
+		if kind == "" {
+			kind = strings.TrimPrefix(strings.ToLower(filepath.Ext(art.Path)), ".")
+		}
+		fetched[i] = fetchedDesignFile{Path: art.Path, Kind: kind, Size: int64(len(raw)), Raw: raw}
+		manifest.Files = append(manifest.Files, designSnapshotFile{Path: art.Path, Kind: kind, Size: int64(len(raw))})
+		if isHTML(art.Path) && inline == "" {
 			// Inline the entry HTML so the contract field is self-contained;
 			// cap it — downstream consumers get the full file from the bundle.
 			inline = string(raw)
@@ -107,17 +129,28 @@ func (s *Server) captureDesignGateSnapshot(r *http.Request, project, agent strin
 		return "", ""
 	}
 
+	// Observability: a companion (css/js) was requested but dropped because its
+	// fetch failed. Fail-soft (the snapshot still ships) but make the
+	// incompleteness visible instead of silently freezing a shell — the
+	// 2026-09-03 4test incident shipped a 595-byte index.html with dangling
+	// <link>/<script> refs precisely because this used to be invisible.
+	if len(manifest.Files) < len(artifacts) {
+		s.addComment(t, project, agent, "design snapshot: incomplete — captured "+
+			strconv.Itoa(len(manifest.Files))+" of "+strconv.Itoa(len(artifacts))+
+			" artifacts; see prior fetch errors above")
+	}
+
 	// Persist under the workspace's .multigent dir (same store root that owns
 	// agency.yaml); the contract field carries the workspace-relative path so
 	// consumers resolve it against s.st.Root().
 	if root := strings.TrimSpace(s.st.Root()); root != "" {
 		absDir := filepath.Join(root, designSnapshotDir, t.ID)
 		if mkErr := os.MkdirAll(absDir, 0o755); mkErr == nil {
-			for i := range manifest.Files {
-				art := artifacts[i]
-				if raw, err := client.GetProjectFile(ctx, odProjectID, art.Path); err == nil && int64(len(raw)) <= designSnapshotFetchCap {
-					_ = os.WriteFile(filepath.Join(absDir, filepath.FromSlash(art.Path)), raw, 0o644)
+			for _, f := range fetched {
+				if f.Raw == nil {
+					continue
 				}
+				_ = os.WriteFile(filepath.Join(absDir, filepath.FromSlash(f.Path)), f.Raw, 0o644)
 			}
 			rawManifest, _ := json.MarshalIndent(manifest, "", "  ")
 			_ = os.WriteFile(filepath.Join(absDir, "manifest.json"), rawManifest, 0o644)
@@ -127,33 +160,35 @@ func (s *Server) captureDesignGateSnapshot(r *http.Request, project, agent strin
 	return inline, snapshotPath
 }
 
-// designSnapshotArtifacts keeps html artifacts first (deterministic order),
-// followed by css/js companions that make the snapshot self-contained.
+// designSnapshotArtifacts keeps the html/css/js files that make the snapshot
+// self-contained. Selection is by FILE EXTENSION, not by OD's `kind` field:
+// OpenDesign reports css/js with kind "code" (and markdown with "text"), so a
+// kind-based match would drop every companion and freeze only the entry HTML
+// shell. That is exactly what caused the 2026-09-03 4test incident — a
+// 595-byte index.html with dangling <link>/<script> refs shipped to the
+// implementer, which then rebuilt the app from scratch instead of from the
+// prototype.
 func designSnapshotArtifacts(files []ODProjectFile) []ODProjectFile {
 	keep := make([]ODProjectFile, 0, len(files))
 	for _, f := range files {
-		k := strings.ToLower(strings.TrimSpace(f.Kind))
-		if k == "" {
-			ext := strings.ToLower(filepath.Ext(f.Path))
-			switch ext {
-			case ".html", ".css", ".js":
-				k = strings.TrimPrefix(ext, ".")
-			default:
-				continue
-			}
-		}
-		if k == "html" || k == "css" || k == "js" {
+		switch strings.ToLower(filepath.Ext(f.Path)) {
+		case ".html", ".css", ".js":
 			keep = append(keep, f)
 		}
 	}
 	sort.SliceStable(keep, func(i, j int) bool {
-		ki, kj := strings.ToLower(keep[i].Kind), strings.ToLower(keep[j].Kind)
-		if ki != kj {
-			return ki == "html"
+		// entry HTML first, then deterministic by path
+		if isHTML(keep[i].Path) != isHTML(keep[j].Path) {
+			return isHTML(keep[i].Path)
 		}
 		return keep[i].Path < keep[j].Path
 	})
 	return keep
+}
+
+// isHTML reports whether path is an .html file (extension match, case-insensitive).
+func isHTML(path string) bool {
+	return strings.EqualFold(filepath.Ext(path), ".html")
 }
 
 func redactODDetail(err error) string {

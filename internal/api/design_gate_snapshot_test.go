@@ -157,3 +157,52 @@ func TestReviewDesignSnapshotFailureDoesNotBlock(t *testing.T) {
 		t.Fatalf("run should advance despite snapshot failure: found=%v active=%s err=%v", found, run.ActiveStepID, err)
 	}
 }
+
+// TestDesignSnapshotArtifactsKeepsCompanionsByExtension locks the 2026-09-03
+// 4test fix: companions are selected by file extension, because OpenDesign
+// reports css/js with kind "code" (not "css"/"js"). The old code matched kind
+// exactly and dropped every companion, freezing only the entry HTML shell.
+func TestDesignSnapshotArtifactsKeepsCompanionsByExtension(t *testing.T) {
+	files := []ODProjectFile{
+		{Path: "index.html", Kind: "html", Size: 595},
+		{Path: "styles.css", Kind: "code", Size: 15997},
+		{Path: "js/app.js", Kind: "code", Size: 14195},
+		{Path: "js/api.js", Kind: "code", Size: 42939},
+		{Path: "README.md", Kind: "text", Size: 4559},
+	}
+
+	got := designSnapshotArtifacts(files)
+
+	want := []string{"index.html", "js/api.js", "js/app.js", "styles.css"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d artifacts, got %d: %+v", len(want), len(got), got)
+	}
+	for i, w := range want {
+		if got[i].Path != w {
+			t.Errorf("position %d: want %s, got %s", i, w, got[i].Path)
+		}
+	}
+	// Entry HTML must sort first so it becomes the inline/entry artifact.
+	if got[0].Path != "index.html" {
+		t.Errorf("entry HTML must be first, got %s", got[0].Path)
+	}
+	// README.md (kind "text", .md extension) must be excluded.
+	for _, g := range got {
+		if g.Path == "README.md" {
+			t.Errorf("non html/css/js file should not be kept: %s", g.Path)
+		}
+	}
+}
+
+// TestIsHTML covers the extension helper used for html-first ordering.
+func TestIsHTML(t *testing.T) {
+	cases := map[string]bool{
+		"index.html": true, "INDEX.HTML": true, "a/b/c.html": true,
+		"styles.css": false, "app.js": false, "readme.md": false,
+	}
+	for path, want := range cases {
+		if got := isHTML(path); got != want {
+			t.Errorf("isHTML(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
