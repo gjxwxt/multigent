@@ -1552,7 +1552,7 @@ export function WorkflowBoard({
   const branchConditionSteps = selected && stepDraft
     ? definition.steps.map((step) => (step.id === selected.id ? stepDraft : step))
     : definition.steps
-  const availableCollaborationChannels = collaborationChannels.filter((channel) => channel === 'feishu' || channel === 'lark')
+  const availableCollaborationChannels = collaborationChannels.filter((channel) => channel === 'feishu' || channel === 'lark' || channel === 'mattermost')
   const canNotifyAssignee = availableCollaborationChannels.length > 0
 
   return (
@@ -1787,6 +1787,7 @@ export function WorkflowBoard({
                         <option value="auto">{t('workflows.detail.notifyChannelAuto')}</option>
                         {availableCollaborationChannels.includes('feishu') ? <option value="feishu">{t('workflows.detail.notifyChannelFeishu')}</option> : null}
                         {availableCollaborationChannels.includes('lark') ? <option value="lark">{t('workflows.detail.notifyChannelLark')}</option> : null}
+                        {availableCollaborationChannels.includes('mattermost') ? <option value="mattermost">{t('workflows.detail.notifyChannelMattermost')}</option> : null}
                       </select>
                     </label>
                   ) : null}

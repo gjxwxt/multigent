@@ -112,6 +112,7 @@ func init() {
 		newWorkerCmd(),
 		newMigrateCmd(),
 		newSchemaCmd(),
+		newMattermostBridgeCmd(),
 	)
 }
 

@@ -1040,3 +1040,132 @@ func TestPrepareRuntimeNotifyDirectSendHidesReplySubjectPrefix(t *testing.T) {
 		t.Fatalf("reply prefix should never be sent as an external subject, got %q", msg.Subject)
 	}
 }
+
+func TestRuntimeNotifyUnboundRecipientAndWorkspacePrefix(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	// Setup Mattermost binding with no bound user identity
+	binding, _ := setupMattermostTestBinding(t, s, workspaceID, "sample", "pm", "cmd-tok")
+
+	// Create a test task in the taskstore
+	task := &entity.Task{
+		ID:        "t-test-notify",
+		Title:     "Test Notification Task",
+		Status:    entity.TaskStatusPending,
+		Assignee:  "pm",
+		CreatedBy: "owner",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := s.ts.AddTask("sample", "pm", task); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	principal := runtimeAgentPrincipal{
+		WorkspaceID:  workspaceID,
+		Project:      "sample",
+		Agent:        "pm",
+		Capabilities: []string{"runtime.notify", "message.use"},
+	}
+
+	_ = s.users.CreateUser("devuser", "pass", RoleMember, "", "", "", "", "")
+	_ = s.controlDB.UpsertWorkspaceMember(workspaceID, "devuser", WorkspaceRoleMember)
+
+	// 1. Send notification to unbound user "devuser" with TaskID
+	body := runtimeNotifyBody{
+		To:      "devuser",
+		Body:    "Please review the PR",
+		TaskID:  task.ID,
+		Channel: binding.ID,
+	}
+	bodyRaw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/notify", strings.NewReader(string(bodyRaw)))
+	req = req.WithContext(context.WithValue(req.Context(), ctxRuntimeAgentKey, principal))
+	rr := httptest.NewRecorder()
+
+	s.handleRuntimeNotify(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var res map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// Verify Q3: returns bindUrl, externalError indicates not bound
+	if res["externalSent"] != false {
+		t.Fatalf("expected externalSent=false")
+	}
+	if !strings.Contains(res["externalError"].(string), "has not bound") {
+		t.Fatalf("expected has not bound error, got %v", res["externalError"])
+	}
+	if res["bindUrl"] != "/projects/sample/agents/pm" {
+		t.Fatalf("expected bindUrl /projects/sample/agents/pm, got %v", res["bindUrl"])
+	}
+
+	// Verify task comment added with deep link and NO plaintext MG- code
+	comments, err := s.ts.ListComments("sample", "pm", task.ID)
+	if err != nil || len(comments) != 1 {
+		t.Fatalf("expected 1 task comment, got %d (err=%v)", len(comments), err)
+	}
+	if !strings.Contains(comments[0].Body, "通知发送失败") || !strings.Contains(comments[0].Body, "/projects/sample/agents/pm") {
+		t.Fatalf("unexpected comment body: %s", comments[0].Body)
+	}
+	if strings.Contains(comments[0].Body, "MG-") {
+		t.Fatalf("plaintext MG- code must NOT appear in task comment: %s", comments[0].Body)
+	}
+
+	// 2. Bind user "devuser" and verify outbound message prefix per Q4
+	var receivedPost map[string]any
+	mmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v4/posts" {
+			_ = json.NewDecoder(r.Body).Decode(&receivedPost)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "post-out-1"})
+			return
+		}
+		t.Fatalf("unexpected path: %s", r.URL.Path)
+	}))
+	defer mmServer.Close()
+
+	// Update connection secret with mock server URL
+	sec, _ := sealConnectionSecret(map[string]string{
+		"baseUrl":      mmServer.URL,
+		"botToken":     "test-bot-token",
+		"commandToken": "cmd-tok",
+	})
+	sec.ConnectionID = binding.ConnectionID
+	_ = s.controlDB.UpsertConnectionSecret(sec)
+
+	// Upsert bound user identity
+	_ = s.controlDB.UpsertUserChannelIdentity(controldb.UserChannelIdentity{
+		ID:               "uch-test-devuser",
+		WorkspaceID:      workspaceID,
+		UserID:           "devuser",
+		ChannelBindingID: binding.ID,
+		Provider:         "mattermost",
+		ExternalUserID:   "mm-usr-devuser",
+		ExternalChatID:   "ch-direct-devuser",
+		CreatedBy:        "devuser",
+		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
+		UpdatedAt:        time.Now().UTC().Format(time.RFC3339),
+	})
+
+	// Send notification again to bound user
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/notify", strings.NewReader(string(bodyRaw)))
+	req2 = req2.WithContext(context.WithValue(req2.Context(), ctxRuntimeAgentKey, principal))
+	rr2 := httptest.NewRecorder()
+	s.handleRuntimeNotify(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr2.Code, rr2.Body.String())
+	}
+	var res2 map[string]any
+	_ = json.NewDecoder(rr2.Body).Decode(&res2)
+	if res2["externalSent"] != true {
+		t.Fatalf("expected externalSent=true, got %#v", res2)
+	}
+	expectedPrefix := "[Test Workspace] [sample] Please review the PR"
+	if receivedPost["message"] != expectedPrefix {
+		t.Fatalf("expected message %q, got %q", expectedPrefix, receivedPost["message"])
+	}
+}
+

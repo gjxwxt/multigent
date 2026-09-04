@@ -249,12 +249,17 @@ type ExternalUserProfileResolver interface {
 	ResolveExternalUserProfile(ctx context.Context, secrets map[string]string, externalUserID, userIDType string) (ExternalUserProfile, error)
 }
 
+type ForwardedEventVerifier interface {
+	VerifyForwardedEvent(r *http.Request, rawBody []byte, secrets map[string]string) error
+}
+
 var registry = []Provider{
 	larkFamilyProvider{id: larkbridge.ProviderFeishu, label: "Feishu"},
 	larkFamilyProvider{id: larkbridge.ProviderLark, label: "Lark"},
 	slackProvider{},
 	telegramProvider{},
 	discordProvider{},
+	mattermostProvider{},
 }
 
 func Providers() []ProviderInfo {

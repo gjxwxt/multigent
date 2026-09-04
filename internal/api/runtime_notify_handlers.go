@@ -211,10 +211,27 @@ func (s *Server) handleRuntimeNotify(w http.ResponseWriter, r *http.Request) {
 	if !targetOK {
 		result["provider"] = binding.Provider
 		result["channelId"] = binding.ID
+		bindURL := fmt.Sprintf("/projects/%s/agents/%s", principal.Project, principal.Agent)
+		result["bindUrl"] = bindURL
 		if strings.HasPrefix(recipient, "chat:") {
 			result["externalError"] = fmt.Sprintf("chat target %q is not bound for this %s agent channel", strings.TrimPrefix(recipient, "chat:"), binding.Provider)
 		} else {
-			result["externalError"] = fmt.Sprintf("recipient %q has not bound a %s collaboration account for this agent channel", recipient, binding.Provider)
+			result["externalError"] = fmt.Sprintf("recipient %q has not bound a %s collaboration account for this agent channel (bind URL: %s)", recipient, binding.Provider, bindURL)
+		}
+		taskID := strings.TrimSpace(body.TaskID)
+		if taskID == "" && strings.TrimSpace(principal.RunID) != "" {
+			if run, runFound, runErr := s.controlDB.RuntimeRunByID(principal.WorkspaceID, principal.RunID); runErr == nil && runFound {
+				taskID = strings.TrimSpace(run.TaskID)
+			}
+		}
+		if taskID != "" && principal.Project != "" {
+			_ = s.ts.AddComment(principal.Project, principal.Agent, &entity.TaskComment{
+				ID:        entity.NewCommentID(),
+				TaskID:    taskID,
+				Author:    principal.Agent,
+				Body:      fmt.Sprintf("⚠️ 通知发送失败：用户 %s 尚未绑定 %s 协作账号。请前往 [协作渠道设置](%s) 生成绑定码完成绑定。", recipient, binding.Provider, bindURL),
+				CreatedAt: time.Now().UTC(),
+			})
 		}
 		s.auditRuntimeNotify(r, principal, msg.ID, binding.Provider, subject, false, result["externalError"].(string), runtimeNotifyAuditExtra(result))
 		_ = json.NewEncoder(w).Encode(result)
@@ -273,6 +290,21 @@ func (s *Server) handleRuntimeNotify(w http.ResponseWriter, r *http.Request) {
 		result["messageFormat"] = "card"
 	}
 	notifyMessage.MentionOpenID = target.MentionOpenID
+	wsName := principal.WorkspaceID
+	if ws, ok, err := s.controlDB.WorkspaceByID(principal.WorkspaceID); err == nil && ok && strings.TrimSpace(ws.Name) != "" {
+		wsName = strings.TrimSpace(ws.Name)
+	}
+	prefix := ""
+	if wsName != "" && principal.Project != "" {
+		prefix = fmt.Sprintf("[%s] [%s] ", wsName, principal.Project)
+	} else if wsName != "" {
+		prefix = fmt.Sprintf("[%s] ", wsName)
+	} else if principal.Project != "" {
+		prefix = fmt.Sprintf("[%s] ", principal.Project)
+	}
+	if prefix != "" && !strings.HasPrefix(notifyMessage.Text, prefix) {
+		notifyMessage.Text = prefix + notifyMessage.Text
+	}
 	notifyMessage.Text = trimForIM(notifyMessage.Text, 3500)
 	prepareRuntimeNotifyExternalMessage(&notifyMessage, target)
 	if target.ReplyToMessageID != "" {
@@ -954,7 +986,7 @@ func (s *Server) selectRuntimeNotifyChannel(principal runtimeAgentPrincipal, req
 		requested = "auto"
 	}
 	for _, binding := range bindings {
-		if requested == "auto" || requested == strings.ToLower(strings.TrimSpace(binding.Provider)) {
+		if requested == "auto" || requested == strings.ToLower(strings.TrimSpace(binding.Provider)) || requested == strings.ToLower(strings.TrimSpace(binding.ID)) {
 			return binding, true, nil
 		}
 	}

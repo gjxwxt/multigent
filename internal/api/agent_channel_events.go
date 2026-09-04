@@ -420,6 +420,39 @@ func (s *Server) handleIMEvent(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusBadRequest, "invalid event JSON")
 		return
 	}
+	if verifier, ok := channelProvider.(imbridge.ForwardedEventVerifier); ok {
+		matches, matchErr := s.matchChannelEventBindings(channelProvider.Info().ID, parsed.AppID, parsed.Message.ChatID)
+		if matchErr != nil {
+			s.serverError(w, matchErr)
+			return
+		}
+		if len(matches) == 0 {
+			if verifyErr := verifier.VerifyForwardedEvent(r, raw, nil); verifyErr != nil {
+				s.jsonError(w, http.StatusUnauthorized, "unauthorized: "+verifyErr.Error())
+				return
+			}
+			s.jsonError(w, http.StatusUnauthorized, "unauthorized: channel binding not found")
+			return
+		}
+		secret, foundSecret, secretErr := s.controlDB.ConnectionSecret(matches[0].ConnectionID)
+		if secretErr != nil {
+			s.serverError(w, secretErr)
+			return
+		}
+		if !foundSecret {
+			s.jsonError(w, http.StatusUnauthorized, "unauthorized: connection secret missing")
+			return
+		}
+		values, openErr := openConnectionSecret(secret)
+		if openErr != nil {
+			s.serverError(w, openErr)
+			return
+		}
+		if verifyErr := verifier.VerifyForwardedEvent(r, raw, values); verifyErr != nil {
+			s.jsonError(w, http.StatusUnauthorized, "unauthorized: "+verifyErr.Error())
+			return
+		}
+	}
 	if parsed.IsURLVerification {
 		_ = json.NewEncoder(w).Encode(map[string]string{"challenge": parsed.Challenge})
 		return
@@ -1280,7 +1313,7 @@ func (s *Server) replyBindCommandFailure(channelProvider imbridge.Provider, bind
 }
 
 func (s *Server) replyChannelIdentityBindingRequired(channelProvider imbridge.Provider, binding controldb.AgentChannelBinding, message imbridge.IncomingMessage) {
-	if !strings.EqualFold(strings.TrimSpace(message.ChatType), "p2p") {
+	if !isDirectChatType(message.ChatType) {
 		return
 	}
 	if s == nil || s.controlDB == nil {
@@ -2025,8 +2058,17 @@ func (s *Server) recordIMInteractionAttentionSignal(resolved resolvedChannelEven
 	return signalID
 }
 
+func isDirectChatType(chatType string) bool {
+	for _, t := range []string{"p2p", "d", "direct", "private", "dm", "im"} {
+		if strings.EqualFold(strings.TrimSpace(chatType), t) {
+			return true
+		}
+	}
+	return false
+}
+
 func imAttentionReason(message imbridge.IncomingMessage) string {
-	if strings.TrimSpace(message.ChatType) != "" && strings.TrimSpace(message.ChatType) != "p2p" {
+	if strings.TrimSpace(message.ChatType) != "" && !isDirectChatType(message.ChatType) {
 		return "im_mention"
 	}
 	return "im_direct_message"

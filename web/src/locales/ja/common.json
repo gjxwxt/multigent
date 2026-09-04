@@ -755,6 +755,7 @@
       "notifyChannelAuto": "自動",
       "notifyChannelFeishu": "Feishu",
       "notifyChannelLark": "Lark",
+      "notifyChannelMattermost": "Mattermost",
       "assigneeNotification": "担当者通知",
       "assigneeNotificationEnabled": "有効 · {{channel}}",
       "assigneeNotificationDisabled": "無効"

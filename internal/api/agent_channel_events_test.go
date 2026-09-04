@@ -1,14 +1,18 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -2028,3 +2032,436 @@ func encryptLarkEventForAPITest(t *testing.T, plaintext []byte, encryptKey strin
 	cipher.NewCBCEncrypter(block, iv).CryptBlocks(body, body)
 	return base64.StdEncoding.EncodeToString(append(append([]byte(nil), iv...), body...))
 }
+
+func TestMattermostForwardedEventInboundAndC3Isolation(t *testing.T) {
+	s, wsA := newConnectionGrantPolicyServer(t)
+	wsB := "ws-second-isolated"
+	if err := s.controlDB.UpsertWorkspace(controldb.Workspace{ID: wsB, Name: "Workspace B", Slug: "ws-second-isolated"}); err != nil {
+		t.Fatalf("create wsB: %v", err)
+	}
+
+	var mockReplyPost map[string]any
+	mockMMServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v4/posts" {
+			_ = json.NewDecoder(r.Body).Decode(&mockReplyPost)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "post-reply-123"})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockMMServer.Close()
+
+	// 1. Setup Workspace A: agent lina, bot-a, secret-a
+	secA, err := sealConnectionSecret(map[string]string{
+		"baseUrl":          mockMMServer.URL,
+		"botToken":         "token-a",
+		"bridgeHmacSecret": "secret-a",
+		"appId":            "bot-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secA.ConnectionID = "conn-mm-a"
+	if err := s.controlDB.UpsertConnection(controldb.Connection{
+		ID:             "conn-mm-a",
+		WorkspaceID:    wsA,
+		Provider:       "mattermost",
+		ConnectionName: "agent-flow-check-lina",
+		OwnerType:      ConnectionOwnerWorkspace,
+		OwnerID:        wsA,
+		Status:         "active",
+		ProfileJSON:    "{}",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.controlDB.UpsertConnectionSecret(secA); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.controlDB.UpsertAgentWorker(controldb.AgentWorker{
+		ID:          "aw-lina",
+		WorkspaceID: wsA,
+		Name:        "lina",
+		DisplayName: "Lina",
+		Status:      "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bindingA := controldb.AgentChannelBinding{
+		ID:            "chan-mm-a",
+		WorkspaceID:   wsA,
+		AgentWorkerID: "aw-lina",
+		ProjectID:     "flow-check",
+		AgentID:       "lina",
+		Provider:      "mattermost",
+		ConnectionID:  "conn-mm-a",
+		Status:        "connected",
+		MetadataJSON:  `{"appId":"bot-a"}`,
+	}
+	if err := s.controlDB.UpsertAgentChannelBinding(bindingA); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.controlDB.UpsertExternalIdentity(controldb.ExternalIdentity{
+		ID:             "ext-id-a",
+		WorkspaceID:    wsA,
+		Provider:       "mattermost",
+		ExternalUserID: "mm-user-a",
+		UserID:         "admin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.controlDB.UpsertUserChannelIdentity(controldb.UserChannelIdentity{
+		ID:               "uci-a",
+		WorkspaceID:      wsA,
+		ChannelBindingID: "chan-mm-a",
+		Provider:         "mattermost",
+		ExternalUserID:   "mm-user-a",
+		UserID:           "admin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Setup Workspace B: agent mira, bot-b, secret-b
+	secB, err := sealConnectionSecret(map[string]string{
+		"baseUrl":          mockMMServer.URL,
+		"botToken":         "token-b",
+		"bridgeHmacSecret": "secret-b",
+		"appId":            "bot-b",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secB.ConnectionID = "conn-mm-b"
+	if err := s.controlDB.UpsertConnection(controldb.Connection{
+		ID:             "conn-mm-b",
+		WorkspaceID:    wsB,
+		Provider:       "mattermost",
+		ConnectionName: "agent-1test-mira",
+		OwnerType:      ConnectionOwnerWorkspace,
+		OwnerID:        wsB,
+		Status:         "active",
+		ProfileJSON:    "{}",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.controlDB.UpsertConnectionSecret(secB); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.controlDB.UpsertAgentWorker(controldb.AgentWorker{
+		ID:          "aw-mira",
+		WorkspaceID: wsB,
+		Name:        "mira",
+		DisplayName: "Mira",
+		Status:      "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bindingB := controldb.AgentChannelBinding{
+		ID:            "chan-mm-b",
+		WorkspaceID:   wsB,
+		AgentWorkerID: "aw-mira",
+		ProjectID:     "1test",
+		AgentID:       "mira",
+		Provider:      "mattermost",
+		ConnectionID:  "conn-mm-b",
+		Status:        "connected",
+		MetadataJSON:  `{"appId":"bot-b"}`,
+	}
+	if err := s.controlDB.UpsertAgentChannelBinding(bindingB); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.controlDB.UpsertExternalIdentity(controldb.ExternalIdentity{
+		ID:             "ext-id-b",
+		WorkspaceID:    wsB,
+		Provider:       "mattermost",
+		ExternalUserID: "mm-user-b",
+		UserID:         "admin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.controlDB.UpsertUserChannelIdentity(controldb.UserChannelIdentity{
+		ID:               "uci-b",
+		WorkspaceID:      wsB,
+		ChannelBindingID: "chan-mm-b",
+		Provider:         "mattermost",
+		ExternalUserID:   "mm-user-b",
+		UserID:           "admin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	signEvent := func(raw []byte, secret string, ts int64) (string, string) {
+		tsStr := strconv.FormatInt(ts, 10)
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write([]byte(tsStr + "."))
+		mac.Write(raw)
+		return tsStr, hex.EncodeToString(mac.Sum(nil))
+	}
+
+	makePayload := func(botID, channelID, userID, msgID, text string) []byte {
+		postJSON, _ := json.Marshal(map[string]any{
+			"id":         msgID,
+			"channel_id": channelID,
+			"user_id":    userID,
+			"message":    text,
+			"create_at":  time.Now().UnixMilli(),
+		})
+		ev := map[string]any{
+			"event": "posted",
+			"data": map[string]any{
+				"channel_id":   channelID,
+				"channel_type": "D",
+				"post":         string(postJSON),
+				"bot_id":       botID,
+			},
+		}
+		raw, _ := json.Marshal(ev)
+		return raw
+	}
+
+	// Subtest 1: B1 Invariant - Non-loopback source rejected with 401 even with forged headers
+	t.Run("B1_NonLoopback_Rejected", func(t *testing.T) {
+		raw := makePayload("bot-a", "chan-1", "mm-user-a", "msg-1", "hello")
+		tsStr, sig := signEvent(raw, "secret-a", time.Now().Unix())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/events", bytes.NewReader(raw))
+		req.SetPathValue("provider", "mattermost")
+		req.RemoteAddr = "192.168.1.100:54321" // Non-loopback!
+		req.Header.Set("X-Real-IP", "127.0.0.1")
+		req.Header.Set("X-Forwarded-For", "127.0.0.1")
+		req.Header.Set("X-Mattermost-Forward-Timestamp", tsStr)
+		req.Header.Set("X-Mattermost-Forward-Signature", sig)
+		rec := httptest.NewRecorder()
+		s.handleIMEvent(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for non-loopback source, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	// Subtest 2: Bad HMAC Signature rejected with 401
+	t.Run("Bad_Signature_Rejected", func(t *testing.T) {
+		raw := makePayload("bot-a", "chan-1", "mm-user-a", "msg-2", "hello")
+		tsStr, _ := signEvent(raw, "secret-a", time.Now().Unix())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/events", bytes.NewReader(raw))
+		req.SetPathValue("provider", "mattermost")
+		req.RemoteAddr = "127.0.0.1:54321"
+		req.Header.Set("X-Mattermost-Forward-Timestamp", tsStr)
+		req.Header.Set("X-Mattermost-Forward-Signature", "wrong-signature-hex")
+		rec := httptest.NewRecorder()
+		s.handleIMEvent(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for bad signature, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	// Subtest 3: Expired Timestamp (>5min) rejected with 401
+	t.Run("Expired_Timestamp_Rejected", func(t *testing.T) {
+		raw := makePayload("bot-a", "chan-1", "mm-user-a", "msg-3", "hello")
+		expiredTs := time.Now().Add(-10 * time.Minute).Unix()
+		tsStr, sig := signEvent(raw, "secret-a", expiredTs)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/events", bytes.NewReader(raw))
+		req.SetPathValue("provider", "mattermost")
+		req.RemoteAddr = "127.0.0.1:54321"
+		req.Header.Set("X-Mattermost-Forward-Timestamp", tsStr)
+		req.Header.Set("X-Mattermost-Forward-Signature", sig)
+		rec := httptest.NewRecorder()
+		s.handleIMEvent(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for expired timestamp, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	// Subtest 4: Valid Inbound to Bot A in Workspace A
+	t.Run("Valid_Inbound_WorkspaceA", func(t *testing.T) {
+		raw := makePayload("bot-a", "chan-1", "mm-user-a", "msg-valid-a", "Hello Lina from Alice")
+		tsStr, sig := signEvent(raw, "secret-a", time.Now().Unix())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/events", bytes.NewReader(raw))
+		req.SetPathValue("provider", "mattermost")
+		req.RemoteAddr = "127.0.0.1:54321"
+		req.Header.Set("X-Mattermost-Forward-Timestamp", tsStr)
+		req.Header.Set("X-Mattermost-Forward-Signature", sig)
+		rec := httptest.NewRecorder()
+		s.handleIMEvent(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 for valid inbound, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		signalsA, err := s.controlDB.ListAttentionSignals(controldb.AttentionSignalFilter{WorkspaceID: wsA})
+		if err != nil || len(signalsA) == 0 {
+			t.Fatalf("expected attention signal in Workspace A, got %d err=%v", len(signalsA), err)
+		}
+		foundA := false
+		for _, sig := range signalsA {
+			if sig.SourceID == "msg-valid-a" {
+				foundA = true
+				if sig.Reason != "im_direct_message" {
+					t.Fatalf("expected reason im_direct_message for chatType D, got %s", sig.Reason)
+				}
+			}
+		}
+		if !foundA {
+			t.Fatalf("did not find signal for msg-valid-a in Workspace A")
+		}
+
+		// Workspace B must have zero signals
+		signalsB, _ := s.controlDB.ListAttentionSignals(controldb.AttentionSignalFilter{WorkspaceID: wsB})
+		if len(signalsB) != 0 {
+			t.Fatalf("Workspace B should have 0 signals, got %d", len(signalsB))
+		}
+	})
+
+	// Subtest 4b: Duplicate Event Ingestion (Real-time and Catch-up overlap) deduplicated at DB layer
+	t.Run("Duplicate_Inbound_Deduplication", func(t *testing.T) {
+		raw := makePayload("bot-a", "chan-1", "mm-user-a", "msg-valid-a", "Hello Lina from Alice")
+		tsStr, sig := signEvent(raw, "secret-a", time.Now().Unix())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/events", bytes.NewReader(raw))
+		req.SetPathValue("provider", "mattermost")
+		req.RemoteAddr = "127.0.0.1:54321"
+		req.Header.Set("X-Mattermost-Forward-Timestamp", tsStr)
+		req.Header.Set("X-Mattermost-Forward-Signature", sig)
+		rec := httptest.NewRecorder()
+		s.handleIMEvent(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 for duplicate event, got %d: %s", rec.Code, rec.Body.String())
+		}
+		signalsA, err := s.controlDB.ListAttentionSignals(controldb.AttentionSignalFilter{WorkspaceID: wsA})
+		if err != nil {
+			t.Fatal(err)
+		}
+		count := 0
+		for _, sig := range signalsA {
+			if sig.SourceID == "msg-valid-a" {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("expected exactly 1 signal for msg-valid-a despite duplicate submission, got %d", count)
+		}
+	})
+
+	// Subtest 5: C3 Multi-Workspace Isolation - Bot B routed strictly to Workspace B
+	t.Run("C3_MultiWorkspace_Isolation_BotB", func(t *testing.T) {
+		raw := makePayload("bot-b", "chan-2", "mm-user-b", "msg-valid-b", "Hello Mira from Bob")
+		tsStr, sig := signEvent(raw, "secret-b", time.Now().Unix())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/events", bytes.NewReader(raw))
+		req.SetPathValue("provider", "mattermost")
+		req.RemoteAddr = "127.0.0.1:54321"
+		req.Header.Set("X-Mattermost-Forward-Timestamp", tsStr)
+		req.Header.Set("X-Mattermost-Forward-Signature", sig)
+		rec := httptest.NewRecorder()
+		s.handleIMEvent(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 for valid inbound to Bot B, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		signalsB, err := s.controlDB.ListAttentionSignals(controldb.AttentionSignalFilter{WorkspaceID: wsB})
+		if err != nil || len(signalsB) != 1 {
+			t.Fatalf("expected exactly 1 attention signal in Workspace B, got %d err=%v", len(signalsB), err)
+		}
+		if signalsB[0].SourceID != "msg-valid-b" {
+			t.Fatalf("expected signal source msg-valid-b in Workspace B, got %s", signalsB[0].SourceID)
+		}
+
+		// Workspace A signal count should still be 1 (untouched by Bot B event)
+		signalsA, _ := s.controlDB.ListAttentionSignals(controldb.AttentionSignalFilter{WorkspaceID: wsA})
+		if len(signalsA) != 1 {
+			t.Fatalf("Workspace A signals should remain 1, got %d", len(signalsA))
+		}
+	})
+
+	// Subtest 6: Unbound DM user receives binding required guidance
+	t.Run("Unbound_DM_User_Receives_Guidance", func(t *testing.T) {
+		mockReplyPost = nil
+		raw := makePayload("bot-a", "chan-dm-unbound", "mm-unbound-user", "msg-unbound", "Hello from stranger")
+		tsStr, sig := signEvent(raw, "secret-a", time.Now().Unix())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/events", bytes.NewReader(raw))
+		req.SetPathValue("provider", "mattermost")
+		req.RemoteAddr = "127.0.0.1:54321"
+		req.Header.Set("X-Mattermost-Forward-Timestamp", tsStr)
+		req.Header.Set("X-Mattermost-Forward-Signature", sig)
+		rec := httptest.NewRecorder()
+		s.handleIMEvent(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 for unbound message event, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Ignored bool   `json:"ignored"`
+			Reason  string `json:"reason"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		if !resp.Ignored || resp.Reason != "unknown_identity" {
+			t.Fatalf("expected ignored=true reason=unknown_identity, got %#v", resp)
+		}
+
+		if mockReplyPost == nil {
+			t.Fatalf("expected mock Mattermost server to receive guidance reply, got nil")
+		}
+		msg, _ := mockReplyPost["message"].(string)
+		if !strings.Contains(msg, "/bind MG-") {
+			t.Fatalf("expected reply to contain bind guidance '/bind MG-', got: %s", msg)
+		}
+	})
+
+	// Subtest 7: FailClosed - Bot with empty bridgeHmacSecret rejected with 401
+	t.Run("FailClosed_Empty_Secret_Rejected", func(t *testing.T) {
+		secEmpty, _ := sealConnectionSecret(map[string]string{
+			"baseUrl":          mockMMServer.URL,
+			"botToken":         "token-empty",
+			"bridgeHmacSecret": "",
+			"appId":            "bot-empty",
+		})
+		secEmpty.ConnectionID = "conn-mm-empty"
+		_ = s.controlDB.UpsertConnection(controldb.Connection{
+			ID:             "conn-mm-empty",
+			WorkspaceID:    wsA,
+			Provider:       "mattermost",
+			ConnectionName: "agent-empty-bot",
+			OwnerType:      ConnectionOwnerWorkspace,
+			OwnerID:        wsA,
+			Status:         "active",
+		})
+		_ = s.controlDB.UpsertConnectionSecret(secEmpty)
+		_ = s.controlDB.UpsertAgentChannelBinding(controldb.AgentChannelBinding{
+			ID:            "chan-mm-empty",
+			WorkspaceID:   wsA,
+			AgentWorkerID: "aw-lina",
+			ProjectID:     "flow-check",
+			AgentID:       "lina",
+			Provider:      "mattermost",
+			ConnectionID:  "conn-mm-empty",
+			Status:        "connected",
+			MetadataJSON:  `{"appId":"bot-empty"}`,
+		})
+
+		raw := makePayload("bot-empty", "chan-1", "mm-user-a", "msg-empty-sec", "hello")
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/events", bytes.NewReader(raw))
+		req.SetPathValue("provider", "mattermost")
+		req.RemoteAddr = "127.0.0.1:54321"
+		req.Header.Set("X-Mattermost-Forward-Timestamp", strconv.FormatInt(time.Now().Unix(), 10))
+		req.Header.Set("X-Mattermost-Forward-Signature", "any-sig")
+		rec := httptest.NewRecorder()
+		s.handleIMEvent(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for bot with empty HMAC secret, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "bridge HMAC secret not configured") {
+			t.Fatalf("expected error message to contain 'bridge HMAC secret not configured', got: %s", rec.Body.String())
+		}
+	})
+
+	// Subtest 8: M3 Diagnostic Protection - Unknown bot returns 'channel binding not found' instead of HMAC error
+	t.Run("Unknown_Bot_Diagnostic_Not_Swallowed", func(t *testing.T) {
+		raw := makePayload("bot-unknown-nonexistent", "chan-1", "mm-user-a", "msg-unk", "hello")
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/events", bytes.NewReader(raw))
+		req.SetPathValue("provider", "mattermost")
+		req.RemoteAddr = "127.0.0.1:54321"
+		rec := httptest.NewRecorder()
+		s.handleIMEvent(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for unknown bot, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "channel binding not found") {
+			t.Fatalf("expected error message to contain 'channel binding not found', got: %s", rec.Body.String())
+		}
+	})
+}
+

@@ -1,8 +1,16 @@
 package db
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"strings"
 )
 
@@ -239,3 +247,89 @@ func scanConnection(row connectionScanner) (Connection, error) {
 	}
 	return c, err
 }
+
+func OpenConnectionSecret(secret ConnectionSecret) (map[string]string, error) {
+	if secret.Ciphertext == "" {
+		return map[string]string{}, nil
+	}
+	var raw []byte
+	switch secret.KeyVersion {
+	case "", "plain-dev":
+		decoded, err := base64.StdEncoding.DecodeString(secret.Ciphertext)
+		if err != nil {
+			return nil, err
+		}
+		raw = decoded
+	case "env-v1":
+		key := strings.TrimSpace(os.Getenv("MULTIGENT_CONNECTION_ENCRYPTION_KEY"))
+		if key == "" {
+			return nil, fmt.Errorf("MULTIGENT_CONNECTION_ENCRYPTION_KEY is required to decrypt connection secret")
+		}
+		ciphertext, err := base64.StdEncoding.DecodeString(secret.Ciphertext)
+		if err != nil {
+			return nil, err
+		}
+		nonce, err := base64.StdEncoding.DecodeString(secret.Nonce)
+		if err != nil {
+			return nil, err
+		}
+		sum := sha256.Sum256([]byte(key))
+		block, err := aes.NewCipher(sum[:])
+		if err != nil {
+			return nil, err
+		}
+		gcm, err := cipher.NewGCM(block)
+		if err != nil {
+			return nil, err
+		}
+		opened, err := gcm.Open(nil, nonce, ciphertext, nil)
+		if err != nil {
+			return nil, err
+		}
+		raw = opened
+	default:
+		return nil, fmt.Errorf("unsupported connection secret key version %q", secret.KeyVersion)
+	}
+	out := map[string]string{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func SealConnectionSecret(values map[string]string) (ConnectionSecret, error) {
+	raw, err := json.Marshal(values)
+	if err != nil {
+		return ConnectionSecret{}, err
+	}
+	key := strings.TrimSpace(os.Getenv("MULTIGENT_CONNECTION_ENCRYPTION_KEY"))
+	if key == "" {
+		return ConnectionSecret{
+			Ciphertext: base64.StdEncoding.EncodeToString(raw),
+			KeyVersion: "plain-dev",
+			UpdatedAt:  nowUTC(),
+		}, nil
+	}
+	sum := sha256.Sum256([]byte(key))
+	block, err := aes.NewCipher(sum[:])
+	if err != nil {
+		return ConnectionSecret{}, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return ConnectionSecret{}, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return ConnectionSecret{}, err
+	}
+	sealed := gcm.Seal(nil, nonce, raw, nil)
+	return ConnectionSecret{
+		Ciphertext: base64.StdEncoding.EncodeToString(sealed),
+		Nonce:      base64.StdEncoding.EncodeToString(nonce),
+		KeyVersion: "env-v1",
+		UpdatedAt:  nowUTC(),
+	}, nil
+}
+
+

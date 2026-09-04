@@ -12,7 +12,7 @@ import (
 
 func TestProviderRegistryExposesFeishuAndLark(t *testing.T) {
 	providers := Providers()
-	if len(providers) != 5 {
+	if len(providers) != 6 {
 		t.Fatalf("providers len=%d", len(providers))
 	}
 	feishu, ok := LookupProvider("FEISHU")
@@ -29,7 +29,7 @@ func TestProviderRegistryExposesFeishuAndLark(t *testing.T) {
 	if lark.Info().ID != "lark" || lark.OpenBaseURL() != "https://open.larksuite.com" {
 		t.Fatalf("unexpected lark provider: %#v %s", lark.Info(), lark.OpenBaseURL())
 	}
-	for _, id := range []string{"slack", "telegram", "discord"} {
+	for _, id := range []string{"slack", "telegram", "discord", "mattermost"} {
 		provider, ok := LookupProvider(id)
 		if !ok {
 			t.Fatalf("%s provider not found", id)

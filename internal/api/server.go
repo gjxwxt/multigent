@@ -653,6 +653,7 @@ func (s *Server) Handler() http.Handler {
 	publicMux.HandleFunc("POST /api/v1/invitations/{token}/accept", s.handleAcceptInvitation)
 	publicMux.HandleFunc("POST /api/v1/invitations/{token}/reject", s.handleRejectInvitation)
 	publicMux.HandleFunc("POST /api/v1/im/{provider}/events", s.handleIMEvent)
+	publicMux.HandleFunc("POST /api/v1/im/mattermost/commands/bind", s.handleMattermostSlashBind)
 	publicMux.HandleFunc("GET /api/v1/health", s.handleHealth)
 	publicMux.HandleFunc("/preview/", s.handleTaskPreviewProxy)
 	// Design proxy + launch are iframe-bootstrap surfaces: the iframe carries

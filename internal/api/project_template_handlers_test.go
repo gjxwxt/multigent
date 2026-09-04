@@ -55,6 +55,9 @@ func TestInitializeProjectTemplateKeepsRemoteURLIntact(t *testing.T) {
 	s, workspaceID := newConnectionGrantPolicyServer(t)
 	seedAgentWorkerForTest(t, s, workspaceID, "sample", "pm")
 	remoteURL := "http://host.orb.internal:8083/root/sample.git"
+	t.Cleanup(func() {
+		_ = os.RemoveAll("http:")
+	})
 	req := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/initialize-template", "admin", map[string]string{
 		"repo":       remoteURL,
 		"templateId": projecttemplate.ReactGoFullstackID,

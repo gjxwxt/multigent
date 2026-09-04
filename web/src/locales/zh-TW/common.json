@@ -755,6 +755,7 @@
       "notifyChannelAuto": "自動選擇",
       "notifyChannelFeishu": "飛書",
       "notifyChannelLark": "Lark",
+      "notifyChannelMattermost": "Mattermost",
       "assigneeNotification": "負責人通知",
       "assigneeNotificationEnabled": "已啟用 · {{channel}}",
       "assigneeNotificationDisabled": "未啟用"

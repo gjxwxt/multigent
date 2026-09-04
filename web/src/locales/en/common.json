@@ -766,6 +766,7 @@
       "notifyChannelAuto": "Auto",
       "notifyChannelFeishu": "Feishu",
       "notifyChannelLark": "Lark",
+      "notifyChannelMattermost": "Mattermost",
       "assigneeNotification": "Assignee notification",
       "assigneeNotificationEnabled": "Enabled · {{channel}}",
       "assigneeNotificationDisabled": "Disabled"
