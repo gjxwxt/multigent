@@ -3,9 +3,11 @@ package imbridge
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -14,6 +16,15 @@ import (
 
 	larkbridge "github.com/multigent/multigent/internal/imbridge/lark"
 )
+
+func shortSensitiveHash(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("%x", sum[:])[:16]
+}
 
 type ProviderInfo struct {
 	ID        string             `json:"id"`
@@ -214,6 +225,15 @@ type IncomingAttachmentDownload struct {
 
 type AttachmentDownloader interface {
 	DownloadAttachment(ctx context.Context, secrets map[string]string, message IncomingMessage, attachment IncomingAttachment) (IncomingAttachmentDownload, error)
+}
+
+// IncomingMessageEnricher lets a provider resolve references that are only
+// available after receiving the platform event. For example, Lark's
+// merge_forward event contains a summary while its child messages and file
+// keys are fetched from the platform API. The core runtime stays provider
+// agnostic and keeps the enrichment optional for other channels.
+type IncomingMessageEnricher interface {
+	EnrichIncomingMessage(ctx context.Context, secrets map[string]string, message IncomingMessage) (IncomingMessage, error)
 }
 
 type ProgressCardReplyProvider interface {
@@ -435,6 +455,8 @@ func (p larkFamilyProvider) DownloadAttachment(ctx context.Context, secrets map[
 	if strings.EqualFold(strings.TrimSpace(attachment.Type), "image") {
 		resourceType = "image"
 	}
+	log.Printf("[im:%s] downloading message resource message=%s attachment=%s type=%s resource_type=%s",
+		p.Info().ID, shortSensitiveHash(message.MessageID), shortSensitiveHash(attachment.ID), strings.TrimSpace(attachment.Type), resourceType)
 	download, err := client.DownloadMessageResource(ctx, message.MessageID, attachment.ID, resourceType)
 	if err != nil {
 		return IncomingAttachmentDownload{}, err
@@ -445,6 +467,42 @@ func (p larkFamilyProvider) DownloadAttachment(ctx context.Context, secrets map[
 		MIME:     firstNonEmpty(attachment.MIME, download.MIME),
 		Data:     download.Data,
 	}, nil
+}
+
+func (p larkFamilyProvider) EnrichIncomingMessage(ctx context.Context, secrets map[string]string, message IncomingMessage) (IncomingMessage, error) {
+	if !strings.EqualFold(strings.TrimSpace(message.MessageType), "merge_forward") {
+		return message, nil
+	}
+	client := larkbridge.OpenAPIClient{
+		BaseURL:   secrets["baseUrl"],
+		AppID:     secrets["appId"],
+		AppSecret: secrets["appSecret"],
+	}
+	text, attachments, err := client.ExpandMergeForwardMessage(ctx, message.MessageID)
+	if err != nil {
+		return message, err
+	}
+	log.Printf("[im:%s] expanded forwarded message message=%s text_bytes=%d attachments=%d",
+		p.Info().ID, shortSensitiveHash(message.MessageID), len(text), len(attachments))
+	if strings.TrimSpace(text) != "" {
+		message.Text = strings.TrimSpace(text)
+	}
+	if len(attachments) > 0 {
+		message.Attachments = make([]IncomingAttachment, 0, len(attachments))
+		for _, attachment := range attachments {
+			message.Attachments = append(message.Attachments, IncomingAttachment{
+				ID:      attachment.ID,
+				Type:    attachment.Type,
+				Name:    attachment.Name,
+				URL:     attachment.URL,
+				MIME:    attachment.MIME,
+				Size:    attachment.Size,
+				Preview: attachment.Preview,
+				Raw:     attachment.Raw,
+			})
+		}
+	}
+	return message, nil
 }
 
 func (p larkFamilyProvider) StartProgressCardReply(ctx context.Context, secrets map[string]string, message IncomingMessage, card ProgressCard) (any, error) {

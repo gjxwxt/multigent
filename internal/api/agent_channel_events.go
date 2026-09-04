@@ -601,7 +601,15 @@ func (s *Server) acceptIMMessage(channelProvider imbridge.Provider, appID, verif
 	if text == "" {
 		text = incomingMessageFallbackText(message)
 	}
+	log.Printf("[im:%s] received message type=%s chat_type=%s message=%s content_bytes=%d text_bytes=%d attachments=%d", provider,
+		strings.TrimSpace(message.MessageType), strings.TrimSpace(message.ChatType), shortSensitiveHash(message.MessageID),
+		len(message.RawContent), len(text), len(message.Attachments))
+	if len(message.Attachments) > 0 {
+		log.Printf("[im:%s] incoming attachment metadata message=%s attachments=%s",
+			provider, shortSensitiveHash(message.MessageID), incomingAttachmentDebugSummary(message.Attachments))
+	}
 	if text == "" && len(message.Attachments) == 0 {
+		log.Printf("[im:%s] ignored message type=%s message=%s reason=empty_content", provider, strings.TrimSpace(message.MessageType), shortSensitiveHash(message.MessageID))
 		return map[string]any{"ok": true, "ignored": true}, nil
 	}
 	if bindCmd, code, ok := parseAgentChannelBindCommand(text); ok {
@@ -702,6 +710,25 @@ func (s *Server) acceptIMMessage(channelProvider imbridge.Provider, appID, verif
 		})
 		return map[string]any{"ok": true, "ignored": true, "reason": "permission_denied"}, nil
 	}
+	if enricher, ok := channelProvider.(imbridge.IncomingMessageEnricher); ok {
+		// Forwarded messages are lightweight envelope events. Resolve their
+		// child content only after identity and permission checks, so an
+		// untrusted sender cannot use the enrichment path to probe the channel
+		// API. A failed enrichment must not discard the original signal.
+		enrichCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		enriched, enrichErr := enricher.EnrichIncomingMessage(enrichCtx, resolved.SecretValues, message)
+		cancel()
+		if enrichErr != nil {
+			log.Printf("[im:%s] message enrichment failed type=%s message=%s: %v", provider, strings.TrimSpace(message.MessageType), shortSensitiveHash(message.MessageID), enrichErr)
+		} else {
+			message = enriched
+			text = strings.TrimSpace(message.Text)
+			if text == "" {
+				text = incomingMessageFallbackText(message)
+			}
+			log.Printf("[im:%s] message enriched type=%s message=%s text_bytes=%d attachments=%d metadata=%s", provider, strings.TrimSpace(message.MessageType), shortSensitiveHash(message.MessageID), len(text), len(message.Attachments), incomingAttachmentDebugSummary(message.Attachments))
+		}
+	}
 	if cmd, ok := parseAgentChannelControlCommand(text); ok {
 		return s.acceptAgentChannelControlCommand(channelProvider, resolved, message, cmd)
 	}
@@ -718,10 +745,16 @@ func (s *Server) acceptIMMessage(channelProvider imbridge.Provider, appID, verif
 		MessageID:   message.MessageID,
 		Provider:    provider,
 	}) {
+		log.Printf("[im:%s] accepted message type=%s message=%s signal=%s wake=queued", provider, strings.TrimSpace(message.MessageType), shortSensitiveHash(message.MessageID), shortSensitiveHash(attentionID))
 		s.acknowledgeIMAccepted(channelProvider, resolved, message)
 		s.recordAgentChannelCallback(resolved.Binding, "queued", "attention_pending", message, "")
 		return map[string]any{"ok": true, "queued": true, "attentionId": attentionID}, nil
 	}
+	log.Printf("[im:%s] accepted message type=%s message=%s signal=%s wake=scheduled", provider, strings.TrimSpace(message.MessageType), shortSensitiveHash(message.MessageID), shortSensitiveHash(attentionID))
+	// A message is acknowledged as soon as it passes identity and permission
+	// checks. Runtime readiness is a separate concern: a temporary runtime
+	// outage must not make the channel look unresponsive.
+	s.acknowledgeIMAccepted(channelProvider, resolved, message)
 	meta, err := s.agentMetaForProjectMember(resolved.Binding.WorkspaceID, resolved.Binding.ProjectID, resolved.Binding.AgentID)
 	if err != nil {
 		return nil, err
@@ -750,7 +783,6 @@ func (s *Server) acceptIMMessage(channelProvider imbridge.Provider, appID, verif
 		return map[string]any{"ok": true, "ignored": true, "reason": "runtime_not_ready"}, nil
 	}
 	s.recordAgentChannelCallback(resolved.Binding, "accepted", "", message, "")
-	s.acknowledgeIMAccepted(channelProvider, resolved, message)
 	go s.requestAgentAttentionWakeupAfterDebounce(resolved.Binding, reason, runtimeAPIURL, resolved.Identity.UserID, attentionID)
 	return map[string]any{"ok": true}, nil
 }
@@ -814,11 +846,21 @@ func (s *Server) acceptAgentChannelControlCommand(channelProvider imbridge.Provi
 func (s *Server) formatAgentChannelStatus(binding controldb.AgentChannelBinding) string {
 	worker, workerOK := s.agentWorkerForChannelBinding(binding)
 	var hb *entity.HeartbeatConfig
+	var wakeupRunning bool
 	if workerOK {
 		hb = parseAgentWorkerSchedule(worker)
 	} else if target := s.runtimeSchedulerTargetForProjectAgent(binding.WorkspaceID, binding.ProjectID, binding.AgentID); strings.TrimSpace(target.workerID) != "" {
 		if loaded, err := s.loadSchedulerTargetHeartbeat(binding.WorkspaceID, target); err == nil {
 			hb = loaded
+		}
+	}
+	if hb != nil && strings.EqualFold(strings.TrimSpace(hb.LastWakeupStatus), "running") {
+		// A heartbeat record can outlive its child process (or be persisted by a
+		// runtime node), so use a live process or active runtime run as proof.
+		wakeupRunning = hb.PID > 0 && processAlive(hb.PID)
+		if !wakeupRunning {
+			target := s.runtimeSchedulerTargetForProjectAgent(binding.WorkspaceID, binding.ProjectID, binding.AgentID)
+			wakeupRunning = s.hasActiveRuntimeRunForTarget(binding.WorkspaceID, target, "")
 		}
 	}
 	label := s.agentChannelDisplayName(binding)
@@ -869,6 +911,7 @@ func (s *Server) formatAgentChannelStatus(binding controldb.AgentChannelBinding)
 		fmt.Sprintf("- 模型账号: %s", firstNonEmpty(modelAccount, "-")),
 		fmt.Sprintf("- 运行节点: %s", firstNonEmpty(runtimeNode, "-")),
 		fmt.Sprintf("- 运行模式: %s", firstNonEmpty(runtimeMode, "-")),
+		fmt.Sprintf("- 当前唤醒运行中: %s", yesNo(wakeupRunning)),
 	)
 	if primarySession != "" {
 		lines = append(lines, fmt.Sprintf("- 主会话: `%s`", primarySession))
@@ -2035,13 +2078,15 @@ func formatIMAgentPromptWithSender(providerID string, binding controldb.AgentCha
 			}
 			b.WriteString("\n")
 		}
-		b.WriteString("Download attachments with `mga attention attachment download <signal-id> --index <n>` before analyzing image/file content. Do not assume you cannot access the attachment.\n")
+		b.WriteString("For image/file/media/audio attachments with a non-empty ID, download the binary with `mga attention attachment download <signal-id> --index <n>` before analyzing it. For `link` or `document` entries, use the displayed URL or the appropriate document/network tool; do not call the binary attachment download command for a link. Do not assume you cannot access an attachment.\n")
 		b.WriteString("\n")
 	}
 	b.WriteString("\nReply contract:\n")
 	b.WriteString("- Always finish with a concise, human-facing final reply. Do not end silently after tool calls.\n")
 	b.WriteString("- Reply in the same language as the user's message unless the user asks otherwise.\n")
 	b.WriteString("- Prefer short Markdown: one conclusion first, then bullets for details or next steps.\n")
+	b.WriteString("- To reply to this exact inbound message in the same chat or thread, use `mga notify send --to source --message-format markdown --body \"...\"`. The `source` target carries the platform reply relation and keeps the conversation threaded.\n")
+	b.WriteString("- `--to user:<id>` and `--to chat:<id>` intentionally create a new message; do not use them when replying to the message above. Do not put `Re:` in the subject.\n")
 	b.WriteString("- For chat-like conversations, behave like a responsive coworker: you may first acknowledge with `mga notify react --to source --emoji THINKING` or send a short `mga notify send --to source --body \"我先看下\"`, then continue working.\n")
 	b.WriteString("- You may send several short source replies when that feels more natural than one long final block. Avoid spam; each message should move the conversation forward.\n")
 	b.WriteString("- If you cannot complete the request, explain the blocker and the exact next action needed.\n")
@@ -2111,6 +2156,25 @@ func incomingMessageFallbackText(message imbridge.IncomingMessage) string {
 		parts = append(parts, "["+label+"]")
 	}
 	return strings.Join(parts, " ")
+}
+
+func incomingAttachmentDebugSummary(attachments []imbridge.IncomingAttachment) string {
+	parts := make([]string, 0, len(attachments))
+	for _, attachment := range attachments {
+		kind := strings.TrimSpace(attachment.Type)
+		if kind == "" {
+			kind = "unknown"
+		}
+		id := shortSensitiveHash(attachment.ID)
+		if id == "" {
+			id = "none"
+		}
+		parts = append(parts, kind+":"+id)
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, ",")
 }
 
 func agentChannelReplySubject(agentID string) string {

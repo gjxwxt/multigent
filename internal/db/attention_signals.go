@@ -124,6 +124,14 @@ FROM attention_signals WHERE 1=1`
 }
 
 func (db *SQLiteStore) MarkAttentionSignalStatus(workspaceID, id, status string) error {
+	return db.markAttentionSignalStatus(workspaceID, id, status, "")
+}
+
+func (db *SQLiteStore) MarkAttentionSignalStatusWithResult(workspaceID, id, status, resultRef string) error {
+	return db.markAttentionSignalStatus(workspaceID, id, status, resultRef)
+}
+
+func (db *SQLiteStore) markAttentionSignalStatus(workspaceID, id, status, resultRef string) error {
 	now := nowUTC()
 	field := "seen_at"
 	guard := ""
@@ -133,11 +141,21 @@ func (db *SQLiteStore) MarkAttentionSignalStatus(workspaceID, id, status string)
 		guard = " AND status NOT IN ('handled', 'ignored', 'expired')"
 	case "handled", "ignored", "expired":
 		field = "handled_at"
+		// Terminal signals are immutable. Replaying a wakeup or an explicit
+		// close must not reopen the signal or overwrite its audit reference.
+		guard = " AND status NOT IN ('handled', 'ignored', 'expired')"
 	case "seen":
 		guard = " AND status = 'pending'"
 	}
-	_, err := db.sql.Exec(`UPDATE attention_signals SET status = ?, `+field+` = ? WHERE workspace_id = ? AND id = ?`+guard,
-		strings.TrimSpace(status), now, strings.TrimSpace(workspaceID), strings.TrimSpace(id))
+	query := `UPDATE attention_signals SET status = ?, ` + field + ` = ?`
+	args := []any{strings.TrimSpace(status), now}
+	if strings.TrimSpace(resultRef) != "" {
+		query += `, result_ref = ?`
+		args = append(args, strings.TrimSpace(resultRef))
+	}
+	query += ` WHERE workspace_id = ? AND id = ?` + guard
+	args = append(args, strings.TrimSpace(workspaceID), strings.TrimSpace(id))
+	_, err := db.sql.Exec(query, args...)
 	return err
 }
 

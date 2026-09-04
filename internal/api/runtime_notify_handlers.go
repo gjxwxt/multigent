@@ -220,6 +220,18 @@ func (s *Server) handleRuntimeNotify(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(result)
 		return
 	}
+	// Agents normally use --to source for a threaded reply. Keep the runtime
+	// forgiving when an agent explicitly writes a reply-style subject while
+	// addressing the same user: this is an unambiguous intent signal and avoids
+	// creating a detached "Re: ..." message in the active conversation.
+	if runtimeNotifyLooksLikeReplySubject(subject) {
+		if sourceTarget, sourceOK, sourceErr := s.runtimeNotifySourceTarget(principal, binding); sourceErr != nil {
+			s.serverError(w, sourceErr)
+			return
+		} else if sourceOK && runtimeNotifyTargetsShareConversation(target, sourceTarget) {
+			target = sourceTarget
+		}
+	}
 	channelProvider, ok := imbridge.LookupProvider(binding.Provider)
 	if !ok {
 		result["externalError"] = "unsupported IM provider: " + binding.Provider
@@ -650,9 +662,8 @@ func (s *Server) runtimeNotifyCreateInteractionRequest(principal runtimeAgentPri
 		}
 		actions = append(actions, imbridge.InteractiveCardAction{ID: id, Label: label, Style: action.Style, RequiresText: action.RequiresText})
 	}
-	if len(actions) == 0 {
-		return nil, "", fmt.Errorf("card.actions must include at least one action")
-	}
+	// A card may be display-only. Interactive cards need actions, but review
+	// summaries and progress reports should not invent a meaningless button.
 	fields := make([]imbridge.InteractiveCardField, 0, len(cardBody.Fields))
 	for _, field := range cardBody.Fields {
 		if strings.TrimSpace(field.Label) == "" && strings.TrimSpace(field.Value) == "" {
@@ -980,6 +991,28 @@ func (s *Server) runtimeChannelToRow(principal runtimeAgentPrincipal, binding co
 		})
 	}
 	row.CanNotify = runtimeChannelCanNotify(binding) || len(row.Targets) > 0
+	// A user identity is a valid notification route even when the channel does
+	// not have a static owner/chat target. This is the normal binding model for
+	// per-user IM accounts.
+	if !row.CanNotify {
+		identities, identityErr := s.controlDB.ListUserChannelIdentities(controldb.UserChannelIdentityFilter{
+			WorkspaceID:      principal.WorkspaceID,
+			ChannelBindingID: binding.ID,
+			Provider:         binding.Provider,
+		})
+		if identityErr != nil {
+			return runtimeChannelRow{}, identityErr
+		}
+		row.CanNotify = len(identities) > 0
+	}
+	// A source target is resolved from the current attention signal rather than
+	// from a static owner/chat binding. It is still a valid notification route
+	// for the current run and must be visible to the agent as usable.
+	if !row.CanNotify {
+		if _, sourceAvailable := s.runtimeNotifySourceInfoForPrincipal(principal, binding.Provider); sourceAvailable {
+			row.CanNotify = true
+		}
+	}
 	if t, err := time.Parse(time.RFC3339, strings.TrimSpace(binding.LastActivityAt)); err == nil {
 		row.LastActivityAt = &t
 	}
@@ -1508,14 +1541,24 @@ func prepareRuntimeNotifyExternalMessage(message *imbridge.OutgoingMessage, targ
 	if message == nil {
 		return
 	}
-	if strings.TrimSpace(target.ReplyToMessageID) != "" {
-		// IM source replies should feel like normal chat replies. Strip obvious
-		// mail-style subjects, but keep agent-provided/default names as card
-		// titles because some IM card formats require a header.
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(message.Subject)), "re:") {
-			message.Subject = ""
-		}
+	// A subject is an internal routing hint, not part of the external
+	// conversation. In particular, letting an agent pass "Re: ..." here makes
+	// direct messages look like a fake reply even when the target is new.
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(message.Subject)), "re:") {
+		message.Subject = ""
 	}
+	_ = target
+}
+
+func runtimeNotifyLooksLikeReplySubject(subject string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(subject)), "re:")
+}
+
+func runtimeNotifyTargetsShareConversation(target, source imbridge.OutgoingTarget) bool {
+	if strings.TrimSpace(target.ChatID) == "" || strings.TrimSpace(source.ChatID) == "" {
+		return false
+	}
+	return strings.TrimSpace(target.ChatID) == strings.TrimSpace(source.ChatID)
 }
 
 func runtimeNotifyAuditExtra(result map[string]any) map[string]any {

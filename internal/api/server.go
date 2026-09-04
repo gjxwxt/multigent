@@ -160,7 +160,9 @@ func NewServer(root, apiKey string) *Server {
 		worktreeMgr:            gitworktree.NewManager(),
 		previewSessions:        make(map[string]*previewChatSession),
 	}
-	go s.restoreDesiredSchedulers()
+	// Scheduler restore is intentionally absent: upstream v2.0.10 made the
+	// workspace scheduler service-managed (StartWorkspaceScheduler in
+	// cmd/multigent), so per-agent restore at construction would double-schedule.
 	go func() {
 		if err := s.previewEngine.Reconcile(context.Background()); err != nil {
 			log.Printf("preview reconciliation skipped: %v", err)
@@ -575,8 +577,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/workbench/tasks", s.handleWorkbenchTasks)
 	mux.HandleFunc("GET /api/v1/workbench/overview", s.handleWorkbenchOverview)
 	mux.HandleFunc("GET /api/v1/scheduler/status", s.handleSchedulerStatus)
-	mux.HandleFunc("POST /api/v1/scheduler/start", s.handleSchedulerStart)
-	mux.HandleFunc("POST /api/v1/scheduler/stop", s.handleSchedulerStop)
 	mux.HandleFunc("POST /api/v1/scheduler/wakeup", s.handleSchedulerWakeup)
 	mux.HandleFunc("POST /api/v1/scheduler/abort", s.handleSchedulerAbort)
 	mux.HandleFunc("GET /api/v1/inbox", s.handleInbox)
@@ -1629,9 +1629,6 @@ func (s *Server) identityLabel(identity string) string {
 	if identity == "" {
 		return ""
 	}
-	if strings.Contains(identity, "/") {
-		return identity
-	}
 	if identity == "human" {
 		return "Human"
 	}
@@ -1645,7 +1642,33 @@ func (s *Server) identityLabel(identity string) string {
 			}
 		}
 	}
+	// Agent task records may carry either the workspace worker ID or a
+	// project/worker mailbox. Resolve both to a readable worker label while
+	// retaining the stable identity in the raw field for auditing and updates.
+	if s != nil && s.agentDirectory != nil {
+		workspaceID, err := s.currentWorkspaceID()
+		if err == nil && strings.TrimSpace(workspaceID) != "" {
+			if project, agent, ok := agentdir.SplitProjectMailbox(identity); ok {
+				if resolved, found, err := s.agentDirectory.ProjectWorker(workspaceID, project, agent); err == nil && found {
+					if label := agentWorkerIdentityLabel(resolved.Worker); label != "" {
+						return label
+					}
+				}
+			} else if worker, found, err := s.agentDirectory.Worker(workspaceID, identity); err == nil && found {
+				if label := agentWorkerIdentityLabel(worker); label != "" {
+					return label
+				}
+			}
+		}
+	}
 	return identity
+}
+
+func agentWorkerIdentityLabel(worker controldb.AgentWorker) string {
+	if label := strings.TrimSpace(worker.DisplayName); label != "" {
+		return label
+	}
+	return strings.TrimSpace(worker.Name)
 }
 
 func userVisibleTaskPrompt(prompt string) string {

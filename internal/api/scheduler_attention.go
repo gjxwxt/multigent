@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/multigent/multigent/internal/attention"
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
 )
@@ -93,8 +94,10 @@ func (s *Server) pendingAttentionWakeupSectionAndVars(workspaceID, project, agen
 	signals, err := s.controlDB.ListAttentionSignals(controldb.AttentionSignalFilter{
 		WorkspaceID:   workspaceID,
 		AgentWorkerID: resolved.Worker.ID,
-		Statuses:      []string{"pending", "seen", "handling"},
-		Limit:         limit,
+		// A signal is eligible for injection exactly once. `seen` means it was
+		// already delivered to a wakeup; `handling` is owned by an active run.
+		Statuses: []string{"pending"},
+		Limit:    limit,
 	})
 	if err != nil || len(signals) == 0 {
 		return "", nil, nil, err
@@ -136,6 +139,19 @@ func (s *Server) pendingAttentionWakeupSectionAndVars(workspaceID, project, agen
 		signals = focused
 	}
 	vars := s.attentionWakeupTaskVars(workspaceID, signals)
+	if len(signals) > 0 {
+		ids := make([]string, 0, len(signals))
+		for _, signal := range signals {
+			if id := strings.TrimSpace(signal.ID); id != "" {
+				ids = append(ids, id)
+			}
+		}
+		rawIDs, _ := json.Marshal(ids)
+		if vars == nil {
+			vars = map[string]string{}
+		}
+		vars["MULTIGENT_ATTENTION_SIGNAL_IDS_JSON"] = string(rawIDs)
+	}
 	i18n := s.apiWakeupStrings()
 	var b strings.Builder
 	b.WriteString(i18n.AttentionHeader)
@@ -198,7 +214,7 @@ func (s *Server) pendingAttentionWakeupSectionAndVars(workspaceID, project, agen
 	}
 	b.WriteString("---\n\n")
 	b.WriteString(i18n.AttentionHint)
-	b.WriteString("\nIf an IM signal payload contains `attachments`, download the binary before analyzing it: `mga attention attachment download <signal-id> --index 1`. Use the returned local path in your analysis; do not ask the user to re-upload unless the download fails.\n")
+	b.WriteString("\nIf an IM signal payload contains an image/file/media/audio attachment with a non-empty ID, download the binary before analyzing it: `mga attention attachment download <signal-id> --index <n>`. For `link` or `document` entries, use the displayed URL or the appropriate document/network tool instead of binary attachment download. Use the returned local path in your analysis; do not ask the user to re-upload unless a real binary download fails.\n")
 	return b.String(), ids, vars, nil
 }
 
@@ -282,6 +298,12 @@ func (s *Server) recoverablePendingAttentionWakeupTargets(limit int) ([]attentio
 	groups := map[key][]string{}
 	order := make([]key, 0)
 	for _, signal := range signals {
+		// IM is an attention source, not durable work. Replaying an old chat
+		// message merely because the service restarted creates surprising replies.
+		// New IM events and the normal heartbeat path still handle it.
+		if isIMAttentionSignal(signal) {
+			continue
+		}
 		var refs struct {
 			Project string `json:"project"`
 			Agent   string `json:"agent"`
@@ -359,7 +381,7 @@ func (s *Server) requestPendingAttentionWakeupAfterRun(run controldb.RuntimeRun)
 	signals, err := s.controlDB.ListAttentionSignals(controldb.AttentionSignalFilter{
 		WorkspaceID:   workspaceID,
 		AgentWorkerID: workerID,
-		Statuses:      []string{"pending", "seen"},
+		Statuses:      []string{"pending"},
 		Limit:         50,
 	})
 	if err != nil {
@@ -427,6 +449,34 @@ func (s *Server) markAttentionSignalsSeen(workspaceID string, ids []string) {
 	}
 	for _, id := range ids {
 		_ = s.controlDB.MarkAttentionSignalStatus(workspaceID, id, "seen")
+	}
+}
+
+// markAttentionSignalsForWakeupRun closes only the signals that were actually
+// attached to this wakeup task. This keeps unrelated pending signals for a
+// later cycle and makes the run-to-signal relationship auditable.
+func (s *Server) markAttentionSignalsForWakeupRun(run controldb.RuntimeRun) {
+	if s == nil || s.controlDB == nil || s.ts == nil || strings.TrimSpace(run.TaskID) == "" {
+		return
+	}
+	task, err := s.ts.GetTask(run.ProjectID, run.AgentID, run.TaskID)
+	if err != nil || task == nil || len(task.Vars) == 0 {
+		return
+	}
+	if !isSuccessfulRuntimeStatus(run.Status) {
+		return
+	}
+	if err := attention.CloseTaskSignals(s.controlDB, run.WorkspaceID, task, "run:"+strings.TrimSpace(run.ID)); err != nil {
+		log.Printf("[attention] mark wakeup signal handled failed run=%s: %v", run.ID, err)
+	}
+}
+
+func isSuccessfulRuntimeStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "done_success", "succeeded", "success", "completed":
+		return true
+	default:
+		return false
 	}
 }
 

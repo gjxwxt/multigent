@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/multigent/multigent/internal/agentdir"
+	"github.com/multigent/multigent/internal/attention"
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/runner"
@@ -313,6 +314,15 @@ func newSchedulerStartCmd() *cobra.Command {
 
 			var wg sync.WaitGroup
 
+			// Keep cron discovery workspace-scoped and refresh it continuously.
+			// Cron definitions can be created or enabled from the web console while
+			// this process is already running; they must not wait for a restart.
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				runWorkspaceCronLoop(ctx, root, ts, s, startAgent)
+			}()
+
 			// Deduplicate: if agent is in both lists, heartbeat loop handles cron too.
 			heartbeatSet := map[schedulerAgentKey]bool{}
 			for _, k := range heartbeatAgents {
@@ -359,10 +369,12 @@ func collectSchedulerStartTargets(root string, projects []string, startAgent str
 func loadSchedulerHeartbeat(root, project, agent string, ts taskstore.Store) (*entity.HeartbeatConfig, error) {
 	_ = ts
 	worker, ok, db, _, err := resolveCLIProjectWorker(root, project, agent)
+	if db != nil {
+		defer db.Close()
+	}
 	if err != nil {
 		return nil, err
 	}
-	_ = db
 	if !ok {
 		return nil, fmt.Errorf("agent worker membership %s/%s not found", project, agent)
 	}
@@ -379,6 +391,9 @@ func saveSchedulerHeartbeat(root, project, agent string, ts taskstore.Store, hb 
 		return fmt.Errorf("heartbeat config is nil")
 	}
 	worker, ok, db, _, err := resolveCLIProjectWorker(root, project, agent)
+	if db != nil {
+		defer db.Close()
+	}
 	if err != nil {
 		return err
 	}
@@ -684,6 +699,19 @@ func runHeartbeatLoop(ctx context.Context, root, project, agentName string,
 					agentLog("%s next wakeup deferred — waiting for active window at %s",
 						colorDim+"○", hb.ActiveHours)
 				}
+				// nextWindowStart returns 0 while the current window is open. A
+				// plain continue here would busy-spin when a scheduled task is due
+				// within the next second. Always yield before recalculating.
+				sleepDur := schedulerRecheckDelay(nextOpen)
+				timer := time.NewTimer(sleepDur)
+				select {
+				case <-ctx.Done():
+					if !timer.Stop() {
+						<-timer.C
+					}
+					return
+				case <-timer.C:
+				}
 				continue
 			}
 
@@ -869,6 +897,23 @@ func runAllPendingTasks(ctx context.Context, root, project, agentName string,
 			hb.SessionStartedAt = nil
 			_ = saveSchedulerHeartbeat(root, project, agent, ts, hb)
 		}
+		// A persistent cron owns a separate provider session. Clearing only the
+		// heartbeat session leaves that stale session to poison the next cron run.
+		// Clear all persistent cron sessions for this agent; the runner will save
+		// the newly-created session after the recovery run completes.
+		if crons, err := ts.ListCrons(project, agent); err == nil {
+			changed := false
+			for _, c := range crons {
+				if c != nil && c.SessionScope == "persistent" && c.SessionID != "" {
+					c.SessionID = ""
+					c.SessionStartedAt = nil
+					changed = true
+				}
+			}
+			if changed {
+				_ = ts.SaveCrons(project, agent, crons)
+			}
+		}
 	}
 	sessionID := hb.SessionID
 	i18n := wakeupStrings(agencyLang(s))
@@ -896,6 +941,16 @@ func runAllPendingTasks(ctx context.Context, root, project, agentName string,
 			return fmt.Errorf("invalid max_cycle_duration %q: %w", hb.MaxCycleDuration, err)
 		}
 	}
+	// A zero value must remain safe. Without defaults, a pathological task
+	// producer can keep one wakeup cycle alive indefinitely.
+	maxTasks := hb.MaxTasksPerCycle
+	if maxTasks <= 0 {
+		maxTasks = 10
+	}
+	if maxDuration <= 0 {
+		maxDuration = 30 * time.Minute
+	}
+	seenTaskIDs := make(map[string]struct{})
 
 	for {
 		if ctx.Err() != nil {
@@ -990,6 +1045,10 @@ func runAllPendingTasks(ctx context.Context, root, project, agentName string,
 					CreatedAt: now,
 					UpdatedAt: now,
 				}
+				if len(attentionIDs) > 0 {
+					rawIDs, _ := json.Marshal(attentionIDs)
+					wakeupTask.Vars = map[string]string{"MULTIGENT_ATTENTION_SIGNAL_IDS_JSON": string(rawIDs)}
+				}
 				// Persist before running so `task confirm-request --id $TASK_ID` works.
 				if addErr := ts.AddTask(project, agentName, wakeupTask); addErr != nil {
 					taskLog("%s failed to persist wakeup task: %v", colorRed+"✗", addErr)
@@ -1029,6 +1088,7 @@ func runAllPendingTasks(ctx context.Context, root, project, agentName string,
 					_ = ts.ArchiveTask(project, agentName, wakeupTask)
 					return fmt.Errorf("[heartbeat %s/%s] wakeup failed: %w", project, agentName, rErr)
 				} else {
+					markAttentionSignalsHandled(root, wakeupTask, wakeupTask.ID)
 					if interactionLease != nil {
 						_ = interactionLease.event("agent", project+"/"+agentName, sourceChannel, "run_completed", "", map[string]any{
 							"taskId":           wakeupTask.ID,
@@ -1059,13 +1119,17 @@ func runAllPendingTasks(ctx context.Context, root, project, agentName string,
 		}
 
 		// Check max tasks per cycle limit before processing this task.
-		if hb.MaxTasksPerCycle > 0 && tasksProcessed >= hb.MaxTasksPerCycle {
+		if tasksProcessed >= maxTasks {
 			taskLog("%s ▶ cycle limit reached (%d task(s), %s elapsed)",
 				colorYellow+"⚠", tasksProcessed, time.Since(cycleStart).Round(time.Second))
 			return nil
 		}
 
 		taskLog("%s task %s  %s", colorCyan+"▶", task.ID, task.Title)
+		if _, seen := seenTaskIDs[task.ID]; seen {
+			return fmt.Errorf("task %s was returned repeatedly in one scheduler cycle; stopping to prevent a processing loop", task.ID)
+		}
+		seenTaskIDs[task.ID] = struct{}{}
 		if interactionLease != nil {
 			_ = interactionLease.event("system", "scheduler", sourceChannel, "message", task.Prompt, map[string]any{
 				"taskId": task.ID,
@@ -1430,7 +1494,7 @@ func pendingAttentionSection(root, project, agentName string, i18n wakeupI18n) (
 	signals, err := db.ListAttentionSignals(controldb.AttentionSignalFilter{
 		WorkspaceID:   workspaceID,
 		AgentWorkerID: resolved.Worker.ID,
-		Statuses:      []string{"pending", "seen", "handling"},
+		Statuses:      []string{"pending"},
 		Limit:         20,
 	})
 	if err != nil || len(signals) == 0 {
@@ -1621,6 +1685,24 @@ func markAttentionSignalsSeen(root string, ids []string) {
 	}
 }
 
+func markAttentionSignalsHandled(root string, task *entity.Task, runID string) {
+	if len(attention.SignalIDsForTask(task)) == 0 {
+		return
+	}
+	db, err := openControlDBForRoot(root)
+	if err != nil {
+		return
+	}
+	defer db.Close()
+	workspaceID, err := schedulerWorkspaceID(root, db)
+	if err != nil || strings.TrimSpace(workspaceID) == "" {
+		return
+	}
+	if err := attention.CloseTaskSignals(db, workspaceID, task, "task:"+strings.TrimSpace(runID)); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to close attention signal(s) for task %s: %v\n", task.ID, err)
+	}
+}
+
 func schedulerWorkspaceID(root string, db controldb.Store) (string, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
@@ -1710,9 +1792,22 @@ func sleepWithCronCheck(ctx context.Context, dur time.Duration,
 
 var schedulerCronParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 
-// fireDueCrons inspects all enabled crons for an agent, fires any that are due
-// by enqueuing a new Task, and updates LastRun.  Returns the number enqueued.
+// The workspace reconciliation loop and per-agent loops can inspect the same
+// cron concurrently. Serialize the read/decide/enqueue/save transaction so a
+// stale LastRun cannot overwrite a newer slot decision.
+var schedulerCronMu sync.Mutex
+
+// fireDueCrons inspects all enabled crons for an agent, fires due crons by
+// enqueuing a new Task, and updates LastRun. A scheduler can be down across a
+// scheduled minute, so this is deliberately based on the last consumed slot,
+// not a small wall-clock lookback window. At most the newest missed slot is
+// replayed: this prevents a restart from generating a burst of old external
+// publishing jobs. Each slot also has an idempotency key, so a crash between
+// task creation and cron state persistence cannot duplicate work.
 func fireDueCrons(ts taskstore.Store, project, agentName string) int {
+	schedulerCronMu.Lock()
+	defer schedulerCronMu.Unlock()
+
 	crons, err := ts.ListCrons(project, agentName)
 	if err != nil || len(crons) == 0 {
 		return 0
@@ -1728,13 +1823,9 @@ func fireDueCrons(ts taskstore.Store, project, agentName string) int {
 		if err != nil {
 			continue
 		}
-		lookback := now.Add(-2 * time.Minute)
-		lastExpected := prevCronTime(sched, now)
-		if lastExpected.IsZero() || lastExpected.Before(lookback) {
+		lastExpected := dueCronSlot(sched, c.LastRun, now)
+		if lastExpected.IsZero() {
 			continue
-		}
-		if c.LastRun != nil && !c.LastRun.Before(lastExpected) {
-			continue // already ran this slot
 		}
 		// Apply jitter: shift the expected fire time by a deterministic random offset
 		// so the decision is stable across minute-tick checks.
@@ -1759,19 +1850,31 @@ func fireDueCrons(ts taskstore.Store, project, agentName string) int {
 			rb[i] = chars[rand.Intn(len(chars))]
 		}
 		taskID := fmt.Sprintf("t-%s-%s", now.UTC().Format("20060102"), string(rb))
+		idempotencyKey := fmt.Sprintf("cron:%s:%s", c.ID, lastExpected.Format(time.RFC3339))
+		if cronTaskExists(ts, project, agentName, idempotencyKey) {
+			// The task was created before a previous scheduler process exited.
+			// Treat the slot as consumed without creating another task.
+			t := lastExpected
+			c.LastRun = &t
+			c.LastRunStatus = "enqueued"
+			c.RunCount++
+			changed = true
+			continue
+		}
 		task := &entity.Task{
-			ID:        taskID,
-			Title:     fmt.Sprintf("[cron] %s", c.Title),
-			Status:    entity.TaskStatusPending,
-			Type:      "cron",
-			Priority:  5,
-			Prompt:    c.Prompt,
-			CreatedBy: "cron:" + c.ID,
-			CreatedAt: now.UTC(),
-			UpdatedAt: now.UTC(),
+			ID:             taskID,
+			Title:          fmt.Sprintf("[cron] %s", c.Title),
+			Status:         entity.TaskStatusPending,
+			Type:           "cron",
+			Priority:       5,
+			Prompt:         c.Prompt,
+			CreatedBy:      "cron:" + c.ID,
+			CreatedAt:      now.UTC(),
+			UpdatedAt:      now.UTC(),
+			IdempotencyKey: idempotencyKey,
 		}
 		if err := ts.AddTask(project, agentName, task); err == nil {
-			t := now
+			t := lastExpected
 			c.LastRun = &t
 			c.LastRunStatus = "enqueued"
 			c.RunCount++
@@ -1785,17 +1888,106 @@ func fireDueCrons(ts taskstore.Store, project, agentName string) int {
 	return enqueued
 }
 
-// prevCronTime returns the most recent scheduled time before or equal to `now`.
-func prevCronTime(sched cron.Schedule, now time.Time) time.Time {
-	// Binary search: find t such that Next(t) <= now < Next(t + epsilon).
-	// We approximate by going back one full schedule cycle.
-	// Simple approach: t = now - 1min, then compute Next and see.
-	probe := now.Add(-2 * time.Minute)
-	t := sched.Next(probe)
-	if t.After(now) {
+// dueCronSlot returns the newest scheduled slot that is at or before now and
+// strictly after lastRun. A nil lastRun is recovered from the latest calendar
+// slot as well, so the first scheduler scan cannot silently lose an already
+// due cron. For an existing cron, walking forward from lastRun is cheap and
+// works for daily, weekly, monthly, and sub-minute-ineligible 5-field
+// schedules alike.
+func dueCronSlot(sched cron.Schedule, lastRun *time.Time, now time.Time) time.Time {
+	if sched == nil {
 		return time.Time{}
 	}
-	return t
+	// Always derive the current slot from now first. This prevents stale or
+	// offset-bearing LastRun values from making a future slot look due.
+	candidate := prevCronTime(sched, now)
+	if candidate.IsZero() {
+		return time.Time{}
+	}
+	if lastRun != nil && !candidate.After(*lastRun) {
+		return time.Time{}
+	}
+	return candidate
+}
+
+// runWorkspaceCronLoop refreshes the agent list every minute so cron changes
+// made while the service is running are observed without restarting it. The
+// per-agent loops remain responsible for heartbeat cadence; this loop only
+// provides a workspace-wide cron reconciliation path and relies on the cron
+// slot idempotency key to avoid duplicate tasks.
+func runWorkspaceCronLoop(ctx context.Context, root string, ts taskstore.Store, s store.Store, startAgent string) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	fire := func() {
+		projects, err := ts.ListProjects()
+		if err != nil {
+			return
+		}
+		_, cronTargets, _ := collectAgentWorkerSchedulerTargets(root, projects, startAgent, ts)
+		for _, target := range cronTargets {
+			if fireDueCrons(ts, target.key.project, target.key.agent) == 0 {
+				continue
+			}
+			hb, _ := loadSchedulerHeartbeat(root, target.key.project, target.key.agent, ts)
+			if err := runAllPendingTasks(ctx, root, target.key.project, target.key.agent, ts, s, hb); err != nil && ctx.Err() == nil {
+				fmt.Printf("%s workspace cron execution error for %s/%s: %v\n", colorRed+"✗"+colorReset, target.key.project, target.key.agent, err)
+			}
+		}
+	}
+	fire()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			fire()
+		}
+	}
+}
+
+func cronTaskExists(ts taskstore.Store, project, agent, key string) bool {
+	active, err := ts.ListTasks(project, agent)
+	if err == nil {
+		for _, t := range active {
+			if t != nil && t.IdempotencyKey == key {
+				return true
+			}
+		}
+	}
+	archived, err := ts.ListArchivedTasks(project, agent)
+	if err == nil {
+		for _, t := range archived {
+			if t != nil && t.IdempotencyKey == key {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// prevCronTime returns the most recent scheduled time before or equal to now.
+// robfig/cron exposes only a forward Next operation, so use a bounded binary
+// search instead of scanning a fixed recent-minute window. This keeps startup
+// recovery fast even for sparse schedules such as yearly or monthly crons.
+func prevCronTime(sched cron.Schedule, now time.Time) time.Time {
+	if sched == nil {
+		return time.Time{}
+	}
+	low := now.Add(-400 * 24 * time.Hour)
+	high := now
+	for high.Sub(low) > time.Second {
+		mid := low.Add(high.Sub(low) / 2)
+		if next := sched.Next(mid); !next.After(now) {
+			low = mid
+		} else {
+			high = mid
+		}
+	}
+	candidate := sched.Next(low)
+	if candidate.After(now) {
+		return time.Time{}
+	}
+	return candidate
 }
 
 // runCronOnlyLoop is for agents that have crons but no heartbeat.
@@ -1874,6 +2066,15 @@ func isInActiveWindowAt(t time.Time, hb *entity.HeartbeatConfig) bool {
 		return ok
 	}
 	return true
+}
+
+// schedulerRecheckDelay prevents a heartbeat from repeatedly recalculating
+// state without yielding when the next calculated wake is within one second.
+func schedulerRecheckDelay(nextWindow time.Duration) time.Duration {
+	if nextWindow < time.Second {
+		return time.Second
+	}
+	return nextWindow
 }
 
 // nextWindowStart returns how long to sleep until the active window opens.

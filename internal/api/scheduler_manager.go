@@ -87,6 +87,12 @@ func (m *SchedulerManager) Start(project, agent string) error {
 	return err
 }
 
+// StartWorkspace starts the single scheduler owned by the API service. The
+// scheduler scans the whole workspace; projects are execution context only.
+func (m *SchedulerManager) StartWorkspace() error {
+	return m.Start("", "")
+}
+
 func (m *SchedulerManager) StartManagedCommand(key, project, agent, mode string, cmd *exec.Cmd) (int, error) {
 	if cmd == nil {
 		return 0, fmt.Errorf("command is nil")
@@ -407,6 +413,15 @@ func (s *Server) restoreDesiredSchedulers() {
 	}
 }
 
+// StartWorkspaceScheduler makes periodic activity part of the server
+// lifecycle. Callers should not need to start a project scheduler manually.
+func (s *Server) StartWorkspaceScheduler() error {
+	if s == nil || s.sched == nil {
+		return fmt.Errorf("scheduler manager is unavailable")
+	}
+	return s.sched.StartWorkspace()
+}
+
 func (m *SchedulerManager) Cleanup() {
 	m.mu.Lock()
 	keys := make([]string, 0, len(m.procs))
@@ -530,8 +545,12 @@ func (s *Server) ensureAgentSchedulerRunning(r *http.Request, workspaceID, proje
 			log.Printf("scheduler auto-start %s: %v", key, err)
 			return
 		}
-	} else if err := s.sched.Start(project, agent); err != nil {
-		log.Printf("scheduler auto-start %s: %v", schedKey(project, agent), err)
+	} else {
+		// Local heartbeat/cron execution is owned by the one workspace scheduler
+		// started with the API service. Agent settings only wake it when needed.
+		if err := s.sched.StartWorkspace(); err != nil && !strings.Contains(err.Error(), "already running") {
+			log.Printf("workspace scheduler auto-start: %v", err)
+		}
 		return
 	}
 	s.setSchedulerDesiredKey(key, project, agent, mode, true)
@@ -952,6 +971,14 @@ func (s *Server) enqueueSpecificRuntimeTaskRunFromRequest(workspaceID, project, 
 }
 
 func (s *Server) enqueueRuntimeWakeupRunFromRequest(workspaceID, project, agent string, hb *entity.HeartbeatConfig, serverURL, actor string) (controldb.RuntimeRun, *entity.Task, error) {
+	// Bind every scheduler-created task and run to the canonical project
+	// membership title. Channel bindings and old installations may still use
+	// the worker name, but mixing those identities creates tasks that the
+	// running agent cannot complete through mga.
+	if target := s.runtimeSchedulerTargetForProjectAgent(workspaceID, project, agent); target.agent != "" {
+		project = target.project
+		agent = target.agent
+	}
 	task, attentionIDs, err := s.nextRuntimeWakeupTask(workspaceID, project, agent, hb)
 	if err != nil {
 		return controldb.RuntimeRun{}, nil, err

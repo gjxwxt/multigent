@@ -18,7 +18,8 @@ export function useApiJson<T>(path: string | null, reloadKey = 0, options?: UseA
   // Callers often pass options inline (`{ silentStatuses: [403] }`), so the array
   // identity changes on every render. Depend on a serialized key instead and read
   // the live options through a ref — otherwise the effect re-runs (refetches) on
-  // every render, hammering the endpoint in a loop.
+  // every render, hammering the endpoint in a loop. (Upstream 96580ca fixed the
+  // same bug independently; the effect body below reads through the ref.)
   const optionsRef = useRef(options)
   optionsRef.current = options
   const silentStatusesKey = options?.silentStatuses ? options.silentStatuses.join(',') : ''

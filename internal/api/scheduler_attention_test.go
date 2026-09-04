@@ -59,9 +59,43 @@ func TestRuntimeWakeupTaskIncludesPendingAttentionSignals(t *testing.T) {
 	if got, err := s.ts.GetTask("sample", "pm", task.ID); err != nil || got == nil {
 		t.Fatalf("wakeup task should be persisted before enqueue, task=%+v err=%v", got, err)
 	}
+	if task.Vars["MULTIGENT_ATTENTION_SIGNAL_IDS_JSON"] != `["sig-runtime-wakeup"]` {
+		t.Fatalf("wakeup task should retain its signal ids, vars=%v", task.Vars)
+	}
 }
 
-func TestRuntimeWakeupTaskIncludesSeenOpenAttentionSignals(t *testing.T) {
+func TestAttentionWakeupDoesNotInjectDomainSpecificContract(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	seedTaskAttentionWorker(t, s, workspaceID, "sample", "pm", true)
+	if err := s.controlDB.UpsertAttentionSignal(controldb.AttentionSignal{
+		ID:            "sig-normal-attention",
+		WorkspaceID:   workspaceID,
+		AgentWorkerID: "aw-pm",
+		DedupeKey:     "test:normal-attention",
+		SourceKind:    "task",
+		SourceID:      "task-normal-attention",
+		Reason:        "task_assigned",
+		Summary:       "Continue the assigned task",
+		Status:        "pending",
+		CreatedAt:     time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsert normal signal: %v", err)
+	}
+	task, _, err := s.nextRuntimeWakeupTask(workspaceID, "sample", "pm", &entity.HeartbeatConfig{})
+	if err != nil {
+		t.Fatalf("next wakeup task: %v", err)
+	}
+	if task == nil {
+		t.Fatal("expected wakeup task")
+	}
+	for _, forbidden := range []string{"Active Operating Contract", "PR Review workflow", "not a reviewer"} {
+		if strings.Contains(task.Prompt, forbidden) {
+			t.Fatalf("attention wakeup should not inject domain contract %q:\n%s", forbidden, task.Prompt)
+		}
+	}
+}
+
+func TestRuntimeWakeupTaskDoesNotReincludeSeenAttentionSignals(t *testing.T) {
 	s, workspaceID := newConnectionGrantPolicyServer(t)
 	seedTaskAttentionWorker(t, s, workspaceID, "sample", "pm", true)
 	if err := s.controlDB.UpsertAttentionSignal(controldb.AttentionSignal{
@@ -86,14 +120,11 @@ func TestRuntimeWakeupTaskIncludesSeenOpenAttentionSignals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("next wakeup task: %v", err)
 	}
-	if task == nil {
-		t.Fatal("expected wakeup task")
+	if len(ids) != 0 {
+		t.Fatalf("seen signal should not be selected: task=%+v ids=%+v", task, ids)
 	}
-	if len(ids) != 1 || ids[0] != "sig-seen-but-open" {
-		t.Fatalf("unexpected attention ids: %+v", ids)
-	}
-	if !strings.Contains(task.Prompt, "sig-seen-but-open") || !strings.Contains(task.Prompt, "mga attention list") {
-		t.Fatalf("wakeup prompt did not include seen open signal:\n%s", task.Prompt)
+	if task != nil && strings.Contains(task.Prompt, "sig-seen-but-open") {
+		t.Fatalf("seen signal should not be injected into wakeup prompt:\n%s", task.Prompt)
 	}
 }
 
@@ -125,7 +156,7 @@ func TestAttentionWakeupTaskCanFocusTriggeredSignal(t *testing.T) {
 		SourceID:      "om_new",
 		Reason:        "im_mention",
 		Priority:      "high",
-		Summary:       "Joey asked a direct question in the group",
+		Summary:       "user-b asked a direct question in the group",
 		Status:        "pending",
 		CreatedAt:     now,
 	}); err != nil {
@@ -140,7 +171,7 @@ func TestAttentionWakeupTaskCanFocusTriggeredSignal(t *testing.T) {
 		SourceID:      "om_new_2",
 		Reason:        "im_mention",
 		Priority:      "high",
-		Summary:       "Glenn asked a second question in the group",
+		Summary:       "owner-a asked a second question in the group",
 		Status:        "pending",
 		CreatedAt:     now,
 	}); err != nil {
@@ -172,10 +203,10 @@ func TestAttentionWakeupTaskCanFocusTriggeredSignal(t *testing.T) {
 	if len(ids) != 2 || ids[0] != "sig-new-im" || ids[1] != "sig-new-im-2" {
 		t.Fatalf("unexpected focused ids with open im aggregation: %+v", ids)
 	}
-	if !strings.Contains(task.Prompt, "sig-new-im") || !strings.Contains(task.Prompt, "Joey asked") {
+	if !strings.Contains(task.Prompt, "sig-new-im") || !strings.Contains(task.Prompt, "user-b asked") {
 		t.Fatalf("focused prompt missing new signal:\n%s", task.Prompt)
 	}
-	if !strings.Contains(task.Prompt, "sig-new-im-2") || !strings.Contains(task.Prompt, "Glenn asked") {
+	if !strings.Contains(task.Prompt, "sig-new-im-2") || !strings.Contains(task.Prompt, "owner-a asked") {
 		t.Fatalf("focused prompt missing second open im signal:\n%s", task.Prompt)
 	}
 	if strings.Contains(task.Prompt, "sig-old-task") || strings.Contains(task.Prompt, "Old task signal") {
@@ -394,7 +425,7 @@ func TestRecoverablePendingAttentionWakeupTargetsGroupsPendingSignals(t *testing
 	if target.WorkspaceID != workspaceID || target.ProjectID != "sample" || target.AgentID != "pm" || target.AgentWorkerID != "aw-pm" {
 		t.Fatalf("unexpected target: %+v", target)
 	}
-	if strings.Join(target.AttentionIDs, ",") != "sig-recover-im-1,sig-recover-card,sig-recover-message,sig-recover-task" {
+	if strings.Join(target.AttentionIDs, ",") != "sig-recover-message,sig-recover-task" {
 		t.Fatalf("unexpected recovered ids: %+v", target.AttentionIDs)
 	}
 }

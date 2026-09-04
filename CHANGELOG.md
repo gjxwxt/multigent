@@ -1,5 +1,29 @@
 # Changelog
 
+## [v2.0.12] - 2026-09-04
+
+### Fixed
+
+- Fixed 1.x to 2.x Agent Worker migration leaving legacy project-scoped tool grants behind.
+- Automatic database migration and the explicit `migrate agent-worker --apply` path now clear legacy project and agent grants while preserving workspace, user, and Agent Worker grants.
+- Migration reports now include migrated tool binding and removed legacy grant counts.
+
+### Tested
+
+- Added regression coverage for first-run migration, repeated startup migration, legacy identity cleanup, and grant canonicalization.
+- Verified `go test ./...`.
+
+## [v2.0.11] - 2026-09-03
+
+### Fixed
+
+- Fixed a scheduler SQLite connection leak that could accumulate file descriptors and memory during long-running heartbeat scheduling.
+- Acknowledge accepted IM messages before runtime readiness checks, so channel feedback is not lost during a temporary runtime outage.
+
+### Tested
+
+- Verified scheduler and IM regression tests, including the runtime-not-ready acknowledgement path.
+
 ## [v2.0.6] - 2026-08-26
 
 ### Added
@@ -86,7 +110,7 @@
 
 - Polished the workspace-level agent detail page so newly created agents land on the full configuration surface instead of a reduced placeholder view.
 - Restored the full agent capability sections on workspace agent details, including model account, runtime node, heartbeat wakeup, prompt/context, reference bindings, collaboration channels, and advanced runtime settings.
-- Agent detail URLs now prefer stable agent handles such as `/agents/nova`, while existing ID-based URLs remain usable.
+- Agent detail URLs now prefer stable agent handles such as `/agents/manager-agent`, while existing ID-based URLs remain usable.
 - Audit logs now use localized labels, a table layout with pagination, cleaner filters, fixed detail actions, better actor display, and proxy-aware client IP parsing.
 - Agent list cards now focus on actionable metadata, show clearer team/role information, hide noisy session/provider IDs, and provide a direct chat shortcut.
 - Workspace agent creation now asks for team and role up front and redirects to the new agent detail page after creation.
@@ -662,9 +686,9 @@
 - Person detail page with editable profile fields (email, avatar, phone, bio)
 - Human hiring flow via web UI
 
-**IM platform integration (cc-connect)**
-- cc-connect API proxy: connect agents to Feishu/WeChat via QR code scanning
-- Settings page: one-stop cc-connect configuration panel
+**IM platform integration (example-connect)**
+- example-connect API proxy: connect agents to Feishu/WeChat via QR code scanning
+- Settings page: one-stop example-connect configuration panel
 - Agent detail page: IM connection panel for binding IM accounts per agent
 - Explicit project creation wizard with auto-restart polling
 
@@ -688,7 +712,7 @@
 - Knowledge base third-level directory navigation
 - Scheduler `ActiveDays` configuration not being respected
 - Workbench reply textarea hiding while typing
-- cc-connect project name path encoding with URL-safe separators
+- example-connect project name path encoding with URL-safe separators
 - Dark mode select dropdown option styling across all pages
 - React error #310 in workbench message detail modal
 

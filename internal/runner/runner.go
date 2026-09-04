@@ -358,10 +358,10 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 		cmd.Stdin = pf
 	}
 
-	var outBuf bytes.Buffer
-	var multiOut io.Writer = io.MultiWriter(&outBuf, logFile, os.Stdout)
+	outBuf := newBoundedOutput(maxCapturedOutputBytes)
+	var multiOut io.Writer = io.MultiWriter(outBuf, logFile, os.Stdout)
 	if r.SuppressStdout {
-		multiOut = io.MultiWriter(&outBuf, logFile)
+		multiOut = io.MultiWriter(outBuf, logFile)
 	}
 	cmd.Stdout = multiOut
 	cmd.Stderr = multiOut
@@ -369,6 +369,9 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 	runStarted := time.Now()
 	runErr := runCommandContext(ctx, cmd)
 	runFinished := time.Now()
+	if outBuf.Truncated() {
+		fmt.Fprintf(logFile, "\n=== in-memory output capture truncated at %d bytes; full output remains in this log ===\n", maxCapturedOutputBytes)
+	}
 
 	fmt.Fprintf(logFile, "\n=== exit code: %v  finished: %s ===\n",
 		cmd.ProcessState.ExitCode(), time.Now().UTC().Format(time.RFC3339))
@@ -386,11 +389,6 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 	if runErr != nil {
 		if resumeSessionID != "" && isResumeSessionMissingError(output) {
 			fmt.Fprintf(logFile, "\n=== saved session is missing — clearing heartbeat session + retrying fresh ===\n")
-			r.recordAgentRun(telemetry.KindExec, project, agentName, "", "", string(model), sandboxLabel,
-				apiModel, apiBaseURL,
-				runStarted, runFinished, entity.TaskStatusDoneFailed, &ec, result.SessionID,
-				"saved session missing, retrying fresh",
-				logPath, telemetry.FormatExecCommand(executable, args), prompt, outBuf.Bytes())
 			r.clearHeartbeatSession(project, agentName)
 			return r.ExecPromptWithRuntimeControlEnvContext(ctx, project, agentName, prompt, "", runtimeControlEnv)
 		}
@@ -457,8 +455,10 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 		scopedBoundary = fmt.Sprintf("【Git Worktree 独立分支安全边界约束】\n- 你当前工作在独立特性分支 `%s` (基于 `%s`) 的专用工作区 (Worktree) 中。\n- 你的工作根目录已映射至 `/workspace`。所有代码修改、新增文件与单测验证必须严格限定在 `/workspace` 内部。\n- 严禁执行 git checkout 切换到其他分支，严禁修改父仓库或其他任务的文件。\n- 严禁执行 `git worktree prune`、`git worktree remove` 或任何修改父仓库 `.git` 目录与共享 Git 配置（含 credential.helper、remote URL）的命令——这些元数据由平台统一管理，破坏会同时毁掉其他任务的工作区。\n- 严禁向 git 配置写入任何凭据（token/密码）；推送凭据由平台在推送瞬时注入，无需也不允许你自行配置。\n- 【工作区环境与依赖状态】当前工作区的所有代码、Git 历史与已安装依赖（如 node_modules）均已持久化就绪。严禁执行 rm -rf .git 或重新 git init，严禁无故全量重装依赖。请直接在现有代码库上进行增量改动、构建和测试。\n\n", task.BranchName, base)
 	}
 
-	fullPrompt := scopedBoundary + r.taskPromptWithWorkflowContext(project, agentName, task) + fmt.Sprintf(systemMetaFooter,
-		task.ID, project, agentName, task.ID, task.ID, task.ID, task.ID, project, agentName)
+	// BuildTaskPrompt carries the workflow context, the agent-worker contract
+	// (upstream v2.0.12), and the meta footer; the worktree boundary stays
+	// CLI-path-only, prepended here.
+	fullPrompt := scopedBoundary + r.BuildTaskPrompt(project, agentName, task)
 
 	// Write prompt to a temp file (avoids shell escaping issues).
 	promptFile, err := writeTempPrompt(agentDir, fullPrompt)
@@ -607,8 +607,8 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 		cmd.Stdin = pf
 	}
 
-	var outBuf bytes.Buffer
-	multiOut := io.MultiWriter(&outBuf, logFile)
+	outBuf := newBoundedOutput(maxCapturedOutputBytes)
+	multiOut := io.MultiWriter(outBuf, logFile)
 	cmd.Stdout = multiOut
 	cmd.Stderr = multiOut
 
@@ -647,11 +647,6 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 	if runErr != nil {
 		if resumeSessionID != "" && isResumeSessionMissingError(output) {
 			fmt.Fprintf(logFile, "\n=== saved session is missing — clearing heartbeat session + retrying fresh ===\n")
-			r.recordAgentRun(telemetry.KindTask, project, agentName, task.ID, task.Title, string(model), sandboxLabel,
-				apiModel, apiBaseURL,
-				runStarted, runFinished, entity.TaskStatusDoneFailed, &ec, result.SessionID,
-				"saved session missing, retrying fresh",
-				logPath, cmdSummary, fullPrompt, outBuf.Bytes())
 			r.clearHeartbeatSession(project, agentName)
 			return r.RunTaskWithContext(ctx, project, agentName, task, "")
 		}
@@ -696,11 +691,34 @@ func (r *Runner) taskPromptWithWorkflowContext(project, agentName string, task *
 	return ctx + "\n\n---\n## Task Prompt\n\n" + task.Prompt
 }
 
+// taskPromptWithAgentContext makes the workspace-level agent contract part of
+// every task invocation. Runtime nodes cannot assume that a generated
+// AGENTS.md/CLAUDE.md file is present in the mounted working directory, so
+// relying on that file alone can silently drop profile prompts and role
+// boundaries. The context file remains useful for the full inherited prompt;
+// this small identity layer is the execution-time safety net.
+func (r *Runner) taskPromptWithAgentContext(project, agentName, prompt string) string {
+	if r == nil || r.agentStore == nil || strings.TrimSpace(prompt) == "" {
+		return prompt
+	}
+	provider, ok := r.agentStore.(store.AgentWorkerContextProvider)
+	if !ok {
+		return prompt
+	}
+	workerContext, err := provider.AgentWorkerContext(project, agentName)
+	if err != nil || strings.TrimSpace(workerContext.Layer) == "" {
+		return prompt
+	}
+	return strings.TrimSpace(workerContext.Layer) + "\n\n---\n## Current Task\n\n" + prompt
+}
+
 func (r *Runner) BuildTaskPrompt(project, agentName string, task *entity.Task) string {
 	if task == nil {
 		return ""
 	}
-	return r.taskPromptWithWorkflowContext(project, agentName, task) + fmt.Sprintf(systemMetaFooter,
+	prompt := r.taskPromptWithWorkflowContext(project, agentName, task)
+	prompt = r.taskPromptWithAgentContext(project, agentName, prompt)
+	return prompt + fmt.Sprintf(systemMetaFooter,
 		task.ID, project, agentName, task.ID, task.ID, task.ID, task.ID, project, agentName)
 }
 
@@ -1549,8 +1567,7 @@ func (r *Runner) runTaskHTTP(project, agentName, agentDir string, meta *entity.A
 		return nil, err
 	}
 
-	userPrompt := r.taskPromptWithWorkflowContext(project, agentName, task) + fmt.Sprintf(systemMetaFooter,
-		task.ID, project, agentName, task.ID, task.ID, task.ID, task.ID, project, agentName)
+	userPrompt := r.BuildTaskPrompt(project, agentName, task)
 
 	logDir, err := r.ts.RunLogDir(project, agentName)
 	if err != nil {
@@ -1916,6 +1933,11 @@ func runtimeCLIBinaryCandidates(root string) []string {
 	}
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		candidates = append(candidates, filepath.Join(filepath.Dir(exe), runtimecli.BinaryName))
+		// Self-hosted deployments commonly keep the server release under
+		// /opt/multigent/current while the shared runtime CLI is installed at
+		// /opt/multigent/mga/bin/mga. Discover that standard sibling location
+		// so Docker runs can mount the matching Linux CLI into the container.
+		candidates = append(candidates, filepath.Join(filepath.Dir(filepath.Dir(exe)), "mga", "bin", runtimecli.BinaryName))
 	}
 	if cwd, err := os.Getwd(); err == nil && cwd != "" {
 		candidates = append(candidates, filepath.Join(cwd, "dist", runtimecli.BinaryName))
@@ -2524,16 +2546,27 @@ func validRuntimeSecretEnvName(name string) bool {
 
 func runtimeMGAInstallerScript() []string {
 	return []string{
-		"export MULTIGENT_TOOLCHAIN_HOME=" + shellQuote(agentcli.ToolchainHome),
-		"mkdir -p \"$MULTIGENT_TOOLCHAIN_HOME/mga/bin\"",
-		"for mga_src in /opt/multigent/mga/bin/mga /opt/multigent/current/mga; do",
-		"  if [ -x \"$mga_src\" ]; then",
-		"    cp \"$mga_src\" \"$MULTIGENT_TOOLCHAIN_HOME/mga/bin/mga\"",
-		"    chmod 0755 \"$MULTIGENT_TOOLCHAIN_HOME/mga/bin/mga\"",
-		"    break",
-		"  fi",
-		"done",
-		"export PATH=\"$MULTIGENT_TOOLCHAIN_HOME/mga/bin:$PATH\"",
+		// Prefer the managed binary, but do not assume the runtime user can
+		// write the shared toolchain directory. The image/current locations are
+		// read-only fallbacks for non-root host and customer runtime nodes.
+		"if [ -x " + shellQuote(agentcli.ToolchainHome+"/mga/bin/mga") + " ]; then",
+		"  export PATH=" + shellQuote(agentcli.ToolchainHome+"/mga/bin") + ":$PATH",
+		"elif [ -x /opt/multigent/mga/bin/mga ]; then",
+		"  export PATH=/opt/multigent/mga/bin:$PATH",
+		"elif [ -x /opt/multigent/current/mga ]; then",
+		"  export PATH=/opt/multigent/current:$PATH",
+		"else",
+		"  export MULTIGENT_TOOLCHAIN_HOME=" + shellQuote(agentcli.ToolchainHome),
+		"  mkdir -p \"$MULTIGENT_TOOLCHAIN_HOME/mga/bin\"",
+		"  for mga_src in /opt/multigent/mga/bin/mga /opt/multigent/current/mga; do",
+		"    if [ -x \"$mga_src\" ]; then",
+		"      cp \"$mga_src\" \"$MULTIGENT_TOOLCHAIN_HOME/mga/bin/mga\"",
+		"      chmod 0755 \"$MULTIGENT_TOOLCHAIN_HOME/mga/bin/mga\"",
+		"      break",
+		"    fi",
+		"  done",
+		"  export PATH=\"$MULTIGENT_TOOLCHAIN_HOME/mga/bin:$PATH\"",
+		"fi",
 		"command -v mga >/dev/null 2>&1",
 	}
 }

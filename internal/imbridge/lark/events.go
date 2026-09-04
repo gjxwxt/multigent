@@ -135,12 +135,17 @@ func ParseCardActionEvent(env EventEnvelope) (CardActionCallback, bool, error) {
 }
 
 func ExtractText(message EventMessage) string {
-	if message.MessageType != "text" && message.MessageType != "post" {
-		return ""
-	}
 	var body map[string]any
 	if json.Unmarshal([]byte(message.Content), &body) != nil {
 		return strings.TrimSpace(message.Content)
+	}
+	messageType := strings.ToLower(strings.TrimSpace(message.MessageType))
+	if messageType != "text" && messageType != "post" {
+		// Interactive cards and forwarded messages use nested Card 2.0 JSON
+		// instead of the text/post envelope. Extract only user-facing fields so
+		// the message remains useful to the agent without exposing every
+		// implementation field as prose.
+		return extractStructuredMessageText(body)
 	}
 	if text, _ := body["text"].(string); text != "" {
 		return strings.TrimSpace(text)
@@ -183,6 +188,29 @@ func ExtractAttachments(message EventMessage) []MessageAttachment {
 		for _, link := range extractLinksFromMessageBody(body) {
 			out = append(out, link)
 		}
+	case "interactive", "merge_forward", "share_chat", "share_user":
+		if body != nil {
+			// Interactive cards can contain real image/file elements. Keep the
+			// card marker only when no downloadable resource was found; otherwise
+			// expose the concrete resources so the runtime can download them.
+			if nested := extractNestedResourceAttachments(body); len(nested) > 0 {
+				out = append(out, nested...)
+			}
+			out = append(out, extractLinksFromMessageBody(body)...)
+			if len(out) > 0 {
+				break
+			}
+			name := firstMapString(body, "title", "name")
+			if name == "" {
+				name = messageType
+			}
+			out = append(out, MessageAttachment{
+				Type: messageType,
+				Name: name,
+				ID:   firstMapString(body, "message_id", "messageId", "chat_id", "chatId"),
+				Raw:  body,
+			})
+		}
 	default:
 		if urlValue := firstMapString(body, "url", "href"); urlValue != "" {
 			out = append(out, MessageAttachment{
@@ -194,6 +222,56 @@ func ExtractAttachments(message EventMessage) []MessageAttachment {
 		}
 	}
 	return dedupeAttachments(out)
+}
+
+var structuredMessageTextKeys = map[string]bool{
+	"text":        true,
+	"content":     true,
+	"markdown":    true,
+	"plain_text":  true,
+	"title":       true,
+	"description": true,
+	"label":       true,
+}
+
+func extractStructuredMessageText(body map[string]any) string {
+	if body == nil {
+		return ""
+	}
+	parts := make([]string, 0, 8)
+	seen := map[string]bool{}
+	var walk func(string, any)
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			return
+		}
+		seen[value] = true
+		parts = append(parts, value)
+	}
+	walk = func(key string, value any) {
+		switch v := value.(type) {
+		case string:
+			if structuredMessageTextKeys[strings.ToLower(strings.TrimSpace(key))] {
+				var nested map[string]any
+				if strings.HasPrefix(strings.TrimSpace(v), "{") && json.Unmarshal([]byte(v), &nested) == nil {
+					walk(key, nested)
+					return
+				}
+				add(v)
+			}
+		case []any:
+			for _, item := range v {
+				walk(key, item)
+			}
+		case map[string]any:
+			for childKey, child := range v {
+				walk(childKey, child)
+			}
+		}
+	}
+	walk("", body)
+	return strings.Join(parts, "\n")
 }
 
 var markdownURLPattern = regexp.MustCompile(`https?://[^\s<>"')\]]+`)
@@ -219,11 +297,26 @@ func extractLinksFromMessageBody(body map[string]any) []MessageAttachment {
 		addURL(href, firstMapString(body, "text", "title"))
 	}
 	collectPostLinks(body["content"], addURL)
+	collectPostLinks(body["elements"], addURL)
+	for _, key := range []string{"user_dsl", "card", "data"} {
+		if encoded, _ := body[key].(string); strings.TrimSpace(encoded) == "" {
+			continue
+		} else if len(encoded) <= 1<<20 {
+			var decoded any
+			if json.Unmarshal([]byte(encoded), &decoded) == nil {
+				collectPostLinks(decoded, addURL)
+			}
+		}
+	}
 	return out
 }
 
 func collectPostLinks(value any, addURL func(string, string)) {
 	switch v := value.(type) {
+	case string:
+		for _, match := range markdownURLPattern.FindAllString(v, -1) {
+			addURL(match, "")
+		}
 	case []any:
 		for _, item := range v {
 			collectPostLinks(item, addURL)
@@ -237,7 +330,7 @@ func collectPostLinks(value any, addURL func(string, string)) {
 				addURL(match, "")
 			}
 		}
-		for _, key := range []string{"content", "elements"} {
+		for _, key := range []string{"content", "elements", "text"} {
 			if child, ok := v[key]; ok {
 				collectPostLinks(child, addURL)
 			}
@@ -270,6 +363,101 @@ func extractPostPlainText(body map[string]any) string {
 	}
 	walk(body["content"])
 	return strings.Join(parts, " ")
+}
+
+// ExpandMergeForwardItems converts the platform representation of a
+// merge_forward message into the same provider-neutral fields used by normal
+// messages. Resource IDs intentionally keep the outer message ID in the
+// IncomingMessage; Lark requires that container ID when downloading a child
+// file or image.
+func ExpandMergeForwardItems(items []map[string]any, outerMessageID string) (string, []MessageAttachment, error) {
+	var textParts []string
+	var attachments []MessageAttachment
+	for _, item := range items {
+		messageType := strings.ToLower(firstMapString(item, "msg_type", "message_type", "messageType"))
+		if messageType == "" {
+			messageType = "text"
+		}
+		body, _ := item["body"].(map[string]any)
+		content := firstMapString(body, "content")
+		if content == "" {
+			content = firstMapString(item, "content")
+		}
+		child := EventMessage{MessageID: firstMapString(item, "message_id", "messageId"), MessageType: messageType, Content: content}
+		if value := strings.TrimSpace(ExtractText(child)); value != "" {
+			textParts = append(textParts, value)
+		}
+		for _, attachment := range ExtractAttachments(child) {
+			if attachment.ID == "" || attachment.Type == "merge_forward" {
+				continue
+			}
+			attachment.Raw = item
+			attachments = append(attachments, attachment)
+		}
+		attachments = append(attachments, extractNestedResourceAttachments(item)...)
+		var decodedContent any
+		if strings.TrimSpace(content) != "" && json.Unmarshal([]byte(content), &decodedContent) == nil {
+			attachments = append(attachments, extractNestedResourceAttachments(decodedContent)...)
+		}
+	}
+	attachments = dedupeAttachments(attachments)
+	if len(items) == 0 {
+		return "", nil, nil
+	}
+	if len(attachments) == 0 && len(textParts) == 0 {
+		return "[转发消息未包含可读取的内容]", nil, nil
+	}
+	_ = outerMessageID // documents the download contract at the call site
+	return strings.Join(textParts, "\n\n"), attachments, nil
+}
+
+func extractNestedResourceAttachments(value any) []MessageAttachment {
+	var out []MessageAttachment
+	var walk func(any, map[string]any)
+	walk = func(current any, parent map[string]any) {
+		switch node := current.(type) {
+		case string:
+			// Card payloads such as user_dsl and nested content are commonly
+			// JSON-encoded strings rather than objects in the event envelope.
+			// Decode only JSON-shaped strings so ordinary card text is untouched.
+			trimmed := strings.TrimSpace(node)
+			if len(trimmed) > 0 && len(trimmed) <= 1<<20 && (strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[")) {
+				var decoded any
+				if json.Unmarshal([]byte(trimmed), &decoded) == nil {
+					walk(decoded, parent)
+				}
+			}
+		case []any:
+			for _, child := range node {
+				walk(child, parent)
+			}
+		case map[string]any:
+			if key := firstMapString(node, "key", "resource_key"); key != "" {
+				resourceType := strings.ToLower(firstMapString(node, "type", "resource_type"))
+				if resourceType == "image" || resourceType == "file" || resourceType == "media" || resourceType == "audio" {
+					attachmentType := resourceType
+					if attachmentType == "media" || attachmentType == "audio" {
+						attachmentType = "file"
+					}
+					out = append(out, MessageAttachment{ID: key, Type: attachmentType, Name: firstMapString(node, "file_name", "fileName", "name"), MIME: firstMapString(node, "mime_type", "mimeType"), Size: firstMapInt64(node, "file_size", "fileSize", "size"), Raw: parent})
+				}
+			}
+			if imageKey := firstMapString(node, "image_key", "imageKey", "img_key", "imgKey"); imageKey != "" {
+				out = append(out, MessageAttachment{ID: imageKey, Type: "image", Name: firstMapString(node, "file_name", "fileName", "name"), Raw: parent})
+			}
+			if imageToken := firstMapString(node, "image_token", "imageToken"); imageToken != "" {
+				out = append(out, MessageAttachment{ID: imageToken, Type: "image", Name: firstMapString(node, "file_name", "fileName", "name"), Raw: parent})
+			}
+			if fileKey := firstMapString(node, "file_key", "fileKey", "file_token", "fileToken"); fileKey != "" {
+				out = append(out, MessageAttachment{ID: fileKey, Type: "file", Name: firstMapString(node, "file_name", "fileName", "name"), MIME: firstMapString(node, "mime_type", "mimeType"), Size: firstMapInt64(node, "file_size", "fileSize", "size"), Raw: parent})
+			}
+			for _, child := range node {
+				walk(child, node)
+			}
+		}
+	}
+	walk(value, nil)
+	return out
 }
 
 func classifyLarkURL(rawURL string) string {
