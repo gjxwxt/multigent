@@ -4,6 +4,29 @@
 
 ---
 
+## 0. Agent 运行入口与状态写回 (MVP)
+
+开始任务时，按以下顺序读取：
+
+1. 本文件。
+2. `docs/agent/README.md`（文档路由与事实优先级）。
+3. `docs/agent/state/feature_list.json`（机器可读的批次摘要）。
+4. `docs/agent/state/progress.md` 与 `docs/agent/handoffs/current.md`（当前状态和接班摘要）。
+5. 仅按当前任务需要读取 `HANDOFF.md`、架构、部署、决策和证据文档；不要默认加载完整历史。
+
+写回规则：
+
+- 当前进度、阻塞、下一步：更新 `docs/agent/state/progress.md`。
+- 批次状态、依赖、完成条件：更新 `docs/agent/state/feature_list.json`。
+- 非显然决策及其理由：写入 `docs/agent/decisions/`（目录不存在时再创建）。
+- 测试、运行日志和验收结果：写入 `docs/agent/evidence/`（目录不存在时再创建）。
+- 下一线程恢复所需的最小信息：更新 `docs/agent/handoffs/current.md`，不要把完整历史复制进去。
+- 临时调试输出、可由代码直接推导的内容、未验证猜测：不要写入长期文档。
+
+事实优先级：实时 API、Git 和测试结果高于状态摘要；状态摘要高于旧 handoff。无法验证的内容必须明确标记为 `unknown`，不得写成事实。
+
+完成任务前必须更新状态、记录验证证据，并在最终回复中说明仍未验证的边界。不得把现有未跟踪用户文件顺手加入提交。
+
 ## 1. 项目简介 (Project Overview)
 
 **Multigent** 是一个面向团队的人机协作 Agent 操作系统（Human-agent collaboration infrastructure）。
