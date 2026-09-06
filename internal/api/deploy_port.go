@@ -106,3 +106,33 @@ func (s *Server) pushDeployPortVariable(ctx context.Context, project string, p *
 	}
 	log.Printf("[deploy-port] %s: APP_PORT=%d pushed to gitlab project %s", project, p.DeployPort, p.RemoteProjectID)
 }
+
+// defaultRunnerIDEnv names the runner the platform binds into every
+// template-initialized project. Shared runners commonly disable
+// run_untagged, so a project with no explicit binding stays pending forever
+// — the exact deadlock the ias-auth-center pilot hit (runner tags restored
+// by hand). Configure MULTIGENT_GITLAB_RUNNER_ID with the shared runner's
+// numeric ID and initialization binds it best-effort alongside APP_PORT.
+const defaultRunnerIDEnv = "MULTIGENT_GITLAB_RUNNER_ID"
+
+// bindDefaultRunner attaches the configured default runner to the project's
+// GitLab remote. Best-effort by design, mirroring pushDeployPortVariable:
+// initialization must not fail when the remote is absent, the GitLab host is
+// unreachable, or no default runner is configured — handlePutProject
+// re-runs this on every remote update.
+func (s *Server) bindDefaultRunner(ctx context.Context, project string, p *entity.Project) {
+	runnerID := strings.TrimSpace(os.Getenv(defaultRunnerIDEnv))
+	if runnerID == "" || strings.TrimSpace(p.RemoteProjectID) == "" {
+		return
+	}
+	host, _, err := s.pinnedGitLabHost(ctx, project, p)
+	if err != nil {
+		log.Printf("[runner-bind] %s: resolve gitlab host failed, runner %s not bound: %v", project, runnerID, err)
+		return
+	}
+	if err := host.EnableRunnerOnProject(ctx, p.RemoteProjectID, runnerID); err != nil {
+		log.Printf("[runner-bind] %s: bind runner %s to gitlab project %s failed: %v", project, runnerID, p.RemoteProjectID, err)
+		return
+	}
+	log.Printf("[runner-bind] %s: runner %s bound to gitlab project %s", project, runnerID, p.RemoteProjectID)
+}

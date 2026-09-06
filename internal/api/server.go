@@ -1319,6 +1319,7 @@ func (s *Server) handlePutProject(w http.ResponseWriter, r *http.Request) {
 	// Re-push APP_PORT so a freshly bound (or rebound) GitLab remote picks
 	// up the reserved port. Best-effort, no-op without port+remote.
 	s.pushDeployPortVariable(r.Context(), name, p)
+	s.bindDefaultRunner(r.Context(), name, p)
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 

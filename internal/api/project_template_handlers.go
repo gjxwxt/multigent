@@ -205,6 +205,7 @@ func (s *Server) handleInitializeProjectTemplate(w http.ResponseWriter, r *http.
 	// Best-effort: no-op until the project has a bound GitLab remote (the
 	// initialization workflow binds it later; handlePutProject re-pushes).
 	s.pushDeployPortVariable(r.Context(), name, project)
+	s.bindDefaultRunner(r.Context(), name, project)
 	s.auditLog(auditLogInput{
 		Action:       "project.template_initialize",
 		ResourceType: "project",

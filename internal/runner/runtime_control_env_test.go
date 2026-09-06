@@ -18,6 +18,7 @@ import (
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/runtimeauth"
 	"github.com/multigent/multigent/internal/runtimecli"
+	"github.com/multigent/multigent/internal/sandbox"
 )
 
 func TestNormalizeRuntimeAPIURL(t *testing.T) {
@@ -1104,14 +1105,18 @@ func TestWriteRuntimeToolsFileMaterializesBasicExternalToolCredentials(t *testin
 }
 
 func TestMaterializeGitLabConfigUsesScopedCredentialHelper(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), ".gitconfig")
+	agentDir := t.TempDir()
+	configPath := filepath.Join(agentDir, ".multigent", "runtime-tools", "run-1", "home", "gitlab", "gl", ".gitconfig")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	env, err := materializeGitLabConfig(runtimeConfigFileRef{
 		Path:             "~/.gitconfig",
 		MaterializedPath: configPath,
 	}, map[string]string{
 		"baseUrl": "http://localhost:8083",
 		"apiKey":  "gitlab-secret-token",
-	})
+	}, agentDir)
 	if err != nil {
 		t.Fatalf("materializeGitLabConfig failed: %v", err)
 	}
@@ -1125,6 +1130,12 @@ func TestMaterializeGitLabConfigUsesScopedCredentialHelper(t *testing.T) {
 	}
 	if strings.Contains(string(configBody), "gitlab-secret-token") || !strings.Contains(string(configBody), ".credential-helper") {
 		t.Fatalf("git config must reference, not contain, the token: %s", configBody)
+	}
+	if strings.Contains(string(configBody), agentDir) {
+		t.Fatalf("git config must reference the container path, not the host path: %s", configBody)
+	}
+	if !strings.Contains(string(configBody), sandbox.WorkspaceMount+"/") {
+		t.Fatalf("credential helper must point under %s inside the container: %s", sandbox.WorkspaceMount, configBody)
 	}
 
 	helperPath := configPath + ".credential-helper"

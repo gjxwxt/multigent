@@ -2467,7 +2467,7 @@ func writeRuntimeToolsFile(workspaceRoot, agentDir, runID, connectionsPath strin
 				if err := os.MkdirAll(filepath.Dir(cfg.MaterializedPath), 0o700); err != nil {
 					return "", "", nil, err
 				}
-				env, err := materializeCLIConfig(manifest.Tools[ti], *adapter, *cfg, secretValues)
+				env, err := materializeCLIConfig(manifest.Tools[ti], *adapter, *cfg, secretValues, agentDir)
 				if err != nil {
 					return "", "", nil, err
 				}
@@ -2629,12 +2629,12 @@ func runtimeConfigMaterializedPath(toolDir string, tool runtimeToolRef, configur
 	)
 }
 
-func materializeCLIConfig(tool runtimeToolRef, adapter runtimeAdapterRef, cfg runtimeConfigFileRef, secretValues map[string]string) (map[string]string, error) {
+func materializeCLIConfig(tool runtimeToolRef, adapter runtimeAdapterRef, cfg runtimeConfigFileRef, secretValues map[string]string, agentDir string) (map[string]string, error) {
 	switch strings.TrimSpace(tool.Provider) {
 	case "github":
 		return materializeGitHubCLIConfig(adapter, cfg, secretValues)
 	case "gitlab":
-		return materializeGitLabConfig(cfg, secretValues)
+		return materializeGitLabConfig(cfg, secretValues, agentDir)
 	case "feishu", "lark":
 		return materializeLarkCLIConfig(tool, adapter, cfg, secretValues)
 	case "ssh_key":
@@ -2907,7 +2907,7 @@ func dockerHostAlias(host string) string {
 	return ""
 }
 
-func materializeGitLabConfig(cfg runtimeConfigFileRef, secretValues map[string]string) (map[string]string, error) {
+func materializeGitLabConfig(cfg runtimeConfigFileRef, secretValues map[string]string, agentDir string) (map[string]string, error) {
 	if cfg.MaterializedPath == "" || !strings.HasSuffix(strings.TrimSpace(cfg.Path), ".gitconfig") {
 		return nil, nil
 	}
@@ -2950,11 +2950,36 @@ func materializeGitLabConfig(cfg runtimeConfigFileRef, secretValues map[string]s
 	if err := os.WriteFile(helperPath, []byte(helperBody), 0o700); err != nil {
 		return nil, err
 	}
-	configBody := "[credential]\n\thelper = " + helperPath + "\n"
+	configBody := "[credential]\n\thelper = " + containerRuntimePath(helperPath, agentDir) + "\n"
 	if err := os.WriteFile(cfg.MaterializedPath, []byte(configBody), 0o600); err != nil {
 		return nil, err
 	}
 	return map[string]string{"GIT_CONFIG_GLOBAL": cfg.MaterializedPath}, nil
+}
+
+// containerRuntimePath maps a host path under the agent workspace to the path
+// the sandbox container sees (agentDir is mounted at sandbox.WorkspaceMount).
+// File *contents* reference paths directly — unlike env vars, they never pass
+// through dockerRuntimeEnvValue, so anything git (or another in-container
+// consumer) executes from a config file must already be a container path.
+func containerRuntimePath(hostPath, agentDir string) string {
+	agentDir = strings.TrimSpace(agentDir)
+	if agentDir == "" {
+		return hostPath
+	}
+	absAgentDir, err := filepath.Abs(agentDir)
+	if err != nil {
+		absAgentDir = agentDir
+	}
+	for _, root := range uniqueNonEmptyStrings(filepath.Clean(absAgentDir), filepath.Clean(agentDir)) {
+		if root == "." || root == string(filepath.Separator) {
+			continue
+		}
+		if prefix := root + string(filepath.Separator); strings.HasPrefix(hostPath, prefix) {
+			return sandbox.WorkspaceMount + strings.TrimPrefix(hostPath, root)
+		}
+	}
+	return hostPath
 }
 
 func materializeNPMRegistryConfig(cfg runtimeConfigFileRef, secretValues map[string]string) (map[string]string, error) {	if cfg.MaterializedPath == "" || !strings.HasSuffix(strings.TrimSpace(cfg.Path), ".npmrc") {

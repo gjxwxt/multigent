@@ -951,13 +951,32 @@ func TestUnifiedDeliveryPipelineTemplateStructure(t *testing.T) {
 			hasHuman++
 		}
 	}
-	for _, want := range []string{"clarify", "clarify_review", "implement", "agent_self_review", "code_review", "changelog", "create_pr", "pr_review", "merge_sync", "qa", "qa_signoff", "release"} {
+	for _, want := range []string{"clarify", "clarify_review", "implement", "agent_self_review", "ci_ready_gate", "code_review", "changelog", "create_pr", "pr_review", "merge_sync", "qa", "qa_signoff", "release"} {
 		if !stepIDs[want] {
 			t.Fatalf("missing step %q", want)
 		}
 	}
 	if hasHuman != 4 {
 		t.Fatalf("expected 4 human_review steps (scope, code, pr, qa), got %d", hasHuman)
+	}
+
+	// The ci_ready gate is a mandatory deterministic stop between agent
+	// self-review and human code review: exactly one edge enters it (from
+	// the self-review pass route) and its only exit reaches code_review.
+	ciReadyIn := 0
+	for _, e := range tmpl.Edges {
+		if e.To == "ci_ready_gate" {
+			ciReadyIn++
+			if e.From != "agent_self_review" {
+				t.Fatalf("ci_ready_gate reached from unexpected step %q", e.From)
+			}
+		}
+		if e.From == "ci_ready_gate" && e.To != "code_review" {
+			t.Fatalf("ci_ready_gate must only route to code_review, got %q", e.To)
+		}
+	}
+	if ciReadyIn != 1 {
+		t.Fatalf("expected exactly 1 edge into ci_ready_gate, got %d", ciReadyIn)
 	}
 
 	// Agent self-review recycle loop: rework edge back to implement carries

@@ -318,6 +318,45 @@ func (g *GitLabHost) SetProjectVariable(ctx context.Context, projectID, key, val
 	return fmt.Errorf("create gitlab variable %s status %d: %s", key, resp.StatusCode, string(b))
 }
 
+// EnableRunnerOnProject binds an existing shared/specific runner (by runner
+// ID) to a project, equivalent to POST /projects/:id/runners with
+// run_untagged semantics untouched on the runner itself. Binding is
+// idempotent: GitLab answers 409/201 depending on prior state and both are
+// treated as success. Projects without an explicit runner binding can never
+// pick up jobs when the runner disables run_untagged, which is the default
+// posture of shared runners — hence this call belongs in project
+// initialization, right next to APP_PORT provisioning.
+func (g *GitLabHost) EnableRunnerOnProject(ctx context.Context, projectID, runnerID string) error {
+	projectID = strings.TrimSpace(projectID)
+	runnerID = strings.TrimSpace(runnerID)
+	if projectID == "" || runnerID == "" {
+		return fmt.Errorf("project ID and runner ID are required")
+	}
+	endpoint := fmt.Sprintf("/projects/%s/runners", url.PathEscape(projectID))
+	form := url.Values{"runner_id": {runnerID}}
+	req, err := g.newRequest(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := g.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("enable runner on gitlab project: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusOK {
+		return nil
+	}
+	// GitLab rejects an already-bound runner with 400 "Runner projects runner
+	// has already been taken" (not 409): the binding exists, so treat it as
+	// the idempotent success path.
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusBadRequest && strings.Contains(string(b), "already been taken") {
+		return nil
+	}
+	return fmt.Errorf("enable runner %s on project %s status %d: %s", runnerID, projectID, resp.StatusCode, string(b))
+}
+
 type gitlabMRResp struct {
 	ID           int64  `json:"id"`
 	IID          int64  `json:"iid"`

@@ -654,3 +654,66 @@ func TestRepairWorkspaceOwnershipReclaimsRootFiles(t *testing.T) {
 		t.Fatalf("expected file to survive repair walk: %v", err)
 	}
 }
+
+func TestPushTagEnforcesAncestryAndVerifiesRemote(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "gitworktree-tag-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+	remoteDir := filepath.Join(tempDir, "origin.git")
+	rootDir := filepath.Join(tempDir, "repo")
+	runGit(t, tempDir, "init", "--bare", remoteDir)
+	if err := os.MkdirAll(rootDir, 0755); err != nil {
+		t.Fatalf("create repo dir: %v", err)
+	}
+	runGit(t, rootDir, "init", "-b", "main")
+	runGit(t, rootDir, "config", "user.email", "test@multigent.ai")
+	runGit(t, rootDir, "config", "user.name", "Multigent Tester")
+	readme := filepath.Join(rootDir, "README.md")
+	if err := os.WriteFile(readme, []byte("base\n"), 0644); err != nil {
+		t.Fatalf("write base file: %v", err)
+	}
+	runGit(t, rootDir, "add", "README.md")
+	runGit(t, rootDir, "commit", "-m", "initial")
+	runGit(t, rootDir, "remote", "add", "origin", remoteDir)
+	runGit(t, rootDir, "push", "-u", "origin", "main")
+	mainSHA := strings.TrimSpace(string(runGitOutput(t, rootDir, "rev-parse", "main")))
+
+	mgr := NewManager()
+
+	// 1. A commit that never landed on main is a dangling release: the gate
+	// must refuse before anything reaches the remote.
+	wtDir, _, err := mgr.EnsureWorktree(rootDir, "task-tag", "main", "feature/task-tag")
+	if err != nil {
+		t.Fatalf("EnsureWorktree failed: %v", err)
+	}
+	defer mgr.CleanupWorktree(rootDir, "task-tag")
+	if err := os.WriteFile(filepath.Join(wtDir, "feature.txt"), []byte("feature\n"), 0644); err != nil {
+		t.Fatalf("write feature file: %v", err)
+	}
+	runGit(t, wtDir, "add", "feature.txt")
+	runGit(t, wtDir, "commit", "-m", "feature")
+	danglingSHA := strings.TrimSpace(string(runGitOutput(t, wtDir, "rev-parse", "HEAD")))
+	if err := mgr.PushTag(rootDir, "v0.1.0-dangling", danglingSHA, "dangling", "origin/main"); err == nil {
+		t.Fatal("PushTag must refuse a commit unreachable from origin/main")
+	}
+	remoteTags := strings.TrimSpace(string(runGitOutput(t, rootDir, "ls-remote", "--tags", "origin")))
+	if strings.Contains(remoteTags, "v0.1.0-dangling") {
+		t.Fatalf("refused tag must not exist on the remote: %q", remoteTags)
+	}
+	if localTags := strings.TrimSpace(string(runGitOutput(t, rootDir, "tag", "-l"))); strings.Contains(localTags, "v0.1.0-dangling") {
+		t.Fatalf("refused tag must not linger locally: %q", localTags)
+	}
+
+	// 2. A commit reachable from origin/main tags and verifies cleanly.
+	if err := mgr.PushTag(rootDir, "v0.1.0", mainSHA, "release candidate", "origin/main"); err != nil {
+		t.Fatalf("PushTag on main-reachable commit failed: %v", err)
+	}
+	// The annotated tag advertises its own tag object sha on refs/tags/x and
+	// the peeled commit sha on refs/tags/x^{} — assert the peeled entry.
+	remote := strings.TrimSpace(string(runGitOutput(t, rootDir, "ls-remote", "origin", "refs/tags/v0.1.0^{}")))
+	if !strings.HasPrefix(remote, mainSHA+"\t") {
+		t.Fatalf("remote peeled tag = %q, want commit %s", remote, mainSHA)
+	}
+}

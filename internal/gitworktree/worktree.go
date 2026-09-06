@@ -783,6 +783,122 @@ func (m *Manager) PushBranch(projectRoot, branch, expectedCommit string) error {
 	return nil
 }
 
+// PushTag creates an annotated tag on the given commit, pushes it to origin,
+// and verifies the remote tag points at the expected commit. The ancestry
+// gate is fail-closed: when expectedAncestorOf is a non-empty ref (normally
+// origin/main), the tagged commit must be reachable from it — a tag on a
+// commit that never landed on the integration branch is a dangling release
+// (the v1.0.0-rc1 "断头 tag" failure in the ias-auth-center pilot) and is
+// rejected before anything is pushed.
+func (m *Manager) PushTag(projectRoot, tag, commit, message, expectedAncestorOf string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	unlock, err := acquireProjectLock(projectRoot)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	projectRoot = strings.TrimSpace(projectRoot)
+	tag = strings.TrimSpace(tag)
+	commit = strings.TrimSpace(commit)
+	message = strings.TrimSpace(message)
+	expectedAncestorOf = strings.TrimSpace(expectedAncestorOf)
+	if projectRoot == "" || tag == "" || commit == "" {
+		return fmt.Errorf("project root, tag, and commit are required")
+	}
+	sanitizeSharedGitConfig(projectRoot)
+
+	resolve := exec.Command("git", "rev-parse", "--verify", commit+"^{commit}")
+	resolve.Dir = projectRoot
+	out, err := resolve.Output()
+	if err != nil {
+		return fmt.Errorf("resolve tag target %s failed: %w", commit, err)
+	}
+	targetSHA := strings.TrimSpace(string(out))
+
+	if expectedAncestorOf != "" {
+		ancestry, err := m.isAncestorLocked(projectRoot, commit, expectedAncestorOf)
+		if err != nil {
+			return err
+		}
+		if !ancestry {
+			return fmt.Errorf("refusing to push tag %s: commit %s is not reachable from %s (dangling release)",
+				tag, targetSHA[:min(len(targetSHA), 7)], expectedAncestorOf)
+		}
+	}
+
+	tagCmd := exec.Command("git", "tag", "-a", tag, "-m", message, targetSHA)
+	tagCmd.Dir = projectRoot
+	var tagOut bytes.Buffer
+	tagCmd.Stdout = &tagOut
+	tagCmd.Stderr = &tagOut
+	if err := tagCmd.Run(); err != nil {
+		if strings.Contains(tagOut.String(), "already exists") {
+			return fmt.Errorf("tag %s already exists", tag)
+		}
+		return fmt.Errorf("create tag %s failed: %w (%s)", tag, err, redactGitOutput(tagOut.String()))
+	}
+
+	push := exec.Command("git", "push", "origin", "refs/tags/"+tag+":refs/tags/"+tag)
+	push.Dir = projectRoot
+	push.Env = gitNetworkEnv()
+	var pushOut bytes.Buffer
+	push.Stdout = &pushOut
+	push.Stderr = &pushOut
+	if err := push.Run(); err != nil {
+		// Do not leave a local-only tag behind: a failed push must not make
+		// the next attempt "already exists" against a tag nobody can fetch.
+		_ = exec.Command("git", "tag", "-d", tag).Run()
+		return fmt.Errorf("push tag %s failed: %w (%s)", tag, err, redactGitOutput(pushOut.String()))
+	}
+
+	verify := exec.Command("git", "ls-remote", "--tags", "origin", "refs/tags/"+tag, "refs/tags/"+tag+"^{}")
+	verify.Dir = projectRoot
+	out, err = verify.Output()
+	if err != nil {
+		return fmt.Errorf("verify remote tag %s failed: %w", tag, err)
+	}
+	// Annotated tags carry their own tag object: ls-remote lists the object
+	// sha on refs/tags/<tag> and the peeled commit sha on refs/tags/<tag>^{}.
+	// Either matching means the remote points at the tagged commit.
+	matches := false
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && strings.EqualFold(fields[0], targetSHA) {
+			matches = true
+			break
+		}
+	}
+	if !matches {
+		actual := strings.TrimSpace(string(out))
+		if actual == "" {
+			actual = "(missing)"
+		}
+		return fmt.Errorf("remote tag %s does not point to %q: %s", tag, targetSHA, actual)
+	}
+	return nil
+}
+
+// isAncestorLocked expects m.mu held; see IsAncestor for the public form.
+func (m *Manager) isAncestorLocked(projectRoot, ancestor, descendant string) (bool, error) {
+	ancestor = strings.TrimSpace(ancestor)
+	descendant = strings.TrimSpace(descendant)
+	if strings.TrimSpace(projectRoot) == "" || ancestor == "" || descendant == "" {
+		return false, fmt.Errorf("project root, ancestor, and descendant are required")
+	}
+	cmd := exec.Command("git", "merge-base", "--is-ancestor", ancestor, descendant)
+	cmd.Dir = projectRoot
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("check ancestor relationship: %w", err)
+}
+
 // IsAncestor reports whether ancestor is reachable from descendant. It is
 // used to detect squash/rebase integration where a task completion commit is
 // no longer in the default branch history.
