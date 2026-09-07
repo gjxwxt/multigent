@@ -129,3 +129,70 @@ func TestTriggerManagerFindsDueScheduledTaskWithoutTaskTrigger(t *testing.T) {
 		t.Fatalf("test setup should not include task trigger: %#v", hb.Triggers)
 	}
 }
+
+func TestTriggerManagerResolvesCanonicalAgentNameForWorkerID(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	worker := controldb.AgentWorker{
+		ID:           "aw_hello_world_relay_lina",
+		WorkspaceID:  workspaceID,
+		Name:         "lina-worker",
+		DisplayName:  "Lina Worker",
+		Status:       "active",
+		ScheduleJSON: `{"triggers":["on_message"]}`,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := s.controlDB.UpsertAgentWorker(worker); err != nil {
+		t.Fatalf("worker: %v", err)
+	}
+	if err := s.controlDB.UpsertProjectMembership(controldb.ProjectMembership{
+		ID:          "pm-lina",
+		WorkspaceID: workspaceID,
+		ProjectID:   "ias-auth-center",
+		MemberType:  "agent_worker",
+		MemberID:    worker.ID,
+		Role:        "developer",
+		Title:       "Lina",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("membership: %v", err)
+	}
+
+	canonical, ok := s.triggers.resolveCanonicalAgentName("ias-auth-center", "aw_hello_world_relay_lina")
+	if !ok || canonical != "Lina" {
+		t.Fatalf("expected canonical name Lina for worker ID, got ok=%v canonical=%q", ok, canonical)
+	}
+
+	// Non-MM normal agent resolution regression check: passing regular name "Lina" directly
+	canonicalDirect, okDirect := s.triggers.resolveCanonicalAgentName("ias-auth-center", "Lina")
+	if !okDirect || canonicalDirect != "Lina" {
+		t.Fatalf("expected canonical name Lina for direct agent name, got ok=%v canonical=%q", okDirect, canonicalDirect)
+	}
+
+	// Directional regression: "DM Mira's bot MUST wake up Mira"
+	miraWorker := controldb.AgentWorker{
+		ID:          "aw_hello_world_relay_mira",
+		WorkspaceID: workspaceID,
+		Name:        "mira-worker",
+		Status:      "active",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	_ = s.controlDB.UpsertAgentWorker(miraWorker)
+	_ = s.controlDB.UpsertProjectMembership(controldb.ProjectMembership{
+		ID:          "pm-mira",
+		WorkspaceID: workspaceID,
+		ProjectID:   "1test",
+		MemberType:  "agent_worker",
+		MemberID:    miraWorker.ID,
+		Title:       "Mira",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	})
+	miraCanonical, okMira := s.triggers.resolveCanonicalAgentName("1test", "aw_hello_world_relay_mira")
+	if !okMira || miraCanonical != "Mira" {
+		t.Fatalf("expected canonical name Mira for worker ID aw_hello_world_relay_mira, got ok=%v canonical=%q", okMira, miraCanonical)
+	}
+}

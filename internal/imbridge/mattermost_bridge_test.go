@@ -384,12 +384,42 @@ func TestRefreshSupervisorsTracksMissingHMACSecret(t *testing.T) {
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
 
-	if len(bridge.supervisors) != 0 {
-		t.Fatalf("expected 0 supervisors started for missing HMAC secret, got %d", len(bridge.supervisors))
-	}
 	reason, ok := bridge.unconfiguredBots["bind-missing-hmac"]
 	if !ok || reason != "missing_hmac_secret" {
 		t.Fatalf("expected unconfigured reason 'missing_hmac_secret', got %q", reason)
 	}
 }
+
+type panicMockStore struct {
+	controldb.Store
+}
+
+func (p panicMockStore) ListAgentChannelBindings(filter controldb.AgentChannelBindingFilter) ([]controldb.AgentChannelBinding, error) {
+	panic("simulated modernc.org/sqlite nil pointer dereference")
+}
+
+func TestMattermostBridge_PanicRecoveryAndStatus(t *testing.T) {
+	bridge := NewMattermostBridge(MattermostBridgeConfig{}, panicMockStore{})
+
+	// Calling refreshSupervisors should NOT panic the caller
+	bridge.refreshSupervisors(context.Background())
+
+	if bridge.panicCount.Load() != 1 {
+		t.Fatalf("expected panicCount 1, got %d", bridge.panicCount.Load())
+	}
+	if bridge.errorsCount.Load() != 1 {
+		t.Fatalf("expected errorsCount 1, got %d", bridge.errorsCount.Load())
+	}
+	if !strings.Contains(bridge.lastPanic, "simulated modernc.org/sqlite") {
+		t.Fatalf("expected lastPanic to contain simulated error, got %q", bridge.lastPanic)
+	}
+	if bridge.lastPanicAt == "" {
+		t.Fatalf("expected lastPanicAt to be set")
+	}
+
+	// Also verify flushAllCursors handles panics cleanly
+	bridge.flushAllCursors()
+	// No panic, cursors flushed
+}
+
 

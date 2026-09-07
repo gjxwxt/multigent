@@ -10,6 +10,7 @@ import (
 	"time"
 
 	controldb "github.com/multigent/multigent/internal/db"
+	"github.com/multigent/multigent/internal/imbridge"
 )
 
 func setupMattermostTestBinding(t *testing.T, s *Server, workspaceID, project, agent, commandToken string) (controldb.AgentChannelBinding, string) {
@@ -365,5 +366,54 @@ func TestMattermostSlashBind_Success_Chat(t *testing.T) {
 	}
 	if targets[0].DisplayName != "Release War Room" || targets[0].ExternalChatID != "ch-group-war-room" {
 		t.Fatalf("unexpected target: %#v", targets[0])
+	}
+}
+
+func TestSaveManualAgentIMChannel_RejectsDuplicateBotID(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+
+	// Create connection for binding1
+	if err := s.controlDB.UpsertConnection(controldb.Connection{
+		ID:             "conn-mira",
+		WorkspaceID:    workspaceID,
+		Provider:       "mattermost",
+		ConnectionName: "agent-1test-Mira",
+		OwnerType:      ConnectionOwnerWorkspace,
+		OwnerID:        workspaceID,
+		AuthType:       "bot_token",
+		Status:         "active",
+		ProfileJSON:    "{}",
+	}); err != nil {
+		t.Fatalf("upsert connection: %v", err)
+	}
+
+	// Agent 1 ("1test/Mira") binds bot-shared
+	binding1 := controldb.AgentChannelBinding{
+		ID:            "chan-mira",
+		WorkspaceID:   workspaceID,
+		ProjectID:     "1test",
+		AgentID:       "Mira",
+		Provider:      "mattermost",
+		ConnectionID:  "conn-mira",
+		ExternalBotID: "bot-shared",
+		Status:        "connected",
+	}
+	if err := s.controlDB.UpsertAgentChannelBinding(binding1); err != nil {
+		t.Fatalf("upsert binding1: %v", err)
+	}
+
+	// Agent 2 ("flow-check/Lina") attempts to bind the same bot-shared
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/channels", nil)
+	result := imbridge.ManualSetupResult{
+		Provider:      "mattermost",
+		AppID:         "bot-shared",
+		ExternalBotID: "bot-shared",
+	}
+	_, err := s.saveManualAgentIMChannel(req, workspaceID, "flow-check", "Lina", "", result)
+	if err == nil {
+		t.Fatalf("expected error when binding duplicate bot-shared to a different agent, got nil")
+	}
+	if !strings.Contains(err.Error(), "already bound to 1test/Mira") {
+		t.Fatalf("expected already bound error, got: %v", err)
 	}
 }
