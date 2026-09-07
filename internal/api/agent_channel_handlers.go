@@ -1143,6 +1143,24 @@ func (s *Server) saveManualAgentIMChannel(r *http.Request, workspaceID, project,
 			return controldb.AgentChannelBinding{}, err
 		}
 	}
+	// Enforce 1:1 Bot-to-Binding constraint in P1b:
+	// A single external bot ID cannot be shared by multiple agents within the same workspace,
+	// which prevents routing ambiguity and C3 HMAC signature verification collisions.
+	if strings.TrimSpace(result.ExternalBotID) != "" {
+		existingBindings, err := s.controlDB.ListAgentChannelBindings(controldb.AgentChannelBindingFilter{
+			WorkspaceID: workspaceID,
+			Provider:    provider,
+			Status:      "connected",
+		})
+		if err == nil {
+			for _, b := range existingBindings {
+				if (b.ProjectID != project || b.AgentID != agent) &&
+					strings.TrimSpace(b.ExternalBotID) == strings.TrimSpace(result.ExternalBotID) {
+					return controldb.AgentChannelBinding{}, fmt.Errorf("bot %s is already bound to %s/%s in this workspace; each agent must have a dedicated bot account", result.ExternalBotID, b.ProjectID, b.AgentID)
+				}
+			}
+		}
+	}
 	connectionName := agentChannelConnectionName(project, agent)
 	connectionID := ""
 	connections, err := s.controlDB.ListConnections(controldb.ConnectionFilter{

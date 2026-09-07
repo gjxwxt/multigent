@@ -184,9 +184,16 @@ ON CONFLICT(connection_id) DO UPDATE SET
 	return err
 }
 
-func (db *SQLiteStore) ConnectionSecret(connectionID string) (ConnectionSecret, bool, error) {
-	var s ConnectionSecret
-	err := db.sql.QueryRow(`SELECT connection_id, ciphertext, nonce, key_version, updated_at
+func (db *SQLiteStore) ConnectionSecret(connectionID string) (s ConnectionSecret, found bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("sqlite query panic recovered: %v", r)
+		}
+	}()
+	if db == nil || db.sql == nil {
+		return ConnectionSecret{}, false, fmt.Errorf("database not open")
+	}
+	err = db.sql.QueryRow(`SELECT connection_id, ciphertext, nonce, key_version, updated_at
 FROM connection_secrets WHERE connection_id = ?`, connectionID).
 		Scan(&s.ConnectionID, &s.Ciphertext, &s.Nonce, &s.KeyVersion, &s.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {

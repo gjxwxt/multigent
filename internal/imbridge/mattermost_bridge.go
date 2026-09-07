@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -52,10 +53,14 @@ type MattermostBridge struct {
 	unconfiguredBots map[string]string         // binding.ID -> reason (e.g. missing_hmac_secret)
 	mu               sync.Mutex
 
-	// Metrics
+	// Metrics (process in-memory)
 	messagesForwarded atomic.Int64
 	catchUpCount      atomic.Int64
 	errorsCount       atomic.Int64
+	panicCount        atomic.Int64
+	lastPanic         string
+	lastPanicAt       string
+	panicMu           sync.Mutex
 	startTime         time.Time
 }
 
@@ -116,6 +121,16 @@ func (b *MattermostBridge) Start(ctx context.Context) error {
 	}
 }
 
+func (b *MattermostBridge) recordPanic(where string, r any) {
+	b.panicCount.Add(1)
+	b.errorsCount.Add(1)
+	b.panicMu.Lock()
+	b.lastPanic = fmt.Sprintf("[%s] %v", where, r)
+	b.lastPanicAt = time.Now().UTC().Format(time.RFC3339)
+	b.panicMu.Unlock()
+	log.Printf("[mattermost-bridge] PANIC RECOVERED in %s: %v\n%s", where, r, debug.Stack())
+}
+
 func (b *MattermostBridge) runStatusServer(ctx context.Context) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
@@ -137,6 +152,11 @@ func (b *MattermostBridge) runStatusServer(ctx context.Context) {
 		}
 		b.mu.Unlock()
 
+		b.panicMu.Lock()
+		lastPanic := b.lastPanic
+		lastPanicAt := b.lastPanicAt
+		b.panicMu.Unlock()
+
 		statusText := "healthy"
 		if len(unconfigured) > 0 {
 			statusText = "degraded"
@@ -148,6 +168,10 @@ func (b *MattermostBridge) runStatusServer(ctx context.Context) {
 			"messagesForwarded": b.messagesForwarded.Load(),
 			"catchUpPosts":      b.catchUpCount.Load(),
 			"errors":            b.errorsCount.Load(),
+			"panicCount":        b.panicCount.Load(),
+			"lastPanic":         lastPanic,
+			"lastPanicAt":       lastPanicAt,
+			"countersScope":     "process-in-memory (resets on restart)",
 			"activeBots":        len(bots),
 			"unconfiguredBots":  len(unconfigured),
 			"unconfigured":      unconfigured,
@@ -176,6 +200,12 @@ func (b *MattermostBridge) runStatusServer(ctx context.Context) {
 }
 
 func (b *MattermostBridge) refreshSupervisors(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			b.recordPanic("refreshSupervisors", r)
+		}
+	}()
+
 	bindings, err := b.store.ListAgentChannelBindings(controldb.AgentChannelBindingFilter{
 		Provider: "mattermost",
 		Status:   "connected",
@@ -257,6 +287,12 @@ func (b *MattermostBridge) refreshSupervisors(ctx context.Context) {
 }
 
 func (b *MattermostBridge) flushAllCursors() {
+	defer func() {
+		if r := recover(); r != nil {
+			b.recordPanic("flushAllCursors", r)
+		}
+	}()
+
 	b.mu.Lock()
 	supervisors := make([]*botSupervisor, 0, len(b.supervisors))
 	for _, s := range b.supervisors {

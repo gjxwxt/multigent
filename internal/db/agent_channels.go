@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -69,7 +70,15 @@ FROM agent_channel_bindings WHERE id = ?`, id)
 	return b, true, nil
 }
 
-func (db *SQLiteStore) ListAgentChannelBindings(filter AgentChannelBindingFilter) ([]AgentChannelBinding, error) {
+func (db *SQLiteStore) ListAgentChannelBindings(filter AgentChannelBindingFilter) (out []AgentChannelBinding, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("sqlite query panic recovered: %v", r)
+		}
+	}()
+	if db == nil || db.sql == nil {
+		return nil, fmt.Errorf("database not open")
+	}
 	query := `SELECT id, workspace_id, agent_worker_id, project_id, agent_id, provider, connection_id,
 external_bot_id, external_chat_id, external_owner_id, status, metadata_json,
 created_by, created_at, updated_at, last_activity_at
@@ -109,7 +118,7 @@ FROM agent_channel_bindings WHERE 1=1`
 		return nil, err
 	}
 	defer rows.Close()
-	out := make([]AgentChannelBinding, 0)
+	out = make([]AgentChannelBinding, 0)
 	for rows.Next() {
 		b, err := scanAgentChannelBinding(rows)
 		if err != nil {

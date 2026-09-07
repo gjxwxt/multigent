@@ -434,6 +434,16 @@ func (s *Server) handleIMEvent(w http.ResponseWriter, r *http.Request) {
 			s.jsonError(w, http.StatusUnauthorized, "unauthorized: channel binding not found")
 			return
 		}
+		// DEFECT-C3 (Architectural Defect Tracking):
+		// When multiple channel bindings match the same AppID (e.g. across multiple workspaces or shared bots),
+		// blindly selecting matches[0] creates an ambiguity where the wrong connection secret is evaluated
+		// for HMAC verification, causing spurious 401s or cross-tenant routing errors.
+		// In P1b, this is mitigated by enforcing 1:1 bot-to-binding uniqueness in saveManualAgentIMChannel.
+		// The structural fix (workspace-aware routing & multi-secret candidate verification) is tracked for P3.
+		if len(matches) > 1 {
+			log.Printf("[im:%s] WARNING (DEFECT-C3): multiple (%d) channel bindings matched appId %q; selecting matches[0] (%s/%s, conn=%s)",
+				channelProvider.Info().ID, len(matches), parsed.AppID, matches[0].ProjectID, matches[0].AgentID, matches[0].ConnectionID)
+		}
 		secret, foundSecret, secretErr := s.controlDB.ConnectionSecret(matches[0].ConnectionID)
 		if secretErr != nil {
 			s.serverError(w, secretErr)

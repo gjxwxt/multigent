@@ -282,19 +282,34 @@ func defaultJSON(value string) string {
 	return value
 }
 
-func (db *SQLiteStore) UpsertRecord(table string, workspaceID string, key []string, payload string) error {
+func (db *SQLiteStore) UpsertRecord(table string, workspaceID string, key []string, payload string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("sqlite upsert panic recovered: %v", r)
+		}
+	}()
+	if db == nil || db.sql == nil {
+		return fmt.Errorf("database not open")
+	}
 	k1, k2, k3 := normalizeKey(key)
-	_, err := db.sql.Exec(`INSERT INTO kv_records (table_name, workspace_id, k1, k2, k3, payload, updated_at)
+	_, err = db.sql.Exec(`INSERT INTO kv_records (table_name, workspace_id, k1, k2, k3, payload, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(table_name, workspace_id, k1, k2, k3) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`,
 		table, workspaceID, k1, k2, k3, payload, nowUTC())
 	return err
 }
 
-func (db *SQLiteStore) GetRecord(table string, workspaceID string, key []string) (string, bool, error) {
+func (db *SQLiteStore) GetRecord(table string, workspaceID string, key []string) (payload string, found bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("sqlite get panic recovered: %v", r)
+		}
+	}()
+	if db == nil || db.sql == nil {
+		return "", false, fmt.Errorf("database not open")
+	}
 	k1, k2, k3 := normalizeKey(key)
-	var payload string
-	err := db.sql.QueryRow(`SELECT payload FROM kv_records WHERE table_name = ? AND workspace_id = ? AND k1 = ? AND k2 = ? AND k3 = ?`, table, workspaceID, k1, k2, k3).Scan(&payload)
+	err = db.sql.QueryRow(`SELECT payload FROM kv_records WHERE table_name = ? AND workspace_id = ? AND k1 = ? AND k2 = ? AND k3 = ?`, table, workspaceID, k1, k2, k3).Scan(&payload)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}

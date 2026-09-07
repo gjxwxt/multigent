@@ -332,13 +332,18 @@ func (tm *triggerManager) Fire(project, agent string, triggerType entity.Trigger
 }
 
 func (tm *triggerManager) fireWakeup(project, agent string, hb *entity.HeartbeatConfig, triggerType entity.TriggerType, reason string) {
-	key := project + "/" + agent
+	targetAgent := agent
+	if canonical, ok := tm.resolveCanonicalAgentName(project, agent); ok && canonical != "" {
+		targetAgent = canonical
+	}
+
+	key := project + "/" + targetAgent
 
 	tm.mu.Lock()
 	if _, ok := tm.inflight[key]; ok {
 		tm.queued[key] = queuedTrigger{triggerType: triggerType, reason: reason}
 		tm.mu.Unlock()
-		fmt.Fprintf(os.Stderr, "[trigger] %s/%s: queued — already inflight\n", project, agent)
+		fmt.Fprintf(os.Stderr, "[trigger] %s/%s: queued — already inflight\n", project, targetAgent)
 		return
 	}
 	if hb.PID > 0 && hb.LastWakeupStatus == "running" {
@@ -346,7 +351,7 @@ func (tm *triggerManager) fireWakeup(project, agent string, hb *entity.Heartbeat
 			if proc.Signal(syscall.Signal(0)) == nil {
 				tm.queued[key] = queuedTrigger{triggerType: triggerType, reason: reason}
 				tm.mu.Unlock()
-				fmt.Fprintf(os.Stderr, "[trigger] %s/%s: queued — agent already running (pid=%d)\n", project, agent, hb.PID)
+				fmt.Fprintf(os.Stderr, "[trigger] %s/%s: queued — agent already running (pid=%d)\n", project, targetAgent, hb.PID)
 				return
 			}
 		}
@@ -367,20 +372,20 @@ func (tm *triggerManager) fireWakeup(project, agent string, hb *entity.Heartbeat
 			if hasNext {
 				go func() {
 					time.Sleep(300 * time.Millisecond)
-					tm.Fire(project, agent, next.triggerType, next.reason)
+					tm.Fire(project, targetAgent, next.triggerType, next.reason)
 				}()
 			}
 		}()
 
-		fmt.Fprintf(os.Stderr, "[trigger] %s/%s fired (%s: %s)\n", project, agent, triggerType, reason)
+		fmt.Fprintf(os.Stderr, "[trigger] %s/%s fired (%s: %s)\n", project, targetAgent, triggerType, reason)
 
-		args := []string{"--dir", tm.root, "scheduler", "wakeup", "--project", project, "--agent", agent}
+		args := []string{"--dir", tm.root, "scheduler", "wakeup", "--project", project, "--agent", targetAgent}
 		cmd := exec.Command(tm.binPath, args...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		setProcGroup(cmd)
 		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "[trigger] %s/%s: wakeup command failed: %v\n", project, agent, err)
+			fmt.Fprintf(os.Stderr, "[trigger] %s/%s: wakeup command failed: %v\n", project, targetAgent, err)
 		}
 	}()
 }
@@ -398,12 +403,32 @@ func (tm *triggerManager) heartbeatForTrigger(project, agent string) (*entity.He
 }
 
 func (tm *triggerManager) resolveAgentWorker(project, agent string) (controldb.AgentWorker, bool) {
+	worker, _, ok := tm.resolveAgentWorkerAndMembership(project, agent)
+	return worker, ok
+}
+
+func (tm *triggerManager) resolveCanonicalAgentName(project, agent string) (string, bool) {
+	worker, membership, ok := tm.resolveAgentWorkerAndMembership(project, agent)
+	if !ok {
+		return "", false
+	}
+	name := strings.TrimSpace(membership.Title)
+	if name == "" {
+		name = strings.TrimSpace(worker.Name)
+	}
+	if name == "" {
+		name = strings.TrimSpace(membership.Role)
+	}
+	return name, name != ""
+}
+
+func (tm *triggerManager) resolveAgentWorkerAndMembership(project, agent string) (controldb.AgentWorker, controldb.ProjectMembership, bool) {
 	if tm == nil || tm.db == nil {
-		return controldb.AgentWorker{}, false
+		return controldb.AgentWorker{}, controldb.ProjectMembership{}, false
 	}
 	workspaceID := tm.workspaceID()
 	if workspaceID == "" {
-		return controldb.AgentWorker{}, false
+		return controldb.AgentWorker{}, controldb.ProjectMembership{}, false
 	}
 	memberships, err := tm.db.ListProjectMemberships(controldb.ProjectMembershipFilter{
 		WorkspaceID: workspaceID,
@@ -411,7 +436,7 @@ func (tm *triggerManager) resolveAgentWorker(project, agent string) (controldb.A
 		MemberType:  "agent_worker",
 	})
 	if err != nil {
-		return controldb.AgentWorker{}, false
+		return controldb.AgentWorker{}, controldb.ProjectMembership{}, false
 	}
 	for _, membership := range memberships {
 		worker, ok, err := tm.db.AgentWorkerByID(workspaceID, membership.MemberID)
@@ -419,10 +444,10 @@ func (tm *triggerManager) resolveAgentWorker(project, agent string) (controldb.A
 			continue
 		}
 		if triggerAgentMatches(agent, membership, worker) {
-			return worker, true
+			return worker, membership, true
 		}
 	}
-	return controldb.AgentWorker{}, false
+	return controldb.AgentWorker{}, controldb.ProjectMembership{}, false
 }
 
 func (tm *triggerManager) workspaceID() string {
