@@ -326,7 +326,7 @@ func Defaults() []Provider {
 				{Key: "apiKey", Label: "OD API token", InputType: "password", Required: true, Secret: true},
 			},
 			Guides: []ProviderGuide{
-				credentialGuide("OD API token", "Use the OD_API_TOKEN value configured on the OpenDesign daemon. The token is stored encrypted and only injected server-side when proxying design requests.", "OpenDesign deployment", "https://github.com/multigent/multigent/blob/main/docs/opendesign-integration-plan.md"),
+				credentialGuide("OD API token", "Use the OD_API_TOKEN value configured on the OpenDesign daemon. The token is stored encrypted and only injected server-side when proxying design requests.", "OpenDesign deployment", "https://github.com/multigent/multigent/blob/main/docs/getting-started/configuration-and-logging.md"),
 			},
 			Enabled: true,
 		},

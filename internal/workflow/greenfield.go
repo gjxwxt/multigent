@@ -8,7 +8,7 @@ import (
 // project's first delivery there is no existing UI, so a visual design gate
 // (OpenDesign, human_review with Config designGate=true) sits between the
 // quick requirement review and implementation. Existing projects keep using
-// the unified pipeline untouched. See docs/opendesign-integration-plan.md §9.
+// the unified pipeline untouched.
 func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 	locale = normalizeTemplateLocale(locale)
 	text := localizedTemplateText(locale, map[string]string{

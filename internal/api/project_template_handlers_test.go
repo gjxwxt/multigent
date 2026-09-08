@@ -54,7 +54,7 @@ func TestInitializeProjectTemplateMaterializesAndRecordsMetadata(t *testing.T) {
 func TestInitializeProjectTemplateKeepsRemoteURLIntact(t *testing.T) {
 	s, workspaceID := newConnectionGrantPolicyServer(t)
 	seedAgentWorkerForTest(t, s, workspaceID, "sample", "pm")
-	remoteURL := "http://host.orb.internal:8083/root/sample.git"
+	remoteURL := "http://git.example.test:8083/root/sample.git"
 	t.Cleanup(func() {
 		_ = os.RemoveAll("http:")
 	})

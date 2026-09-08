@@ -16,8 +16,7 @@ import (
 	"github.com/multigent/multigent/internal/store"
 )
 
-// OpenDesign (OD) client. Phase 0 (docs/opendesign-integration-plan.md
-// appendix A) established the real wire contract:
+// OpenDesign (OD) client. The wire contract is:
 //
 //   - BYOK is request-scoped: every run carries agentId "byok-opencode" plus
 //     a byokProvider object (protocol/baseUrl/apiKey/model). The OD daemon

@@ -19,7 +19,7 @@ import (
 	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
 
-// Design gate endpoints (OpenDesign integration, docs/opendesign-integration-plan.md).
+// Design gate endpoints for the OpenDesign integration.
 // All routes live on the authenticated main mux (never publicMux) and start
 // with checkProjectAccess via the shared project/task guard. The OD API token
 // never leaves the server: it is decrypted from connection_secrets per call
