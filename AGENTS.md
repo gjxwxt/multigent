@@ -4,24 +4,11 @@
 
 ---
 
-## 0. Agent 运行入口与状态写回 (MVP)
+## 0. Agent 运行入口与状态写回
 
-开始任务时，按以下顺序读取：
-
-1. 本文件。
-2. `docs/agent/README.md`（文档路由与事实优先级）。
-3. `docs/agent/state/feature_list.json`（机器可读的批次摘要）。
-4. `docs/agent/state/progress.md` 与 `docs/agent/handoffs/current.md`（当前状态和接班摘要）。
-5. 仅按当前任务需要读取 `HANDOFF.md`、架构、部署、决策和证据文档；不要默认加载完整历史。
-
-写回规则：
-
-- 当前进度、阻塞、下一步：更新 `docs/agent/state/progress.md`。
-- 批次状态、依赖、完成条件：更新 `docs/agent/state/feature_list.json`。
-- 非显然决策及其理由：写入 `docs/agent/decisions/`（目录不存在时再创建）。
-- 测试、运行日志和验收结果：写入 `docs/agent/evidence/`（目录不存在时再创建）。
-- 下一线程恢复所需的最小信息：更新 `docs/agent/handoffs/current.md`，不要把完整历史复制进去。
-- 临时调试输出、可由代码直接推导的内容、未验证猜测：不要写入长期文档。
+开始任务时，先读取本文件、README 和与当前任务直接相关的源码与测试。
+任务状态、决策和验收证据应写入公开且不含环境秘密的项目文档；临时调试输出、
+部署地址、凭据、内部网络拓扑和私有运行记录不得提交到公开仓库。
 
 事实优先级：实时 API、Git 和测试结果高于状态摘要；状态摘要高于旧 handoff。无法验证的内容必须明确标记为 `unknown`，不得写成事实。
 
@@ -91,8 +78,7 @@ multigent/
    ./dist/multigent start
    ```
    *服务启动后访问：`http://127.0.0.1:27892`*
-   - 默认初始管理员账号：`admin`
-   - 默认初始管理员密码：`admin123`
+   - 初始管理员凭据由部署环境配置，不写入仓库文档。
 
 3. **前端热重载开发 (Web Local Dev)**
    ```bash
@@ -134,7 +120,7 @@ multigent/
 
 ## 5. 安全红线 (Security Invariants — 违反即事故)
 
-以下约定由真实事故沉淀而来，**任何修改不得绕过**；细节与事故背景见 `HANDOFF.md` 第 7 节：
+以下约定由真实事故沉淀而来，**任何修改不得绕过**；细节以源码、测试和公开架构文档为准：
 
 1. **端点鉴权边界**：`publicMux`（server.go）上的路由完全无认证。新增有副作用的端点一律注册到带 `withTokenAuth` 的主 mux 并做 `checkProjectAccess`；必须暴露给预览 iframe 的端点，handler 内必须校验预览签名 token（`internal/api/preview_token.go`），写端点再加频率限制。
 2. **凭据不落盘**：Git remote URL 持久化必须保持纯净（无 token）；凭据只在推送瞬时注入（credential-helper 或运行时注入）。Git 命令输出入库/返回前端前必须 redact（参考 `redactGitOutput`）。
@@ -153,18 +139,20 @@ multigent/
 | Git Worktree 隔离 | `internal/gitworktree/worktree.go` | 项目锁串行化 git 操作；`sanitizeTaskID` 防路径穿越；快照失败必须阻断清理（防丢未推送工作） |
 | 审核自动提交 | `internal/api/workflow_handlers.go` `commitAndPushReviewChanges` | 人工审核 approve 时收编 Copilot 工作区改动为 checkpoint commit；push 失败写任务评论告警，不静默 |
 | 启动自愈扫描 | `internal/api/workflow_handlers.go` `recoverActiveWorkflowRuns` | 重启后 3s 自动恢复停在 agent 节点的 active run；永不自动恢复 human_review；150ms 节流 |
-| 六大生命周期解耦 | `HANDOFF.md` 第 6 节 | 任务/代码基线/Worktree/预览会话/容器/远程同步各自独立字段与状态机，禁止混用单一状态 |
+| 六大生命周期解耦 | `internal/api/`, `internal/gitworktree/`, `internal/preview/`, `internal/workflow/` | 任务、代码基线、Worktree、预览会话、容器和远程同步各自独立，禁止混用单一状态 |
 | 工作流双层体系 | `internal/workflow/store.go` | 代码内置 `Templates()`（只读目录）→ 经 `POST /api/v1/workflows` 实例化落库才可供任务选用；改模板后必须重新实例化才能在 UI 生效 |
 | 统一交付流水线 | 模板 ID `unified-delivery-pipeline` | 12 步闭环，核心是编码后的 Agent 初审闸门（独立 reviewer-agent、实测验证、`review_rounds` 三轮封顶）；发布步 CI 触发为 best-effort（无权限如实填 none） |
 | CI/CD 基线与 ci_ready 闸门 | `internal/ciready/` + 模板 `.gitlab-ci.yml`（模板 1.1.0） | 确定性优先：补种与十项校验全是纯函数，Agent 在 init v2 的 `ci_ready` 步骤只执行 `mga ci ready`（引擎无系统步骤类型才借道 agent_task）；端点 `POST /api/v1/runtime/ci-ready` 以 HEAD SHA 流水线为客观证据；`apk add --no-cache` 即 fail（每 job 重下 docker CLI）；release tag 必须从含优化 yml 的 main 切 |
 
-**runner tags 决策（模板 `.gitlab-ci.yml` 硬编码 `tags: [docker]`，勿"顺手参数化"）**：GitLab 的 `tags:` 字段不支持变量展开（调度早于 job 变量生效）；本环境 runner 以 `run_untagged=false` 注册，无 tags 的 job 永远 pending；tags 同时把 package/deploy 路由到挂载 docker.sock 的 runner。**内网迁移**：注册 runner 时打 `docker` 标签即可，项目级或共享 runner 绑定均可（GitLab 按标签匹配而非绑定类型）；若换标签名，只需全局替换模板 yml 中的 `tags: [docker]`。背景与 #897 复盘见 `HANDOFF.md` 第 9 节 (9)。
+**runner tags 决策**：GitLab 的 `tags:` 字段参与 job 调度，必须与目标 runner 的注册标签一致；不要未经验证参数化或删除模板中的标签。不同部署环境的 runner 标签属于部署配置，不写入本项目的私有运维记录。
 
 ---
 
 ## 7. 部署与验证环境 (Deployment Context)
 
-- 生产运行环境为 OrbStack Ubuntu VM（`127.0.0.1`），服务监听 `0.0.0.0:27892`；Mac 侧可用 VM IP 直连（推荐，与 HANDOFF.md 拓扑一致）或 OrbStack 的 `127.0.0.1` 端口转发（等价别名）。
-- **修改代码后的部署 SOP（Mac → VM）**：`make build` → `GOOS=linux GOARCH=amd64 go build`（multigent 与 mga 两个产物）→ `orb -m ubuntu sudo cp` 到 `/opt/multigent/bin/` → `systemctl restart multigent` → `journalctl -u multigent` 查日志。完整命令见 `HANDOFF.md` 第 4 节。
-- 部署重启会触发启动自愈扫描器；重启后应检查日志确认无 `panic` 且 `[auto-recovery]` 行为符合预期。
-- `work/multigent-linux-amd64` 是随仓库管理的部署产物，发布新版本后按惯例刷新并单独提交（`build: refresh linux deployment artifact`）。
+- 生产地址、部署主机、服务端口、凭据、容器名称和 systemd 路径属于部署环境配置，
+  不得写入公开仓库。请使用部署环境中的私有 runbook。
+- 修改代码后至少运行 `make test` 或 `make build`，并按目标环境的私有 runbook
+  做行为级验证。
+- 交叉编译产物写入 `dist/`、`work/` 或外部临时目录均可，但这些产物必须被
+  `.gitignore` 忽略，不能作为源码提交。
