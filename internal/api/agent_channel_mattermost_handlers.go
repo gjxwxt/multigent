@@ -30,14 +30,20 @@ func (s *Server) handleMattermostSlashBind(w http.ResponseWriter, r *http.Reques
 	}
 
 	command := strings.TrimSpace(r.FormValue("command"))
-	if command != "/bind" && command != "/bind-chat" {
-		writeMattermostEphemeral(w, "未知命令。请使用 /bind <绑定码> 进行账号绑定。")
+	switch command {
+	case "/bind", "/bind-chat", "/multigent", "/mg", "/mg-bind":
+		// valid
+	default:
+		writeMattermostEphemeral(w, "未知命令。请使用 /bind <绑定码> 或 /multigent bind <绑定码> 进行账号绑定。")
 		return
 	}
 
 	code := strings.TrimSpace(r.FormValue("text"))
+	if strings.HasPrefix(code, "bind ") {
+		code = strings.TrimSpace(strings.TrimPrefix(code, "bind "))
+	}
 	if code == "" {
-		writeMattermostEphemeral(w, "请提供绑定码。用法：/bind <绑定码>（请在 Multigent 控制台对应 Agent 协作渠道中生成）。")
+		writeMattermostEphemeral(w, "请提供绑定码。用法：/bind <绑定码> 或 /multigent bind <绑定码>（请在 Multigent 控制台对应 Agent 协作渠道中生成）。")
 		return
 	}
 
