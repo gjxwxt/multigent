@@ -16,15 +16,13 @@ func (db *SQLiteStore) UpsertUserChannelIdentity(identity UserChannelIdentity) e
 	if identity.MetadataJSON == "" {
 		identity.MetadataJSON = "{}"
 	}
+	_, _ = db.sql.Exec(`DELETE FROM user_channel_identities WHERE workspace_id = ? AND channel_binding_id = ? AND (external_user_id = ? OR user_id = ?)`,
+		identity.WorkspaceID, identity.ChannelBindingID, identity.ExternalUserID, identity.UserID)
+
 	_, err := db.sql.Exec(`INSERT INTO user_channel_identities (
 	id, workspace_id, user_id, channel_binding_id, provider, external_user_id,
 	external_chat_id, metadata_json, created_by, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(workspace_id, channel_binding_id, user_id) DO UPDATE SET
-	external_user_id = excluded.external_user_id,
-	external_chat_id = excluded.external_chat_id,
-	metadata_json = excluded.metadata_json,
-	updated_at = excluded.updated_at`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		identity.ID, identity.WorkspaceID, identity.UserID, identity.ChannelBindingID, identity.Provider,
 		identity.ExternalUserID, identity.ExternalChatID, identity.MetadataJSON, identity.CreatedBy,
 		identity.CreatedAt, identity.UpdatedAt)

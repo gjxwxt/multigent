@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -167,6 +168,45 @@ func TestMattermostSlashBind_CommandTokenUnauthorized(t *testing.T) {
 	// Security invariant: token mismatch MUST be HTTP 401
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 Unauthorized, got %d", rr.Code)
+	}
+}
+
+func TestMattermostSlashBind_MultiTokenSupport(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	// Multiple comma/space separated tokens configured
+	binding, _ := setupMattermostTestBinding(t, s, workspaceID, "sample", "pm", "tok-bind, tok-multigent, tok-mg")
+
+	now := time.Now().UTC()
+	for i, validTok := range []string{"tok-bind", "tok-multigent", "tok-mg"} {
+		code := fmt.Sprintf("MG-MULTI-%d", i)
+		_ = s.controlDB.CreateAgentChannelBindCode(controldb.AgentChannelBindCode{
+			Code:             code,
+			WorkspaceID:      workspaceID,
+			ChannelBindingID: binding.ID,
+			UserID:           "owner",
+			TargetType:       "user",
+			ExpiresAt:        now.Add(10 * time.Minute).Format(time.RFC3339),
+			CreatedAt:        now.Format(time.RFC3339),
+		})
+
+		form := url.Values{
+			"command": {"/multigent"},
+			"text":    {"bind " + code},
+			"token":   {validTok},
+			"user_id": {fmt.Sprintf("mm-usr-%d", i)},
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/commands/bind", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rr := httptest.NewRecorder()
+		s.handleMattermostSlashBind(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("token %q expected 200, got %d", validTok, rr.Code)
+		}
+		var resp map[string]any
+		_ = json.NewDecoder(rr.Body).Decode(&resp)
+		if resp["response_type"] != "ephemeral" || !strings.Contains(resp["text"].(string), "绑定成功") {
+			t.Fatalf("token %q expected success, got %#v", validTok, resp)
+		}
 	}
 }
 

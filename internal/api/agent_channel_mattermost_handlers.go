@@ -134,7 +134,7 @@ func (s *Server) handleMattermostSlashBind(w http.ResponseWriter, r *http.Reques
 	}
 
 	receivedToken := strings.TrimSpace(r.FormValue("token"))
-	if subtle.ConstantTimeCompare([]byte(receivedToken), []byte(expectedToken)) != 1 {
+	if !isMattermostCommandTokenValid(receivedToken, expectedToken) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -347,3 +347,21 @@ func writeMattermostEphemeral(w http.ResponseWriter, text string) {
 		"text":          text,
 	})
 }
+
+func isMattermostCommandTokenValid(receivedToken, expectedTokens string) bool {
+	if receivedToken == "" || expectedTokens == "" {
+		return false
+	}
+	parts := strings.FieldsFunc(expectedTokens, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\n' || r == '\t'
+	})
+	matched := 0
+	for _, part := range parts {
+		clean := strings.TrimSpace(part)
+		if clean != "" && subtle.ConstantTimeCompare([]byte(receivedToken), []byte(clean)) == 1 {
+			matched = 1
+		}
+	}
+	return matched == 1
+}
+
