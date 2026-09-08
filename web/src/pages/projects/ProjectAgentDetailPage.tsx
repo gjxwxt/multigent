@@ -13,7 +13,7 @@ import type { LucideIcon } from 'lucide-react'
 import { cn } from '../../lib/cn'
 import { useFormatDateTime } from '../../lib/format-datetime'
 import { useApiJson } from '../../lib/use-api'
-import { apiDelete, apiFetch, apiPost, apiPut, apiPatch, apiTeamPath } from '../../lib/api'
+import { apiDelete, apiFetch, apiPost, apiPut, apiPatch, apiTeamPath, ApiError } from '../../lib/api'
 import { canConfigureAgent, canManageProject, canOperateAgent, isTrustedProxyMode, useAuth } from '../../lib/auth'
 import { useWorkspaceAccess } from '../../lib/workspace-access'
 import { Pagination } from '../../components/ui/Pagination'
@@ -664,11 +664,27 @@ function AgentCronSettings({ agentName, projectIds }: { agentName: string; proje
 
   async function load() {
     if (!agentName || projectIds.length === 0) { setCrons([]); return }
-    const responses = await Promise.all(projectIds.map(item => apiFetch<{ project: string; agents?: Array<{ name: string; crons?: Array<Omit<AgentCron, 'project'>> }> }>(`/api/v1/projects/${encodeURIComponent(item)}/schedule`)))
+    const results = await Promise.allSettled(
+      projectIds.map(item =>
+        apiFetch<{ project: string; agents?: Array<{ name: string; crons?: Array<Omit<AgentCron, 'project'>> }> }>(
+          `/api/v1/projects/${encodeURIComponent(item)}/schedule`,
+          { silentStatuses: [404] },
+        )
+      )
+    )
     const next: AgentCron[] = []
-    responses.forEach(response => {
-      const row = (response.agents ?? []).find(item => item.name === agentName)
-      ;(row?.crons ?? []).forEach(cron => next.push({ ...cron, project: response.project }))
+    results.forEach((result, idx) => {
+      if (result.status === 'fulfilled') {
+        const response = result.value
+        const row = (response.agents ?? []).find(item => item.name === agentName)
+        ;(row?.crons ?? []).forEach(cron => next.push({ ...cron, project: response.project }))
+      } else {
+        const err = result.reason
+        if (err instanceof ApiError && err.status === 404) {
+          return
+        }
+        console.warn(`[agent_schedule] failed to load schedule for project ${projectIds[idx]}:`, err)
+      }
     })
     setCrons(next)
   }

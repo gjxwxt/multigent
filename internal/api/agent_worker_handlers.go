@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -83,6 +84,7 @@ func (s *Server) handleAgentWorkers(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, err)
 		return
 	}
+	memberships = s.filterValidProjectMemberships(memberships)
 	membershipsByWorker := make(map[string][]controldb.ProjectMembership, len(workers))
 	roleTeams := s.projectMembershipRoleTeams()
 	membershipTeams := make(map[string]string, len(memberships))
@@ -191,6 +193,7 @@ func (s *Server) handleAgentWorker(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, err)
 		return
 	}
+	memberships = s.filterValidProjectMemberships(memberships)
 	roleTeams := s.projectMembershipRoleTeams()
 	membershipTeams := make(map[string]string, len(memberships))
 	for _, membership := range memberships {
@@ -810,6 +813,32 @@ func normalizeStringList(values []string) []string {
 		}
 		seen[value] = true
 		out = append(out, value)
+	}
+	return out
+}
+
+func (s *Server) filterValidProjectMemberships(memberships []controldb.ProjectMembership) []controldb.ProjectMembership {
+	if s.st == nil {
+		return memberships
+	}
+	projects, err := s.st.ListProjects()
+	if err != nil {
+		log.Printf("[agent_worker] failed to list projects for membership validation: %v; preserving memberships (fail-safe)", err)
+		return memberships
+	}
+	validProjectNames := make(map[string]bool, len(projects))
+	for _, p := range projects {
+		if p != nil && strings.TrimSpace(p.Name) != "" {
+			validProjectNames[strings.TrimSpace(p.Name)] = true
+		}
+	}
+	out := make([]controldb.ProjectMembership, 0, len(memberships))
+	for _, m := range memberships {
+		if validProjectNames[m.ProjectID] {
+			out = append(out, m)
+		} else {
+			log.Printf("[agent_worker] omitting orphaned membership %s for non-existent project %q (member_id=%s)", m.ID, m.ProjectID, m.MemberID)
+		}
 	}
 	return out
 }

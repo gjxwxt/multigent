@@ -318,3 +318,136 @@ func TestPatchProjectAgentUpdatesMembershipBackedWorker(t *testing.T) {
 func boolPtr(v bool) *bool {
 	return &v
 }
+
+func TestAgentWorkers_FiltersOrphanedProjectMemberships(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	now := "2026-09-08T12:00:00Z"
+
+	// Create valid-project in store
+	if err := s.st.SaveProject("valid-project", &entity.Project{
+		Name:        "valid-project",
+		Description: "A valid project",
+	}); err != nil {
+		t.Fatalf("save project: %v", err)
+	}
+
+	// Create agent worker
+	worker := controldb.AgentWorker{
+		ID:          "aw_orphan_test",
+		WorkspaceID: workspaceID,
+		Name:        "agent-filter-test",
+		DisplayName: "Agent Filter Test",
+		Model:       "codex",
+		Status:      "active",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := s.controlDB.UpsertAgentWorker(worker); err != nil {
+		t.Fatalf("upsert worker: %v", err)
+	}
+
+	// Seed one valid membership and one orphaned membership pointing to non-existent 'ghost-project'
+	if err := s.controlDB.UpsertProjectMembership(controldb.ProjectMembership{
+		ID:          "pm_valid",
+		WorkspaceID: workspaceID,
+		ProjectID:   "valid-project",
+		MemberType:  "agent_worker",
+		MemberID:    worker.ID,
+		Role:        "dev",
+		Title:       "agent-filter-test",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("valid membership: %v", err)
+	}
+	if err := s.controlDB.UpsertProjectMembership(controldb.ProjectMembership{
+		ID:          "pm_orphan",
+		WorkspaceID: workspaceID,
+		ProjectID:   "ghost-project",
+		MemberType:  "agent_worker",
+		MemberID:    worker.ID,
+		Role:        "dev",
+		Title:       "agent-filter-test",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("orphan membership: %v", err)
+	}
+
+	// Test 1: GET /api/v1/agents
+	listReq := providerTestRequest(http.MethodGet, "/api/v1/agents", "admin", nil)
+	listRec := httptest.NewRecorder()
+	s.handleAgentWorkers(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("handleAgentWorkers code=%d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var listResp struct {
+		Agents []struct {
+			ID          string `json:"id"`
+			Memberships []struct {
+				ID        string `json:"id"`
+				ProjectID string `json:"projectId"`
+			} `json:"memberships"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("decode list resp: %v", err)
+	}
+	var targetAgent *struct {
+		ID          string `json:"id"`
+		Memberships []struct {
+			ID        string `json:"id"`
+			ProjectID string `json:"projectId"`
+		} `json:"memberships"`
+	}
+	for i := range listResp.Agents {
+		if listResp.Agents[i].ID == worker.ID {
+			targetAgent = &listResp.Agents[i]
+			break
+		}
+	}
+	if targetAgent == nil {
+		t.Fatalf("worker not found in list response")
+	}
+	if len(targetAgent.Memberships) != 1 || targetAgent.Memberships[0].ProjectID != "valid-project" {
+		t.Fatalf("expected exactly 1 valid membership 'valid-project', got: %#v", targetAgent.Memberships)
+	}
+
+	// Test 2: GET /api/v1/agents/{id}
+	getReq := providerTestRequest(http.MethodGet, "/api/v1/agents/"+worker.ID, "admin", nil)
+	getReq.SetPathValue("id", worker.ID)
+	getRec := httptest.NewRecorder()
+	s.handleAgentWorker(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("handleAgentWorker code=%d body=%s", getRec.Code, getRec.Body.String())
+	}
+	var getResp struct {
+		Agent struct {
+			ID string `json:"id"`
+		} `json:"agent"`
+		Memberships []struct {
+			ID        string `json:"id"`
+			ProjectID string `json:"projectId"`
+		} `json:"memberships"`
+	}
+	if err := json.Unmarshal(getRec.Body.Bytes(), &getResp); err != nil {
+		t.Fatalf("decode get resp: %v", err)
+	}
+	if len(getResp.Memberships) != 1 || getResp.Memberships[0].ProjectID != "valid-project" {
+		t.Fatalf("expected exactly 1 valid membership 'valid-project', got: %#v", getResp.Memberships)
+	}
+}
+
+func TestAgentWorkers_NilStore_PreservesMemberships(t *testing.T) {
+	s, _ := newConnectionGrantPolicyServer(t)
+	s.st = nil // Simulate missing store
+
+	rawMemberships := []controldb.ProjectMembership{
+		{ID: "pm1", ProjectID: "some-project"},
+		{ID: "pm2", ProjectID: "another-project"},
+	}
+	filtered := s.filterValidProjectMemberships(rawMemberships)
+	if len(filtered) != 2 {
+		t.Fatalf("expected fail-safe preservation of 2 memberships when s.st is nil, got %d", len(filtered))
+	}
+}

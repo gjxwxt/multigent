@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 
@@ -94,9 +95,16 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 			WorkspaceID: workspaceID,
 			ProjectID:   project,
 		})
-		if err == nil {
-			for _, m := range memberships {
-				_ = s.controlDB.DeleteProjectMembership(workspaceID, m.ID)
+		if err != nil {
+			log.Printf("[project:delete] failed to list memberships for project %s: %v", project, err)
+			s.serverError(w, err)
+			return
+		}
+		for _, m := range memberships {
+			if delErr := s.controlDB.DeleteProjectMembership(workspaceID, m.ID); delErr != nil {
+				log.Printf("[project:delete] failed to delete membership %s for project %s: %v", m.ID, project, delErr)
+				s.serverError(w, delErr)
+				return
 			}
 		}
 	}

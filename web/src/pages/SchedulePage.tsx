@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { Bot, Clock3, Pause, RefreshCw, Zap } from 'lucide-react'
 import { useApiJson } from '../lib/use-api'
 import { cn } from '../lib/cn'
-import { apiFetch, apiPatch } from '../lib/api'
+import { apiFetch, apiPatch, ApiError } from '../lib/api'
 import { showToast } from '../components/ui/Toast'
 import { useWorkspaceAccess } from '../lib/workspace-access'
 import { useFormatDateTime } from '../lib/format-datetime'
@@ -176,19 +176,38 @@ export default function SchedulePage() {
     async function loadCronSummaries() {
       if (projectOptions.length === 0) { setCronSummaries([]); return }
       try {
-        const responses = await Promise.all(projectOptions.map(project => apiFetch<{ project: string; agents?: Array<{ name: string; agentWorkerId?: string; heartbeat?: { enabled?: boolean; nextWakeupAt?: string }; crons?: Array<{ enabled: boolean; nextRun?: string }> }> }>(`/api/v1/projects/${encodeURIComponent(project)}/schedule`)))
+        const results = await Promise.allSettled(
+          projectOptions.map(project =>
+            apiFetch<{ project: string; agents?: Array<{ name: string; agentWorkerId?: string; heartbeat?: { enabled?: boolean; nextWakeupAt?: string }; crons?: Array<{ enabled: boolean; nextRun?: string }> }> }>(
+              `/api/v1/projects/${encodeURIComponent(project)}/schedule`,
+              { silentStatuses: [404] },
+            )
+          )
+        )
         if (cancelled) return
         const next: CronSummary[] = []
-        responses.forEach(response => (response.agents ?? []).forEach(agent => {
-          const crons = agent.crons ?? []
-          const enabledCrons = crons.filter(cron => cron.enabled)
-          const nextRunCandidates = enabledCrons
-            .map(cron => cron.nextRun)
-            .filter((value): value is string => Boolean(value))
-          if (agent.heartbeat?.enabled && agent.heartbeat.nextWakeupAt) nextRunCandidates.push(agent.heartbeat.nextWakeupAt)
-          const nextRun = nextRunCandidates.sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0]
-          if (crons.length > 0 || nextRun) next.push({ project: response.project, agent: agent.name, agentWorkerId: agent.agentWorkerId, count: crons.length, enabled: enabledCrons.length, nextRun })
-        }))
+        results.forEach((result, idx) => {
+          if (result.status === 'fulfilled') {
+            const response = result.value
+            ;(response.agents ?? []).forEach(agent => {
+              const crons = agent.crons ?? []
+              const enabledCrons = crons.filter(cron => cron.enabled)
+              const nextRunCandidates = enabledCrons
+                .map(cron => cron.nextRun)
+                .filter((value): value is string => Boolean(value))
+              if (agent.heartbeat?.enabled && agent.heartbeat.nextWakeupAt) nextRunCandidates.push(agent.heartbeat.nextWakeupAt)
+              const nextRun = nextRunCandidates.sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0]
+              if (crons.length > 0 || nextRun) next.push({ project: response.project, agent: agent.name, agentWorkerId: agent.agentWorkerId, count: crons.length, enabled: enabledCrons.length, nextRun })
+            })
+          } else {
+            const err = result.reason
+            if (err instanceof ApiError && err.status === 404) {
+              // Gracefully skip deleted/non-existent project schedule
+              return
+            }
+            console.warn(`[schedule] failed to load schedule for project ${projectOptions[idx]}:`, err)
+          }
+        })
         setCronSummaries(next)
       } catch {
         if (!cancelled) setCronSummaries([])
