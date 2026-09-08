@@ -58,3 +58,8 @@ internal/dev/
 
 # Local agent memory (workbuddy)
 .workbuddy/
+
+# Keep the empty web root required by the generated Go template's go:embed.
+!internal/projecttemplate/files/react_go_fullstack/server/webui/
+!internal/projecttemplate/files/react_go_fullstack/server/webui/dist/
+!internal/projecttemplate/files/react_go_fullstack/server/webui/dist/placeholder.txt
