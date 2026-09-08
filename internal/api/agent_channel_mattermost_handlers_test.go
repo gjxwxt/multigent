@@ -417,3 +417,80 @@ func TestSaveManualAgentIMChannel_RejectsDuplicateBotID(t *testing.T) {
 		t.Fatalf("expected already bound error, got: %v", err)
 	}
 }
+
+func TestMattermostSlash_StatusAndHelp(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	setupMattermostTestBinding(t, s, workspaceID, "1test", "Mira", "tok-123")
+
+	// 1. Test /multigent help
+	form := url.Values{
+		"command": {"/multigent"},
+		"text":    {"help"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/commands/bind", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+
+	s.handleMattermostSlashBind(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("help response status: %d", rec.Code)
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	text, _ := resp["text"].(string)
+	if !strings.Contains(text, "Multigent ChatOps 协同指令指南") {
+		t.Errorf("expected help text, got: %s", text)
+	}
+
+	// 2. Test /multigent status (unbound)
+	formStatusUnbound := url.Values{
+		"command":   {"/multigent"},
+		"text":      {"status"},
+		"user_id":   {"mm-unbound-user"},
+		"user_name": {"stranger"},
+	}
+	reqUnbound := httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/commands/bind", strings.NewReader(formStatusUnbound.Encode()))
+	reqUnbound.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recUnbound := httptest.NewRecorder()
+
+	s.handleMattermostSlashBind(recUnbound, reqUnbound)
+	var respUnbound map[string]any
+	_ = json.Unmarshal(recUnbound.Body.Bytes(), &respUnbound)
+	textUnbound, _ := respUnbound["text"].(string)
+	if !strings.Contains(textUnbound, "未绑定") {
+		t.Errorf("expected unbound status, got: %s", textUnbound)
+	}
+
+	// 3. Test /multigent status (bound)
+	_ = s.controlDB.UpsertUser(controldb.User{
+		Username: "alex",
+		Role:     "manager",
+	})
+	_ = s.controlDB.UpsertUserChannelIdentity(controldb.UserChannelIdentity{
+		ID:               "alex-identity",
+		WorkspaceID:      workspaceID,
+		UserID:           "alex",
+		ChannelBindingID: "chan-mm-1test-Mira",
+		Provider:         "mattermost",
+		ExternalUserID:   "mm-user-alex",
+	})
+
+	formStatusBound := url.Values{
+		"command":   {"/mg"},
+		"text":      {"status"},
+		"user_id":   {"mm-user-alex"},
+		"user_name": {"alex"},
+	}
+	reqBound := httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/commands/bind", strings.NewReader(formStatusBound.Encode()))
+	reqBound.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recBound := httptest.NewRecorder()
+
+	s.handleMattermostSlashBind(recBound, reqBound)
+	var respBound map[string]any
+	_ = json.Unmarshal(recBound.Body.Bytes(), &respBound)
+	textBound, _ := respBound["text"].(string)
+	if !strings.Contains(textBound, "@alex") || !strings.Contains(textBound, "已就绪") {
+		t.Errorf("expected bound status with @alex and 已就绪, got: %s", textBound)
+	}
+}
+

@@ -22,16 +22,19 @@ import (
 type TaskThreadProjectionService struct {
 	store      controldb.Store
 	httpClient *http.Client
+	debouncer  *LiveCardDebouncer
 }
 
 func NewTaskThreadProjectionService(store controldb.Store, client *http.Client) *TaskThreadProjectionService {
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &TaskThreadProjectionService{
+	s := &TaskThreadProjectionService{
 		store:      store,
 		httpClient: client,
 	}
+	s.debouncer = NewLiveCardDebouncer(1500*time.Millisecond, s.patchLiveCardDirect)
+	return s
 }
 
 // HTTPClient returns the HTTP client configured for projection service.
@@ -101,32 +104,22 @@ func (s *TaskThreadProjectionService) EnsureTaskRootPost(ctx context.Context, re
 		return "", fmt.Errorf("no target channel configured for project %s", req.ProjectID)
 	}
 
-	// 3. Format Task Root Post
-	title := req.TaskTitle
-	if title == "" {
-		title = req.TaskID
-	}
-	pipelineInfo := req.PipelineID
-	if pipelineInfo == "" {
-		pipelineInfo = "standard"
-	}
-	initiator := req.CreatedBy
-	if initiator == "" {
-		initiator = "system"
-	}
+	// 3. Format Task Root Post as Live Task Card
+	content := FormatLiveCardContent(LiveCardUpdateRequest{
+		WorkspaceID:   req.WorkspaceID,
+		ProjectID:     req.ProjectID,
+		TaskID:        req.TaskID,
+		TaskTitle:     req.TaskTitle,
+		PipelineID:    req.PipelineID,
+		Initiator:     req.CreatedBy,
+		CurrentStepID: "init",
+		CurrentStep:   "任务已启动，正在准备执行环境...",
+		StepStatus:    "running",
+		StepIndex:     0,
+		TotalSteps:    10,
+	})
 
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("### 📋 [Task] %s\n", title))
-	sb.WriteString(fmt.Sprintf("> **Task ID**: `%s` | **Project**: `%s` | **Pipeline**: `%s`\n", req.TaskID, req.ProjectID, pipelineInfo))
-	sb.WriteString(fmt.Sprintf("> **Initiator**: `@%s` | **Status**: 🚀 Running\n\n", initiator))
-	if req.TaskSummary != "" {
-		sb.WriteString("**Summary**:\n")
-		sb.WriteString(req.TaskSummary)
-		sb.WriteString("\n\n")
-	}
-	sb.WriteString("---\n*All progress updates, reviews, and handoffs for this task will be logged in this thread.*")
-
-	postID, err := s.createPost(ctx, baseURL, botToken, channelID, "", sb.String())
+	postID, err := s.createPost(ctx, baseURL, botToken, channelID, "", content)
 	if err != nil {
 		return "", fmt.Errorf("create task root post: %w", err)
 	}
@@ -402,6 +395,62 @@ func (s *TaskThreadProjectionService) RemoveCardActionsAndSetStatus(ctx context.
 	return nil
 }
 
+// UpdateTaskRootPostLiveCard queues a Live Card update (throttled by 1.5s in-memory debouncer).
+func (s *TaskThreadProjectionService) UpdateTaskRootPostLiveCard(ctx context.Context, req LiveCardUpdateRequest) error {
+	if s == nil || s.debouncer == nil {
+		return nil
+	}
+	return s.debouncer.Schedule(ctx, req)
+}
+
+func (s *TaskThreadProjectionService) patchLiveCardDirect(ctx context.Context, req LiveCardUpdateRequest) error {
+	if req.WorkspaceID == "" || req.TaskID == "" {
+		return fmt.Errorf("workspaceID and taskID are required")
+	}
+	active, found, err := s.store.ActiveTaskThreadProjection(req.WorkspaceID, req.TaskID, "mattermost")
+	if err != nil {
+		return fmt.Errorf("query active projection: %w", err)
+	}
+	if !found || active.RootPostID == "" {
+		return nil
+	}
+
+	baseURL, botToken, _, _, _, err := s.resolveMMTarget(req.WorkspaceID, req.ProjectID, active.ChannelID)
+	if err != nil {
+		return fmt.Errorf("resolve credentials: %w", err)
+	}
+
+	content := FormatLiveCardContent(req)
+	patchPayload := map[string]any{
+		"message": content,
+	}
+
+	baseURL = strings.TrimRight(baseURL, "/")
+	bodyBytes, err := json.Marshal(patchPayload)
+	if err != nil {
+		return err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, baseURL+"/api/v4/posts/"+active.RootPostID+"/patch", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+botToken)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.httpClient.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("mattermost patch live card (%d): %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
 // CloseTaskThread posts a completion message and marks the thread projection as closed.
 func (s *TaskThreadProjectionService) CloseTaskThread(ctx context.Context, workspaceID, projectID, taskID, finalSummary string) error {
 	active, found, err := s.store.ActiveTaskThreadProjection(workspaceID, taskID, "mattermost")
@@ -409,14 +458,28 @@ func (s *TaskThreadProjectionService) CloseTaskThread(ctx context.Context, works
 		return nil
 	}
 
+	// Update Live Task Card to final completed state immediately
+	_ = s.patchLiveCardDirect(ctx, LiveCardUpdateRequest{
+		WorkspaceID:    workspaceID,
+		ProjectID:      projectID,
+		TaskID:         taskID,
+		StepStatus:     "completed",
+		CurrentStep:    "全部交付阶段完成",
+		CurrentStepID:  "done",
+		StepIndex:      10,
+		TotalSteps:     10,
+		QualitySummary: "✓ 全流程顺利完结 | 已归档",
+		ForceImmediate: true,
+	})
+
 	baseURL, botToken, _, _, _, err := s.resolveMMTarget(workspaceID, projectID, active.ChannelID)
 	if err == nil {
 		var sb strings.Builder
-		sb.WriteString("### 🏁 Task Delivery Completed\n")
+		sb.WriteString("### 🏁 任务交付已完结 (Task Delivery Completed)\n")
 		if finalSummary != "" {
-			sb.WriteString(fmt.Sprintf("- **Final Summary**: %s\n", finalSummary))
+			sb.WriteString(fmt.Sprintf("- **最终摘要**: %s\n", finalSummary))
 		}
-		sb.WriteString("- **Status**: Closed. All delivery stages finished.")
+		sb.WriteString("- **状态**: 流程顺利闭环，已归档。")
 		_, _ = s.createPost(ctx, baseURL, botToken, active.ChannelID, active.RootPostID, sb.String())
 	}
 

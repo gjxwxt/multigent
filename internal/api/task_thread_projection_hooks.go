@@ -103,6 +103,46 @@ func (s *Server) notifyTaskThreadStepTransition(workspaceID, project string, t *
 			stepTitle = transition.Next.Title
 		}
 
+		// Calculate workflow progress metrics
+		totalSteps := 10
+		stepIndex := 1
+		if s.controlDB != nil {
+			wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+			if run, ok, err := wfStore.RunForTask(project, t.ID); err == nil && ok {
+				if def, ok, err := wfStore.RunDefinition(run); err == nil && ok && len(def.Steps) > 0 {
+					totalSteps = len(def.Steps)
+					for idx, st := range def.Steps {
+						if st.ID == transition.Current.StepID {
+							stepIndex = idx + 1
+							break
+						}
+					}
+				}
+			}
+		}
+
+		var elapsedSec int
+		if t != nil && !t.CreatedAt.IsZero() {
+			elapsedSec = int(time.Since(t.CreatedAt).Seconds())
+		}
+
+		// S0: Update Live Task Card (in-place Root Post patch with 1.5s debouncing)
+		_ = s.threadProjections.UpdateTaskRootPostLiveCard(ctx, imbridge.LiveCardUpdateRequest{
+			WorkspaceID:    workspaceID,
+			ProjectID:      project,
+			TaskID:         t.ID,
+			TaskTitle:      t.Title,
+			CurrentStepID:  transition.Current.StepID,
+			CurrentStep:    stepTitle,
+			StepStatus:     transition.Current.Status,
+			StepIndex:      stepIndex,
+			TotalSteps:     totalSteps,
+			Assignee:       transition.Current.ActorID,
+			ElapsedSeconds: elapsedSec,
+			ForceImmediate: transition.Done || (transition.Next != nil && strings.TrimSpace(transition.Next.Type) == "human_review"),
+		})
+
+		// S1 / S2: Thread replies for milestone / step completion
 		_ = s.threadProjections.PostStepTransition(ctx, imbridge.StepTransitionPostRequest{
 			WorkspaceID:  workspaceID,
 			ProjectID:    project,
@@ -123,7 +163,7 @@ func (s *Server) notifyTaskThreadStepTransition(workspaceID, project string, t *
 			}
 			_ = s.threadProjections.CloseTaskThread(ctx, workspaceID, project, t.ID, finalSummary)
 		} else if transition.Next != nil && strings.TrimSpace(transition.Next.Type) == "human_review" {
-			// Human review gate reached! Dispatch interactive review card to thread.
+			// S3: Human review gate reached! Dispatch interactive review card to thread.
 			if s.controlDB != nil {
 				wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
 				preview, err := wfStore.GetReviewResolutionPreview(project, t, transition.Next.ID)

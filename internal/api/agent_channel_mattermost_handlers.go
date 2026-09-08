@@ -38,12 +38,22 @@ func (s *Server) handleMattermostSlashBind(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	code := strings.TrimSpace(r.FormValue("text"))
+	rawText := strings.TrimSpace(r.FormValue("text"))
+	if rawText == "status" {
+		s.handleMattermostStatus(w, r)
+		return
+	}
+	if rawText == "help" || (rawText == "" && (command == "/multigent" || command == "/mg")) {
+		s.handleMattermostHelp(w, r)
+		return
+	}
+
+	code := rawText
 	if strings.HasPrefix(code, "bind ") {
 		code = strings.TrimSpace(strings.TrimPrefix(code, "bind "))
 	}
 	if code == "" {
-		writeMattermostEphemeral(w, "请提供绑定码。用法：/bind <绑定码> 或 /multigent bind <绑定码>（请在 Multigent 控制台对应 Agent 协作渠道中生成）。")
+		writeMattermostEphemeral(w, "请提供绑定码。用法：/bind <绑定码> 或 /multigent bind <绑定码>（请在 Multigent 控制台对应 Agent 协作渠道中生成）。输入 /multigent help 查看帮助。")
 		return
 	}
 
@@ -277,6 +287,57 @@ func (s *Server) handleMattermostSlashBind(w http.ResponseWriter, r *http.Reques
 
 	agentLabel := s.agentChannelDisplayName(binding)
 	writeMattermostEphemeral(w, fmt.Sprintf("绑定成功！您已将 Mattermost 账号与 Multigent 关联。之后 %s 可以通过 Mattermost 通知你。", agentLabel))
+}
+
+func (s *Server) handleMattermostStatus(w http.ResponseWriter, r *http.Request) {
+	mmUserID := strings.TrimSpace(r.FormValue("user_id"))
+	if mmUserID == "" {
+		writeMattermostEphemeral(w, "无法获取 Mattermost 用户 ID。")
+		return
+	}
+
+	identities, err := s.controlDB.ListUserChannelIdentities(controldb.UserChannelIdentityFilter{
+		Provider:       "mattermost",
+		ExternalUserID: mmUserID,
+	})
+	if err != nil {
+		s.serverError(w, err)
+		return
+	}
+
+	if len(identities) == 0 {
+		msg := "### ℹ️ Multigent 账号状态 (未绑定)\n" +
+			"当前 Mattermost 账号尚未绑定到 Multigent 平台。\n\n" +
+			"**快速绑定步骤**：\n" +
+			"1. 在浏览器登录 Multigent 平台；\n" +
+			"2. 进入 Agent 渠道设置并点击「生成绑定码」（获得 `MG-xxxx`）；\n" +
+			"3. 在 Mattermost 中输入 `/multigent bind <绑定码>` 完成持有认证。"
+		writeMattermostEphemeral(w, msg)
+		return
+	}
+
+	identity := identities[0]
+	user, userFound, _ := s.controlDB.UserByUsername(identity.UserID)
+	roleName := "普通成员 (Member)"
+	if userFound && user.Role != "" {
+		roleName = user.Role
+	}
+
+	msg := fmt.Sprintf("### ℹ️ Multigent 账号协同状态 (已就绪)\n"+
+		"> **平台用户名**: `@%s` | **权限角色**: `%s`\n"+
+		"> **协同渠道**: `Mattermost` | **出站路由**: `全工作区通行 (D6 Ready)`\n\n"+
+		"**已启用特性**: ✅ Dual CAS 防漂移保护 · ✅ Task Thread 实时看板 · ✅ 1-Click / Dialog 审批\n\n"+
+		"*💡 如需绑定其他账号，可输入 `/multigent bind <新绑定码>`*", identity.UserID, roleName)
+	writeMattermostEphemeral(w, msg)
+}
+
+func (s *Server) handleMattermostHelp(w http.ResponseWriter, r *http.Request) {
+	msg := "### 🤖 Multigent ChatOps 协同指令指南 (Ambient Workspace)\n\n" +
+		"- `/multigent bind <绑定码>`: 绑定您的 Mattermost 账号与 Multigent 开发者身份 (PoP 持据防伪)。\n" +
+		"- `/multigent status`: 查看当前账号的绑定状态、权限角色与可用能力。\n" +
+		"- `/multigent help`: 查看此帮助手册。\n\n" +
+		"*支持快捷别名: `/mg bind <码>`、`/mg status`、`/bind <码>`*"
+	writeMattermostEphemeral(w, msg)
 }
 
 func writeMattermostEphemeral(w http.ResponseWriter, text string) {

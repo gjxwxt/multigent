@@ -269,7 +269,11 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 
 	// 7. Dual CAS check (StateVersion + SnapshotHash)
 	if err := workflow.ValidateReviewCAS(preview.ExpectedStateVersion, tokenData.ExpectedStateVersion, preview.ReviewSnapshotHash, tokenData.ReviewSnapshotHash); err != nil {
-		writeMattermostEphemeral(w, "⚠️ 审批冲突 (409 Conflict)：该任务的审核内容或上游产物已发生变更，请刷新任务 Thread 重新确认。")
+		msg := "### ⚠️ 审批标的已发生更新 (409 Conflict: Protected)\n" +
+			"> **保护机制触发**: 系统检测到您查看卡片后，上游产物或工作流状态已发生变更（版本/指纹防漂移）。\n" +
+			"> **安全说明**: 原卡片已为您保护性失效，防止误批旧代码。\n\n" +
+			"💡 **请查看 Thread 中最新推送的待审卡片，或前往 Multigent 控制台完成审批。**"
+		writeMattermostEphemeral(w, msg)
 		return
 	}
 

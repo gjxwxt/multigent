@@ -1036,6 +1036,16 @@ func (s *Server) runtimeChannelToRow(principal runtimeAgentPrincipal, binding co
 			return runtimeChannelRow{}, identityErr
 		}
 		row.CanNotify = len(identities) > 0
+		// D6 Fallback: check workspace-wide user identities for this provider
+		if !row.CanNotify {
+			wsIdentities, wsErr := s.controlDB.ListUserChannelIdentities(controldb.UserChannelIdentityFilter{
+				WorkspaceID: principal.WorkspaceID,
+				Provider:    binding.Provider,
+			})
+			if wsErr == nil && len(wsIdentities) > 0 {
+				row.CanNotify = true
+			}
+		}
 	}
 	// A source target is resolved from the current attention signal rather than
 	// from a static owner/chat binding. It is still a valid notification route
@@ -1140,7 +1150,17 @@ func (s *Server) runtimeNotifyTargetForRecipient(principal runtimeAgentPrincipal
 		return imbridge.OutgoingTarget{}, false, err
 	}
 	if len(identities) == 0 {
-		return imbridge.OutgoingTarget{}, false, nil
+		// D6 Fallback: fallback to workspace-wide user identities if not bound under this specific agent binding
+		wsIdentities, wsErr := s.controlDB.ListUserChannelIdentities(controldb.UserChannelIdentityFilter{
+			WorkspaceID: principal.WorkspaceID,
+			UserID:      recipient,
+			Provider:    binding.Provider,
+		})
+		if wsErr == nil && len(wsIdentities) > 0 {
+			identities = wsIdentities
+		} else {
+			return imbridge.OutgoingTarget{}, false, nil
+		}
 	}
 	identity := identities[0]
 	if externalUserID := strings.TrimSpace(identity.ExternalUserID); externalUserID != "" {
