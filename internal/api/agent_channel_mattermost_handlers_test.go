@@ -358,6 +358,93 @@ func TestMattermostSlashBind_Success_UserAndB4Routing(t *testing.T) {
 	}
 }
 
+func TestMattermostSlashBind_ConflictRejectsTakeover(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	binding, _ := setupMattermostTestBinding(t, s, workspaceID, "sample", "lina", "tok-sample")
+
+	_ = s.users.CreateUser("alice", "pass", RoleMember, "", "", "", "", "")
+	_ = s.controlDB.UpsertWorkspaceMember(workspaceID, "alice", WorkspaceRoleMember)
+	_ = s.users.CreateUser("bob", "pass", RoleMember, "", "", "", "", "")
+	_ = s.controlDB.UpsertWorkspaceMember(workspaceID, "bob", WorkspaceRoleMember)
+
+	now := time.Now().UTC()
+	// 1. User A binds external user "mm-alice"
+	codeA := "MG-ALICE1"
+	_ = s.controlDB.CreateAgentChannelBindCode(controldb.AgentChannelBindCode{
+		Code:             codeA,
+		WorkspaceID:      workspaceID,
+		ChannelBindingID: binding.ID,
+		UserID:           "alice",
+		TargetType:       "user",
+		ExpiresAt:        now.Add(10 * time.Minute).Format(time.RFC3339),
+		CreatedAt:        now.Format(time.RFC3339),
+	})
+
+	formA := url.Values{
+		"command":    {"/mg"},
+		"text":       {"bind " + codeA},
+		"token":      {"tok-sample"},
+		"user_id":    {"mm-alice"},
+		"channel_id": {"ch-direct-alice"},
+	}
+	reqA := httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/commands/bind", strings.NewReader(formA.Encode()))
+	reqA.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rrA := httptest.NewRecorder()
+	s.handleMattermostSlashBind(rrA, reqA)
+	if rrA.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for Alice, got %d", rrA.Code)
+	}
+
+	// 2. User Bob tries to bind the same external user "mm-alice"
+	codeB := "MG-BOB123"
+	_ = s.controlDB.CreateAgentChannelBindCode(controldb.AgentChannelBindCode{
+		Code:             codeB,
+		WorkspaceID:      workspaceID,
+		ChannelBindingID: binding.ID,
+		UserID:           "bob",
+		TargetType:       "user",
+		ExpiresAt:        now.Add(10 * time.Minute).Format(time.RFC3339),
+		CreatedAt:        now.Format(time.RFC3339),
+	})
+
+	formB := url.Values{
+		"command":    {"/mg"},
+		"text":       {"bind " + codeB},
+		"token":      {"tok-sample"},
+		"user_id":    {"mm-alice"}, // SAME external user!
+		"channel_id": {"ch-direct-alice"},
+	}
+	reqB := httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/commands/bind", strings.NewReader(formB.Encode()))
+	reqB.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rrB := httptest.NewRecorder()
+	s.handleMattermostSlashBind(rrB, reqB)
+	if rrB.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK (ephemeral response), got %d", rrB.Code)
+	}
+
+	var respB map[string]any
+	_ = json.NewDecoder(rrB.Body).Decode(&respB)
+	respText, _ := respB["text"].(string)
+	if !strings.Contains(respText, "绑定失败") || !strings.Contains(respText, "@alice") {
+		t.Fatalf("expected conflict failure mentioning @alice, got: %s", respText)
+	}
+
+	// Verify Bob's bind code was NOT marked used
+	codeRowB, _, _ := s.controlDB.AgentChannelBindCodeByCode(codeB)
+	if strings.TrimSpace(codeRowB.UsedAt) != "" {
+		t.Fatalf("expected codeB to remain unused on conflict rejection")
+	}
+
+	// Verify external identity is STILL alice
+	ext, ok, err := s.controlDB.ExternalIdentityByExternalID(workspaceID, "mattermost", "mm-alice")
+	if err != nil || !ok {
+		t.Fatalf("external identity lookup: ok=%v err=%v", ok, err)
+	}
+	if ext.UserID != "alice" {
+		t.Fatalf("expected external identity to remain 'alice', but got: %s", ext.UserID)
+	}
+}
+
 func TestMattermostSlashBind_Success_Chat(t *testing.T) {
 	s, workspaceID := newConnectionGrantPolicyServer(t)
 	binding, _ := setupMattermostTestBinding(t, s, workspaceID, "sample", "pm", "tok-chat")

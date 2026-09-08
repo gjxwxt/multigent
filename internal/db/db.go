@@ -124,6 +124,7 @@ type Store interface {
 	CreateAgentChannelBindCode(code AgentChannelBindCode) error
 	AgentChannelBindCodeByCode(code string) (AgentChannelBindCode, bool, error)
 	MarkAgentChannelBindCodeUsed(code, usedAt string) error
+	UnbindUserConnection(workspaceID, userID, connectionID string) error
 
 	CreateInteractionSession(session InteractionSession) error
 	UpdateInteractionSession(session InteractionSession) error

@@ -247,6 +247,17 @@ func (s *Server) handleMattermostSlashBind(w http.ResponseWriter, r *http.Reques
 		"workspaceId":      binding.WorkspaceID,
 	})
 
+	// Conflict defense: reject if this external Mattermost account is already bound to another Multigent user
+	existingExt, foundExt, err := s.controlDB.ExternalIdentityByExternalID(binding.WorkspaceID, "mattermost", senderUserID)
+	if err != nil {
+		s.serverError(w, err)
+		return
+	}
+	if foundExt && existingExt.UserID != "" && existingExt.UserID != codeRow.UserID {
+		writeMattermostEphemeral(w, fmt.Sprintf("绑定失败：该 Mattermost 账号已绑定至 Multigent 用户 @%s。如需改绑，请先由原账号在个人中心解除绑定或联系管理员。", existingExt.UserID))
+		return
+	}
+
 	if err := s.controlDB.UpsertUserChannelIdentity(controldb.UserChannelIdentity{
 		ID:               newChannelID("uch"),
 		WorkspaceID:      binding.WorkspaceID,
@@ -264,7 +275,7 @@ func (s *Server) handleMattermostSlashBind(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	_ = s.controlDB.UpsertExternalIdentity(controldb.ExternalIdentity{
+	if err := s.controlDB.UpsertExternalIdentity(controldb.ExternalIdentity{
 		ID:             newChannelID("ext"),
 		WorkspaceID:    binding.WorkspaceID,
 		Provider:       "mattermost",
@@ -274,7 +285,10 @@ func (s *Server) handleMattermostSlashBind(w http.ResponseWriter, r *http.Reques
 		CreatedBy:      codeRow.UserID,
 		CreatedAt:      nowStr,
 		UpdatedAt:      nowStr,
-	})
+	}); err != nil {
+		s.serverError(w, err)
+		return
+	}
 
 	binding.LastActivityAt = nowStr
 	binding.UpdatedAt = nowStr

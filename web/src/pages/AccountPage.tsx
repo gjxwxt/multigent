@@ -10,6 +10,7 @@ import type { ThemeMode } from '../theme/ThemeProvider'
 import { useTheme } from '../theme/ThemeProvider'
 import { confirmDialog } from '../components/ui/ConfirmDialog'
 import { overlayDismissProps } from '../components/ui/overlay'
+import { IMIdentitiesSection } from '../components/account/IMIdentitiesSection'
 
 const selectCls =
   'h-9 w-52 rounded-md border border-neutral-200/80 bg-white px-2.5 text-sm text-neutral-800 outline-none transition-colors focus:border-sky-400 dark:border-zinc-700/60 dark:bg-zinc-900 dark:text-zinc-200 dark:[color-scheme:dark] [&>option]:dark:bg-zinc-900 [&>option]:dark:text-zinc-200'
@@ -644,6 +645,8 @@ export default function AccountPage() {
             </select>
           </PreferenceRow>
         </section>
+
+        {user && <IMIdentitiesSection />}
 
         {user && <ClientTokensSection />}
 

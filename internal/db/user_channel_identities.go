@@ -200,3 +200,105 @@ func scanAgentChannelBindCode(row interface{ Scan(dest ...any) error }) (AgentCh
 	err := row.Scan(&code.Code, &code.WorkspaceID, &code.ChannelBindingID, &code.UserID, &code.TargetType, &code.TargetName, &code.ExpiresAt, &code.UsedAt, &code.CreatedAt)
 	return code, err
 }
+
+func (db *SQLiteStore) UnbindUserConnection(workspaceID, userID, connectionID string) error {
+	workspaceID = strings.TrimSpace(workspaceID)
+	userID = strings.TrimSpace(userID)
+	connectionID = strings.TrimSpace(connectionID)
+	if workspaceID == "" || userID == "" || connectionID == "" {
+		return errors.New("workspaceID, userID, and connectionID are required")
+	}
+
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// 1. Find all agent_channel_bindings for this connection in this workspace
+	rows, err := tx.Query(`SELECT id, provider FROM agent_channel_bindings WHERE workspace_id = ? AND connection_id = ?`, workspaceID, connectionID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var bindingIDs []string
+	var provider string
+	for rows.Next() {
+		var bid, prov string
+		if err := rows.Scan(&bid, &prov); err != nil {
+			return err
+		}
+		bindingIDs = append(bindingIDs, bid)
+		if provider == "" {
+			provider = prov
+		}
+	}
+	rows.Close()
+
+	if len(bindingIDs) == 0 {
+		return nil
+	}
+
+	// 2. Find external_user_ids for this user under these bindings
+	placeholders := strings.Repeat("?,", len(bindingIDs))
+	placeholders = placeholders[:len(placeholders)-1]
+	queryArgs := []any{workspaceID, userID}
+	for _, bid := range bindingIDs {
+		queryArgs = append(queryArgs, bid)
+	}
+
+	identRows, err := tx.Query(`SELECT DISTINCT external_user_id, provider FROM user_channel_identities 
+WHERE workspace_id = ? AND user_id = ? AND channel_binding_id IN (`+placeholders+`)`, queryArgs...)
+	if err != nil {
+		return err
+	}
+	defer identRows.Close()
+
+	type extInfo struct {
+		extUserID string
+		prov      string
+	}
+	var affectedExts []extInfo
+	for identRows.Next() {
+		var extUser, prov string
+		if err := identRows.Scan(&extUser, &prov); err != nil {
+			return err
+		}
+		affectedExts = append(affectedExts, extInfo{extUserID: extUser, prov: prov})
+	}
+	identRows.Close()
+
+	// 3. Delete user_channel_identities under these bindings
+	deleteQuery := `DELETE FROM user_channel_identities WHERE workspace_id = ? AND user_id = ? AND channel_binding_id IN (` + placeholders + `)`
+	if _, err := tx.Exec(deleteQuery, queryArgs...); err != nil {
+		return err
+	}
+
+	// 4. Invalidate pending bind codes for these bindings
+	now := nowUTC()
+	invalidateQuery := `UPDATE agent_channel_bind_codes SET used_at = ? 
+WHERE workspace_id = ? AND user_id = ? AND channel_binding_id IN (` + placeholders + `) AND (used_at = '' OR used_at IS NULL)`
+	invalidateArgs := append([]any{now, workspaceID, userID}, queryArgs[2:]...)
+	if _, err := tx.Exec(invalidateQuery, invalidateArgs...); err != nil {
+		return err
+	}
+
+	// 5. Check if external_identities still has other bindings for this user
+	for _, ext := range affectedExts {
+		var count int
+		err := tx.QueryRow(`SELECT COUNT(*) FROM user_channel_identities WHERE workspace_id = ? AND user_id = ? AND provider = ? AND external_user_id = ?`,
+			workspaceID, userID, ext.prov, ext.extUserID).Scan(&count)
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			if _, err := tx.Exec(`DELETE FROM external_identities WHERE workspace_id = ? AND user_id = ? AND provider = ? AND external_user_id = ?`,
+				workspaceID, userID, ext.prov, ext.extUserID); err != nil {
+				return err
+			}
+		}
+	}
+
+	return tx.Commit()
+}
