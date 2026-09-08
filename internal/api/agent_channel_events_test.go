@@ -2464,4 +2464,3 @@ func TestMattermostForwardedEventInboundAndC3Isolation(t *testing.T) {
 		}
 	})
 }
-

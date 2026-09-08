@@ -13,11 +13,11 @@ import (
 
 // handleMattermostSlashBind processes the /bind Slash Command from Mattermost.
 // Security Invariants & Design:
-// - B3 + B4: Routing key is the bind code (code.ChannelBindingID directly identifies the binding).
-//   Command Token verifies origin authenticity, but does NOT route.
-// - C1 + Q2: Responses are explicitly ephemeral (response_type: "ephemeral").
-// - §8 Rule 1: Command Token must match the configured commandToken (or verificationToken). Failure => 401.
-// - §8 Rule 9: Plaintext MG- code never stored in audit logs or metadata.
+//   - B3 + B4: Routing key is the bind code (code.ChannelBindingID directly identifies the binding).
+//     Command Token verifies origin authenticity, but does NOT route.
+//   - C1 + Q2: Responses are explicitly ephemeral (response_type: "ephemeral").
+//   - §8 Rule 1: Command Token must match the configured commandToken (or verificationToken). Failure => 401.
+//   - §8 Rule 9: Plaintext MG- code never stored in audit logs or metadata.
 func (s *Server) handleMattermostSlashBind(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -38,12 +38,26 @@ func (s *Server) handleMattermostSlashBind(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	receivedToken := strings.TrimSpace(r.FormValue("token"))
+	if receivedToken == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	rawText := strings.TrimSpace(r.FormValue("text"))
 	if rawText == "status" {
+		if !s.verifyAnyMattermostCommandToken(receivedToken) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		s.handleMattermostStatus(w, r)
 		return
 	}
 	if rawText == "help" || (rawText == "" && (command == "/multigent" || command == "/mg")) {
+		if !s.verifyAnyMattermostCommandToken(receivedToken) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		s.handleMattermostHelp(w, r)
 		return
 	}
@@ -133,7 +147,7 @@ func (s *Server) handleMattermostSlashBind(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	receivedToken := strings.TrimSpace(r.FormValue("token"))
+	receivedToken = strings.TrimSpace(r.FormValue("token"))
 	if !isMattermostCommandTokenValid(receivedToken, expectedToken) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -159,17 +173,17 @@ func (s *Server) handleMattermostSlashBind(w http.ResponseWriter, r *http.Reques
 			chatName = channelID
 		}
 		metaRaw, _ := json.Marshal(map[string]any{
-			"source":          "agent_channel_bind_code",
-			"project":         binding.ProjectID,
-			"agent":           binding.AgentID,
-			"provider":        "mattermost",
-			"targetType":      "chat",
-			"boundAt":         nowStr,
-			"chatId":          channelID,
-			"externalUserId":  senderUserID,
-			"bindCodeHash":    codeHash,
-			"channelId":       binding.ID,
-			"workspaceId":     binding.WorkspaceID,
+			"source":         "agent_channel_bind_code",
+			"project":        binding.ProjectID,
+			"agent":          binding.AgentID,
+			"provider":       "mattermost",
+			"targetType":     "chat",
+			"boundAt":        nowStr,
+			"chatId":         channelID,
+			"externalUserId": senderUserID,
+			"bindCodeHash":   codeHash,
+			"channelId":      binding.ID,
+			"workspaceId":    binding.WorkspaceID,
 		})
 		if err := s.controlDB.UpsertAgentChannelTarget(controldb.AgentChannelTarget{
 			ID:               newChannelID("cht"),
@@ -365,3 +379,32 @@ func isMattermostCommandTokenValid(receivedToken, expectedTokens string) bool {
 	return matched == 1
 }
 
+func (s *Server) verifyAnyMattermostCommandToken(receivedToken string) bool {
+	if receivedToken == "" || s == nil || s.controlDB == nil {
+		return false
+	}
+	conns, err := s.controlDB.ListConnections(controldb.ConnectionFilter{
+		Provider: "mattermost",
+	})
+	if err != nil || len(conns) == 0 {
+		return false
+	}
+	for _, c := range conns {
+		secret, ok, err := s.controlDB.ConnectionSecret(c.ID)
+		if err != nil || !ok {
+			continue
+		}
+		vals, err := openConnectionSecret(secret)
+		if err != nil {
+			continue
+		}
+		tok := strings.TrimSpace(vals["commandToken"])
+		if tok == "" {
+			tok = strings.TrimSpace(vals["verificationToken"])
+		}
+		if isMattermostCommandTokenValid(receivedToken, tok) {
+			return true
+		}
+	}
+	return false
+}

@@ -54,6 +54,8 @@ type TaskRootPostRequest struct {
 	PipelineID  string
 	CreatedBy   string
 	ChannelID   string // Optional: target channel ID. If empty, resolved from project bindings.
+	TotalSteps  int
+	ConsoleURL  string
 }
 
 type StepTransitionPostRequest struct {
@@ -104,6 +106,11 @@ func (s *TaskThreadProjectionService) EnsureTaskRootPost(ctx context.Context, re
 		return "", fmt.Errorf("no target channel configured for project %s", req.ProjectID)
 	}
 
+	totalSteps := req.TotalSteps
+	if totalSteps <= 0 {
+		totalSteps = 1
+	}
+
 	// 3. Format Task Root Post as Live Task Card
 	content := FormatLiveCardContent(LiveCardUpdateRequest{
 		WorkspaceID:   req.WorkspaceID,
@@ -116,7 +123,8 @@ func (s *TaskThreadProjectionService) EnsureTaskRootPost(ctx context.Context, re
 		CurrentStep:   "任务已启动，正在准备执行环境...",
 		StepStatus:    "running",
 		StepIndex:     0,
-		TotalSteps:    10,
+		TotalSteps:    totalSteps,
+		ConsoleURL:    req.ConsoleURL,
 	})
 
 	postID, err := s.createPost(ctx, baseURL, botToken, channelID, "", content)
@@ -452,10 +460,14 @@ func (s *TaskThreadProjectionService) patchLiveCardDirect(ctx context.Context, r
 }
 
 // CloseTaskThread posts a completion message and marks the thread projection as closed.
-func (s *TaskThreadProjectionService) CloseTaskThread(ctx context.Context, workspaceID, projectID, taskID, finalSummary string) error {
+func (s *TaskThreadProjectionService) CloseTaskThread(ctx context.Context, workspaceID, projectID, taskID, finalSummary string, totalSteps int, consoleURL string) error {
 	active, found, err := s.store.ActiveTaskThreadProjection(workspaceID, taskID, "mattermost")
 	if err != nil || !found || active.RootPostID == "" {
 		return nil
+	}
+
+	if totalSteps <= 0 {
+		totalSteps = 1
 	}
 
 	// Update Live Task Card to final completed state immediately
@@ -466,9 +478,10 @@ func (s *TaskThreadProjectionService) CloseTaskThread(ctx context.Context, works
 		StepStatus:     "completed",
 		CurrentStep:    "全部交付阶段完成",
 		CurrentStepID:  "done",
-		StepIndex:      10,
-		TotalSteps:     10,
+		StepIndex:      totalSteps,
+		TotalSteps:     totalSteps,
 		QualitySummary: "✓ 全流程顺利完结 | 已归档",
+		ConsoleURL:     consoleURL,
 		ForceImmediate: true,
 	})
 

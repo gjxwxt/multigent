@@ -137,14 +137,12 @@ func TestWorkflowTaskThreadProjection_Integration(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	if postCount.Load() != 2 {
-		t.Fatalf("expected 2 posts after step transition, got %d", postCount.Load())
-	}
-	if receivedPosts[1]["root_id"] != "mock-post-1" {
-		t.Fatalf("expected reply root_id mock-post-1, got %v", receivedPosts[1]["root_id"])
+	// S0: Routine step "implement" updates Live Card via PATCH, does NOT create noisy thread post!
+	if postCount.Load() != 1 {
+		t.Fatalf("expected 1 root post (silent live card update), got %d posts", postCount.Load())
 	}
 
-	// 4. Trigger completion
+	// 4. Trigger completion (S1: Completion posts delivery summary)
 	doneTransition := workflowstore.TransitionResult{
 		Run: entity.WorkflowRun{
 			ID:     "run-1",
@@ -162,9 +160,12 @@ func TestWorkflowTaskThreadProjection_Integration(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	if postCount.Load() != 4 {
-		// 1 root post + 1 step transition reply + 1 step transition release + 1 close task thread
-		t.Fatalf("expected 4 posts total, got %d", postCount.Load())
+	// 1 root post + 1 close task thread delivery post
+	if postCount.Load() != 2 {
+		t.Fatalf("expected 2 posts total (1 root post + 1 delivery completion post), got %d", postCount.Load())
+	}
+	if receivedPosts[1]["root_id"] != "mock-post-1" {
+		t.Fatalf("expected reply root_id mock-post-1, got %v", receivedPosts[1]["root_id"])
 	}
 
 	// Verify projection is now closed in DB

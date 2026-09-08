@@ -1168,4 +1168,3 @@ func TestRuntimeNotifyUnboundRecipientAndWorkspacePrefix(t *testing.T) {
 		t.Fatalf("expected message %q, got %q", expectedPrefix, receivedPost["message"])
 	}
 }
-

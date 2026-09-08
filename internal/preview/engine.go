@@ -420,18 +420,26 @@ func previewWorktreeMount(worktreeDir string, readOnly bool) string {
 // after a service restart. Containers are only managed when they carry the
 // Multigent preview label; unrelated Docker workloads are untouched.
 func (e *Engine) Reconcile(ctx context.Context) error {
-	// One docker call for the full picture: ID, state, and labels. The
-	// reaper runs this every minute, so a per-container inspect loop would
-	// multiply docker invocations across every preview container.
-	format := `{{.ID}}\t{{.State.Status}}\t{{json .Config.Labels}}`
-	out, err := exec.CommandContext(ctx, "docker", "ps", "-a", "--format", format,
-		"--filter", "label=com.multigent.preview=true").Output()
+	// List container IDs with the preview label
+	out, err := exec.CommandContext(ctx, "docker", "ps", "-aq", "--filter", "label=com.multigent.preview=true").Output()
 	if err != nil {
 		return fmt.Errorf("list preview containers: %w", err)
 	}
+	containerIDs := strings.Fields(string(out))
+	if len(containerIDs) == 0 {
+		return nil
+	}
+
+	// Batch inspect container state and labels in a single invocation
+	format := `{{.Id}}\t{{.State.Status}}\t{{json .Config.Labels}}`
+	inspectArgs := append([]string{"inspect", "--format", format}, containerIDs...)
+	inspectOut, err := exec.CommandContext(ctx, "docker", inspectArgs...).Output()
+	if err != nil {
+		return fmt.Errorf("inspect preview containers: %w", err)
+	}
 
 	now := time.Now().UTC()
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range strings.Split(string(inspectOut), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue

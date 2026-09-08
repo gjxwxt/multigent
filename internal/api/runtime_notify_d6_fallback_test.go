@@ -112,4 +112,40 @@ func TestD6OutboundIdentityFallback(t *testing.T) {
 	if !row.CanNotify {
 		t.Errorf("expected CanNotify=true for Lina via D6 workspace fallback")
 	}
+
+	// 3. Security & Cross-Connection Isolation:
+	// Agent C on a DIFFERENT connection (conn-other) must NOT fallback to Alex's identity on conn-mm!
+	connOther := "conn-mm-other-instance"
+	_ = store.UpsertConnection(controldb.Connection{
+		ID:             connOther,
+		WorkspaceID:    wsID,
+		Provider:       "mattermost",
+		ConnectionName: "mm-conn-other",
+		AuthType:       "bot_token",
+		Status:         "active",
+		ProfileJSON:    "{}",
+	})
+	bindingC := controldb.AgentChannelBinding{
+		ID:           "binding-kobe",
+		WorkspaceID:  wsID,
+		ProjectID:    "1test",
+		AgentID:      "kobe",
+		Provider:     "mattermost",
+		ConnectionID: connOther,
+		Status:       "connected",
+	}
+	_ = store.UpsertAgentChannelBinding(bindingC)
+
+	principalKobe := runtimeAgentPrincipal{
+		WorkspaceID: wsID,
+		Project:     "1test",
+		Agent:       "kobe",
+	}
+	_, foundOther, errOther := server.runtimeNotifyTargetForRecipient(principalKobe, bindingC, "alex")
+	if errOther != nil {
+		t.Fatalf("runtimeNotifyTargetForRecipient other connection failed: %v", errOther)
+	}
+	if foundOther {
+		t.Fatalf("security invariant violated: D6 fallback crossed connection boundary to incompatible connection %s", connOther)
+	}
 }

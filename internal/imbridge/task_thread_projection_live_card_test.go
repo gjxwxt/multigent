@@ -210,7 +210,7 @@ func TestTaskThreadProjectionService_LiveCardPatchE2E(t *testing.T) {
 	}
 
 	// Close task thread and verify final green stamp patch
-	err = svc.CloseTaskThread(ctx, wsID, projID, "task-live-1", "交付完成")
+	err = svc.CloseTaskThread(ctx, wsID, projID, "task-live-1", "交付完成", 10, "")
 	if err != nil {
 		t.Fatalf("CloseTaskThread failed: %v", err)
 	}

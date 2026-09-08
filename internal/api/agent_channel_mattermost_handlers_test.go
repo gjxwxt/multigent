@@ -462,10 +462,25 @@ func TestMattermostSlash_StatusAndHelp(t *testing.T) {
 	s, workspaceID := newConnectionGrantPolicyServer(t)
 	setupMattermostTestBinding(t, s, workspaceID, "1test", "Mira", "tok-123")
 
-	// 1. Test /multigent help
+	// 0. Test unauthorized access without valid token
+	formNoToken := url.Values{
+		"command": {"/multigent"},
+		"text":    {"help"},
+		"token":   {"invalid-tok"},
+	}
+	reqNoTok := httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/commands/bind", strings.NewReader(formNoToken.Encode()))
+	reqNoTok.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recNoTok := httptest.NewRecorder()
+	s.handleMattermostSlashBind(recNoTok, reqNoTok)
+	if recNoTok.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for unauthorized help call, got %d", recNoTok.Code)
+	}
+
+	// 1. Test /multigent help with valid token
 	form := url.Values{
 		"command": {"/multigent"},
 		"text":    {"help"},
+		"token":   {"tok-123"},
 	}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/commands/bind", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -482,10 +497,11 @@ func TestMattermostSlash_StatusAndHelp(t *testing.T) {
 		t.Errorf("expected help text, got: %s", text)
 	}
 
-	// 2. Test /multigent status (unbound)
+	// 2. Test /multigent status (unbound) with valid token
 	formStatusUnbound := url.Values{
 		"command":   {"/multigent"},
 		"text":      {"status"},
+		"token":     {"tok-123"},
 		"user_id":   {"mm-unbound-user"},
 		"user_name": {"stranger"},
 	}
@@ -501,7 +517,7 @@ func TestMattermostSlash_StatusAndHelp(t *testing.T) {
 		t.Errorf("expected unbound status, got: %s", textUnbound)
 	}
 
-	// 3. Test /multigent status (bound)
+	// 3. Test /multigent status (bound) with valid token
 	_ = s.controlDB.UpsertUser(controldb.User{
 		Username: "alex",
 		Role:     "manager",
@@ -518,6 +534,7 @@ func TestMattermostSlash_StatusAndHelp(t *testing.T) {
 	formStatusBound := url.Values{
 		"command":   {"/mg"},
 		"text":      {"status"},
+		"token":     {"tok-123"},
 		"user_id":   {"mm-user-alex"},
 		"user_name": {"alex"},
 	}
@@ -533,4 +550,3 @@ func TestMattermostSlash_StatusAndHelp(t *testing.T) {
 		t.Errorf("expected bound status with @alex and 已就绪, got: %s", textBound)
 	}
 }
-

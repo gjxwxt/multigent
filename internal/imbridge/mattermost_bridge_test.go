@@ -139,9 +139,9 @@ func TestCatchUpChronologicalSortingAndHMAC(t *testing.T) {
 			resp := map[string]any{
 				"order": []string{"post-3", "post-2", "post-bot", "post-1"},
 				"posts": map[string]any{
-					"post-3": postItem{ID: "post-3", CreateAt: 3000, ChannelID: "ch-1", UserID: "user-1", Message: "msg-3"},
-					"post-1": postItem{ID: "post-1", CreateAt: 1000, ChannelID: "ch-1", UserID: "user-1", Message: "msg-1"},
-					"post-2": postItem{ID: "post-2", CreateAt: 2000, ChannelID: "ch-1", UserID: "user-1", Message: "msg-2"},
+					"post-3":   postItem{ID: "post-3", CreateAt: 3000, ChannelID: "ch-1", UserID: "user-1", Message: "msg-3"},
+					"post-1":   postItem{ID: "post-1", CreateAt: 1000, ChannelID: "ch-1", UserID: "user-1", Message: "msg-1"},
+					"post-2":   postItem{ID: "post-2", CreateAt: 2000, ChannelID: "ch-1", UserID: "user-1", Message: "msg-2"},
 					"post-bot": postItem{ID: "post-bot", CreateAt: 2500, ChannelID: "ch-1", UserID: "bot-1", Message: "msg-bot"},
 				},
 			}
@@ -421,5 +421,3 @@ func TestMattermostBridge_PanicRecoveryAndStatus(t *testing.T) {
 	bridge.flushAllCursors()
 	// No panic, cursors flushed
 }
-
-

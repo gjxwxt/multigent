@@ -23,8 +23,8 @@ import (
 
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/gitworktree"
-	workflowstore "github.com/multigent/multigent/internal/workflow"
 	"github.com/multigent/multigent/internal/preview"
+	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
 
 type previewChatSession struct {

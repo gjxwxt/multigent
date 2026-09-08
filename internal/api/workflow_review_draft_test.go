@@ -10,10 +10,10 @@ import (
 func TestStructuredRefOK(t *testing.T) {
 	positive := []string{
 		"92573d15a47976feed3742844735e24fb2a953ca", // full SHA
-		"92573d1",   // short SHA
-		"92573D1",   // uppercase tolerated and normalized by caller
-		"v0.2.0",    // pushed tag
-		"v1.20.3",   // multi-digit tag
+		"92573d1", // short SHA
+		"92573D1", // uppercase tolerated and normalized by caller
+		"v0.2.0",  // pushed tag
+		"v1.20.3", // multi-digit tag
 		"refs/tags/v0.2.0",
 	}
 	negative := []string{

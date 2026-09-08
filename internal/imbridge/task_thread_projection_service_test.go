@@ -151,7 +151,7 @@ func TestTaskThreadProjectionService_E2E(t *testing.T) {
 	}
 
 	// 4. CloseTaskThread posts completion and marks projection closed
-	err = svc.CloseTaskThread(ctx, wsID, "1test", "task-xyz", "All tests passed, v1.0.0 tagged")
+	err = svc.CloseTaskThread(ctx, wsID, "1test", "task-xyz", "All tests passed, v1.0.0 tagged", 10, "")
 	if err != nil {
 		t.Fatalf("CloseTaskThread failed: %v", err)
 	}

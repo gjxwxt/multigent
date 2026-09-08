@@ -32,7 +32,7 @@ graph TB
         BotLina["独立 Bot: @bot-lina (专属 Lina)"]
         ProjChannel["项目频道: #town-square"]
         UserAlex["新人账号: alex (已加入团队)"]
-        
+
         Team --> ProjChannel
         BotMira -.已加入频道.-> ProjChannel
         BotLina -.已加入频道.-> ProjChannel
@@ -43,12 +43,12 @@ graph TB
         Proj["项目: 1test"]
         AgentMira["Agent: Mira (代码编写)"]
         AgentLina["Agent: Lina (代码初审)"]
-        
+
         BindMira["Mira 专属渠道绑定 (conn-mira)"]
         BindLina["Lina 专属渠道绑定 (conn-lina)"]
-        
+
         UserRecord["平台用户: alex (项目 Manager)"]
-        
+
         Workspace --> Proj
         Proj --> AgentMira
         Proj --> AgentLina
@@ -59,7 +59,7 @@ graph TB
     %% 物理连接
     BindMira <==独立 Token==> BotMira
     BindLina <==独立 Token==> BotLina
-    
+
     %% 严格 PoP 绑定约束
     UserRecord -.1. 生成 10 分钟一次性绑定码 MG-xxx.-> UserAlex
     UserAlex ==2. 在 MM 必须发送 /bind MG-xxx (持有证明 PoP)==> ProjChannel
@@ -73,7 +73,7 @@ graph TB
   ```go
   if strings.TrimSpace(b.ExternalBotID) == strings.TrimSpace(result.ExternalBotID) {
       return controldb.AgentChannelBinding{}, fmt.Errorf(
-          "bot %s is already bound to %s/%s in this workspace; each agent must have a dedicated bot account", 
+          "bot %s is already bound to %s/%s in this workspace; each agent must have a dedicated bot account",
           result.ExternalBotID, b.ProjectID, b.AgentID,
       )
   }
@@ -157,7 +157,7 @@ graph TB
         SingleBind["全平台统一账号绑定 (/agent bind)"]
         D6Fallback["D6: 全局出站身份兜底回退 (Outbound Identity Fallback)"]
     end
-    
+
     subgraph 现状 (P1b + Phase 2 - 已落地)
         MultiBots["每 Agent 独立 Bot (bot-mira, bot-lina)"]
         DedicatedConn["1:1 独立连接约束 (复用报 400)"]

@@ -134,12 +134,12 @@ func (mattermostProvider) ParseEvent(raw []byte) (ParsedEvent, error) {
 		return ParsedEvent{}, nil
 	}
 	var post struct {
-		ID       string `json:"id"`
-		CreateAt int64  `json:"create_at"`
-		UserID   string `json:"user_id"`
+		ID        string `json:"id"`
+		CreateAt  int64  `json:"create_at"`
+		UserID    string `json:"user_id"`
 		ChannelID string `json:"channel_id"`
-		Message  string `json:"message"`
-		RootID   string `json:"root_id"`
+		Message   string `json:"message"`
+		RootID    string `json:"root_id"`
 	}
 	if err := json.Unmarshal([]byte(ev.Data.Post), &post); err != nil {
 		return ParsedEvent{}, err

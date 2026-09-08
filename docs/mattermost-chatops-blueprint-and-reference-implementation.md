@@ -1,15 +1,15 @@
 # Multigent × Mattermost: 企业级人机协作 ChatOps 架构蓝图与参考实现规范 (V2 产品重构版)
 
-> **文档性质**: 架构基线与标准参考实现规范 (Architecture Blueprint & Standard Reference Specification)  
-> **适用受众**: 平台架构师、产品负责人、新入职研发人员、接棒维护 Agent、以及希望在自身业务中构建同款 ChatOps 协作系统的其他项目团队。  
-> **核心原则**: **后台可以极度复杂，前台绝不感知复杂。**  
+> **文档性质**: 架构基线与标准参考实现规范 (Architecture Blueprint & Standard Reference Specification)
+> **适用受众**: 平台架构师、产品负责人、新入职研发人员、接棒维护 Agent、以及希望在自身业务中构建同款 ChatOps 协作系统的其他项目团队。
+> **核心原则**: **后台可以极度复杂，前台绝不感知复杂。**
 > **关键机制**: Intent-first 意图路由 · 实时看板 (Live Card) · S0~S3 通知分级 · 领域参数决议 (Domain Resolution) · 状态/指纹双重防漂移 (Dual CAS) · 零信任持据防伪 (PoP)
 
 ---
 
 ## 1. 架构愿景与六大产品交互原则 (Vision & Product UX Principles)
 
-传统 ChatOps 往往沦为“把命令行直接搬进群聊”，让用户去记大量复杂的命令与智能体名称。  
+传统 ChatOps 往往沦为“把命令行直接搬进群聊”，让用户去记大量复杂的命令与智能体名称。
 Multigent ChatOps 的终极愿景不是做一个“打字控制台”，而是打造一个 **环境式智能体工程工作区 (Ambient Agentic Engineering Workspace)**：
 > **Agent 自己持续工作，系统默默推进，人类只在关键决策点 (Decision Point) 出现。**
 
@@ -61,7 +61,7 @@ graph TD
 
 ## 3. S0 ~ S3 通知分级梯队与实时看板机制
 
-在拥有 12~20 个节点的复杂流水线中，如果每个节点的开始与结束都在 Thread 里回帖，会导致 Thread 内部迅速被刷屏炸毁。  
+在拥有 12~20 个节点的复杂流水线中，如果每个节点的开始与结束都在 Thread 里回帖，会导致 Thread 内部迅速被刷屏炸毁。
 系统通过**通知分级机制**，将“工作流执行日志”与“业务里程碑”彻底剥离：
 
 | 级别 | 事件类型 | Mattermost 呈现形态 | 是否打扰人类 |
@@ -93,7 +93,7 @@ graph TD
 ### 4.1 双层交互模型：意图为主，命令为辅
 - **普通用户模式（意图驱动，Intent-first）**：
   在任务 Thread 内部，人类直接输入自然语言，系统根据当前上下文自动推导目标 Agent：
-  > 人类：“`@multigent 帮我补充一下并发锁超时的边界测试用例`”  
+  > 人类：“`@multigent 帮我补充一下并发锁超时的边界测试用例`”
   > 调度器：“识别到当前处于 TASK-102 的 Code Review 阶段，自动路由给测试智能体 Lina 并在当前 Worktree 中执行。”
 - **高级调试模式（命令驱动，Escape Hatch）**：
   保留单根命令空间，供管理员排错与特定定向调用：
@@ -149,7 +149,7 @@ sequenceDiagram
     actor User as 新人 (Alex)
     participant MM as Mattermost
     participant MG as Multigent Web
-    
+
     User->>MM: 初次发消息或点击通知卡片
     MM-->>User: 弹出提示: "检测到未绑定 Multigent 账号 [一键连接平台]"
     User->>MM: 点击 [一键连接平台] 按钮 (带一次性随机 Nonce)

@@ -1036,14 +1036,24 @@ func (s *Server) runtimeChannelToRow(principal runtimeAgentPrincipal, binding co
 			return runtimeChannelRow{}, identityErr
 		}
 		row.CanNotify = len(identities) > 0
-		// D6 Fallback: check workspace-wide user identities for this provider
+		// D6 Fallback: check workspace-wide user identities for this provider sharing the same ConnectionID
 		if !row.CanNotify {
 			wsIdentities, wsErr := s.controlDB.ListUserChannelIdentities(controldb.UserChannelIdentityFilter{
 				WorkspaceID: principal.WorkspaceID,
 				Provider:    binding.Provider,
 			})
 			if wsErr == nil && len(wsIdentities) > 0 {
-				row.CanNotify = true
+				for _, wid := range wsIdentities {
+					if wid.ChannelBindingID == binding.ID {
+						row.CanNotify = true
+						break
+					}
+					otherBinding, otherFound, bErr := s.controlDB.AgentChannelBindingByID(wid.ChannelBindingID)
+					if bErr == nil && otherFound && otherBinding.ConnectionID == binding.ConnectionID {
+						row.CanNotify = true
+						break
+					}
+				}
 			}
 		}
 	}
@@ -1157,8 +1167,20 @@ func (s *Server) runtimeNotifyTargetForRecipient(principal runtimeAgentPrincipal
 			Provider:    binding.Provider,
 		})
 		if wsErr == nil && len(wsIdentities) > 0 {
-			identities = wsIdentities
-		} else {
+			// Security & Connection Isolation: only fallback to identities that share the same ConnectionID (same IM instance)
+			for _, wid := range wsIdentities {
+				if wid.ChannelBindingID == binding.ID {
+					identities = append(identities, wid)
+					break
+				}
+				otherBinding, otherFound, bErr := s.controlDB.AgentChannelBindingByID(wid.ChannelBindingID)
+				if bErr == nil && otherFound && otherBinding.ConnectionID == binding.ConnectionID {
+					identities = append(identities, wid)
+					break
+				}
+			}
+		}
+		if len(identities) == 0 {
 			return imbridge.OutgoingTarget{}, false, nil
 		}
 	}
