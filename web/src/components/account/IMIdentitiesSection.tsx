@@ -22,6 +22,9 @@ type UserIMConnection = {
   providerLabel: string
   status: string
   baseUrl?: string
+  instanceId?: string
+  instanceName?: string
+  instanceTrust?: string
   hasAccess: boolean
   bound: boolean
   externalUserId?: string
@@ -44,6 +47,9 @@ type BindCodeResp = {
 }
 
 function getGroupKey(conn: UserIMConnection): string {
+	if (conn.instanceId) {
+		return `${conn.provider}:instance:${conn.instanceId}`
+	}
   if (!conn.baseUrl) {
     return `conn:${conn.id}`
   }
@@ -62,6 +68,15 @@ function getGroupDisplay(groupConns: UserIMConnection[]) {
   const first = groupConns[0]
   if (!first) return { title: 'IM', subtitle: '', providerLabel: 'IM' }
 
+  if (first.instanceId && first.instanceName) {
+    return {
+      title: `${first.providerLabel} · ${first.instanceName}`,
+      subtitle: first.baseUrl || '',
+      providerLabel: first.providerLabel,
+      trust: first.instanceTrust,
+    }
+  }
+
   let host = ''
   if (first.baseUrl) {
     try {
@@ -77,7 +92,7 @@ function getGroupDisplay(groupConns: UserIMConnection[]) {
   const title = host ? `${first.providerLabel} · ${envHint}` : first.name
   const subtitle = first.baseUrl || ''
 
-  return { title, subtitle, providerLabel: first.providerLabel }
+  return { title, subtitle, providerLabel: first.providerLabel, trust: '' }
 }
 
 function SectionHeader({ title, description }: { title: string; description: string }) {
@@ -285,6 +300,11 @@ export function IMIdentitiesSection() {
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
+                    {group.trust === 'admin_attested' ? (
+                      <span className="rounded-full bg-sky-50 px-2.5 py-0.5 text-xs font-medium text-sky-700 dark:bg-sky-950/30 dark:text-sky-300">
+                        {t('account.imInstanceAdminAttested', { defaultValue: '管理员确认的实例' })}
+                      </span>
+                    ) : null}
                     <span className="rounded-full bg-neutral-100 px-2.5 py-0.5 text-xs font-medium text-neutral-600 dark:bg-zinc-800 dark:text-zinc-300">
                       {t('account.botEndpointsCount', {
                         defaultValue: '{{count}} 个 Bot 接入点',

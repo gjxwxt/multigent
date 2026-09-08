@@ -1,6 +1,6 @@
 {
-  "updatedAt": "2026-09-08T23:20:00+08:00",
-  "activeFeature": "im-instance-foundation",
+  "updatedAt": "2026-09-08T23:58:00+08:00",
+  "activeFeature": "im-instance-routing-hardening",
   "features": [
     {
       "id": "im-identity-center-p0",
@@ -18,14 +18,31 @@
       ]
     },
     {
-      "id": "im-instance-foundation",
-      "status": "planned",
+      "id": "im-instance-association-foundation",
+      "status": "completed",
       "dependsOn": ["im-identity-center-p0"],
-      "summary": "Introduce a verified IM-instance boundary before enabling identity reuse or dynamic direct-message routing across separate bot connections.",
+      "summary": "Administrators can explicitly associate active Agent IM connections with an administrator-attested instance. Account cards use that relationship before falling back to URL-only visual grouping.",
+      "verification": [
+        "go test ./internal/db ./internal/api -run TestIMInstance",
+        "make test",
+        "make web",
+        "make build"
+      ],
+      "boundaries": [
+        "An admin attestation is a control-plane trust decision, not a Mattermost protocol fingerprint.",
+        "The association does not change D6 routing, slash-command routing, or approval identity resolution."
+      ]
+    },
+    {
+      "id": "im-instance-routing-hardening",
+      "status": "planned",
+      "dependsOn": ["im-instance-association-foundation"],
+      "summary": "Make cross-Bot delivery safe only after identity, notification, and approval resolution are all scoped to the same administrator-attested IM instance.",
       "doneWhen": [
-        "A trusted instance association exists for each participating connection.",
-        "Cross-connection identity routing checks that association and live RBAC.",
-        "Same-connection routing remains unchanged."
+        "Mattermost identity conflict checks and callback resolution are instance-scoped rather than provider-global.",
+        "Runtime delivery checks live recipient RBAC for the destination Agent route.",
+        "A cross-Bot direct message opens a destination-Bot DM and never reuses the source Bot channel ID.",
+        "Unassociated connections continue to fail closed."
       ]
     }
   ]

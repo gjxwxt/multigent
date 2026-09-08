@@ -66,6 +66,12 @@ type Store interface {
 	UpdateConnection(connection Connection) error
 	ConnectionByID(id string) (Connection, bool, error)
 	ListConnections(filter ConnectionFilter) ([]Connection, error)
+	UpsertIMInstance(instance IMInstance) error
+	IMInstanceByID(id string) (IMInstance, bool, error)
+	ListIMInstances(filter IMInstanceFilter) ([]IMInstance, error)
+	SetConnectionIMInstance(workspaceID, instanceID, connectionID string) error
+	ClearConnectionIMInstance(workspaceID, instanceID, connectionID string) error
+	DeleteIMInstance(workspaceID, id string) error
 	SetDefaultConnection(workspaceID, connectionID string) error
 	DeleteConnection(id string) error
 	UpsertConnectionSecret(secret ConnectionSecret) error
@@ -274,6 +280,7 @@ type Connection struct {
 	OwnerID        string
 	AuthType       string
 	Status         string
+	IMInstanceID   string
 	ProfileJSON    string
 	CreatedBy      string
 	CreatedAt      string
@@ -327,6 +334,24 @@ type ConnectionFilter struct {
 	OwnerType   string
 	OwnerID     string
 	Status      string
+}
+
+// IMInstance is an administrator-attested collaboration-platform boundary.
+// It intentionally does not claim that a provider URL is a verified tenant ID.
+type IMInstance struct {
+	ID          string
+	WorkspaceID string
+	Provider    string
+	DisplayName string
+	Attestation string
+	CreatedBy   string
+	CreatedAt   string
+	UpdatedAt   string
+}
+
+type IMInstanceFilter struct {
+	WorkspaceID string
+	Provider    string
 }
 
 type ConnectionSecret struct {

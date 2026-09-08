@@ -20,6 +20,9 @@ type agentChannelResponse struct {
 	Provider        string `json:"provider"`
 	Status          string `json:"status"`
 	ConnectionID    string `json:"connectionId,omitempty"`
+	IMInstanceID    string `json:"imInstanceId,omitempty"`
+	IMInstanceName  string `json:"imInstanceName,omitempty"`
+	IMInstanceTrust string `json:"imInstanceTrust,omitempty"`
 	CallbackURL     string `json:"callbackUrl,omitempty"`
 	AppID           string `json:"appId,omitempty"`
 	AccountsURL     string `json:"accountsUrl,omitempty"`
@@ -120,6 +123,7 @@ func (s *Server) handleAgentChannels(w http.ResponseWriter, r *http.Request) {
 	out := make([]agentChannelResponse, 0, len(bindings))
 	for _, binding := range bindings {
 		resp := agentChannelToResponse(binding)
+		s.enrichAgentChannelInstance(&resp)
 		resp.CallbackURL = requestBaseURL(r) + "/api/v1/im/" + binding.Provider + "/events"
 		if secret, ok, err := s.controlDB.ConnectionSecret(binding.ConnectionID); err == nil && ok {
 			if values, err := openConnectionSecret(secret); err == nil {
@@ -151,6 +155,7 @@ func (s *Server) handleAgentWorkerChannels(w http.ResponseWriter, r *http.Reques
 	out := make([]agentChannelResponse, 0, len(bindings))
 	for _, binding := range bindings {
 		resp := agentChannelToResponse(binding)
+		s.enrichAgentChannelInstance(&resp)
 		resp.CallbackURL = requestBaseURL(r) + "/api/v1/im/" + binding.Provider + "/events"
 		if secret, ok, err := s.controlDB.ConnectionSecret(binding.ConnectionID); err == nil && ok {
 			if values, err := openConnectionSecret(secret); err == nil {
@@ -368,6 +373,7 @@ func (s *Server) handleAgentChannelSecurity(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	resp := agentChannelToResponse(binding)
+	s.enrichAgentChannelInstance(&resp)
 	resp.CallbackURL = requestBaseURL(r) + "/api/v1/im/" + binding.Provider + "/events"
 	resp.Security.VerificationTokenConfigured = strings.TrimSpace(values["verificationToken"]) != ""
 	resp.Security.EncryptKeyConfigured = strings.TrimSpace(values["encryptKey"]) != ""
@@ -441,6 +447,7 @@ func (s *Server) handleAgentWorkerChannelSecurity(w http.ResponseWriter, r *http
 		return
 	}
 	resp := agentChannelToResponse(binding)
+	s.enrichAgentChannelInstance(&resp)
 	resp.CallbackURL = requestBaseURL(r) + "/api/v1/im/" + binding.Provider + "/events"
 	resp.Security.VerificationTokenConfigured = strings.TrimSpace(values["verificationToken"]) != ""
 	resp.Security.EncryptKeyConfigured = strings.TrimSpace(values["encryptKey"]) != ""
@@ -490,10 +497,12 @@ func (s *Server) handleAgentChannelSetupPoll(w http.ResponseWriter, r *http.Requ
 		s.serverError(w, err)
 		return
 	}
+	channel := agentChannelToResponse(binding)
+	s.enrichAgentChannelInstance(&channel)
 	resp := map[string]any{
 		"status":  "connected",
 		"baseUrl": poll.BaseURL,
-		"channel": agentChannelToResponse(binding),
+		"channel": channel,
 	}
 	_ = json.NewEncoder(w).Encode(resp)
 }
@@ -533,10 +542,12 @@ func (s *Server) handleAgentWorkerChannelSetupPoll(w http.ResponseWriter, r *htt
 		s.serverError(w, err)
 		return
 	}
+	channel := agentChannelToResponse(binding)
+	s.enrichAgentChannelInstance(&channel)
 	resp := map[string]any{
 		"status":  "connected",
 		"baseUrl": poll.BaseURL,
-		"channel": agentChannelToResponse(binding),
+		"channel": channel,
 	}
 	_ = json.NewEncoder(w).Encode(resp)
 }
@@ -580,6 +591,7 @@ func (s *Server) handleAgentChannelSetupManual(w http.ResponseWriter, r *http.Re
 		return
 	}
 	resp := agentChannelToResponse(binding)
+	s.enrichAgentChannelInstance(&resp)
 	resp.CallbackURL = requestBaseURL(r) + "/api/v1/im/" + binding.Provider + "/events"
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"status":  "connected",
@@ -618,6 +630,7 @@ func (s *Server) handleAgentWorkerChannelSetupManual(w http.ResponseWriter, r *h
 		return
 	}
 	resp := agentChannelToResponse(binding)
+	s.enrichAgentChannelInstance(&resp)
 	resp.CallbackURL = requestBaseURL(r) + "/api/v1/im/" + binding.Provider + "/events"
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"status":  "connected",
@@ -1479,6 +1492,23 @@ func agentChannelToResponse(binding controldb.AgentChannelBinding) agentChannelR
 	resp.Callback.MessageID = meta.LastCallback.MessageID
 	resp.Callback.Error = meta.LastCallback.Error
 	return resp
+}
+
+func (s *Server) enrichAgentChannelInstance(resp *agentChannelResponse) {
+	if s == nil || s.controlDB == nil || resp == nil || strings.TrimSpace(resp.ConnectionID) == "" {
+		return
+	}
+	connection, found, err := s.controlDB.ConnectionByID(resp.ConnectionID)
+	if err != nil || !found || strings.TrimSpace(connection.IMInstanceID) == "" {
+		return
+	}
+	instance, found, err := s.controlDB.IMInstanceByID(connection.IMInstanceID)
+	if err != nil || !found || instance.WorkspaceID != connection.WorkspaceID || instance.Provider != connection.Provider {
+		return
+	}
+	resp.IMInstanceID = instance.ID
+	resp.IMInstanceName = instance.DisplayName
+	resp.IMInstanceTrust = instance.Attestation
 }
 
 func agentChannelConnectionName(project, agent string) string {

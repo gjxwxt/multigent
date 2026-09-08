@@ -20,18 +20,21 @@ type userIMAgentRoute struct {
 }
 
 type userIMConnectionResponse struct {
-	ID               string              `json:"id"`
-	Name             string              `json:"name"`
-	Provider         string              `json:"provider"`
-	ProviderLabel    string              `json:"providerLabel"`
-	Status           string              `json:"status"`
-	BaseURL          string              `json:"baseUrl,omitempty"`
-	HasAccess        bool                `json:"hasAccess"`
-	Bound            bool                `json:"bound"`
-	ExternalUserID   string              `json:"externalUserId,omitempty"`
-	ExternalUsername string              `json:"externalUsername,omitempty"`
-	BoundAt          string              `json:"boundAt,omitempty"`
-	Routes           []userIMAgentRoute  `json:"routes,omitempty"`
+	ID               string             `json:"id"`
+	Name             string             `json:"name"`
+	Provider         string             `json:"provider"`
+	ProviderLabel    string             `json:"providerLabel"`
+	Status           string             `json:"status"`
+	BaseURL          string             `json:"baseUrl,omitempty"`
+	InstanceID       string             `json:"instanceId,omitempty"`
+	InstanceName     string             `json:"instanceName,omitempty"`
+	InstanceTrust    string             `json:"instanceTrust,omitempty"`
+	HasAccess        bool               `json:"hasAccess"`
+	Bound            bool               `json:"bound"`
+	ExternalUserID   string             `json:"externalUserId,omitempty"`
+	ExternalUsername string             `json:"externalUsername,omitempty"`
+	BoundAt          string             `json:"boundAt,omitempty"`
+	Routes           []userIMAgentRoute `json:"routes,omitempty"`
 }
 
 type userIMIdentitiesListResponse struct {
@@ -70,6 +73,15 @@ func (s *Server) handleUserIMIdentities(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		s.serverError(w, err)
 		return
+	}
+	instances, err := s.controlDB.ListIMInstances(controldb.IMInstanceFilter{WorkspaceID: workspaceID})
+	if err != nil {
+		s.serverError(w, err)
+		return
+	}
+	instancesByID := make(map[string]controldb.IMInstance, len(instances))
+	for _, instance := range instances {
+		instancesByID[instance.ID] = instance
 	}
 
 	// Filter connections to IM providers
@@ -211,6 +223,7 @@ func (s *Server) handleUserIMIdentities(w http.ResponseWriter, r *http.Request) 
 		if displayName == "" || displayName == "default" {
 			displayName = label
 		}
+		instance := instancesByID[conn.IMInstanceID]
 
 		out = append(out, userIMConnectionResponse{
 			ID:               conn.ID,
@@ -219,6 +232,9 @@ func (s *Server) handleUserIMIdentities(w http.ResponseWriter, r *http.Request) 
 			ProviderLabel:    label,
 			Status:           conn.Status,
 			BaseURL:          baseURL,
+			InstanceID:       instance.ID,
+			InstanceName:     instance.DisplayName,
+			InstanceTrust:    instance.Attestation,
 			HasAccess:        hasAccess,
 			Bound:            bound,
 			ExternalUserID:   boundIdentity.ExternalUserID,

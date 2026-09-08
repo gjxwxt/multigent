@@ -140,6 +140,20 @@ func (db *SQLiteStore) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_connections_owner ON connections(workspace_id, owner_type, owner_id)`,
 		`ALTER TABLE connections ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_default ON connections(workspace_id, provider) WHERE is_default = 1`,
+		`ALTER TABLE connections ADD COLUMN im_instance_id TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_connections_im_instance ON connections(workspace_id, im_instance_id)`,
+		`CREATE TABLE IF NOT EXISTS im_instances (
+	id TEXT PRIMARY KEY,
+	workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+	provider TEXT NOT NULL,
+	display_name TEXT NOT NULL,
+	attestation TEXT NOT NULL DEFAULT 'admin_attested',
+	created_by TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL DEFAULT '',
+	UNIQUE(workspace_id, provider, display_name)
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_im_instances_workspace_provider ON im_instances(workspace_id, provider, display_name)`,
 		`CREATE TABLE IF NOT EXISTS connection_secrets (
 	connection_id TEXT PRIMARY KEY REFERENCES connections(id) ON DELETE CASCADE,
 	ciphertext TEXT NOT NULL,

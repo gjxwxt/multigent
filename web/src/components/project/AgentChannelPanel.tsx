@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { QRCodeSVG } from 'qrcode.react'
 import { CheckCircle2, Copy, Loader2, MessageSquare, X } from 'lucide-react'
-import { apiDelete, apiFetch, apiPost } from '../../lib/api'
+import { apiDelete, apiFetch, apiPost, apiPut } from '../../lib/api'
 import { copyTextToClipboard } from '../../lib/clipboard'
 import { cn } from '../../lib/cn'
 import { confirmDialog } from '../ui/ConfirmDialog'
@@ -20,6 +20,9 @@ type AgentChannel = {
   provider: string
   status: string
   connectionId?: string
+  imInstanceId?: string
+  imInstanceName?: string
+  imInstanceTrust?: string
   callbackUrl?: string
   appId?: string
   accountsUrl?: string
@@ -46,6 +49,13 @@ type AgentChannel = {
 type ChannelsResponse = {
   providers: ChannelProvider[]
   channels: AgentChannel[]
+}
+
+type IMInstance = {
+  id: string
+  provider: string
+  displayName: string
+  attestation: string
 }
 
 type InteractionStatus = {
@@ -127,6 +137,11 @@ export function AgentChannelPanel({ project, agentName, agentWorkerId }: { proje
   const [chatBindName, setChatBindName] = useState('')
   const [bindCode, setBindCode] = useState<BindCode | null>(null)
   const [copiedBind, setCopiedBind] = useState(false)
+  const [imInstances, setIMInstances] = useState<IMInstance[]>([])
+  const [imInstanceAdmin, setIMInstanceAdmin] = useState(false)
+  const [imInstanceBusy, setIMInstanceBusy] = useState(false)
+  const [selectedIMInstanceID, setSelectedIMInstanceID] = useState('')
+  const [newIMInstanceName, setNewIMInstanceName] = useState('')
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const basePath = agentWorkerId
@@ -273,7 +288,71 @@ export function AgentChannelPanel({ project, agentName, agentWorkerId }: { proje
     setBindCode(null)
     setCopiedBind(false)
     setChatBindName('')
-    await Promise.all([loadChannelIdentities(channel), loadChannelTargets(channel), createBindCode(channel)])
+    setSelectedIMInstanceID(channel.imInstanceId || '')
+    setNewIMInstanceName('')
+    await Promise.all([loadChannelIdentities(channel), loadChannelTargets(channel), createBindCode(channel), loadIMInstances(channel.provider)])
+  }
+
+  async function loadIMInstances(provider: string) {
+    try {
+      const res = await apiFetch<{ instances?: IMInstance[] }>(`/api/v1/im/instances?provider=${encodeURIComponent(provider)}`, { silentStatuses: [403] })
+      setIMInstances(res.instances ?? [])
+      setIMInstanceAdmin(true)
+    } catch {
+      setIMInstances([])
+      setIMInstanceAdmin(false)
+    }
+  }
+
+  async function createIMInstance(channel: AgentChannel) {
+    if (!channel.connectionId || !newIMInstanceName.trim()) return
+    setIMInstanceBusy(true)
+    try {
+      const instance = await apiPost<IMInstance>('/api/v1/im/instances', {
+        provider: channel.provider,
+        displayName: newIMInstanceName.trim(),
+        connectionId: channel.connectionId,
+      })
+      setIMInstances(prev => [...prev, instance].sort((a, b) => a.displayName.localeCompare(b.displayName)))
+      setSelectedIMInstanceID(instance.id)
+      setNewIMInstanceName('')
+      setDetail(current => current && current.channel.connectionId === channel.connectionId
+        ? { ...current, channel: { ...current.channel, imInstanceId: instance.id, imInstanceName: instance.displayName, imInstanceTrust: instance.attestation } }
+        : current)
+      await load()
+    } finally {
+      setIMInstanceBusy(false)
+    }
+  }
+
+  async function attachIMInstance(channel: AgentChannel) {
+    if (!channel.connectionId || !selectedIMInstanceID) return
+    setIMInstanceBusy(true)
+    try {
+      await apiPut(`/api/v1/im/instances/${encodeURIComponent(selectedIMInstanceID)}/connections/${encodeURIComponent(channel.connectionId)}`, {})
+      const instance = imInstances.find(item => item.id === selectedIMInstanceID)
+      setDetail(current => current && current.channel.connectionId === channel.connectionId
+        ? { ...current, channel: { ...current.channel, imInstanceId: selectedIMInstanceID, imInstanceName: instance?.displayName, imInstanceTrust: instance?.attestation } }
+        : current)
+      await load()
+    } finally {
+      setIMInstanceBusy(false)
+    }
+  }
+
+  async function detachIMInstance(channel: AgentChannel) {
+    if (!channel.connectionId || !channel.imInstanceId) return
+    setIMInstanceBusy(true)
+    try {
+      await apiDelete(`/api/v1/im/instances/${encodeURIComponent(channel.imInstanceId)}/connections/${encodeURIComponent(channel.connectionId)}`)
+      setSelectedIMInstanceID('')
+      setDetail(current => current && current.channel.connectionId === channel.connectionId
+        ? { ...current, channel: { ...current.channel, imInstanceId: undefined, imInstanceName: undefined, imInstanceTrust: undefined } }
+        : current)
+      await load()
+    } finally {
+      setIMInstanceBusy(false)
+    }
   }
 
   async function loadChannelIdentities(channel: AgentChannel) {
@@ -515,6 +594,75 @@ export function AgentChannelPanel({ project, agentName, agentWorkerId }: { proje
                 <ChannelDetail label={t('agentChannels.lastEventLabel')} value={t('agentChannels.eventPending')} />
               )}
             </div>
+            {imInstanceAdmin && detail.channel.connectionId ? (
+              <div className="rounded-lg border border-violet-100 bg-violet-50/60 p-3 dark:border-violet-900/50 dark:bg-violet-950/20">
+                <p className="text-xs font-medium text-violet-900 dark:text-violet-200">
+                  {t('agentChannels.imInstanceTitle', { defaultValue: '协作平台实例边界' })}
+                </p>
+                <p className="mt-1 text-xs leading-5 text-violet-800/80 dark:text-violet-300/80">
+                  {t('agentChannels.imInstanceHint', { defaultValue: '仅工作区管理员可确认多个 Bot 属于同一协作平台实例；URL 相同不会自动建立信任关系。' })}
+                </p>
+                {detail.channel.imInstanceId ? (
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md bg-white/70 px-2.5 py-2 dark:bg-zinc-900/70">
+                    <div>
+                      <p className="text-xs font-medium text-neutral-800 dark:text-zinc-100">{detail.channel.imInstanceName || detail.channel.imInstanceId}</p>
+                      <p className="mt-0.5 text-[11px] text-neutral-500 dark:text-zinc-400">
+                        {detail.channel.imInstanceTrust === 'admin_attested'
+                          ? t('agentChannels.imInstanceAdminAttested', { defaultValue: '管理员确认' })
+                          : detail.channel.imInstanceTrust || '-'}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={imInstanceBusy}
+                      onClick={() => void detachIMInstance(detail.channel)}
+                      className="rounded-md border border-violet-200 bg-white px-2.5 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-50 disabled:opacity-50 dark:border-violet-800 dark:bg-zinc-900 dark:text-violet-300 dark:hover:bg-violet-950/40"
+                    >
+                      {t('agentChannels.imInstanceDetach', { defaultValue: '解除关联' })}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="mt-3 space-y-2">
+                    {imInstances.length ? (
+                      <div className="flex flex-wrap gap-2">
+                        <select
+                          value={selectedIMInstanceID}
+                          onChange={(event) => setSelectedIMInstanceID(event.target.value)}
+                          className="min-w-0 flex-1 rounded-md border border-violet-200 bg-white px-2.5 py-1.5 text-xs text-neutral-700 outline-none focus:border-violet-400 dark:border-violet-800 dark:bg-zinc-900 dark:text-zinc-100"
+                        >
+                          <option value="">{t('agentChannels.imInstanceSelect', { defaultValue: '选择已确认的实例' })}</option>
+                          {imInstances.map(instance => <option key={instance.id} value={instance.id}>{instance.displayName}</option>)}
+                        </select>
+                        <button
+                          type="button"
+                          disabled={imInstanceBusy || !selectedIMInstanceID}
+                          onClick={() => void attachIMInstance(detail.channel)}
+                          className="rounded-md border border-violet-200 bg-white px-2.5 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-50 disabled:opacity-50 dark:border-violet-800 dark:bg-zinc-900 dark:text-violet-300 dark:hover:bg-violet-950/40"
+                        >
+                          {t('agentChannels.imInstanceAttach', { defaultValue: '关联' })}
+                        </button>
+                      </div>
+                    ) : null}
+                    <div className="flex flex-wrap gap-2">
+                      <input
+                        value={newIMInstanceName}
+                        onChange={(event) => setNewIMInstanceName(event.target.value)}
+                        placeholder={t('agentChannels.imInstanceNamePlaceholder', { defaultValue: '例如：研发 Mattermost' })}
+                        className="min-w-0 flex-1 rounded-md border border-violet-200 bg-white px-2.5 py-1.5 text-xs text-neutral-700 outline-none focus:border-violet-400 dark:border-violet-800 dark:bg-zinc-900 dark:text-zinc-100"
+                      />
+                      <button
+                        type="button"
+                        disabled={imInstanceBusy || !newIMInstanceName.trim()}
+                        onClick={() => void createIMInstance(detail.channel)}
+                        className="rounded-md border border-violet-200 bg-white px-2.5 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-50 disabled:opacity-50 dark:border-violet-800 dark:bg-zinc-900 dark:text-violet-300 dark:hover:bg-violet-950/40"
+                      >
+                        {t('agentChannels.imInstanceCreate', { defaultValue: '新建并关联' })}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : null}
             <div className="rounded-lg border border-sky-100 bg-sky-50/70 p-3 dark:border-sky-900/50 dark:bg-sky-950/20">
               <p className="text-xs font-medium text-sky-800 dark:text-sky-200">{t('agentChannels.identityBindingNoticeTitle')}</p>
               <p className="mt-1 text-xs leading-5 text-sky-700/80 dark:text-sky-300/80">

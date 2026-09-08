@@ -32,21 +32,22 @@ func (db *SQLiteStore) UpsertConnection(c Connection) error {
 	}
 	_, err := db.sql.Exec(`INSERT INTO connections (
 	id, workspace_id, provider, connection_name, owner_type, owner_id, auth_type, status,
-	profile_json, created_by, created_at, updated_at, last_used_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	im_instance_id, profile_json, created_by, created_at, updated_at, last_used_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(workspace_id, provider, owner_type, owner_id, connection_name) DO UPDATE SET
 	auth_type = excluded.auth_type,
 	status = excluded.status,
+	im_instance_id = CASE WHEN excluded.im_instance_id <> '' THEN excluded.im_instance_id ELSE connections.im_instance_id END,
 	profile_json = excluded.profile_json,
 	updated_at = excluded.updated_at`,
 		c.ID, c.WorkspaceID, c.Provider, c.ConnectionName, c.OwnerType, c.OwnerID,
-		c.AuthType, c.Status, c.ProfileJSON, c.CreatedBy, c.CreatedAt, c.UpdatedAt, c.LastUsedAt)
+		c.AuthType, c.Status, c.IMInstanceID, c.ProfileJSON, c.CreatedBy, c.CreatedAt, c.UpdatedAt, c.LastUsedAt)
 	return err
 }
 
 func (db *SQLiteStore) ConnectionByID(id string) (Connection, bool, error) {
 	row := db.sql.QueryRow(`SELECT id, workspace_id, provider, connection_name, owner_type, owner_id,
-auth_type, status, profile_json, created_by, created_at, updated_at, last_used_at, is_default
+auth_type, status, im_instance_id, profile_json, created_by, created_at, updated_at, last_used_at, is_default
 FROM connections WHERE id = ?`, id)
 	c, err := scanConnection(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -107,11 +108,12 @@ func (db *SQLiteStore) UpdateConnection(c Connection) error {
 	owner_id = ?,
 	auth_type = ?,
 	status = ?,
+	im_instance_id = ?,
 	profile_json = ?,
 	updated_at = ?,
 	last_used_at = ?
 WHERE id = ? AND workspace_id = ?`,
-		c.Provider, c.ConnectionName, c.OwnerType, c.OwnerID, c.AuthType, c.Status,
+		c.Provider, c.ConnectionName, c.OwnerType, c.OwnerID, c.AuthType, c.Status, c.IMInstanceID,
 		c.ProfileJSON, c.UpdatedAt, c.LastUsedAt, c.ID, c.WorkspaceID)
 	if err != nil {
 		return err
@@ -124,7 +126,7 @@ WHERE id = ? AND workspace_id = ?`,
 
 func (db *SQLiteStore) ListConnections(filter ConnectionFilter) ([]Connection, error) {
 	query := `SELECT id, workspace_id, provider, connection_name, owner_type, owner_id,
-auth_type, status, profile_json, created_by, created_at, updated_at, last_used_at, is_default
+auth_type, status, im_instance_id, profile_json, created_by, created_at, updated_at, last_used_at, is_default
 FROM connections WHERE 1=1`
 	args := make([]any, 0, 5)
 	if strings.TrimSpace(filter.WorkspaceID) != "" {
@@ -248,7 +250,7 @@ func scanConnection(row connectionScanner) (Connection, error) {
 	var c Connection
 	var isDefault int
 	err := row.Scan(&c.ID, &c.WorkspaceID, &c.Provider, &c.ConnectionName, &c.OwnerType, &c.OwnerID,
-		&c.AuthType, &c.Status, &c.ProfileJSON, &c.CreatedBy, &c.CreatedAt, &c.UpdatedAt, &c.LastUsedAt, &isDefault)
+		&c.AuthType, &c.Status, &c.IMInstanceID, &c.ProfileJSON, &c.CreatedBy, &c.CreatedAt, &c.UpdatedAt, &c.LastUsedAt, &isDefault)
 	if err == nil && isDefault != 0 {
 		c.IsDefault = true
 	}
@@ -338,5 +340,3 @@ func SealConnectionSecret(values map[string]string) (ConnectionSecret, error) {
 		UpdatedAt:  nowUTC(),
 	}, nil
 }
-
-
