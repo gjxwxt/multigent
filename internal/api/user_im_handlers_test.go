@@ -494,4 +494,3 @@ func TestUserIMIdentities_VisibilityRules_ABC(t *testing.T) {
 		t.Fatalf("user-outsider: expected 0 connections (Rule C anti-leakage), got %d", len(resp4.Connections))
 	}
 }
-

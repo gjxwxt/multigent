@@ -1,0 +1,32 @@
+{
+  "updatedAt": "2026-09-08T23:20:00+08:00",
+  "activeFeature": "im-instance-foundation",
+  "features": [
+    {
+      "id": "im-identity-center-p0",
+      "status": "completed",
+      "commit": "9650f924",
+      "summary": "Personal IM settings group connection cards for display while retaining per-connection binding and unbinding semantics.",
+      "verification": [
+        "go test -v ./internal/api -run TestUserIMIdentities_VisibilityRules_ABC",
+        "make test",
+        "make build"
+      ],
+      "boundaries": [
+        "URL grouping is visual only.",
+        "A binding does not span separate connections or bots."
+      ]
+    },
+    {
+      "id": "im-instance-foundation",
+      "status": "planned",
+      "dependsOn": ["im-identity-center-p0"],
+      "summary": "Introduce a verified IM-instance boundary before enabling identity reuse or dynamic direct-message routing across separate bot connections.",
+      "doneWhen": [
+        "A trusted instance association exists for each participating connection.",
+        "Cross-connection identity routing checks that association and live RBAC.",
+        "Same-connection routing remains unchanged."
+      ]
+    }
+  ]
+}
