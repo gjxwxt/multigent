@@ -233,7 +233,19 @@ func (s *Server) validateWorkflowDecisionReviewer(workspaceID, project, taskID, 
 			return errWorkflowDecisionReviewerForbidden
 		}
 		if strings.TrimSpace(inst.ActorID) != strings.TrimSpace(submittedBy) {
-			return errWorkflowDecisionReviewerForbidden
+			allowed := false
+			if s.users != nil {
+				if u := s.users.GetUser(submittedBy); u != nil {
+					if u.Role == RoleAdmin {
+						allowed = true
+					} else if _, hasAccess := s.users.HasProjectAccess(submittedBy, project); hasAccess {
+						allowed = true
+					}
+				}
+			}
+			if !allowed {
+				return errWorkflowDecisionReviewerForbidden
+			}
 		}
 		if !workflowStepInstanceOpen(inst.Status) {
 			return fmt.Errorf("workflow review step is not open")

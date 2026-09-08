@@ -67,6 +67,12 @@ type WorkflowField struct {
 	// (e.g. branch+SHA carried from upstream outputs). Validation only
 	// fails when the backfill also finds nothing.
 	Optional bool `json:"optional,omitempty" yaml:"optional,omitempty"`
+	// ReviewKind explicitly classifies the field for approval resolution
+	// ("evidence", "inherited_contract", "human_decision", "human_commentary").
+	ReviewKind string `json:"reviewKind,omitempty" yaml:"review_kind,omitempty"`
+	// Overrideable explicitly dictates whether an evidence or inherited parameter
+	// can be edited by a human reviewer.
+	Overrideable *bool `json:"overrideable,omitempty" yaml:"overrideable,omitempty"`
 }
 
 type WorkflowPosition struct {

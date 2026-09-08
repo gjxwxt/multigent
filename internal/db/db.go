@@ -155,6 +155,20 @@ type Store interface {
 	ExtendRuntimeRunLease(workspaceID, runID, nodeID string, leaseSeconds int) (RuntimeRun, bool, error)
 	CreateRuntimeEvent(event RuntimeEvent) error
 	ListRuntimeEvents(workspaceID, runID string, limit int) ([]RuntimeEvent, error)
+
+	UpsertTaskThreadProjection(proj TaskThreadProjection) error
+	ActiveTaskThreadProjection(workspaceID, taskID, provider string) (TaskThreadProjection, bool, error)
+	TaskThreadProjectionByRoot(provider, channelID, rootPostID string) (TaskThreadProjection, bool, error)
+	ListTaskThreadProjections(filter TaskThreadProjectionFilter) ([]TaskThreadProjection, error)
+	CloseTaskThreadProjection(workspaceID, taskID, provider string) error
+
+	CreateChatopsActionSession(s *ChatopsActionSession) error
+	ChatopsActionSessionByID(workspaceID, id string) (*ChatopsActionSession, bool, error)
+	ChatopsActionSessionByNonce(workspaceID, nonce string) (*ChatopsActionSession, bool, error)
+	ClaimChatopsActionSessionForProcessing(workspaceID, id string) (bool, error)
+	CompleteChatopsActionSession(workspaceID, id, resolutionTraceJSON, resolvedOutputsJSON string) error
+	UpdateChatopsActionSessionState(workspaceID, id, state string) error
+	ExpireStaleChatopsActionSessions(workspaceID string, now time.Time) error
 }
 
 type SQLiteStore struct {

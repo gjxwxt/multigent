@@ -812,6 +812,7 @@ func (s *Server) createRuntimeTaskFromBody(w http.ResponseWriter, r *http.Reques
 			s.serverError(w, err)
 			return
 		}
+		s.notifyTaskThreadStarted(principal.WorkspaceID, project, t, workflowID)
 	}
 	if strings.Contains(assignee, "/") {
 		reason := "task_assigned"
@@ -1152,6 +1153,7 @@ func (s *Server) completeRuntimeWorkflowStep(workspaceID, project string, t *ent
 	if err != nil {
 		return result, false, err
 	}
+	s.notifyTaskThreadStepTransition(workspaceID, project, t, result, outputs)
 	return result, result.Next != nil || result.Done, nil
 }
 

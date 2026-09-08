@@ -619,6 +619,45 @@ func (db *SQLiteStore) migrate() error {
 	created_at TEXT NOT NULL
 )`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_events_run_sequence ON runtime_events(workspace_id, run_id, sequence)`,
+		`CREATE TABLE IF NOT EXISTS task_thread_projections (
+	id TEXT PRIMARY KEY,
+	workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+	project_id TEXT NOT NULL,
+	task_id TEXT NOT NULL,
+	provider TEXT NOT NULL,
+	channel_id TEXT NOT NULL,
+	root_post_id TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT 'active',
+	metadata_json TEXT NOT NULL DEFAULT '{}',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL DEFAULT ''
+)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_task_thread_active ON task_thread_projections(workspace_id, task_id, provider) WHERE status = 'active'`,
+		`CREATE INDEX IF NOT EXISTS idx_task_thread_lookup ON task_thread_projections(provider, channel_id, root_post_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_task_thread_task ON task_thread_projections(workspace_id, task_id)`,
+		`CREATE TABLE IF NOT EXISTS chatops_action_sessions (
+	id TEXT PRIMARY KEY,
+	workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+	project TEXT NOT NULL,
+	task_id TEXT NOT NULL,
+	step_id TEXT NOT NULL,
+	expected_state_version INTEGER NOT NULL,
+	review_snapshot_hash TEXT NOT NULL,
+	action_type TEXT NOT NULL,
+	actor_mm_user_id TEXT NOT NULL,
+	actor_platform_user_id TEXT NOT NULL DEFAULT '',
+	state TEXT NOT NULL,
+	action_nonce TEXT NOT NULL UNIQUE,
+	token_hash TEXT NOT NULL UNIQUE,
+	resolution_trace_json TEXT NOT NULL DEFAULT '',
+	resolved_outputs_json TEXT NOT NULL DEFAULT '',
+	expires_at TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL DEFAULT ''
+)`,
+		`ALTER TABLE chatops_action_sessions ADD COLUMN resolution_trace_json TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE chatops_action_sessions ADD COLUMN resolved_outputs_json TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_chatops_sessions_lookup ON chatops_action_sessions(workspace_id, task_id, step_id, state)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.sql.Exec(stmt); err != nil {

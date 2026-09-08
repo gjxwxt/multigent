@@ -677,6 +677,7 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 	if err != nil {
 		return taskWorkflowResponse{}, http.StatusBadRequest, err
 	}
+	s.notifyTaskThreadStepTransition(workspaceID, project, t, transition, outputs)
 	_ = s.ts.RemoveFromInbox(taskID)
 	if transition.Done {
 		now := time.Now().UTC()

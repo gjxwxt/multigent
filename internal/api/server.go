@@ -22,6 +22,7 @@ import (
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/gitworktree"
+	"github.com/multigent/multigent/internal/imbridge"
 	"github.com/multigent/multigent/internal/interaction"
 	"github.com/multigent/multigent/internal/preview"
 	"github.com/multigent/multigent/internal/store"
@@ -119,6 +120,7 @@ type Server struct {
 	designRateMu           sync.Mutex
 	designReadRateSeen     map[string]*previewChatBucket
 	designWriteRateSeen    map[string]*previewChatBucket
+	threadProjections      *imbridge.TaskThreadProjectionService
 }
 
 // NewServer builds an API server for the given workspace root.
@@ -159,6 +161,7 @@ func NewServer(root, apiKey string) *Server {
 		previewEngine:          preview.NewEngine(),
 		worktreeMgr:            gitworktree.NewManager(),
 		previewSessions:        make(map[string]*previewChatSession),
+		threadProjections:      imbridge.NewTaskThreadProjectionService(controlDB, nil),
 	}
 	// Scheduler restore is intentionally absent: upstream v2.0.10 made the
 	// workspace scheduler service-managed (StartWorkspaceScheduler in
@@ -654,6 +657,8 @@ func (s *Server) Handler() http.Handler {
 	publicMux.HandleFunc("POST /api/v1/invitations/{token}/reject", s.handleRejectInvitation)
 	publicMux.HandleFunc("POST /api/v1/im/{provider}/events", s.handleIMEvent)
 	publicMux.HandleFunc("POST /api/v1/im/mattermost/commands/bind", s.handleMattermostSlashBind)
+	publicMux.HandleFunc("POST /api/v1/im/mattermost/actions", s.handleMattermostActionCallback)
+	publicMux.HandleFunc("POST /api/v1/im/mattermost/dialog-submit", s.handleMattermostDialogSubmit)
 	publicMux.HandleFunc("GET /api/v1/health", s.handleHealth)
 	publicMux.HandleFunc("/preview/", s.handleTaskPreviewProxy)
 	// Design proxy + launch are iframe-bootstrap surfaces: the iframe carries

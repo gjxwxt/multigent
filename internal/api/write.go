@@ -342,6 +342,7 @@ func (s *Server) createProjectTaskFromBody(w http.ResponseWriter, r *http.Reques
 			s.serverError(w, err)
 			return
 		}
+		s.notifyTaskThreadStarted(workspaceID, name, t, workflowID)
 		if startStep, _, ok := workflowStartActor(workflowDef, body.WorkflowActorBindings); ok {
 			if startStep.Type == "human_review" {
 				t.Status = entity.TaskStatusAwaitingConfirmation

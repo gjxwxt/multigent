@@ -174,6 +174,9 @@ type Project struct {
 	RemoteURL        string `yaml:"remote_url,omitempty" json:"remoteUrl,omitempty"`               // Remote Web UI URL (e.g. https://gitlab.com/group/repo)
 	CloneURL         string `yaml:"clone_url,omitempty" json:"cloneUrl,omitempty"`                 // Clean Clone URL (no embedded tokens)
 	DefaultBranch    string `yaml:"default_branch,omitempty" json:"defaultBranch,omitempty"`       // Default branch name, e.g. "main"
+
+	// ChatOps & IM integration metadata
+	DefaultIMChannelID string `yaml:"default_im_channel_id,omitempty" json:"defaultImChannelId,omitempty"` // Default group channel ID for task projections
 }
 
 // Skill is a reusable capability definition.
