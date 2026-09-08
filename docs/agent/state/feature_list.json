@@ -1,6 +1,6 @@
 {
-  "updatedAt": "2026-09-08T23:58:00+08:00",
-  "activeFeature": "im-instance-routing-hardening",
+  "updatedAt": "2026-09-09T00:15:00+08:00",
+  "activeFeature": "im-instance-approval-identity-hardening",
   "features": [
     {
       "id": "im-identity-center-p0",
@@ -34,15 +34,30 @@
       ]
     },
     {
-      "id": "im-instance-routing-hardening",
-      "status": "planned",
+      "id": "im-instance-delivery-routing",
+      "status": "completed",
       "dependsOn": ["im-instance-association-foundation"],
-      "summary": "Make cross-Bot delivery safe only after identity, notification, and approval resolution are all scoped to the same administrator-attested IM instance.",
+      "summary": "D6 can send through another Bot only when both active connections share an administrator-attested instance and the recipient currently has destination-route access. Cross-Bot Mattermost delivery opens a destination-Bot DM.",
+      "verification": [
+        "go test ./internal/api ./internal/imbridge -run TestD6OutboundIdentityFallback|TestRuntimeNotify|TestRuntimeChannels|TestMattermost",
+        "make test",
+        "make web"
+      ],
+      "boundaries": [
+        "Same-connection delivery retains the existing ChatID.",
+        "Cross-Bot delivery clears the source ChatID and relies on the Mattermost driver's direct-channel creation.",
+        "Unassociated connections and recipients without current target-route access fail closed."
+      ]
+    },
+    {
+      "id": "im-instance-approval-identity-hardening",
+      "status": "planned",
+      "dependsOn": ["im-instance-delivery-routing"],
+      "summary": "Scope Mattermost bind-conflict and approval/callback identity resolution to the IM instance, not only the provider.",
       "doneWhen": [
-        "Mattermost identity conflict checks and callback resolution are instance-scoped rather than provider-global.",
-        "Runtime delivery checks live recipient RBAC for the destination Agent route.",
-        "A cross-Bot direct message opens a destination-Bot DM and never reuses the source Bot channel ID.",
-        "Unassociated connections continue to fail closed."
+        "Mattermost bind-conflict checks no longer use a provider-global external identity as their security key.",
+        "Interactive-card callbacks resolve a user through the source binding or administrator-attested instance, never an arbitrary same-provider identity.",
+        "Existing non-Mattermost provider behavior and unassociated Mattermost connections remain compatible and fail closed."
       ]
     }
   ]

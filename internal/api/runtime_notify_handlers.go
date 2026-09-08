@@ -1035,8 +1035,14 @@ func (s *Server) runtimeChannelToRow(principal runtimeAgentPrincipal, binding co
 		if identityErr != nil {
 			return runtimeChannelRow{}, identityErr
 		}
-		row.CanNotify = len(identities) > 0
-		// D6 Fallback: check workspace-wide user identities for this provider sharing the same ConnectionID
+		for _, identity := range identities {
+			if s.runtimeIdentityCanReachBinding(principal, binding, identity) {
+				row.CanNotify = true
+				break
+			}
+		}
+		// D6 Fallback: check workspace-wide user identities that are either on
+		// the same Bot connection or on the same administrator-attested IM instance.
 		if !row.CanNotify {
 			wsIdentities, wsErr := s.controlDB.ListUserChannelIdentities(controldb.UserChannelIdentityFilter{
 				WorkspaceID: principal.WorkspaceID,
@@ -1044,12 +1050,7 @@ func (s *Server) runtimeChannelToRow(principal runtimeAgentPrincipal, binding co
 			})
 			if wsErr == nil && len(wsIdentities) > 0 {
 				for _, wid := range wsIdentities {
-					if wid.ChannelBindingID == binding.ID {
-						row.CanNotify = true
-						break
-					}
-					otherBinding, otherFound, bErr := s.controlDB.AgentChannelBindingByID(wid.ChannelBindingID)
-					if bErr == nil && otherFound && otherBinding.ConnectionID == binding.ConnectionID {
+					if s.runtimeIdentityCanReachBinding(principal, binding, wid) {
 						row.CanNotify = true
 						break
 					}
@@ -1073,6 +1074,115 @@ func (s *Server) runtimeChannelToRow(principal runtimeAgentPrincipal, binding co
 
 func runtimeChannelCanNotify(binding controldb.AgentChannelBinding) bool {
 	return strings.TrimSpace(binding.ExternalOwnerID) != "" || strings.TrimSpace(binding.ExternalChatID) != ""
+}
+
+// runtimeIdentityCanReachBinding is deliberately fail-closed. A historical
+// bind alone is insufficient: the recipient must still be allowed to see the
+// destination Agent route, and the source Bot relationship must be either the
+// same connection or an explicit administrator-attested IM instance.
+func (s *Server) runtimeIdentityCanReachBinding(principal runtimeAgentPrincipal, destination controldb.AgentChannelBinding, identity controldb.UserChannelIdentity) bool {
+	if strings.TrimSpace(identity.WorkspaceID) != strings.TrimSpace(principal.WorkspaceID) ||
+		strings.TrimSpace(identity.Provider) != strings.TrimSpace(destination.Provider) {
+		return false
+	}
+	allowed, err := s.userCanAccessAgentChannelBinding(principal.WorkspaceID, identity.UserID, destination)
+	if err != nil || !allowed {
+		return false
+	}
+	if strings.TrimSpace(identity.ChannelBindingID) == strings.TrimSpace(destination.ID) {
+		return true
+	}
+	source, found, err := s.controlDB.AgentChannelBindingByID(identity.ChannelBindingID)
+	if err != nil || !found {
+		return false
+	}
+	usable, _ := s.runtimeBindingsShareDeliveryBoundary(destination, source)
+	return usable
+}
+
+// runtimeBindingsShareDeliveryBoundary reports whether two bindings can reuse
+// a verified external user identity. The second result is true only for a
+// cross-Bot relationship; callers must then discard the source Bot's ChatID.
+func (s *Server) runtimeBindingsShareDeliveryBoundary(destination, source controldb.AgentChannelBinding) (bool, bool) {
+	if s == nil || s.controlDB == nil || destination.WorkspaceID == "" ||
+		destination.WorkspaceID != source.WorkspaceID || destination.Provider != source.Provider ||
+		destination.Status != "connected" || source.Status != "connected" {
+		return false, false
+	}
+	if strings.TrimSpace(destination.ConnectionID) != "" && destination.ConnectionID == source.ConnectionID {
+		return true, false
+	}
+	destinationConn, destinationFound, destinationErr := s.controlDB.ConnectionByID(destination.ConnectionID)
+	sourceConn, sourceFound, sourceErr := s.controlDB.ConnectionByID(source.ConnectionID)
+	if destinationErr != nil || sourceErr != nil || !destinationFound || !sourceFound ||
+		destinationConn.WorkspaceID != destination.WorkspaceID || sourceConn.WorkspaceID != source.WorkspaceID ||
+		destinationConn.Provider != destination.Provider || sourceConn.Provider != source.Provider ||
+		destinationConn.Status != "active" || sourceConn.Status != "active" ||
+		strings.TrimSpace(destinationConn.IMInstanceID) == "" || destinationConn.IMInstanceID != sourceConn.IMInstanceID {
+		return false, false
+	}
+	instance, found, err := s.controlDB.IMInstanceByID(destinationConn.IMInstanceID)
+	if err != nil || !found || instance.WorkspaceID != destination.WorkspaceID ||
+		instance.Provider != destination.Provider || instance.Attestation != imInstanceAttestationAdmin {
+		return false, false
+	}
+	return true, true
+}
+
+func (s *Server) userCanAccessAgentChannelBinding(workspaceID, userID string, binding controldb.AgentChannelBinding) (bool, error) {
+	if s == nil || s.controlDB == nil || s.users == nil || strings.TrimSpace(workspaceID) == "" ||
+		strings.TrimSpace(userID) == "" || binding.WorkspaceID != workspaceID {
+		return false, nil
+	}
+	user := s.users.GetUser(userID)
+	if user == nil || user.Disabled {
+		return false, nil
+	}
+	if user.Role == RoleAdmin {
+		return true, nil
+	}
+	member, found, err := s.controlDB.WorkspaceMember(workspaceID, userID)
+	if err != nil {
+		return false, err
+	}
+	if found && (member.Role == WorkspaceRoleOwner || member.Role == WorkspaceRoleAdmin) {
+		return true, nil
+	}
+	if projectID := strings.TrimSpace(binding.ProjectID); projectID != "" {
+		if _, found := s.users.HasProjectAccess(userID, projectID); found || currentUserLinkedProject(user, projectID) {
+			return true, nil
+		}
+	}
+	workerID := strings.TrimSpace(binding.AgentWorkerID)
+	if workerID == "" {
+		return false, nil
+	}
+	if _, found := currentUserWorkerRole(user, workerID); found {
+		return true, nil
+	}
+	worker, found, err := s.controlDB.AgentWorkerByID(workspaceID, workerID)
+	if err != nil || !found {
+		return false, err
+	}
+	memberships, err := s.controlDB.ListProjectMemberships(controldb.ProjectMembershipFilter{
+		WorkspaceID: workspaceID,
+		MemberType:  "agent_worker",
+		MemberID:    workerID,
+	})
+	if err != nil {
+		return false, err
+	}
+	for _, membership := range memberships {
+		if _, found := s.users.HasProjectAccess(userID, membership.ProjectID); found {
+			return true, nil
+		}
+		for _, agent := range []string{membership.Title, worker.DisplayName, worker.Name} {
+			if _, found := currentUserAgentRole(user, strings.TrimSpace(membership.ProjectID), strings.TrimSpace(agent)); found {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func (s *Server) resolveRuntimeNotifyRecipient(principal runtimeAgentPrincipal, input string) (string, error) {
@@ -1150,6 +1260,13 @@ func (s *Server) runtimeNotifyTargetForRecipient(principal runtimeAgentPrincipal
 		}
 		return imbridge.OutgoingTarget{}, false, nil
 	}
+	allowed, err := s.userCanAccessAgentChannelBinding(principal.WorkspaceID, recipient, binding)
+	if err != nil {
+		return imbridge.OutgoingTarget{}, false, err
+	}
+	if !allowed {
+		return imbridge.OutgoingTarget{}, false, nil
+	}
 	identities, err := s.controlDB.ListUserChannelIdentities(controldb.UserChannelIdentityFilter{
 		WorkspaceID:      principal.WorkspaceID,
 		UserID:           recipient,
@@ -1167,14 +1284,10 @@ func (s *Server) runtimeNotifyTargetForRecipient(principal runtimeAgentPrincipal
 			Provider:    binding.Provider,
 		})
 		if wsErr == nil && len(wsIdentities) > 0 {
-			// Security & Connection Isolation: only fallback to identities that share the same ConnectionID (same IM instance)
+			// Security & Connection Isolation: accept only the same Bot connection or
+			// an explicit, administrator-attested IM instance boundary.
 			for _, wid := range wsIdentities {
-				if wid.ChannelBindingID == binding.ID {
-					identities = append(identities, wid)
-					break
-				}
-				otherBinding, otherFound, bErr := s.controlDB.AgentChannelBindingByID(wid.ChannelBindingID)
-				if bErr == nil && otherFound && otherBinding.ConnectionID == binding.ConnectionID {
+				if s.runtimeIdentityCanReachBinding(principal, binding, wid) {
 					identities = append(identities, wid)
 					break
 				}
@@ -1185,10 +1298,26 @@ func (s *Server) runtimeNotifyTargetForRecipient(principal runtimeAgentPrincipal
 		}
 	}
 	identity := identities[0]
-	if externalUserID := strings.TrimSpace(identity.ExternalUserID); externalUserID != "" {
-		return imbridge.OutgoingTarget{ReceiveID: externalUserID, ReceiveIDType: "open_id", ChatID: strings.TrimSpace(identity.ExternalChatID)}, true, nil
+	chatID := strings.TrimSpace(identity.ExternalChatID)
+	if identity.ChannelBindingID != binding.ID {
+		source, found, err := s.controlDB.AgentChannelBindingByID(identity.ChannelBindingID)
+		if err != nil || !found {
+			return imbridge.OutgoingTarget{}, false, err
+		}
+		usable, crossBot := s.runtimeBindingsShareDeliveryBoundary(binding, source)
+		if !usable {
+			return imbridge.OutgoingTarget{}, false, nil
+		}
+		if crossBot {
+			// Mattermost DMs are Bot-specific. The provider opens a direct
+			// channel for the destination Bot when ChatID is empty.
+			chatID = ""
+		}
 	}
-	if chatID := strings.TrimSpace(identity.ExternalChatID); chatID != "" {
+	if externalUserID := strings.TrimSpace(identity.ExternalUserID); externalUserID != "" {
+		return imbridge.OutgoingTarget{ReceiveID: externalUserID, ReceiveIDType: "open_id", ChatID: chatID}, true, nil
+	}
+	if chatID != "" {
 		return imbridge.OutgoingTarget{ReceiveID: chatID, ReceiveIDType: "chat_id", ChatID: chatID}, true, nil
 	}
 	return imbridge.OutgoingTarget{}, false, nil

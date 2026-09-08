@@ -27,6 +27,8 @@ type UserIMConnection = {
   instanceTrust?: string
   hasAccess: boolean
   bound: boolean
+  sharedBinding?: boolean
+  sharedFrom?: string
   externalUserId?: string
   externalUsername?: string
   boundAt?: string
@@ -349,7 +351,7 @@ export function IMIdentitiesSection() {
                             </p>
                           ) : null}
 
-                          {conn.bound && (
+                          {(conn.bound || conn.sharedBinding) && (
                             <div className="mt-1.5 flex flex-wrap items-center gap-3 text-xs">
                               <span className="text-neutral-600 dark:text-zinc-300">
                                 <span className="font-medium text-neutral-500 dark:text-zinc-400">
@@ -365,6 +367,11 @@ export function IMIdentitiesSection() {
                                   {formatDateTime(conn.boundAt)}
                                 </span>
                               )}
+                              {conn.sharedBinding && conn.sharedFrom && (
+                                <span className="text-[11px] text-neutral-400 dark:text-zinc-500">
+                                  {t('account.imSharedBindingFrom', { defaultValue: `通过 ${conn.sharedFrom} 的同实例绑定复用`, name: conn.sharedFrom })}
+                                </span>
+                              )}
                             </div>
                           )}
                         </div>
@@ -375,6 +382,11 @@ export function IMIdentitiesSection() {
                             <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-emerald-200/60 dark:bg-emerald-950/30 dark:text-emerald-300 dark:ring-emerald-800/40">
                               <CheckCircle2 className="size-3" />
                               {t('account.imBound', { defaultValue: '已绑定' })}
+                            </span>
+                          ) : conn.sharedBinding ? (
+                            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-sky-50 px-2.5 py-0.5 text-xs font-medium text-sky-700 ring-1 ring-sky-200/60 dark:bg-sky-950/30 dark:text-sky-300 dark:ring-sky-800/40">
+                              <CheckCircle2 className="size-3" />
+                              {t('account.imSharedBound', { defaultValue: '同实例复用' })}
                             </span>
                           ) : !conn.hasAccess ? (
                             <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700 ring-1 ring-amber-200/60 dark:bg-amber-950/30 dark:text-amber-300 dark:ring-amber-800/40">
@@ -402,7 +414,7 @@ export function IMIdentitiesSection() {
                                 ? t('common.loading', { defaultValue: '处理中...' })
                                 : t('account.imUnbindAction', { defaultValue: '解除绑定' })}
                             </button>
-                          ) : conn.hasAccess ? (
+                          ) : conn.hasAccess && !conn.sharedBinding ? (
                             <button
                               type="button"
                               onClick={() => void openBindModal(conn)}

@@ -23,6 +23,16 @@ Verified locally on 2026-09-08:
 - `make web`
 - `make build`
 
-## Next: IM instance routing hardening
+## Completed: IM instance delivery routing
 
-Do not widen D6 from `ConnectionID` to URL comparison or to `im_instance_id` yet. Mattermost dynamic DM creation already exists in the driver, but the surrounding identity and approval paths still use provider-global `external_identities`. First scope those paths to the administrator-attested instance and add live recipient RBAC checks. A cross-Bot delivery must clear the source Bot's DM channel ID so the destination Bot opens its own DM.
+D6 now accepts a user identity from another Agent connection only if both active connections share the same `admin_attested` IM instance and the recipient still has access to the destination Agent route. For a different Mattermost Bot, it clears the original `ChatID`; the existing Mattermost driver then creates the destination Bot's direct channel from the external user ID. The account page labels this as same-instance reuse rather than a second direct bind.
+
+Verified locally on 2026-09-09:
+
+- `go test ./internal/api ./internal/imbridge -run TestD6OutboundIdentityFallback|TestRuntimeNotify|TestRuntimeChannels|TestMattermost`
+- `make test`
+- `make web`
+
+## Next: IM approval identity hardening
+
+`external_identities` is still keyed by `(workspace, provider, external_user_id)`. Do not use it as an instance-safe Mattermost lookup for binding conflicts or interactive-card approvals. Migrate those paths to source-binding or administrator-attested-instance scope before changing Slash Command registration or allowing a callback to resolve a user from a different Bot route.

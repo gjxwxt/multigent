@@ -157,6 +157,84 @@ func TestUserIMIdentities_ListAndBoundStatus(t *testing.T) {
 	}
 }
 
+func TestUserIMIdentities_ShowsAdminAttestedSharedBinding(t *testing.T) {
+	s, workspaceID := setupUserIMTestServer(t)
+	_ = s.users.CreateUser("alex", "pass", RoleMember, "", "", "", "", "")
+	_ = s.controlDB.UpsertWorkspaceMember(workspaceID, "alex", WorkspaceRoleMember)
+	_ = s.st.SaveProject("p-shared", &entity.Project{Name: "p-shared"})
+	grantProjectAccessForTest(s, "alex", "p-shared")
+
+	instance := controldb.IMInstance{
+		ID:          "imi-engineering",
+		WorkspaceID: workspaceID,
+		Provider:    "mattermost",
+		DisplayName: "Engineering Mattermost",
+		Attestation: imInstanceAttestationAdmin,
+		CreatedBy:   "admin",
+	}
+	if err := s.controlDB.UpsertIMInstance(instance); err != nil {
+		t.Fatalf("instance: %v", err)
+	}
+	for _, connectionID := range []string{"conn-mira", "conn-lina"} {
+		if err := s.controlDB.UpsertConnection(controldb.Connection{
+			ID:             connectionID,
+			WorkspaceID:    workspaceID,
+			Provider:       "mattermost",
+			ConnectionName: connectionID,
+			OwnerType:      ConnectionOwnerWorkspace,
+			OwnerID:        workspaceID,
+			AuthType:       "bot_token",
+			Status:         "active",
+			IMInstanceID:   instance.ID,
+			ProfileJSON:    `{"baseUrl":"http://mm.internal:8065"}`,
+		}); err != nil {
+			t.Fatalf("connection %s: %v", connectionID, err)
+		}
+	}
+	for _, binding := range []controldb.AgentChannelBinding{
+		{ID: "binding-mira", WorkspaceID: workspaceID, ProjectID: "p-shared", AgentID: "mira", Provider: "mattermost", ConnectionID: "conn-mira", Status: "connected"},
+		{ID: "binding-lina", WorkspaceID: workspaceID, ProjectID: "p-shared", AgentID: "lina", Provider: "mattermost", ConnectionID: "conn-lina", Status: "connected"},
+	} {
+		if err := s.controlDB.UpsertAgentChannelBinding(binding); err != nil {
+			t.Fatalf("binding %s: %v", binding.ID, err)
+		}
+	}
+	if err := s.controlDB.UpsertUserChannelIdentity(controldb.UserChannelIdentity{
+		ID:               "uch-alex-mira",
+		WorkspaceID:      workspaceID,
+		UserID:           "alex",
+		ChannelBindingID: "binding-mira",
+		Provider:         "mattermost",
+		ExternalUserID:   "mm-alex",
+		MetadataJSON:     `{"externalUsername":"alex"}`,
+	}); err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/user/im-identities", nil)
+	req.Header.Set("Authorization", "Bearer "+s.users.IssueToken("alex", time.Hour))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response userIMIdentitiesListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	byID := map[string]userIMConnectionResponse{}
+	for _, connection := range response.Connections {
+		byID[connection.ID] = connection
+	}
+	if !byID["conn-mira"].Bound || byID["conn-mira"].SharedBinding {
+		t.Fatalf("source connection=%#v", byID["conn-mira"])
+	}
+	shared := byID["conn-lina"]
+	if shared.Bound || !shared.SharedBinding || shared.SharedFrom != "conn-mira" || shared.ExternalUserID != "mm-alex" {
+		t.Fatalf("shared connection=%#v", shared)
+	}
+}
+
 func TestUserIMConnectionBindCode_AccessControl(t *testing.T) {
 	s, wsID := setupUserIMTestServer(t)
 
@@ -390,12 +468,12 @@ func TestUserIMIdentities_VisibilityRules_ABC(t *testing.T) {
 		ProfileJSON:    `{"baseUrl":"http://mm.beta:8065"}`,
 	})
 	_ = s.controlDB.UpsertAgentChannelBinding(controldb.AgentChannelBinding{
-		ID:             "binding-beta",
-		WorkspaceID:    wsID,
-		AgentWorkerID:  workerID,
-		Provider:       "mattermost",
-		ConnectionID:   conn2,
-		Status:         "connected",
+		ID:            "binding-beta",
+		WorkspaceID:   wsID,
+		AgentWorkerID: workerID,
+		Provider:      "mattermost",
+		ConnectionID:  conn2,
+		Status:        "connected",
 	})
 
 	// User orphan bound to conn1 in the past, but has no project access

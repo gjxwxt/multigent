@@ -31,6 +31,8 @@ type userIMConnectionResponse struct {
 	InstanceTrust    string             `json:"instanceTrust,omitempty"`
 	HasAccess        bool               `json:"hasAccess"`
 	Bound            bool               `json:"bound"`
+	SharedBinding    bool               `json:"sharedBinding,omitempty"`
+	SharedFrom       string             `json:"sharedFrom,omitempty"`
 	ExternalUserID   string             `json:"externalUserId,omitempty"`
 	ExternalUsername string             `json:"externalUsername,omitempty"`
 	BoundAt          string             `json:"boundAt,omitempty"`
@@ -103,8 +105,14 @@ func (s *Server) handleUserIMIdentities(w http.ResponseWriter, r *http.Request) 
 	}
 
 	bindingsByConn := make(map[string][]controldb.AgentChannelBinding)
+	bindingsByID := make(map[string]controldb.AgentChannelBinding, len(bindings))
 	for _, b := range bindings {
 		bindingsByConn[b.ConnectionID] = append(bindingsByConn[b.ConnectionID], b)
+		bindingsByID[b.ID] = b
+	}
+	connectionsByID := make(map[string]controldb.Connection, len(conns))
+	for _, conn := range conns {
+		connectionsByID[conn.ID] = conn
 	}
 
 	// Fetch user's channel identities
@@ -199,16 +207,6 @@ func (s *Server) handleUserIMIdentities(w http.ResponseWriter, r *http.Request) 
 		// Rule B: Bound but no visible routes -> hasAccess = false, but keep in list so user can unbind
 		hasAccess := isWorkspaceAdmin || hasVisibleRoutes
 
-		var extUsername string
-		if bound && boundIdentity.MetadataJSON != "" {
-			var meta map[string]any
-			if err := json.Unmarshal([]byte(boundIdentity.MetadataJSON), &meta); err == nil {
-				if uname, ok := meta["externalUsername"].(string); ok && uname != "" {
-					extUsername = uname
-				}
-			}
-		}
-
 		var baseURL string
 		if conn.ProfileJSON != "" {
 			var profile map[string]any
@@ -224,6 +222,35 @@ func (s *Server) handleUserIMIdentities(w http.ResponseWriter, r *http.Request) 
 			displayName = label
 		}
 		instance := instancesByID[conn.IMInstanceID]
+		identityForDisplay := boundIdentity
+		sharedBinding := false
+		sharedFrom := ""
+		if !bound && hasVisibleRoutes && conn.Status == "active" && instance.Attestation == imInstanceAttestationAdmin {
+			for _, identity := range userChannelIdentities {
+				sourceBinding, found := bindingsByID[identity.ChannelBindingID]
+				if !found || sourceBinding.Provider != conn.Provider || sourceBinding.Status != "connected" {
+					continue
+				}
+				sourceConnection, found := connectionsByID[sourceBinding.ConnectionID]
+				if !found || sourceConnection.Provider != conn.Provider || sourceConnection.IMInstanceID != instance.ID || sourceConnection.Status != "active" {
+					continue
+				}
+				sharedBinding = true
+				sharedFrom = sourceConnection.ConnectionName
+				identityForDisplay = identity
+				break
+			}
+		}
+
+		var extUsername string
+		if (bound || sharedBinding) && identityForDisplay.MetadataJSON != "" {
+			var meta map[string]any
+			if err := json.Unmarshal([]byte(identityForDisplay.MetadataJSON), &meta); err == nil {
+				if uname, ok := meta["externalUsername"].(string); ok && uname != "" {
+					extUsername = uname
+				}
+			}
+		}
 
 		out = append(out, userIMConnectionResponse{
 			ID:               conn.ID,
@@ -237,9 +264,11 @@ func (s *Server) handleUserIMIdentities(w http.ResponseWriter, r *http.Request) 
 			InstanceTrust:    instance.Attestation,
 			HasAccess:        hasAccess,
 			Bound:            bound,
-			ExternalUserID:   boundIdentity.ExternalUserID,
+			SharedBinding:    sharedBinding,
+			SharedFrom:       sharedFrom,
+			ExternalUserID:   identityForDisplay.ExternalUserID,
 			ExternalUsername: extUsername,
-			BoundAt:          boundIdentity.CreatedAt,
+			BoundAt:          identityForDisplay.CreatedAt,
 			Routes:           visibleRoutes,
 		})
 	}

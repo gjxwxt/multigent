@@ -1069,6 +1069,10 @@ func TestRuntimeNotifyUnboundRecipientAndWorkspacePrefix(t *testing.T) {
 
 	_ = s.users.CreateUser("devuser", "pass", RoleMember, "", "", "", "", "")
 	_ = s.controlDB.UpsertWorkspaceMember(workspaceID, "devuser", WorkspaceRoleMember)
+	if err := s.users.UpdateUser("devuser", nil, nil, nil, nil, nil, nil, nil,
+		[]projectAccess{{Project: "sample", Role: ProjectRoleViewer}}, nil, nil); err != nil {
+		t.Fatalf("grant devuser project access: %v", err)
+	}
 
 	// 1. Send notification to unbound user "devuser" with TaskID
 	body := runtimeNotifyBody{

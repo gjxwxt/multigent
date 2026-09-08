@@ -20,9 +20,16 @@ func TestD6OutboundIdentityFallback(t *testing.T) {
 		t.Fatalf("UpsertWorkspace: %v", err)
 	}
 
-	// Insert user alex
-	if err := store.UpsertUser(controldb.User{Username: "alex", Role: "member"}); err != nil {
+	// Alex can currently access the project served by the destination Bot.
+	if err := store.UpsertUser(controldb.User{
+		Username:     "alex",
+		Role:         "member",
+		ProjectsJSON: `[{"project":"1test","role":"viewer"}]`,
+	}); err != nil {
 		t.Fatalf("UpsertUser: %v", err)
+	}
+	if err := store.UpsertWorkspaceMember(wsID, "alex", WorkspaceRoleMember); err != nil {
+		t.Fatalf("workspace member: %v", err)
 	}
 
 	// Connection
@@ -34,9 +41,20 @@ func TestD6OutboundIdentityFallback(t *testing.T) {
 		ConnectionName: "mm-conn",
 		AuthType:       "bot_token",
 		Status:         "active",
+		IMInstanceID:   "imi-engineering",
 		ProfileJSON:    "{}",
 	}); err != nil {
 		t.Fatalf("UpsertConnection: %v", err)
+	}
+	if err := store.UpsertIMInstance(controldb.IMInstance{
+		ID:          "imi-engineering",
+		WorkspaceID: wsID,
+		Provider:    "mattermost",
+		DisplayName: "Engineering Mattermost",
+		Attestation: imInstanceAttestationAdmin,
+		CreatedBy:   "admin",
+	}); err != nil {
+		t.Fatalf("instance: %v", err)
 	}
 
 	// Agent A binding (mira)
@@ -83,6 +101,7 @@ func TestD6OutboundIdentityFallback(t *testing.T) {
 
 	server := &Server{
 		controlDB: store,
+		users:     newUserStore(store),
 	}
 
 	principalLina := runtimeAgentPrincipal{
@@ -113,9 +132,9 @@ func TestD6OutboundIdentityFallback(t *testing.T) {
 		t.Errorf("expected CanNotify=true for Lina via D6 workspace fallback")
 	}
 
-	// 3. Security & Cross-Connection Isolation:
-	// Agent C on a DIFFERENT connection (conn-other) must NOT fallback to Alex's identity on conn-mm!
-	connOther := "conn-mm-other-instance"
+	// 3. A different Bot on the same administrator-attested instance may reuse
+	// Alex's external user ID, but it must not reuse Mira's Bot-specific DM ID.
+	connOther := "conn-mm-other-bot"
 	_ = store.UpsertConnection(controldb.Connection{
 		ID:             connOther,
 		WorkspaceID:    wsID,
@@ -123,6 +142,7 @@ func TestD6OutboundIdentityFallback(t *testing.T) {
 		ConnectionName: "mm-conn-other",
 		AuthType:       "bot_token",
 		Status:         "active",
+		IMInstanceID:   "imi-engineering",
 		ProfileJSON:    "{}",
 	})
 	bindingC := controldb.AgentChannelBinding{
@@ -141,11 +161,46 @@ func TestD6OutboundIdentityFallback(t *testing.T) {
 		Project:     "1test",
 		Agent:       "kobe",
 	}
-	_, foundOther, errOther := server.runtimeNotifyTargetForRecipient(principalKobe, bindingC, "alex")
+	targetOther, foundOther, errOther := server.runtimeNotifyTargetForRecipient(principalKobe, bindingC, "alex")
 	if errOther != nil {
 		t.Fatalf("runtimeNotifyTargetForRecipient other connection failed: %v", errOther)
 	}
-	if foundOther {
-		t.Fatalf("security invariant violated: D6 fallback crossed connection boundary to incompatible connection %s", connOther)
+	if !foundOther || targetOther.ReceiveID != "mm-user-alex-123" || targetOther.ChatID != "" {
+		t.Fatalf("expected cross-Bot fallback to open a fresh DM, got found=%v target=%#v", foundOther, targetOther)
+	}
+
+	// 4. An unassociated connection must remain isolated.
+	connUnassociated := "conn-mm-unassociated"
+	_ = store.UpsertConnection(controldb.Connection{
+		ID:             connUnassociated,
+		WorkspaceID:    wsID,
+		Provider:       "mattermost",
+		ConnectionName: "mm-unassociated",
+		AuthType:       "bot_token",
+		Status:         "active",
+		ProfileJSON:    "{}",
+	})
+	bindingD := controldb.AgentChannelBinding{
+		ID:           "binding-unassociated",
+		WorkspaceID:  wsID,
+		ProjectID:    "1test",
+		AgentID:      "unassociated",
+		Provider:     "mattermost",
+		ConnectionID: connUnassociated,
+		Status:       "connected",
+	}
+	_ = store.UpsertAgentChannelBinding(bindingD)
+	_, foundUnassociated, err := server.runtimeNotifyTargetForRecipient(runtimeAgentPrincipal{WorkspaceID: wsID, Project: "1test", Agent: "unassociated"}, bindingD, "alex")
+	if err != nil || foundUnassociated {
+		t.Fatalf("unassociated connection crossed the D6 boundary: found=%v err=%v", foundUnassociated, err)
+	}
+
+	// 5. A historical binding cannot bypass revoked access to the destination Agent.
+	if err := store.UpsertUser(controldb.User{Username: "alex", Role: "member", ProjectsJSON: `[]`}); err != nil {
+		t.Fatalf("revoke project access: %v", err)
+	}
+	_, foundAfterRevocation, err := server.runtimeNotifyTargetForRecipient(principalLina, bindingB, "alex")
+	if err != nil || foundAfterRevocation {
+		t.Fatalf("revoked recipient access must fail closed: found=%v err=%v", foundAfterRevocation, err)
 	}
 }
