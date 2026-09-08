@@ -11,18 +11,27 @@ import (
 	"github.com/multigent/multigent/internal/imbridge"
 )
 
+type userIMAgentRoute struct {
+	BindingID     string `json:"bindingId"`
+	AgentID       string `json:"agentId"`
+	ProjectID     string `json:"projectId,omitempty"`
+	AgentWorkerID string `json:"agentWorkerId,omitempty"`
+	DisplayName   string `json:"displayName"`
+}
+
 type userIMConnectionResponse struct {
-	ID               string `json:"id"`
-	Name             string `json:"name"`
-	Provider         string `json:"provider"`
-	ProviderLabel    string `json:"providerLabel"`
-	Status           string `json:"status"`
-	BaseURL          string `json:"baseUrl,omitempty"`
-	HasAccess        bool   `json:"hasAccess"`
-	Bound            bool   `json:"bound"`
-	ExternalUserID   string `json:"externalUserId,omitempty"`
-	ExternalUsername string `json:"externalUsername,omitempty"`
-	BoundAt          string `json:"boundAt,omitempty"`
+	ID               string              `json:"id"`
+	Name             string              `json:"name"`
+	Provider         string              `json:"provider"`
+	ProviderLabel    string              `json:"providerLabel"`
+	Status           string              `json:"status"`
+	BaseURL          string              `json:"baseUrl,omitempty"`
+	HasAccess        bool                `json:"hasAccess"`
+	Bound            bool                `json:"bound"`
+	ExternalUserID   string              `json:"externalUserId,omitempty"`
+	ExternalUsername string              `json:"externalUsername,omitempty"`
+	BoundAt          string              `json:"boundAt,omitempty"`
+	Routes           []userIMAgentRoute  `json:"routes,omitempty"`
 }
 
 type userIMIdentitiesListResponse struct {
@@ -113,26 +122,6 @@ func (s *Server) handleUserIMIdentities(w http.ResponseWriter, r *http.Request) 
 
 		connBindings := bindingsByConn[conn.ID]
 
-		// Check if user has access to at least one project/agent worker using this connection
-		hasAccess := isWorkspaceAdmin
-		if !hasAccess {
-			for _, b := range connBindings {
-				if b.ProjectID != "" && s.canAccessProject(r, b.ProjectID) {
-					hasAccess = true
-					break
-				}
-				if b.AgentWorkerID != "" {
-					worker, found, _ := s.controlDB.AgentWorkerByID(workspaceID, b.AgentWorkerID)
-					if found {
-						if allowed, _ := s.canAccessAgentWorkerForRequest(r, workspaceID, worker); allowed {
-							hasAccess = true
-							break
-						}
-					}
-				}
-			}
-		}
-
 		// Check if user is bound to this connection
 		bound := false
 		var boundIdentity controldb.UserChannelIdentity
@@ -143,6 +132,60 @@ func (s *Server) handleUserIMIdentities(w http.ResponseWriter, r *http.Request) 
 				break
 			}
 		}
+
+		// Collect visible routes for this connection using dual-path RBAC check
+		var visibleRoutes []userIMAgentRoute
+		for _, b := range connBindings {
+			allowed := isWorkspaceAdmin
+			var displayName string
+			if !allowed {
+				if b.ProjectID != "" && s.canAccessProject(r, b.ProjectID) {
+					allowed = true
+				} else if b.AgentWorkerID != "" {
+					worker, found, _ := s.controlDB.AgentWorkerByID(workspaceID, b.AgentWorkerID)
+					if found {
+						if wAllowed, _ := s.canAccessAgentWorkerForRequest(r, workspaceID, worker); wAllowed {
+							allowed = true
+						}
+					}
+				}
+			}
+			if allowed {
+				if b.AgentID != "" && b.ProjectID != "" {
+					displayName = fmt.Sprintf("%s (%s)", b.AgentID, b.ProjectID)
+				} else if b.AgentWorkerID != "" {
+					worker, found, _ := s.controlDB.AgentWorkerByID(workspaceID, b.AgentWorkerID)
+					if found && strings.TrimSpace(worker.Name) != "" {
+						displayName = worker.Name
+					} else {
+						displayName = b.AgentWorkerID
+					}
+				} else if b.AgentID != "" {
+					displayName = b.AgentID
+				} else {
+					displayName = b.ID
+				}
+				visibleRoutes = append(visibleRoutes, userIMAgentRoute{
+					BindingID:     b.ID,
+					AgentID:       b.AgentID,
+					ProjectID:     b.ProjectID,
+					AgentWorkerID: b.AgentWorkerID,
+					DisplayName:   displayName,
+				})
+			}
+		}
+
+		hasVisibleRoutes := len(visibleRoutes) > 0
+
+		// Visibility & anti-leakage rules:
+		// Rule C: Unbound and no visible routes -> completely exclude from response
+		if !bound && !hasVisibleRoutes && !isWorkspaceAdmin {
+			continue
+		}
+
+		// Rule A: Has visible routes -> hasAccess = true
+		// Rule B: Bound but no visible routes -> hasAccess = false, but keep in list so user can unbind
+		hasAccess := isWorkspaceAdmin || hasVisibleRoutes
 
 		var extUsername string
 		if bound && boundIdentity.MetadataJSON != "" {
@@ -181,6 +224,7 @@ func (s *Server) handleUserIMIdentities(w http.ResponseWriter, r *http.Request) 
 			ExternalUserID:   boundIdentity.ExternalUserID,
 			ExternalUsername: extUsername,
 			BoundAt:          boundIdentity.CreatedAt,
+			Routes:           visibleRoutes,
 		})
 	}
 

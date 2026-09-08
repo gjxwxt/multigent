@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Check, CheckCircle2, Copy, ExternalLink, Link2, Loader2, MessageSquare, RefreshCw, ShieldAlert, Unlink, X } from 'lucide-react'
 import { apiDelete, apiFetch, apiPost } from '../../lib/api'
@@ -6,6 +6,14 @@ import { copyTextToClipboard } from '../../lib/clipboard'
 import { useFormatDateTime } from '../../lib/format-datetime'
 import { confirmDialog } from '../ui/ConfirmDialog'
 import { overlayDismissProps } from '../ui/overlay'
+
+type UserIMAgentRoute = {
+  bindingId: string
+  agentId: string
+  projectId?: string
+  agentWorkerId?: string
+  displayName: string
+}
 
 type UserIMConnection = {
   id: string
@@ -19,6 +27,7 @@ type UserIMConnection = {
   externalUserId?: string
   externalUsername?: string
   boundAt?: string
+  routes?: UserIMAgentRoute[]
 }
 
 type UserIMIdentitiesListResp = {
@@ -32,6 +41,43 @@ type BindCodeResp = {
   provider: string
   connectionId: string
   connectionName: string
+}
+
+function getGroupKey(conn: UserIMConnection): string {
+  if (!conn.baseUrl) {
+    return `conn:${conn.id}`
+  }
+  try {
+    const url = new URL(conn.baseUrl)
+    if (!url.host) {
+      return `conn:${conn.id}`
+    }
+    return `${conn.provider}:${url.origin.toLowerCase()}`
+  } catch {
+    return `conn:${conn.id}`
+  }
+}
+
+function getGroupDisplay(groupConns: UserIMConnection[]) {
+  const first = groupConns[0]
+  if (!first) return { title: 'IM', subtitle: '', providerLabel: 'IM' }
+
+  let host = ''
+  if (first.baseUrl) {
+    try {
+      const u = new URL(first.baseUrl)
+      host = u.host
+    } catch {
+      host = first.baseUrl
+    }
+  }
+
+  const isLocal = host.includes('127.0.0.1') || host.includes('localhost')
+  const envHint = isLocal ? `本地协作环境 (${host})` : host
+  const title = host ? `${first.providerLabel} · ${envHint}` : first.name
+  const subtitle = first.baseUrl || ''
+
+  return { title, subtitle, providerLabel: first.providerLabel }
 }
 
 function SectionHeader({ title, description }: { title: string; description: string }) {
@@ -172,6 +218,28 @@ export function IMIdentitiesSection() {
     }
   }
 
+  const groups = useMemo(() => {
+    const map = new Map<string, UserIMConnection[]>()
+    for (const conn of connections) {
+      const key = getGroupKey(conn)
+      const existing = map.get(key)
+      if (existing) {
+        existing.push(conn)
+      } else {
+        map.set(key, [conn])
+      }
+    }
+
+    return Array.from(map.entries()).map(([key, conns]) => {
+      const info = getGroupDisplay(conns)
+      return {
+        key,
+        ...info,
+        connections: conns,
+      }
+    })
+  }, [connections])
+
   return (
     <section className="mt-4 overflow-hidden rounded-lg border border-neutral-200/80 bg-white dark:border-zinc-700/60 dark:bg-zinc-900/40">
       <SectionHeader
@@ -193,100 +261,141 @@ export function IMIdentitiesSection() {
             <p>{t('account.noIMConnections', { defaultValue: '当前工作区暂未接入任何即时通讯渠道（如 Mattermost、飞书等）。' })}</p>
           </div>
         ) : (
-          <div className="grid gap-3 sm:grid-cols-2">
-            {connections.map((conn) => (
+          <div className="space-y-4">
+            {groups.map((group) => (
               <div
-                key={conn.id}
-                className="flex flex-col justify-between rounded-lg border border-neutral-200/80 bg-neutral-50/40 p-4 transition-all hover:border-neutral-300 dark:border-zinc-700/60 dark:bg-zinc-800/20 dark:hover:border-zinc-600"
+                key={group.key}
+                className="overflow-hidden rounded-xl border border-neutral-200/80 bg-white shadow-sm dark:border-zinc-700/60 dark:bg-zinc-900/50"
               >
-                <div>
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-sky-50 text-sky-600 dark:bg-sky-950/40 dark:text-sky-400">
-                        <MessageSquare className="size-4" />
-                      </div>
-                      <div className="min-w-0">
-                        <h4 className="truncate text-sm font-semibold text-neutral-900 dark:text-zinc-100">
-                          {conn.name}
-                        </h4>
-                        <span className="text-[11px] font-medium text-neutral-400 dark:text-zinc-500">
-                          {conn.providerLabel}
-                        </span>
-                      </div>
+                {/* Group Container Header */}
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-200/60 bg-neutral-50/50 px-4 py-3 dark:border-zinc-700/60 dark:bg-zinc-800/30">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-sky-50 text-sky-600 dark:bg-sky-950/40 dark:text-sky-400">
+                      <MessageSquare className="size-4" />
                     </div>
-
-                    {conn.bound ? (
-                      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-emerald-200/60 dark:bg-emerald-950/30 dark:text-emerald-300 dark:ring-emerald-800/40">
-                        <CheckCircle2 className="size-3" />
-                        {t('account.imBound', { defaultValue: '已绑定' })}
-                      </span>
-                    ) : !conn.hasAccess ? (
-                      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 ring-1 ring-amber-200/60 dark:bg-amber-950/30 dark:text-amber-300 dark:ring-amber-800/40">
-                        <ShieldAlert className="size-3" />
-                        {t('account.imNoAccess', { defaultValue: '无可用权限' })}
-                      </span>
-                    ) : (
-                      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-neutral-100 px-2 py-0.5 text-xs font-medium text-neutral-500 dark:bg-zinc-800 dark:text-zinc-400">
-                        {t('account.imUnbound', { defaultValue: '未绑定' })}
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="mt-3 space-y-1 text-xs">
-                    {conn.baseUrl && (
-                      <p className="truncate text-neutral-500 dark:text-zinc-400">
-                        <span className="font-medium text-neutral-600 dark:text-zinc-300">{t('account.imServerUrl', { defaultValue: '服务地址' })}: </span>
-                        <code className="text-[11px] text-neutral-600 dark:text-zinc-400">{conn.baseUrl}</code>
-                      </p>
-                    )}
-
-                    {conn.bound ? (
-                      <>
-                        <p className="text-neutral-600 dark:text-zinc-300">
-                          <span className="font-medium">{t('account.imExternalAccount', { defaultValue: '协同账号' })}: </span>
-                          <span className="font-medium text-sky-600 dark:text-sky-400">
-                            @{conn.externalUsername || conn.externalUserId}
-                          </span>
+                    <div className="min-w-0">
+                      <h4 className="truncate text-sm font-semibold text-neutral-900 dark:text-zinc-100">
+                        {group.title}
+                      </h4>
+                      {group.subtitle && (
+                        <p className="truncate text-[11px] font-mono text-neutral-400 dark:text-zinc-500">
+                          {group.subtitle}
                         </p>
-                        {conn.boundAt && (
-                          <p className="text-[11px] text-neutral-400 dark:text-zinc-500">
-                            {t('account.imBoundAt', { defaultValue: '绑定于' })} {formatDateTime(conn.boundAt)}
-                          </p>
-                        )}
-                      </>
-                    ) : !conn.hasAccess ? (
-                      <p className="text-xs text-amber-600/90 dark:text-amber-400/80">
-                        {t('account.imNoAccessHint', { defaultValue: '您在当前工作区尚未被授权使用该连接关联的智能体项目。' })}
-                      </p>
-                    ) : (
-                      <p className="text-xs text-neutral-400 dark:text-zinc-500">
-                        {t('account.imBindHint', { defaultValue: '绑定后可接收流水线通知及一键决策按钮。' })}
-                      </p>
-                    )}
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="rounded-full bg-neutral-100 px-2.5 py-0.5 text-xs font-medium text-neutral-600 dark:bg-zinc-800 dark:text-zinc-300">
+                      {t('account.botEndpointsCount', {
+                        defaultValue: '{{count}} 个 Bot 接入点',
+                        count: group.connections.length,
+                      })}
+                    </span>
                   </div>
                 </div>
 
-                <div className="mt-4 flex items-center justify-end gap-2 border-t border-neutral-200/60 pt-3 dark:border-zinc-700/60">
-                  {conn.bound ? (
-                    <button
-                      type="button"
-                      disabled={unbindingId === conn.id}
-                      onClick={() => void unbind(conn)}
-                      className="inline-flex items-center gap-1 rounded-md border border-neutral-200 bg-white px-2.5 py-1 text-xs font-medium text-red-600 transition hover:border-red-200 hover:bg-red-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-red-400 dark:hover:border-red-900/50 dark:hover:bg-red-950/20"
-                    >
-                      <Unlink className="size-3.5" />
-                      {unbindingId === conn.id ? t('common.loading', { defaultValue: '处理中...' }) : t('account.imUnbindAction', { defaultValue: '解除绑定' })}
-                    </button>
-                  ) : conn.hasAccess ? (
-                    <button
-                      type="button"
-                      onClick={() => void openBindModal(conn)}
-                      className="inline-flex items-center gap-1 rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-sky-700"
-                    >
-                      <Link2 className="size-3.5" />
-                      {t('account.imBindAction', { defaultValue: '绑定账号' })}
-                    </button>
-                  ) : null}
+                {/* Subheader: 可见 Bot 接入路由 */}
+                <div className="border-b border-neutral-100 bg-neutral-50/30 px-4 py-2 text-[11px] font-medium text-neutral-500 dark:border-zinc-800 dark:bg-zinc-800/10 dark:text-zinc-400">
+                  {t('account.visibleBotRoutesTitle', { defaultValue: '可见 Bot 接入路由' })}
+                </div>
+
+                {/* Bot Endpoint Rows */}
+                <div className="divide-y divide-neutral-100 dark:divide-zinc-800">
+                  {group.connections.map((conn) => {
+                    const hasRoutes = conn.routes && conn.routes.length > 0
+                    return (
+                      <div
+                        key={conn.id}
+                        className="flex flex-col gap-3 p-4 transition-colors hover:bg-neutral-50/30 sm:flex-row sm:items-center sm:justify-between dark:hover:bg-zinc-800/10"
+                      >
+                        {/* Left: Bot name & routes */}
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-sm font-semibold text-neutral-900 dark:text-zinc-100">
+                              {hasRoutes
+                                ? conn.routes!.map((r) => r.displayName).join('、')
+                                : conn.name}
+                            </span>
+                            <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[11px] font-mono text-neutral-500 dark:bg-zinc-800 dark:text-zinc-400">
+                              {conn.name}
+                            </span>
+                          </div>
+
+                          {!hasRoutes ? (
+                            <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                              {conn.bound
+                                ? t('account.boundNoRoutesHint', { defaultValue: '已绑定外部账号，但当前无可见的智能体项目或 Worker。' })
+                                : t('account.noRoutesHint', { defaultValue: '暂无可访问的智能体项目或 Worker。' })}
+                            </p>
+                          ) : null}
+
+                          {conn.bound && (
+                            <div className="mt-1.5 flex flex-wrap items-center gap-3 text-xs">
+                              <span className="text-neutral-600 dark:text-zinc-300">
+                                <span className="font-medium text-neutral-500 dark:text-zinc-400">
+                                  {t('account.imExternalAccount', { defaultValue: '协同账号' })}:{' '}
+                                </span>
+                                <span className="font-semibold text-sky-600 dark:text-sky-400">
+                                  @{conn.externalUsername || conn.externalUserId}
+                                </span>
+                              </span>
+                              {conn.boundAt && (
+                                <span className="text-[11px] text-neutral-400 dark:text-zinc-500">
+                                  {t('account.imBoundAt', { defaultValue: '绑定于' })}{' '}
+                                  {formatDateTime(conn.boundAt)}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Middle: Badge */}
+                        <div className="flex items-center gap-2">
+                          {conn.bound ? (
+                            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-emerald-200/60 dark:bg-emerald-950/30 dark:text-emerald-300 dark:ring-emerald-800/40">
+                              <CheckCircle2 className="size-3" />
+                              {t('account.imBound', { defaultValue: '已绑定' })}
+                            </span>
+                          ) : !conn.hasAccess ? (
+                            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700 ring-1 ring-amber-200/60 dark:bg-amber-950/30 dark:text-amber-300 dark:ring-amber-800/40">
+                              <ShieldAlert className="size-3" />
+                              {t('account.imNoAccess', { defaultValue: '无可用权限' })}
+                            </span>
+                          ) : (
+                            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-neutral-100 px-2.5 py-0.5 text-xs font-medium text-neutral-500 dark:bg-zinc-800 dark:text-zinc-400">
+                              {t('account.imUnbound', { defaultValue: '未绑定' })}
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Right: Actions */}
+                        <div className="flex shrink-0 items-center gap-2">
+                          {conn.bound ? (
+                            <button
+                              type="button"
+                              disabled={unbindingId === conn.id}
+                              onClick={() => void unbind(conn)}
+                              className="inline-flex items-center gap-1 rounded-md border border-neutral-200 bg-white px-2.5 py-1.5 text-xs font-medium text-red-600 transition hover:border-red-200 hover:bg-red-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-red-400 dark:hover:border-red-900/50 dark:hover:bg-red-950/20"
+                            >
+                              <Unlink className="size-3.5" />
+                              {unbindingId === conn.id
+                                ? t('common.loading', { defaultValue: '处理中...' })
+                                : t('account.imUnbindAction', { defaultValue: '解除绑定' })}
+                            </button>
+                          ) : conn.hasAccess ? (
+                            <button
+                              type="button"
+                              onClick={() => void openBindModal(conn)}
+                              className="inline-flex items-center gap-1 rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-sky-700"
+                            >
+                              <Link2 className="size-3.5" />
+                              {t('account.imBindAction', { defaultValue: '绑定账号' })}
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                    )
+                  })}
                 </div>
               </div>
             ))}

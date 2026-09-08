@@ -49,6 +49,10 @@ func grantProjectAccessForTest(s *Server, username, project string) {
 	_ = s.users.UpdateUser(username, nil, nil, nil, nil, nil, nil, nil, []projectAccess{{Project: project, Role: "member"}}, nil, nil)
 }
 
+func grantWorkerAccessForTest(s *Server, username, workerID string) {
+	_ = s.users.UpdateUser(username, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, []workerAccess{{WorkerID: workerID, Role: "operator"}})
+}
+
 func TestUserIMIdentities_ListAndBoundStatus(t *testing.T) {
 	s, wsID := setupUserIMTestServer(t)
 
@@ -326,3 +330,168 @@ func TestUserIMConnectionUnbind_Transactional(t *testing.T) {
 		t.Fatalf("expected old bind code to be invalidated with UsedAt set")
 	}
 }
+
+func TestUserIMIdentities_VisibilityRules_ABC(t *testing.T) {
+	s, wsID := setupUserIMTestServer(t)
+
+	// Create users
+	_ = s.users.CreateUser("user-proj", "pass", RoleMember, "", "", "", "", "")
+	_ = s.controlDB.UpsertWorkspaceMember(wsID, "user-proj", WorkspaceRoleMember)
+
+	_ = s.users.CreateUser("user-worker", "pass", RoleMember, "", "", "", "", "")
+	_ = s.controlDB.UpsertWorkspaceMember(wsID, "user-worker", WorkspaceRoleMember)
+
+	_ = s.users.CreateUser("user-orphan", "pass", RoleMember, "", "", "", "", "")
+	_ = s.controlDB.UpsertWorkspaceMember(wsID, "user-orphan", WorkspaceRoleMember)
+
+	_ = s.users.CreateUser("user-outsider", "pass", RoleMember, "", "", "", "", "")
+	_ = s.controlDB.UpsertWorkspaceMember(wsID, "user-outsider", WorkspaceRoleMember)
+
+	// Projects and workers
+	_ = s.st.SaveProject("proj-alpha", &entity.Project{Name: "proj-alpha"})
+	grantProjectAccessForTest(s, "user-proj", "proj-alpha")
+
+	workerID := "worker-lead"
+	_ = s.controlDB.UpsertAgentWorker(controldb.AgentWorker{
+		ID:          workerID,
+		WorkspaceID: wsID,
+		Name:        "Lead Agent Worker",
+	})
+	grantWorkerAccessForTest(s, "user-worker", workerID)
+
+	// Connection 1: attached to proj-alpha
+	conn1 := "conn-alpha"
+	_ = s.controlDB.UpsertConnection(controldb.Connection{
+		ID:             conn1,
+		WorkspaceID:    wsID,
+		Provider:       "mattermost",
+		ConnectionName: "Alpha Mattermost",
+		Status:         "active",
+		ProfileJSON:    `{"baseUrl":"http://mm.alpha:8065"}`,
+	})
+	_ = s.controlDB.UpsertAgentChannelBinding(controldb.AgentChannelBinding{
+		ID:           "binding-alpha",
+		WorkspaceID:  wsID,
+		ProjectID:    "proj-alpha",
+		AgentID:      "mira",
+		Provider:     "mattermost",
+		ConnectionID: conn1,
+		Status:       "connected",
+	})
+
+	// Connection 2: attached to worker-lead
+	conn2 := "conn-beta"
+	_ = s.controlDB.UpsertConnection(controldb.Connection{
+		ID:             conn2,
+		WorkspaceID:    wsID,
+		Provider:       "mattermost",
+		ConnectionName: "Beta Mattermost",
+		Status:         "active",
+		ProfileJSON:    `{"baseUrl":"http://mm.beta:8065"}`,
+	})
+	_ = s.controlDB.UpsertAgentChannelBinding(controldb.AgentChannelBinding{
+		ID:             "binding-beta",
+		WorkspaceID:    wsID,
+		AgentWorkerID:  workerID,
+		Provider:       "mattermost",
+		ConnectionID:   conn2,
+		Status:         "connected",
+	})
+
+	// User orphan bound to conn1 in the past, but has no project access
+	_ = s.controlDB.UpsertUserChannelIdentity(controldb.UserChannelIdentity{
+		ID:               "uch-orphan",
+		WorkspaceID:      wsID,
+		UserID:           "user-orphan",
+		ChannelBindingID: "binding-alpha",
+		Provider:         "mattermost",
+		ExternalUserID:   "mm-orphan",
+		MetadataJSON:     `{"externalUsername":"orphan_mm"}`,
+		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
+	})
+
+	// 1. user-proj (Rule A: Project access -> sees conn1 with visible routes, excludes conn2)
+	tokenProj := s.users.IssueToken("user-proj", time.Hour)
+	req1 := httptest.NewRequest(http.MethodGet, "/api/v1/user/im-identities", nil)
+	req1.Header.Set("Authorization", "Bearer "+tokenProj)
+	w1 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w1, req1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("user-proj: expected 200, got %d", w1.Code)
+	}
+	var resp1 userIMIdentitiesListResponse
+	_ = json.NewDecoder(w1.Body).Decode(&resp1)
+	if len(resp1.Connections) != 1 {
+		t.Fatalf("user-proj: expected exactly 1 connection, got %d", len(resp1.Connections))
+	}
+	if resp1.Connections[0].ID != conn1 {
+		t.Errorf("user-proj: expected %s, got %s", conn1, resp1.Connections[0].ID)
+	}
+	if !resp1.Connections[0].HasAccess || len(resp1.Connections[0].Routes) != 1 {
+		t.Fatalf("user-proj: expected hasAccess=true with 1 route, got %#v", resp1.Connections[0])
+	}
+	if resp1.Connections[0].Routes[0].AgentID != "mira" || resp1.Connections[0].Routes[0].ProjectID != "proj-alpha" {
+		t.Errorf("user-proj: unexpected route: %#v", resp1.Connections[0].Routes[0])
+	}
+
+	// 2. user-worker (Rule A: Dual-path AgentWorker access -> sees conn2, excludes conn1)
+	tokenWorker := s.users.IssueToken("user-worker", time.Hour)
+	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/user/im-identities", nil)
+	req2.Header.Set("Authorization", "Bearer "+tokenWorker)
+	w2 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("user-worker: expected 200, got %d", w2.Code)
+	}
+	var resp2 userIMIdentitiesListResponse
+	_ = json.NewDecoder(w2.Body).Decode(&resp2)
+	if len(resp2.Connections) != 1 {
+		t.Fatalf("user-worker: expected exactly 1 connection, got %d", len(resp2.Connections))
+	}
+	if resp2.Connections[0].ID != conn2 {
+		t.Errorf("user-worker: expected %s, got %s", conn2, resp2.Connections[0].ID)
+	}
+	if !resp2.Connections[0].HasAccess || len(resp2.Connections[0].Routes) != 1 {
+		t.Fatalf("user-worker: expected hasAccess=true with 1 route, got %#v", resp2.Connections[0])
+	}
+	if resp2.Connections[0].Routes[0].AgentWorkerID != workerID {
+		t.Errorf("user-worker: unexpected route: %#v", resp2.Connections[0].Routes[0])
+	}
+
+	// 3. user-orphan (Rule B: Orphan protection -> sees conn1 with bound=true, hasAccess=false, routes=empty)
+	tokenOrphan := s.users.IssueToken("user-orphan", time.Hour)
+	req3 := httptest.NewRequest(http.MethodGet, "/api/v1/user/im-identities", nil)
+	req3.Header.Set("Authorization", "Bearer "+tokenOrphan)
+	w3 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w3, req3)
+	if w3.Code != http.StatusOK {
+		t.Fatalf("user-orphan: expected 200, got %d", w3.Code)
+	}
+	var resp3 userIMIdentitiesListResponse
+	_ = json.NewDecoder(w3.Body).Decode(&resp3)
+	if len(resp3.Connections) != 1 {
+		t.Fatalf("user-orphan: expected 1 connection (orphan entry), got %d", len(resp3.Connections))
+	}
+	if resp3.Connections[0].ID != conn1 {
+		t.Errorf("user-orphan: expected %s, got %s", conn1, resp3.Connections[0].ID)
+	}
+	if !resp3.Connections[0].Bound || resp3.Connections[0].HasAccess || len(resp3.Connections[0].Routes) != 0 {
+		t.Fatalf("user-orphan: expected bound=true, hasAccess=false, routes=0; got %#v", resp3.Connections[0])
+	}
+
+	// 4. user-outsider (Rule C: Unbound and no visible routes -> completely excluded)
+	tokenOutsider := s.users.IssueToken("user-outsider", time.Hour)
+	req4 := httptest.NewRequest(http.MethodGet, "/api/v1/user/im-identities", nil)
+	req4.Header.Set("Authorization", "Bearer "+tokenOutsider)
+	w4 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w4, req4)
+	if w4.Code != http.StatusOK {
+		t.Fatalf("user-outsider: expected 200, got %d", w4.Code)
+	}
+	var resp4 userIMIdentitiesListResponse
+	_ = json.NewDecoder(w4.Body).Decode(&resp4)
+	if len(resp4.Connections) != 0 {
+		t.Fatalf("user-outsider: expected 0 connections (Rule C anti-leakage), got %d", len(resp4.Connections))
+	}
+}
+
