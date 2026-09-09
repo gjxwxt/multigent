@@ -3,30 +3,87 @@
 ## Start here
 
 Branch: `feat/chatops-live-card-and-d6`.
-Latest commit: `d15e7fd` (Harden binding conflict defense and ChatOps approval identity resolution).
+Status: Phase 1 安全缺陷闭环修复、ChatOps 本地级联清理与 Phase 2 企业级模板均已完成并通过全量验证，End-to-End Pilot 生命周期及伪造输入防御测试全绿。
 
-All 4 mandates from the architecture review have been completed, verified with automated tests, and deployed to the VM:
-1. `UserChannelIdentity` is the sole source of truth for Mattermost (stopped writing to global `external_identities`).
-2. `ActionTokenPayload` and `DialogTokenPayload` strictly enforce `ConnectionID`; missing or tampered connection fails closed.
-3. `ClaimMattermostIdentityInScope` enforces atomic check-and-insert in an SQLite transaction lock.
-4. Unified trusted boundary helpers in `internal/api/im_boundary_helper.go` shared across D6, `/mg bind`, and ChatOps callbacks.
+Key status & deliverables:
+1. **ChatOps Channel Automation & Cascade Cleanup (产品边界明确)**:
+   - Strictly scoped to IM instance; 409 conflict intercept prevents channel hijacking; link mode strictly finds existing channels (404 if missing).
+   - Bot channel invite failures tracked (`status: error`, target suppressed); partial failures recoverable via UI retry.
+   - Added `GET /api/v1/projects/{name}/channels` and project settings ChatOps status card with retry recovery button.
+   - **级联清理产品边界明确 (Cascade Cleanup & Product Boundary)**：
+     - `internal/api/delete_handlers.go` 中项目删除时自动级联清理本地 `project_memberships`、`project_channel_links` 与 `agent_channel_bindings`（由 `TestDeleteRoleTeamAndProjectRequireWorkspaceAdmin` 严格验证）。
+     - **产品设计边界声明**：级联清理仅删除 Multigent 本地关联记录与授权关系，**明确保留 Mattermost 远端真实频道供安全审计与历史追溯**，避免误删导致外部团队沟通记录丢失。
+2. **Project Initialization Alignment & Acceleration**:
+   - Fixed AgentDir vs workspace split; single materialization prevents file duplication; Docker sandbox aligned with workspace root.
+   - Initialization workflow v5 streamlined to 3 deterministic steps (`ready` -> `sync` -> `ci_ready`), cutting run duration from 38m to <3m.
+3. **Phase 1 设计快照与 QA 门禁（3 项 P0 + 2 项防御加固已彻底闭环）**:
+   - 流程拓扑已调整为前置 QA 门禁（`code_review -> qa -> qa_signoff -> pr_open_and_merge -> release`），防止坏代码进 `main`；
+   - 契约字段在自审、代码审、QA 审与返工边之间传递；
+   - **✅ 已闭环的 P0 安全修复与深度防御**：
+     1. **审批绕过入口彻底关闭（含伪造路径防御）** (`internal/api/workflow_handlers.go:664`)：
+        - 服务端在进入设计闸门审批判定时，强制 `delete(outputs, "approved_design_snapshot_path")` 与 `delete(outputs, "approved_design_html")`，绝不信任客户端传入的快照路径与内容，只能由服务端抓取 OD 成功后写入；
+        - 空项目 ID、无快照且无豁免理由时 fail-closed 返回 400 Bad Request（`TestDesignReviewApprovalFailsClosedWithoutReferenceOrWaiver`）；
+        - 伪造 `approved_design_project_id` + 伪造 `approved_design_snapshot_path` 均强制 fail-closed 返回 400（`TestDesignReviewApprovalFailsClosedWithForgedSnapshotPath` 验证通过）。
+     2. **跨项目任务 ID 越权读取快照已拦截** (`internal/api/design_gate_snapshot.go:177`)：引入 `projectTaskResourceGuard`，校验调用者访问权的同时严格校验 `taskId` 必须归属于当前 `projectName`，跨项目越权直接返回 404（`TestDesignSnapshotPreviewEndpoint` 验证通过）。
+     3. **同源 HTML 原型 XSS 彻底隔离** (`internal/api/design_gate_snapshot.go:246`)：快照静态资源端点强制注入严格 CSP 沙箱响应头（无 `allow-same-origin`）：`Content-Security-Policy: sandbox allow-scripts allow-forms; default-src 'self' data: blob: https: 'unsafe-inline' 'unsafe-eval'; frame-ancestors 'self'`，配合 `X-Content-Type-Options: nosniff` 与 `Referrer-Policy: no-referrer`，使得原型在不透明 `null` origin 中执行（`TestDesignSnapshotPreviewEndpoint` 验证通过）。
+     4. **快照写入路径安全与原子发布** (`internal/api/design_gate_snapshot.go:141`)：
+        - 严格校验每个 OD 工件文件路径为纯净相对路径，任何 `..` 目录遍历尝试均被阻断拦截（`TestCaptureDesignGateSnapshotRejectsPathTraversal` 验证通过）；
+        - 使用临时目录（`os.MkdirTemp`）完整抓取写入所有文件和 `manifest.json` 后，再通过 `os.Rename` 原子发布到正式快照目录，杜绝半成品快照目录残留。
+     5. **QA 风险-覆盖矩阵严格校验** (`internal/api/workflow_handlers.go:825`)：
+        - 强制校验矩阵中每项必须有非空且唯一的 `item_id`（空 ID 或重复 ID 均返回 400）；
+        - 严格校验 `manual_waivers` JSON 格式，解析失败直接硬失败返回 400，拒绝静默忽略；
+        - 严格校验 `risk_level`（high/medium/low）与 `status`（passed/failed/blocked/waived/unexecuted/skipped）枚举合法性，拒绝未知枚举；
+        - 拒绝无证据的高风险通过项：`risk_level == "high"` 且 `status == "passed"` 时必须具备非空 `evidence`（`TestQASignoffGateValidation` 全部 9 项子用例全绿验证）。
+4. **Phase 2 企业级全栈工程模板（已验收通过）**:
+   - 现代企业级样板：Java 21 + Spring Boot 3.3.3 + Gradle + React 18 SPA + Vite + Tailwind CSS。
+   - **严格禁止依赖锁文件静默降级**：
+     - `Makefile` 的 `install` 目标显式要求 `web/package-lock.json`，缺失时直接退出报错，杜绝重新引入未锁定依赖。
+   - **POSIX 权限与 Gradle Wrapper 确定性内置**：
+     - `templateFileMode` 强制 `gradlew` 与 `*.sh` 拥有 `0755` 执行权限；
+     - 内置并 Git 追踪 Gradle 8.9 distribution wrapper jar（`server/gradle/wrapper/gradle-wrapper.jar`）。
+   - **真实自动化测试与 TDD 规范落地**：
+     - 前端补齐 RTL + Vitest（7/7 通过），修复全局 `globalThis.fetch` 保证 `tsc -b --noEmit` 0 报错；
+     - 后端提供 MockMvc 切片测试、异常统一拦截与 JUnit 5 隔离测试；
+     - 两个内置模板（`react_spring_boot` 与 `react_go_fullstack`）均配齐 `AGENTS.md`、`CLAUDE.md` 与 `docs/`（`architecture.md`, `api-spec.md`, `tdd-guide.md`）。
+   - **自动化受控 CI 集成测试**：
+     - `TestReactSpringBootMakeInstallFailsWithoutLockfile`：验证缺少 lockfile 时 `make install` 立即阻断。
+     - `TestReactSpringBootControlledCIIntegration`：实测执行 `Materialize` -> `make install` -> `make verify`（含 `doctor`, `lint`, `test`, `build`），全程自动化跑通。
+5. **Phase 3 End-to-End Pilot 全链路验证 (`TestPilotGreenfieldDeliveryPipelineFullLifecycle`)**:
+   - 全程演练 11 步 Greenfield Delivery Pipeline（需求澄清 -> 需求快审 -> 设计确认闸门 -> 实现编码 -> Agent 初审 -> 人工代码审核 -> QA 测试与风险矩阵 -> QA 准出签核 -> 开 PR 并合并 -> 首版发布 -> 上线确认）；
+   - 覆盖设计闸门空输入阻断、伪造快照路径输入阻断以及特批豁免放行；
+   - 覆盖 QA 准出闸门高风险未测项拦截与 per-item manual waiver 特批放行；
+   - 覆盖项目删除时本地 `project_channel_links` 与 `agent_channel_bindings` 的级联清理断言。
 
 ## Non-negotiable boundaries
 
-- A URL is a display hint, not an IM-instance identity or authorization boundary.
-- `admin_attested` is an administrator's explicit control-plane assertion, not a Mattermost protocol fingerprint.
-- D6 and ChatOps approvals may cross `ConnectionID` only when both connections are active, share one `admin_attested` instance, and the recipient has live access to the destination route.
-- A cross-Bot Mattermost delivery must discard the source DM `ChatID`; the driver creates a destination-Bot DM from `ExternalUserID`.
-- Card and dialog callbacks must load secrets directly from the token's verified `ConnectionID`; never fall back to "first binding".
-- Ambiguous identity in a trusted scope must fail closed and record a security audit alert.
-
-## Next work
-
-IM Slash Command instance gateway convergence:
-Moving to a single unified Slash Command gateway (`/mg`) per Mattermost Team/Instance so multiple Bot endpoints share one slash command webhook, routing subcommands safely to the appropriate project/agent.
+- QA 门禁必须严格位于主干合并之前（`code_review -> qa -> qa_signoff -> pr_open_and_merge`）。
+- 模板依赖安装必须 100% 依赖确定性 lockfile，严禁在 lockfile 缺失时自动降级为动态拉取。
+- 快照文件提供端点必须校验任务所属项目，且对原型 HTML 内容实行沙箱隔离。
+- `approved_design_snapshot_path` 和 `approved_design_html` 严禁信任客户端请求输入，必须由服务端抓取生成。
+- `gradlew` 必须保持 `0755` 权限且必须内置 `gradle-wrapper.jar`。
 
 ## Evidence
 
-- `internal/db/user_channel_identities_test.go`: `TestClaimMattermostIdentityInScope`, `TestClaimMattermostIdentity_ConcurrentMutualExclusion`.
-- `internal/api/chatops_identity_hardening_test.go`: All 5 acceptance tests covering cross-instance isolation, same-instance conflict defense, fail-closed connection checks, ambiguous identity defense, and same-instance cross-Bot approval with detachment revocation.
-- Live VM deployment at `192.168.139.231:27892`.
+- `internal/api/pilot_greenfield_test.go`:
+  - `TestPilotGreenfieldDeliveryPipelineFullLifecycle`: PASS (0.33s，11 步全流程、伪造路径拦截、安全闸门与删除清理全绿)
+- `internal/api/delete_handlers_test.go`:
+  - `TestDeleteRoleTeamAndProjectRequireWorkspaceAdmin`: PASS (包含本地 channel links 与 agent bindings 级联清理断言)
+- `internal/api/design_gate_snapshot_test.go`:
+  - `TestDesignReviewApprovalFailsClosedWithoutReferenceOrWaiver`: PASS (空引用/无豁免阻断)
+  - `TestDesignReviewApprovalFailsClosedWithForgedSnapshotPath`: PASS (伪造快照路径反向测试通过)
+  - `TestCaptureDesignGateSnapshotRejectsPathTraversal`: PASS (OD 工件路径遍历拦截通过)
+  - `TestCaptureDesignGateSnapshotRejectsAbsolutePaths`: PASS (绝对路径 /etc/passwd 拦截通过)
+  - `TestCaptureDesignGateSnapshotFailureLeavesNoHalfBakedArtifacts`: PASS (中途抓取失败临时目录彻底回收且无半成品)
+  - `TestGetDesignSnapshotRejectsSymlinkEscape`: PASS (符号链接逃逸任务目录拦截通过)
+- `internal/api/design_gate_pipeline_test.go`:
+  - `TestDesignSnapshotPreviewEndpoint`: PASS (CSP sandbox 响应头、nosniff 与跨项目访问 404 拦截)
+  - `TestQASignoffGateValidation`: PASS (全部 9 项严格校验子用例全绿：涵盖空矩阵、高风险失败硬阻断、无豁免未测项阻断、逐项有效豁免放行、全通过放行、非法 waivers JSON 阻断、缺失/重复 ID 阻断、未知风险/状态枚举阻断、高风险无证据通过阻断)
+- `internal/projecttemplate/template_test.go`: 全部 9 个单元与集成测试通过：
+  - `TestReactSpringBootControlledCIIntegration`: PASS (实测 `make install` -> `make verify` 全链路全绿)
+  - `TestReactSpringBootMakeInstallFailsWithoutLockfile`: PASS (实测拦截无锁安装)
+- `make build`: 产出 `dist/multigent` 与 `dist/mga`；前端 `web` 目录 `npm run build` 0 报错。
+- `git diff --check`: 退出码 0，零代码与格式缺陷。
+- **结构化提交演进 (Logical Commits)**:
+  - `ce93dce` fix(security): Phase 1 安全门禁严密加固与反向测试闭环
+  - `e6268e69` feat(im): 频道绑定管理与项目删除级联清理
+  - `0e70a534` feat(template): 新增 React+Spring Boot 模板及初始化与 CI 确定性基线
