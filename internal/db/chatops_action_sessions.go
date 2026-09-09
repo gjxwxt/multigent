@@ -18,7 +18,7 @@ type ChatopsActionSession struct {
 	StepID               string    `json:"stepId"`
 	ExpectedStateVersion int64     `json:"expectedStateVersion"`
 	ReviewSnapshotHash   string    `json:"reviewSnapshotHash"`
-	ActionType           string    `json:"actionType"` // approve | override | review_approve | reject
+	ActionType           string    `json:"actionType"` // approve | override | review_approve | reject | stale_refresh
 	ActorMMUserID        string    `json:"actorMmUserId"`
 	ActorPlatformUserID  string    `json:"actorPlatformUserId"`
 	State                string    `json:"state"` // issued | dialog_opening | dialog_opened | processing | completed | canceled | expired | stale | failed

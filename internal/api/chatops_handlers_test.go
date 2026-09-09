@@ -266,7 +266,7 @@ func TestMattermostActionCallback_DirectApprove_Success(t *testing.T) {
 }
 
 func TestMattermostActionCallback_DualCAS_StaleVersionConflict(t *testing.T) {
-	s, workspaceID, _, _, _, hmacSecret := setupTestChatopsEnv(t)
+	s, workspaceID, _, postCount, _, hmacSecret := setupTestChatopsEnv(t)
 	task, preview := setupTestWorkflowTask(t, s, workspaceID)
 
 	// Intentionally provide a stale expected state version
@@ -308,6 +308,9 @@ func TestMattermostActionCallback_DualCAS_StaleVersionConflict(t *testing.T) {
 	text, _ := resp["text"].(string)
 	if text == "" || !bytes.Contains([]byte(text), []byte("409 Conflict")) {
 		t.Fatalf("expected 409 Conflict error message, got %s", text)
+	}
+	if postCount.Load() != 1 {
+		t.Fatalf("expected a fresh review card to be reissued after stale click, got %d Mattermost writes", postCount.Load())
 	}
 
 	// Verify workflow was NOT advanced

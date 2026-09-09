@@ -43,6 +43,50 @@ func TestHumanReviewAssigneeLineMentionsOnlyVerifiedSameInstanceUsername(t *test
 	}
 }
 
+func TestHumanReviewAssigneeLineResolvesUsernameForBackfilledIdentity(t *testing.T) {
+	mm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v4/users/mm-reviewer" || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"mm-reviewer","username":"reviewer.remote"}`))
+	}))
+	defer mm.Close()
+
+	store, err := controldb.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	const workspaceID = "ws-reviewer-lookup"
+	const instanceID = "imi-reviewer-lookup"
+	_ = store.UpsertWorkspace(controldb.Workspace{ID: workspaceID, Name: "Review", Slug: "review"})
+	_ = store.UpsertUser(controldb.User{Username: "reviewer", Role: "member"})
+	_ = store.UpsertIMInstance(controldb.IMInstance{ID: instanceID, WorkspaceID: workspaceID, Provider: "mattermost", DisplayName: "Review MM"})
+	_ = store.UpsertConnection(controldb.Connection{ID: "conn-target-lookup", WorkspaceID: workspaceID, Provider: "mattermost", ConnectionName: "target", Status: "active", IMInstanceID: instanceID})
+	_ = store.UpsertConnection(controldb.Connection{ID: "conn-source-lookup", WorkspaceID: workspaceID, Provider: "mattermost", ConnectionName: "source", Status: "active", IMInstanceID: instanceID})
+	secret, err := controldb.SealConnectionSecret(map[string]string{"baseUrl": mm.URL, "botToken": "test-token"})
+	if err != nil {
+		t.Fatalf("SealConnectionSecret: %v", err)
+	}
+	secret.ConnectionID = "conn-target-lookup"
+	if err := store.UpsertConnectionSecret(secret); err != nil {
+		t.Fatalf("UpsertConnectionSecret: %v", err)
+	}
+	_ = store.UpsertAgentChannelBinding(controldb.AgentChannelBinding{ID: "binding-reviewer-lookup", WorkspaceID: workspaceID, ProjectID: "project", AgentID: "agent", Provider: "mattermost", ConnectionID: "conn-source-lookup", Status: "connected"})
+	if err := store.UpsertUserChannelIdentity(controldb.UserChannelIdentity{
+		ID: "identity-reviewer-lookup", WorkspaceID: workspaceID, UserID: "reviewer", ChannelBindingID: "binding-reviewer-lookup", Provider: "mattermost", ExternalUserID: "mm-reviewer", MetadataJSON: `{}`,
+	}); err != nil {
+		t.Fatalf("UpsertUserChannelIdentity: %v", err)
+	}
+
+	svc := NewTaskThreadProjectionService(store, mm.Client())
+	if got := svc.humanReviewAssigneeLine(workspaceID, "conn-target-lookup", "reviewer"); got != "指定审批人：@reviewer.remote" {
+		t.Fatalf("backfilled identity should resolve a verified username, got %q", got)
+	}
+}
+
 func TestTaskThreadProjectionService_E2E(t *testing.T) {
 	var postCount atomic.Int32
 	var lastReceivedBody map[string]any

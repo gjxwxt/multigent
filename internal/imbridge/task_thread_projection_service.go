@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -301,8 +302,57 @@ func (s *TaskThreadProjectionService) humanReviewAssigneeLine(workspaceID, conne
 		if username, ok := metadata["externalUsername"].(string); ok && isSafeMattermostUsername(username) {
 			return "指定审批人：@" + strings.TrimSpace(username)
 		}
+		if username, lookupErr := s.lookupMattermostUsername(context.Background(), conn, identity.ExternalUserID); lookupErr == nil && isSafeMattermostUsername(username) {
+			return "指定审批人：@" + strings.TrimSpace(username)
+		}
 	}
 	return fmt.Sprintf("指定审批人：%s（尚无可验证的 Mattermost @提及）", platformUserID)
+}
+
+func (s *TaskThreadProjectionService) lookupMattermostUsername(ctx context.Context, conn controldb.Connection, externalUserID string) (string, error) {
+	externalUserID = strings.TrimSpace(externalUserID)
+	if externalUserID == "" || conn.Provider != "mattermost" {
+		return "", fmt.Errorf("mattermost identity lookup unavailable")
+	}
+	secret, found, err := s.store.ConnectionSecret(conn.ID)
+	if err != nil || !found {
+		return "", fmt.Errorf("connection secret unavailable")
+	}
+	values, err := controldb.OpenConnectionSecret(secret)
+	if err != nil {
+		return "", fmt.Errorf("open connection secret: %w", err)
+	}
+	baseURL := strings.TrimRight(strings.TrimSpace(values["baseUrl"]), "/")
+	botToken := strings.TrimSpace(values["botToken"])
+	if baseURL == "" || botToken == "" {
+		return "", fmt.Errorf("mattermost connection credentials unavailable")
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(lookupCtx, http.MethodGet, baseURL+"/api/v4/users/"+url.PathEscape(externalUserID), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+botToken)
+	client := s.httpClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("mattermost user lookup returned %d", resp.StatusCode)
+	}
+	var profile struct {
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<10)).Decode(&profile); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(profile.Username), nil
 }
 
 func isSafeMattermostUsername(username string) bool {

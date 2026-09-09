@@ -17,6 +17,7 @@ import (
 	"time"
 
 	controldb "github.com/multigent/multigent/internal/db"
+	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/imbridge"
 	"github.com/multigent/multigent/internal/workflow"
 )
@@ -312,7 +313,7 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 
 	// 5. Anti-Replay Check: Ensure action token has not already been used
 	if strings.TrimSpace(tokenData.Nonce) != "" {
-		if existing, found, err := s.controlDB.ChatopsActionSessionByNonce(tokenData.WorkspaceID, strings.TrimSpace(tokenData.Nonce)); err == nil && found && existing != nil {
+		if existing, found, err := s.controlDB.ChatopsActionSessionByNonce(tokenData.WorkspaceID, strings.TrimSpace(tokenData.Nonce)); err == nil && found && existing != nil && existing.State != "failed" {
 			stage = "action_replay_blocked"
 			writeMattermostActionError(w, "该审批操作已被处理或正在处理中，请勿重复操作。")
 			return
@@ -364,8 +365,9 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 		msg := "### ⚠️ 审批标的已发生更新 (409 Conflict: Protected)\n" +
 			"> **保护机制触发**: 系统检测到您查看卡片后，上游产物或工作流状态已发生变更（版本/指纹防漂移）。\n" +
 			"> **安全说明**: 原卡片已为您保护性失效，防止误批旧代码。\n\n" +
-			"💡 **请查看 Thread 中最新推送的待审卡片，或前往 Multigent 控制台完成审批。**"
+			"💡 **系统将自动补发当前版本的待审卡片，请使用新卡片操作；也可前往 Multigent 控制台完成审批。**"
 		stage = "review_cas_stale"
+		s.reissueCurrentMattermostReviewCard(r, actionToken, *tokenData, payload.UserID, task, preview, platformUserID)
 		writeMattermostActionError(w, msg)
 		return
 	}
@@ -617,6 +619,61 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte("{}"))
 	stage = "dialog_opened"
+}
+
+// reissueCurrentMattermostReviewCard repairs the UX after a stale card click.
+// The old action nonce is recorded before posting so repeated clicks on the same
+// stale card cannot create an unbounded stream of replacement cards. If posting
+// fails, the session is marked failed and a later retry may repair it.
+func (s *Server) reissueCurrentMattermostReviewCard(r *http.Request, actionToken string, tokenData imbridge.ActionTokenPayload, mmUserID string, task *entity.Task, preview workflow.ReviewResolutionPreview, platformUserID string) {
+	if s == nil || s.controlDB == nil || s.threadProjections == nil || task == nil {
+		return
+	}
+	nonce := strings.TrimSpace(tokenData.Nonce)
+	if nonce == "" {
+		return
+	}
+	session := &controldb.ChatopsActionSession{
+		ID:                   "cas-refresh-" + newChatopsID(),
+		WorkspaceID:          tokenData.WorkspaceID,
+		Project:              tokenData.ProjectID,
+		TaskID:               tokenData.TaskID,
+		StepID:               tokenData.StepID,
+		ExpectedStateVersion: preview.ExpectedStateVersion,
+		ReviewSnapshotHash:   preview.ReviewSnapshotHash,
+		ActionType:           "stale_refresh",
+		ActorMMUserID:        strings.TrimSpace(mmUserID),
+		ActorPlatformUserID:  platformUserID,
+		State:                "stale",
+		ActionNonce:          nonce,
+		TokenHash:            imbridge.ComputeTokenHash(actionToken),
+		ExpiresAt:            time.Now().UTC().Add(10 * time.Minute),
+	}
+	if err := s.controlDB.CreateChatopsActionSession(session); err != nil {
+		log.Printf("[chatops] stale review card refresh already claimed or could not be recorded project=%s task=%s step=%s: %v", tokenData.ProjectID, tokenData.TaskID, tokenData.StepID, err)
+		return
+	}
+
+	ctx := context.Background()
+	if r != nil {
+		ctx = r.Context()
+	}
+	refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, err := s.threadProjections.PostHumanReviewCard(refreshCtx, imbridge.HumanReviewPostRequest{
+		WorkspaceID:     tokenData.WorkspaceID,
+		ProjectID:       tokenData.ProjectID,
+		TaskID:          tokenData.TaskID,
+		StepID:          tokenData.StepID,
+		StepTitle:       preview.StepTitle,
+		Assignee:        strings.TrimSpace(task.Assignee),
+		Preview:         preview,
+		CallbackBaseURL: s.consoleBaseURL(),
+	})
+	if err != nil {
+		_ = s.controlDB.UpdateChatopsActionSessionState(tokenData.WorkspaceID, session.ID, "failed")
+		log.Printf("[chatops] reissue current review card failed for %s/%s: %v", tokenData.ProjectID, tokenData.TaskID, err)
+	}
 }
 
 // handleMattermostDialogSubmit processes modal submissions from Mattermost dialogs.
