@@ -87,3 +87,4 @@ Key status & deliverables:
   - `ce93dce` fix(security): Phase 1 安全门禁严密加固与反向测试闭环
   - `e6268e69` feat(im): 频道绑定管理与项目删除级联清理
   - `0e70a534` feat(template): 新增 React+Spring Boot 模板及初始化与 CI 确定性基线
+  - `d1f1f46d` fix(web): 新建项目弹窗展示全部成员的实际 IM 绑定状态
