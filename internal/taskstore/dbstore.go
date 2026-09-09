@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -471,9 +472,11 @@ func (s *DBStore) ListAllTaskRecords(projectFilter string) ([]TaskRecord, error)
 	out := make([]TaskRecord, 0, len(recs))
 	for _, rec := range recs {
 		var t entity.Task
-		if json.Unmarshal([]byte(rec.Payload), &t) == nil {
+		if err := json.Unmarshal([]byte(rec.Payload), &t); err == nil {
 			seen[rec.Key[0]+"\x00"+rec.Key[1]+"\x00"+t.ID] = true
 			out = append(out, TaskRecord{Project: rec.Key[0], Agent: rec.Key[1], Task: &t})
+		} else {
+			log.Printf("[taskstore] skip unreadable task record project=%s agent=%s task=%s err=%v", rec.Key[0], rec.Key[1], rec.Key[2], err)
 		}
 	}
 	fileRecords, fileErr := s.files.ListAllTaskRecords(projectFilter)
