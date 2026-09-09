@@ -154,6 +154,7 @@ function AuthenticatedRoutes() {
         <Route path="projects/:projectId" element={<ProjectBranch />}>
           <Route index element={<Navigate to="tasks" replace />} />
           <Route path="tasks" element={<ProjectTasksPage />} />
+          <Route path="tasks/:taskId" element={<Navigate to="follow" replace />} />
           <Route path="tasks/:taskId/follow" element={<ProjectTaskFollowPage />} />
           {canAdmin && <Route path="task-templates" element={<ProjectTaskTemplatesPage />} />}
           <Route path="goals" element={<ProjectOKRPage />} />
