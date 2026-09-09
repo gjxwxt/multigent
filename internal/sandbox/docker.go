@@ -435,12 +435,17 @@ func RuntimeContainerAvailable(image string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := DockerCommandContext(ctx, "run", "--rm", "--pull=never", "--name", name, image, "/bin/sh", "-lc", "true")
-	if err := cmd.Run(); err != nil {
+	out, err := cmd.CombinedOutput()
+	if err != nil {
 		if ctx.Err() != nil {
 			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cleanupCancel()
 			_ = DockerCommandContext(cleanupCtx, "rm", "-f", name).Run()
 			return fmt.Errorf("Docker daemon is reachable but containers did not start within %s", timeout)
+		}
+		detail := strings.TrimSpace(string(out))
+		if detail != "" {
+			return fmt.Errorf("start runtime container: %s: %w", detail, err)
 		}
 		return fmt.Errorf("start runtime container: %w", err)
 	}
