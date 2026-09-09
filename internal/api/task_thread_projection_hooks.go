@@ -94,13 +94,22 @@ func (s *Server) notifyTaskThreadStarted(workspaceID, project string, t *entity.
 					if strings.TrimSpace(firstStep.Type) == "human_review" {
 						preview, err := wfStore.GetReviewResolutionPreview(project, t, firstStep.ID)
 						if err == nil {
+							reviewer := ""
+							if instances, listErr := wfStore.ListStepInstances(run.ID); listErr == nil {
+								for _, instance := range instances {
+									if instance.StepID == firstStep.ID && workflowReviewActorTypeIsHuman(instance.ActorType) {
+										reviewer = strings.TrimSpace(instance.ActorID)
+										break
+									}
+								}
+							}
 							_, postErr := s.threadProjections.PostHumanReviewCard(ctx, imbridge.HumanReviewPostRequest{
 								WorkspaceID:     workspaceID,
 								ProjectID:       project,
 								TaskID:          t.ID,
 								StepID:          firstStep.ID,
 								StepTitle:       firstStep.Title,
-								Assignee:        firstStep.Title,
+								Assignee:        reviewer,
 								Preview:         preview,
 								CallbackBaseURL: s.consoleBaseURL(),
 							})
@@ -234,13 +243,24 @@ func (s *Server) notifyTaskThreadStepTransition(workspaceID, project string, t *
 				wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
 				preview, err := wfStore.GetReviewResolutionPreview(project, t, transition.Next.ID)
 				if err == nil {
+					reviewer := ""
+					if run, found, runErr := wfStore.RunForTask(project, t.ID); runErr == nil && found {
+						if instances, listErr := wfStore.ListStepInstances(run.ID); listErr == nil {
+							for _, instance := range instances {
+								if instance.StepID == transition.Next.ID && workflowReviewActorTypeIsHuman(instance.ActorType) {
+									reviewer = strings.TrimSpace(instance.ActorID)
+									break
+								}
+							}
+						}
+					}
 					_, postErr := s.threadProjections.PostHumanReviewCard(ctx, imbridge.HumanReviewPostRequest{
 						WorkspaceID:     workspaceID,
 						ProjectID:       project,
 						TaskID:          t.ID,
 						StepID:          transition.Next.ID,
 						StepTitle:       transition.Next.Title,
-						Assignee:        transition.Next.Title,
+						Assignee:        reviewer,
 						Preview:         preview,
 						CallbackBaseURL: s.consoleBaseURL(),
 					})

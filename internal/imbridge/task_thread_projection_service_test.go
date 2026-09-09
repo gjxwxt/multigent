@@ -6,11 +6,42 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	controldb "github.com/multigent/multigent/internal/db"
 )
+
+func TestHumanReviewAssigneeLineMentionsOnlyVerifiedSameInstanceUsername(t *testing.T) {
+	store, err := controldb.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	const workspaceID = "ws-reviewer"
+	const instanceID = "imi-reviewer"
+	_ = store.UpsertWorkspace(controldb.Workspace{ID: workspaceID, Name: "Review", Slug: "review"})
+	_ = store.UpsertUser(controldb.User{Username: "reviewer", Role: "member"})
+	_ = store.UpsertIMInstance(controldb.IMInstance{ID: instanceID, WorkspaceID: workspaceID, Provider: "mattermost", DisplayName: "Review MM"})
+	_ = store.UpsertConnection(controldb.Connection{ID: "conn-target", WorkspaceID: workspaceID, Provider: "mattermost", ConnectionName: "target", Status: "active", IMInstanceID: instanceID})
+	_ = store.UpsertConnection(controldb.Connection{ID: "conn-source", WorkspaceID: workspaceID, Provider: "mattermost", ConnectionName: "source", Status: "active", IMInstanceID: instanceID})
+	_ = store.UpsertAgentChannelBinding(controldb.AgentChannelBinding{ID: "binding-reviewer", WorkspaceID: workspaceID, ProjectID: "project", AgentID: "agent", Provider: "mattermost", ConnectionID: "conn-source", Status: "connected"})
+	if err := store.UpsertUserChannelIdentity(controldb.UserChannelIdentity{
+		ID: "identity-reviewer", WorkspaceID: workspaceID, UserID: "reviewer", ChannelBindingID: "binding-reviewer", Provider: "mattermost", ExternalUserID: "mm-reviewer",
+		MetadataJSON: `{"externalUsername":"reviewer.mm"}`,
+	}); err != nil {
+		t.Fatalf("UpsertUserChannelIdentity: %v", err)
+	}
+
+	svc := NewTaskThreadProjectionService(store, nil)
+	if got := svc.humanReviewAssigneeLine(workspaceID, "conn-target", "reviewer"); got != "指定审批人：@reviewer.mm" {
+		t.Fatalf("verified same-instance identity should be mentioned, got %q", got)
+	}
+	if got := svc.humanReviewAssigneeLine(workspaceID, "conn-target", "unbound"); strings.Contains(got, "@unbound") {
+		t.Fatalf("unbound user must not receive a fabricated Mattermost mention, got %q", got)
+	}
+}
 
 func TestTaskThreadProjectionService_E2E(t *testing.T) {
 	var postCount atomic.Int32

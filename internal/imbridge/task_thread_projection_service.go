@@ -72,11 +72,14 @@ type StepTransitionPostRequest struct {
 }
 
 type HumanReviewPostRequest struct {
-	WorkspaceID     string
-	ProjectID       string
-	TaskID          string
-	StepID          string
-	StepTitle       string
+	WorkspaceID string
+	ProjectID   string
+	TaskID      string
+	StepID      string
+	StepTitle   string
+	// Assignee is the platform user bound to the active human-review step.
+	// It is never rendered as a Mattermost mention unless a verified external
+	// username exists for the same IM instance.
 	Assignee        string
 	Preview         workflow.ReviewResolutionPreview
 	CallbackBaseURL string
@@ -257,12 +260,63 @@ func (s *TaskThreadProjectionService) PostHumanReviewCard(ctx context.Context, r
 		"attachments": []any{attachment},
 	}
 
-	message := fmt.Sprintf("#### ⚠️ 等待人工审核: %s", req.StepTitle)
+	message := fmt.Sprintf("#### ⚠️ 等待人工审核: %s\n%s", req.StepTitle, s.humanReviewAssigneeLine(req.WorkspaceID, connID, req.Assignee))
 	postID, err := s.createPostWithProps(ctx, baseURL, botToken, active.ChannelID, active.RootPostID, message, props)
 	if err != nil {
 		return "", fmt.Errorf("post human review card: %w", err)
 	}
 	return postID, nil
+}
+
+func (s *TaskThreadProjectionService) humanReviewAssigneeLine(workspaceID, connectionID, platformUserID string) string {
+	platformUserID = strings.TrimSpace(platformUserID)
+	if platformUserID == "" {
+		return "指定审批人：当前步骤未绑定具体用户。"
+	}
+	conn, found, err := s.store.ConnectionByID(strings.TrimSpace(connectionID))
+	if err != nil || !found || conn.WorkspaceID != workspaceID || conn.IMInstanceID == "" {
+		return fmt.Sprintf("指定审批人：%s（尚无可验证的 Mattermost @提及）", platformUserID)
+	}
+	identities, err := s.store.ListUserChannelIdentities(controldb.UserChannelIdentityFilter{
+		WorkspaceID: workspaceID,
+		UserID:      platformUserID,
+		Provider:    "mattermost",
+	})
+	if err != nil {
+		return fmt.Sprintf("指定审批人：%s（尚无可验证的 Mattermost @提及）", platformUserID)
+	}
+	for _, identity := range identities {
+		binding, bindingFound, bindingErr := s.store.AgentChannelBindingByID(identity.ChannelBindingID)
+		if bindingErr != nil || !bindingFound || binding.Status != "connected" {
+			continue
+		}
+		sourceConn, sourceFound, sourceErr := s.store.ConnectionByID(binding.ConnectionID)
+		if sourceErr != nil || !sourceFound || sourceConn.Status != "active" || sourceConn.IMInstanceID != conn.IMInstanceID {
+			continue
+		}
+		var metadata map[string]any
+		if err := json.Unmarshal([]byte(identity.MetadataJSON), &metadata); err != nil {
+			continue
+		}
+		if username, ok := metadata["externalUsername"].(string); ok && isSafeMattermostUsername(username) {
+			return "指定审批人：@" + strings.TrimSpace(username)
+		}
+	}
+	return fmt.Sprintf("指定审批人：%s（尚无可验证的 Mattermost @提及）", platformUserID)
+}
+
+func isSafeMattermostUsername(username string) bool {
+	username = strings.TrimSpace(username)
+	if username == "" || len(username) > 64 {
+		return false
+	}
+	for _, r := range username {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // FormatHumanReviewAttachment builds a Mattermost attachment with Interactive Buttons based on workflow.ReviewResolutionPreview.
@@ -350,6 +404,7 @@ func FormatHumanReviewAttachment(workspaceID, projectID, taskID, channelID, conn
 	default: // "zero_input"
 		actions = append(actions,
 			createBtn("act-approve", "✅ 批准通过 (Approve)", "success", "approve"),
+			createBtn("act-edit", "📋 查看审核摘要... (Review)", "primary", "edit"),
 			createBtn("act-reject", "❌ 打回修改 (Reject)", "danger", "reject"),
 		)
 	}

@@ -41,6 +41,53 @@ type mattermostActionPayload struct {
 	Context   mattermostActionContext `json:"context"`
 }
 
+// writeMattermostActionError uses the post-action response schema, rather than
+// the slash-command schema. Mattermost otherwise accepts the HTTP response but
+// silently drops the feedback below the card, which makes an early fail-closed
+// rejection look like an inert button.
+func writeMattermostActionError(w http.ResponseWriter, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]string{"message": message},
+		// Keep text during the transition from slash-command responses so older
+		// clients and existing integrations can still surface the same message.
+		"text": message,
+	})
+}
+
+func writeMattermostActionSuccess(w http.ResponseWriter, ephemeralText, statusText string) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"update": map[string]any{
+			"message": fmt.Sprintf("#### 🔒 人工审核已完结\n> %s", statusText),
+			"props": map[string]any{
+				"attachments": []any{map[string]any{
+					"color": "#10b981",
+					"title": "人工审核已完成 (已归档)",
+					"text":  statusText,
+				}},
+			},
+		},
+		"ephemeral_text":     ephemeralText,
+		"skip_slack_parsing": true,
+		"text":               ephemeralText,
+	})
+}
+
+// logMattermostActionCallback is intentionally shape-only diagnostics. Action
+// and dialog tokens are bearer material and request bodies can contain review
+// text, so neither may be logged.
+func logMattermostActionCallback(stage string, payload mattermostActionPayload) {
+	action := strings.TrimSpace(payload.Context.Action)
+	switch action {
+	case "approve", "edit", "reject", "review_approve":
+	default:
+		action = "unknown"
+	}
+	log.Printf("[chatops] mattermost action callback stage=%s action=%s user_id_present=%t channel_id_present=%t post_id_present=%t trigger_id_present=%t action_token_present=%t",
+		stage, action, strings.TrimSpace(payload.UserID) != "", strings.TrimSpace(payload.ChannelID) != "", strings.TrimSpace(payload.PostID) != "", strings.TrimSpace(payload.TriggerID) != "", strings.TrimSpace(payload.Context.ActionToken) != "")
+}
+
 type mattermostDialogPayload struct {
 	Type       string            `json:"type"` // "dialog_submission"
 	CallbackID string            `json:"callback_id"`
@@ -175,22 +222,27 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	stage := "decode"
 	var payload mattermostActionPayload
+	defer func() { logMattermostActionCallback(stage, payload) }()
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		writeMattermostEphemeral(w, "请求解析失败：无效的 JSON 格式。")
+		stage = "decode_invalid"
+		writeMattermostActionError(w, "请求解析失败：无效的 JSON 格式。")
 		return
 	}
 
 	actionToken := strings.TrimSpace(payload.Context.ActionToken)
 	if actionToken == "" {
-		writeMattermostEphemeral(w, "安全校验失败：缺少 action_token。")
+		stage = "action_token_missing"
+		writeMattermostActionError(w, "安全校验失败：缺少 action_token。")
 		return
 	}
 
 	// 1. Peek token without secret to get connectionID for credential lookup
 	parts := strings.Split(actionToken, ".")
 	if len(parts) != 2 {
-		writeMattermostEphemeral(w, "审批卡片已过期或格式错误。请刷新任务 Thread 获取最新卡片。")
+		stage = "action_token_shape_invalid"
+		writeMattermostActionError(w, "审批卡片已过期或格式错误。请刷新任务 Thread 获取最新卡片。")
 		return
 	}
 
@@ -201,55 +253,68 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 
 	connectionID := strings.TrimSpace(peek.ConnectionID)
 	if connectionID == "" {
-		writeMattermostEphemeral(w, "安全拦截：审批令牌缺少连接标识，无法完成安全验证。")
+		stage = "action_token_connection_missing"
+		writeMattermostActionError(w, "安全拦截：审批令牌缺少连接标识，无法完成安全验证。")
 		return
 	}
 
 	baseURL, botToken, hmacSecret, err := s.resolveMattermostConnectionTarget(connectionID)
 	if err != nil {
-		log.Printf("[chatops] resolve mattermost connection target error: %v", err)
-		writeMattermostEphemeral(w, "无法获取连接验证密钥，请求已被安全拦截。")
+		stage = "connection_resolution_failed"
+		writeMattermostActionError(w, "无法获取连接验证密钥，请求已被安全拦截。")
 		return
 	}
 
 	// 2. Verify action_token HMAC signature & expiration
 	tokenData, err := imbridge.VerifyActionToken(hmacSecret, actionToken)
 	if err != nil {
-		writeMattermostEphemeral(w, "审批卡片已超过有效时限（2小时）或签名失效。请刷新任务 Thread 获取最新卡片，或前往 Web 控制台完成审批。")
+		stage = "action_token_verification_failed"
+		writeMattermostActionError(w, "审批卡片已超过有效时限（2小时）或签名失效。请刷新任务 Thread 获取最新卡片，或前往 Web 控制台完成审批。")
 		return
 	}
 	if tokenData.ConnectionID != connectionID {
-		writeMattermostEphemeral(w, "安全拦截：审批令牌连接标识被篡改。")
+		stage = "action_token_connection_mismatch"
+		writeMattermostActionError(w, "安全拦截：审批令牌连接标识被篡改。")
+		return
+	}
+	if payloadAction := strings.TrimSpace(payload.Context.Action); payloadAction == "" || payloadAction != tokenData.Action {
+		stage = "action_context_mismatch"
+		writeMattermostActionError(w, "安全校验失败：审批动作与卡片上下文不匹配。请刷新任务 Thread 后重试。")
 		return
 	}
 
 	// 3. Security Boundary: Channel & Projection validation
 	if tokenData.ChannelID != "" && payload.ChannelID != "" && tokenData.ChannelID != payload.ChannelID {
-		writeMattermostEphemeral(w, "安全拦截：请求来源频道与审批令牌不匹配。")
+		stage = "token_channel_mismatch"
+		writeMattermostActionError(w, "安全拦截：请求来源频道与审批令牌不匹配。")
 		return
 	}
 
 	active, found, err := s.controlDB.ActiveTaskThreadProjection(tokenData.WorkspaceID, tokenData.TaskID, "mattermost")
 	if err != nil || !found || active.RootPostID == "" {
-		writeMattermostEphemeral(w, "未找到活跃的任务 Thread 投影或任务已归档。")
+		stage = "projection_missing"
+		writeMattermostActionError(w, "未找到活跃的任务 Thread 投影或任务已归档。")
 		return
 	}
 	if payload.ChannelID != "" && active.ChannelID != payload.ChannelID {
-		writeMattermostEphemeral(w, "安全拦截：请求频道与任务活跃投影不匹配。")
+		stage = "projection_channel_mismatch"
+		writeMattermostActionError(w, "安全拦截：请求频道与任务活跃投影不匹配。")
 		return
 	}
 
 	// 4. Server Verification: Ensure User exists on target Mattermost instance
 	validUser, err := s.verifyMattermostUser(r.Context(), baseURL, botToken, payload.UserID)
 	if err != nil || !validUser {
-		writeMattermostEphemeral(w, "无法在 Mattermost 验证您的用户身份，请求已被安全拦截。")
+		stage = "mattermost_user_verification_failed"
+		writeMattermostActionError(w, "无法在 Mattermost 验证您的用户身份，请求已被安全拦截。")
 		return
 	}
 
 	// 5. Anti-Replay Check: Ensure action token has not already been used
 	if strings.TrimSpace(tokenData.Nonce) != "" {
 		if existing, found, err := s.controlDB.ChatopsActionSessionByNonce(tokenData.WorkspaceID, strings.TrimSpace(tokenData.Nonce)); err == nil && found && existing != nil {
-			writeMattermostEphemeral(w, "该审批操作已被处理或正在处理中，请勿重复操作。")
+			stage = "action_replay_blocked"
+			writeMattermostActionError(w, "该审批操作已被处理或正在处理中，请勿重复操作。")
 			return
 		}
 	}
@@ -257,19 +322,22 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 	// 6. User Identity Mapping & Dynamic RBAC check
 	platformUserID, err := s.resolvePlatformUserForAction(r, tokenData.WorkspaceID, tokenData.ConnectionID, payload.UserID)
 	if err != nil {
-		writeMattermostEphemeral(w, "身份验证异常：您的账号在此可信范围内存在歧义或连接异常，已被安全拦截。")
+		stage = "identity_resolution_failed"
+		writeMattermostActionError(w, "身份验证异常：您的账号在此可信范围内存在歧义或连接异常，已被安全拦截。")
 		return
 	}
 	if platformUserID == "" {
-		writeMattermostEphemeral(w, "您的 Mattermost 账号未与 Multigent 平台关联。请先在控制台或私聊中使用 /bind 命令完成绑定。")
+		stage = "identity_unbound"
+		writeMattermostActionError(w, "您的 Mattermost 账号未与 Multigent 平台关联。请先在控制台或私聊中使用 /bind 命令完成绑定。")
 		return
 	}
 
 	if err := s.validateWorkflowDecisionReviewer(tokenData.WorkspaceID, tokenData.ProjectID, tokenData.TaskID, platformUserID); err != nil {
+		stage = "reviewer_authorization_failed"
 		if errors.Is(err, errWorkflowDecisionReviewerForbidden) {
-			writeMattermostEphemeral(w, fmt.Sprintf("权限不足：您没有项目 %s 的审批权限。", tokenData.ProjectID))
+			writeMattermostActionError(w, fmt.Sprintf("权限不足：您没有项目 %s 的审批权限。", tokenData.ProjectID))
 		} else {
-			writeMattermostEphemeral(w, fmt.Sprintf("审批不可用：%v", err))
+			writeMattermostActionError(w, fmt.Sprintf("审批不可用：%v", err))
 		}
 		return
 	}
@@ -277,14 +345,16 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 	// 6. Fetch Task and Domain Preview
 	task, _, err := s.findTaskInProject(tokenData.ProjectID, tokenData.TaskID)
 	if err != nil || task == nil {
-		writeMattermostEphemeral(w, "未找到关联任务或任务已被归档。")
+		stage = "task_missing"
+		writeMattermostActionError(w, "未找到关联任务或任务已被归档。")
 		return
 	}
 
 	wfStore := workflow.NewStore(s.controlDB, tokenData.WorkspaceID)
 	preview, err := wfStore.GetReviewResolutionPreview(tokenData.ProjectID, task, tokenData.StepID)
 	if err != nil {
-		writeMattermostEphemeral(w, "无法获取当前审核步骤状态："+err.Error())
+		stage = "review_preview_failed"
+		writeMattermostActionError(w, "无法获取当前审核步骤状态："+err.Error())
 		return
 	}
 
@@ -294,7 +364,8 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 			"> **保护机制触发**: 系统检测到您查看卡片后，上游产物或工作流状态已发生变更（版本/指纹防漂移）。\n" +
 			"> **安全说明**: 原卡片已为您保护性失效，防止误批旧代码。\n\n" +
 			"💡 **请查看 Thread 中最新推送的待审卡片，或前往 Multigent 控制台完成审批。**"
-		writeMattermostEphemeral(w, msg)
+		stage = "review_cas_stale"
+		writeMattermostActionError(w, msg)
 		return
 	}
 
@@ -319,20 +390,22 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 			ExpiresAt:            time.Now().UTC().Add(10 * time.Minute),
 		}
 		if err := s.controlDB.CreateChatopsActionSession(session); err != nil {
-			log.Printf("[chatops] create 1-click approve session error: %v", err)
-			writeMattermostEphemeral(w, "该审批操作已被处理或正在处理中，请勿重复操作。")
+			stage = "approve_session_create_failed"
+			writeMattermostActionError(w, "该审批操作已被处理或正在处理中，请勿重复操作。")
 			return
 		}
 		claimed, err := s.controlDB.ClaimChatopsActionSessionForProcessing(tokenData.WorkspaceID, session.ID)
 		if err != nil || !claimed {
-			writeMattermostEphemeral(w, "该审批操作已被处理或正在处理中，请勿重复操作。")
+			stage = "approve_session_claim_failed"
+			writeMattermostActionError(w, "该审批操作已被处理或正在处理中，请勿重复操作。")
 			return
 		}
 
 		snap, err := workflow.ResolveApprovalOutputs(preview, "approved", map[string]string{}, platformUserID)
 		if err != nil {
 			_ = s.controlDB.UpdateChatopsActionSessionState(tokenData.WorkspaceID, session.ID, "failed")
-			writeMattermostEphemeral(w, "参数决议失败："+err.Error())
+			stage = "approve_output_resolution_failed"
+			writeMattermostActionError(w, "参数决议失败："+err.Error())
 			return
 		}
 
@@ -343,7 +416,8 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 		})
 		if err != nil {
 			_ = s.controlDB.UpdateChatopsActionSessionState(tokenData.WorkspaceID, session.ID, "failed")
-			writeMattermostEphemeral(w, fmt.Sprintf("推进工作流失败 (%d)：%v", status, err))
+			stage = "approve_workflow_submit_failed"
+			writeMattermostActionError(w, fmt.Sprintf("推进工作流失败 (%d)：%v", status, err))
 			return
 		}
 
@@ -352,16 +426,20 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 		_ = s.controlDB.CompleteChatopsActionSession(tokenData.WorkspaceID, session.ID, string(traceJSON), string(outputsJSON))
 
 		// Update card in Mattermost: remove action buttons and mark approved
-		statusText := fmt.Sprintf("由 @%s 于 %s 批准通过 (v%d)", payload.UserName, time.Now().Format("15:04"), preview.ExpectedStateVersion)
-		_ = s.threadProjections.RemoveCardActionsAndSetStatus(r.Context(), tokenData.WorkspaceID, tokenData.ProjectID, payload.ChannelID, payload.PostID, statusText)
+		statusText := fmt.Sprintf("由已验证审批人 %s 于 %s 批准通过 (v%d)", platformUserID, time.Now().Format("15:04"), preview.ExpectedStateVersion)
+		if s.threadProjections != nil {
+			_ = s.threadProjections.RemoveCardActionsAndSetStatus(r.Context(), tokenData.WorkspaceID, tokenData.ProjectID, payload.ChannelID, payload.PostID, statusText)
+		}
 
-		writeMattermostEphemeral(w, "✅ 审批已成功提交并推进工作流！")
+		stage = "approve_completed"
+		writeMattermostActionSuccess(w, "✅ 审批已成功提交并推进工作流！", statusText)
 		return
 	}
 
 	// Dialog Action: Reject, Review & Approve, or Edit
 	if payload.TriggerID == "" {
-		writeMattermostEphemeral(w, "无法打开交互弹窗：缺少 trigger_id。请在 Mattermost 客户端直接点击按钮。")
+		stage = "dialog_trigger_missing"
+		writeMattermostActionError(w, "无法打开交互弹窗：缺少 trigger_id。请在 Mattermost 客户端直接点击按钮。")
 		return
 	}
 
@@ -373,7 +451,8 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 		callbackBaseURL = os.Getenv("MULTIGENT_CONSOLE_URL")
 	}
 	if strings.TrimSpace(callbackBaseURL) == "" {
-		writeMattermostEphemeral(w, "系统未配置 CHATOPS_CALLBACK_BASE_URL，无法打开审批弹窗。")
+		stage = "dialog_callback_url_missing"
+		writeMattermostActionError(w, "系统未配置 CHATOPS_CALLBACK_BASE_URL，无法打开审批弹窗。")
 		return
 	}
 
@@ -396,8 +475,8 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 		ExpiresAt:            time.Now().UTC().Add(10 * time.Minute),
 	}
 	if err := s.controlDB.CreateChatopsActionSession(session); err != nil {
-		log.Printf("[chatops] create action session error: %v", err)
-		writeMattermostEphemeral(w, "该审批动作已被点击或正在处理中，请勿重复操作。")
+		stage = "dialog_session_create_failed"
+		writeMattermostActionError(w, "该审批动作已被点击或正在处理中，请勿重复操作。")
 		return
 	}
 
@@ -418,7 +497,8 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 		ExpiresAt:            time.Now().UTC().Add(10 * time.Minute).Unix(),
 	})
 	if err != nil {
-		writeMattermostEphemeral(w, "生成对话框签名失败。")
+		stage = "dialog_token_sign_failed"
+		writeMattermostActionError(w, "生成对话框签名失败。")
 		return
 	}
 
@@ -437,8 +517,26 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 			"optional":     false,
 		})
 	} else {
-		title = fmt.Sprintf("审批确认: %s", preview.StepTitle)
-		submitLabel = "确认批准"
+		if tokenData.Action == "edit" {
+			title = fmt.Sprintf("查看并微调: %s", preview.StepTitle)
+			submitLabel = "确认并批准"
+		} else {
+			title = fmt.Sprintf("审批确认: %s", preview.StepTitle)
+			submitLabel = "确认批准"
+		}
+
+		summaryParts := make([]string, 0, len(preview.Parameters)+1)
+		if len(preview.Parameters) == 0 {
+			summaryParts = append(summaryParts, "当前审核没有待决或可微调参数；确认后会按当前快照批准。")
+		} else {
+			for _, p := range preview.Parameters {
+				value := strings.TrimSpace(p.CandidateValue)
+				if value == "" {
+					value = "(未提供)"
+				}
+				summaryParts = append(summaryParts, fmt.Sprintf("%s：%s", p.Label, value))
+			}
+		}
 
 		for _, p := range preview.Parameters {
 			switch p.Kind {
@@ -467,8 +565,9 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 		elements = append(elements, map[string]any{
 			"type":         "text",
 			"name":         "comments",
-			"display_name": "审批附言 (可选)",
+			"display_name": "审核摘要与附言 (可选)",
 			"placeholder":  "输入备注或批示...",
+			"help_text":    strings.Join(summaryParts, "\n"),
 			"optional":     true,
 		})
 	}
@@ -489,7 +588,8 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 	dialogBodyBytes, _ := json.Marshal(dialogPayload)
 	dialogReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, strings.TrimRight(baseURL, "/")+"/api/v4/actions/dialogs/open", bytes.NewReader(dialogBodyBytes))
 	if err != nil {
-		writeMattermostEphemeral(w, "构建对话框请求失败: "+err.Error())
+		stage = "dialog_request_build_failed"
+		writeMattermostActionError(w, "构建对话框请求失败: "+err.Error())
 		return
 	}
 	dialogReq.Header.Set("Authorization", "Bearer "+botToken)
@@ -498,7 +598,8 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 	resp, err := s.getChatopsHTTPClient().Do(dialogReq)
 	if err != nil {
 		_ = s.controlDB.UpdateChatopsActionSessionState(tokenData.WorkspaceID, sessionID, "failed")
-		writeMattermostEphemeral(w, "调用 Mattermost 弹窗接口失败: "+err.Error())
+		stage = "dialog_open_request_failed"
+		writeMattermostActionError(w, "调用 Mattermost 弹窗接口失败: "+err.Error())
 		return
 	}
 	defer resp.Body.Close()
@@ -507,12 +608,14 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		_ = s.controlDB.UpdateChatopsActionSessionState(tokenData.WorkspaceID, sessionID, "failed")
 		log.Printf("[chatops] open dialog error (%d): %s", resp.StatusCode, string(respBody))
-		writeMattermostEphemeral(w, fmt.Sprintf("Mattermost 拒绝打开弹窗 (%d)。", resp.StatusCode))
+		stage = "dialog_open_rejected"
+		writeMattermostActionError(w, fmt.Sprintf("Mattermost 拒绝打开弹窗 (%d)。", resp.StatusCode))
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte("{}"))
+	stage = "dialog_opened"
 }
 
 // handleMattermostDialogSubmit processes modal submissions from Mattermost dialogs.

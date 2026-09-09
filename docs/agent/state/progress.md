@@ -54,3 +54,19 @@ Verified locally and on live VM (2026-09-09):
 ## Next: IM Slash Command instance gateway convergence
 
 Currently, Slash Commands (`/mg`) in Mattermost register per Bot webhook. Moving to a single unified Slash Command gateway per Mattermost Team/Instance requires routing commands through an instance gateway dispatcher to the appropriate Agent/Project.
+
+## Completed locally: Mattermost ChatOps post-action observability and card semantics
+
+The action callback now emits a shape-only, secret-safe diagnostic stage for every received Mattermost post action. It records only action class and field-presence flags; it never writes action/dialog tokens, request bodies, cookies, bot tokens, or reviewer comments. Post-action failures now use Mattermost's documented `error.message` response and successful one-click approval returns an `update` that removes the original card actions immediately, plus `ephemeral_text` confirmation.
+
+The callback continues to require the signed token action to match `context.action`, before action-session creation. This adds no permission bypass and preserves token verification, trusted-instance identity resolution, reviewer authorization, Dual CAS, and session claims.
+
+Human-review cards now carry the active human step's actor binding. They mention a Mattermost username only when the stored binding has a safe `externalUsername` on the same active IM instance; otherwise they show a non-mention fallback. Zero-input cards now also expose a review-summary dialog, and edit dialogs show an explicit review summary even when there are no pending parameters.
+
+Verified locally on 2026-09-10:
+
+- `go test ./internal/api -run 'Chatops|Mattermost|Interaction|Workflow' -count=1`
+- `go test ./internal/imbridge -count=1`
+- `git diff --check`
+
+Deployment and the live callback's actual rejection stage remain unverified. A live click after deployment is required to distinguish an unreachable callback from one of the now-logged fail-closed stages; no task, database, or external approval was changed during this work.

@@ -724,3 +724,109 @@ func TestMattermostActionCallback_DirectApprove_AntiReplayAndTracePersistence(t 
 		t.Fatalf("expected duplicate operation rejection, got %q", text2)
 	}
 }
+
+// Mattermost sends post-action callbacks as application/json with its routing
+// fields at the top level and card-defined values nested under context. Keep
+// this independent from the local struct helper so a drift in that wire shape
+// is caught by the same parser the public endpoint uses.
+func TestMattermostActionCallback_RealPostActionPayloads(t *testing.T) {
+	for _, action := range []string{"approve", "edit", "reject"} {
+		t.Run(action, func(t *testing.T) {
+			s, workspaceID, _, _, _, hmacSecret := setupTestChatopsEnv(t)
+			task, preview := setupTestWorkflowTask(t, s, workspaceID)
+			nonce := imbridge.GenerateNonce()
+			token, err := imbridge.SignActionToken(hmacSecret, imbridge.ActionTokenPayload{
+				WorkspaceID:          workspaceID,
+				ProjectID:            "sample",
+				TaskID:               task.ID,
+				StepID:               preview.StepID,
+				Action:               action,
+				ChannelID:            "chan-chatops-1",
+				ConnectionID:         "conn-mm-chatops-test",
+				ExpectedStateVersion: preview.ExpectedStateVersion,
+				ReviewSnapshotHash:   preview.ReviewSnapshotHash,
+				Nonce:                nonce,
+				ExpiresAt:            time.Now().UTC().Add(time.Hour).Unix(),
+			})
+			if err != nil {
+				t.Fatalf("SignActionToken: %v", err)
+			}
+			body, err := json.Marshal(map[string]any{
+				"user_id":    "mm-user-admin",
+				"channel_id": "chan-chatops-1",
+				"post_id":    "mock-post-card-1",
+				"team_id":    "mm-team-1",
+				"type":       "button",
+				"context": map[string]any{
+					"action_token": token,
+					"action":       action,
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal callback: %v", err)
+			}
+			if action != "approve" {
+				var payload map[string]any
+				if err := json.Unmarshal(body, &payload); err != nil {
+					t.Fatalf("unmarshal callback: %v", err)
+				}
+				payload["trigger_id"] = "trigger-real-post-action"
+				body, _ = json.Marshal(payload)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/actions", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			s.handleMattermostActionCallback(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+			}
+
+			session, found, err := s.controlDB.ChatopsActionSessionByNonce(workspaceID, nonce)
+			if err != nil || !found {
+				t.Fatalf("expected session from real payload, found=%v err=%v", found, err)
+			}
+			if action == "approve" {
+				if session.State != "completed" {
+					t.Fatalf("approve session state = %q, want completed", session.State)
+				}
+				var response map[string]any
+				_ = json.Unmarshal(rec.Body.Bytes(), &response)
+				if response["ephemeral_text"] == "" || response["update"] == nil {
+					t.Fatalf("approve must use Mattermost post-action update response, got %v", response)
+				}
+			} else if session.State != "dialog_opened" {
+				t.Fatalf("%s session state = %q, want dialog_opened", action, session.State)
+			}
+		})
+	}
+}
+
+func TestMattermostActionCallback_RejectsContextActionMismatchBeforeSession(t *testing.T) {
+	s, workspaceID, _, _, _, hmacSecret := setupTestChatopsEnv(t)
+	task, preview := setupTestWorkflowTask(t, s, workspaceID)
+	nonce := imbridge.GenerateNonce()
+	token, err := imbridge.SignActionToken(hmacSecret, imbridge.ActionTokenPayload{
+		WorkspaceID: workspaceID, ProjectID: "sample", TaskID: task.ID, StepID: preview.StepID,
+		Action: "approve", ChannelID: "chan-chatops-1", ConnectionID: "conn-mm-chatops-test",
+		ExpectedStateVersion: preview.ExpectedStateVersion, ReviewSnapshotHash: preview.ReviewSnapshotHash,
+		Nonce: nonce, ExpiresAt: time.Now().UTC().Add(time.Hour).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("SignActionToken: %v", err)
+	}
+	body, _ := json.Marshal(map[string]any{
+		"user_id": "mm-user-admin", "channel_id": "chan-chatops-1", "post_id": "mock-post-card-1",
+		"context": map[string]any{"action_token": token, "action": "reject"},
+	})
+	rec := httptest.NewRecorder()
+	s.handleMattermostActionCallback(rec, httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/actions", bytes.NewReader(body)))
+	var response map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &response)
+	if response["error"] == nil {
+		t.Fatalf("expected Mattermost action error response, got %v", response)
+	}
+	if _, found, err := s.controlDB.ChatopsActionSessionByNonce(workspaceID, nonce); err != nil || found {
+		t.Fatalf("mismatched action must not create a session, found=%v err=%v", found, err)
+	}
+}
