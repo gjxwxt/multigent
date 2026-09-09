@@ -101,5 +101,18 @@ Key status & deliverables:
   - `e6268e69` feat(im): 频道绑定管理与项目删除级联清理
   - `0e70a534` feat(template): 新增 React+Spring Boot 模板及初始化与 CI 确定性基线
   - `d1f1f46d` fix(web): 新建项目弹窗展示全部成员的实际 IM 绑定状态
-  - `101d7dda` fix(project): unify project creation payload, atomic provisioning and transparent validation
+- `101d7dda` fix(project): unify project creation payload, atomic provisioning and transparent validation
 
+## 2026-09-10 ChatOps approval and order MVP evidence
+
+- **审批回调已在真实 Mattermost 环境闭环验证**：旧代码审核卡片点击后先正确触发 CAS 保护并补发当前版本卡片；新卡片显示 `指定审批人：@admin`，点击批准后回写“人工审核已完结”，并推进工作流。
+- **任务索引兼容性修复**：历史任务记录可能把可空时间字段持久化为 `""`（如 `FinishedAt`、`ArchivedAt`），导致 Go JSON 反序列化失败并误报 `task_missing`。`entity.Task.UnmarshalJSON` 现将空的可选时间兼容为 `nil`，并有 `internal/entity/task_json_test.go` 回归测试。
+- **工作流身份与任务定位修复**：审批人绑定按步骤实例隔离，避免 `owner-engineer` 角色同时用于 Agent 节点和人工代码审核节点；`findTaskInProject` 增加项目任务记录索引回退，覆盖人工审核改变 assignee 后的查找场景。
+- **真实 order MVP 结果**：任务 `t-20260909-879ipa` / 工作流 `wfr-p2ubljke` 已 `done_success` / `completed`，9/9 步骤完成。`pr_open_and_merge` 合并 SHA 为 `4d2a358e7710f45d455fdd8bb615482de4bb4db1`，release 产出 `v0.1.0`，GitLab Pipeline `#1041` 的部署作业通过健康检查并验证 `/api/tickets/export.csv`。
+- **恢复性证据**：release Agent 曾因等待 Tag 流水线时结束会话、未提交结构化 `step done` 而失败；创建数据库备份后定向恢复任务，启动自愈成功接管 release，未重跑前置实现和审批节点。
+- **当前部署**：VM 服务已更新至提交 `a0b3cef3`，health 返回正常；本地工作区 clean，全量 `go test ./...` 与 `git diff --check` 通过。
+
+### Follow-up observations
+
+- 任务根帖在中途曾出现“Completed/55%”这类历史投影与真实工作流状态不一致，最终完成时已刷新为 100%/9/9；建议后续单独加一条投影状态机回归测试，确保恢复和人工审批后的根帖不会提前显示终态。
+- 发布 Agent 等待外部 CI 时必须保持会话直到提交结构化输出；平台最好提供 release 节点级重试/续接入口，避免只能依靠人工恢复任务状态。
