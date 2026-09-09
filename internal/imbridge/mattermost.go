@@ -191,6 +191,8 @@ func (mattermostProvider) ReplyText(ctx context.Context, secrets map[string]stri
 	}
 	if message.RootID != "" {
 		payload["root_id"] = message.RootID
+	} else if message.MessageID != "" {
+		payload["root_id"] = message.MessageID
 	}
 	raw, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/v4/posts", bytes.NewReader(raw))
@@ -258,6 +260,9 @@ func (mattermostProvider) SendMessage(ctx context.Context, secrets map[string]st
 		"channel_id": channelID,
 		"message":    message.Text,
 	}
+	if rootID := strings.TrimSpace(target.ReplyToMessageID); rootID != "" {
+		payload["root_id"] = rootID
+	}
 	raw, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/v4/posts", bytes.NewReader(raw))
 	if err != nil {
@@ -273,6 +278,92 @@ func (mattermostProvider) SendMessage(ctx context.Context, secrets map[string]st
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return fmt.Errorf("mattermost send post failed (%d): %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+var _ ReactionProvider = mattermostProvider{}
+
+func (mattermostProvider) AddReaction(ctx context.Context, secrets map[string]string, message IncomingMessage, emoji string) (string, error) {
+	baseURL := strings.TrimRight(secrets["baseUrl"], "/")
+	token := secrets["botToken"]
+	botUserID := secrets["appId"]
+	if botUserID == "" {
+		botUserID = secrets["botId"]
+	}
+	if baseURL == "" || token == "" || botUserID == "" {
+		return "", fmt.Errorf("mattermost credentials missing")
+	}
+	postID := strings.TrimSpace(message.MessageID)
+	if postID == "" {
+		return "", fmt.Errorf("message id missing for reaction")
+	}
+
+	emojiName := strings.Trim(strings.TrimSpace(emoji), ":")
+	if strings.EqualFold(emojiName, "THINKING") {
+		emojiName = "thinking"
+	}
+	if emojiName == "" {
+		emojiName = "thinking"
+	}
+
+	payload := map[string]string{
+		"user_id":    botUserID,
+		"post_id":    postID,
+		"emoji_name": emojiName,
+	}
+	raw, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/v4/reactions", bytes.NewReader(raw))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return "", fmt.Errorf("mattermost add reaction failed (%d): %s", resp.StatusCode, string(b))
+	}
+	return emojiName, nil
+}
+
+func (mattermostProvider) RemoveReaction(ctx context.Context, secrets map[string]string, message IncomingMessage, reactionID string) error {
+	baseURL := strings.TrimRight(secrets["baseUrl"], "/")
+	token := secrets["botToken"]
+	botUserID := secrets["appId"]
+	if botUserID == "" {
+		botUserID = secrets["botId"]
+	}
+	if baseURL == "" || token == "" || botUserID == "" {
+		return fmt.Errorf("mattermost credentials missing")
+	}
+	postID := strings.TrimSpace(message.MessageID)
+	if postID == "" {
+		return fmt.Errorf("message id missing for reaction")
+	}
+	emojiName := strings.Trim(strings.TrimSpace(reactionID), ":")
+	if emojiName == "" {
+		return nil
+	}
+
+	urlStr := fmt.Sprintf("%s/api/v4/users/%s/posts/%s/reactions/%s", baseURL, url.PathEscape(botUserID), url.PathEscape(postID), url.PathEscape(emojiName))
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, urlStr, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusNoContent {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("mattermost remove reaction failed (%d): %s", resp.StatusCode, string(b))
 	}
 	return nil
 }

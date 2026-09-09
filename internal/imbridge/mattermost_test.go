@@ -392,3 +392,85 @@ func TestMattermostClient_Operations(t *testing.T) {
 		t.Fatalf("AddUserToChannel failed: %v", err)
 	}
 }
+
+func TestMattermostReactionsAndThreadReply(t *testing.T) {
+	var receivedReaction map[string]string
+	var deletedURL string
+	var receivedPost map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v4/reactions" {
+			_ = json.NewDecoder(r.Body).Decode(&receivedReaction)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+			return
+		}
+		if r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/v4/users/") {
+			deletedURL = r.URL.Path
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v4/posts" {
+			_ = json.NewDecoder(r.Body).Decode(&receivedPost)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "post-reply-1"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	p := mattermostProvider{}
+	secrets := map[string]string{
+		"baseUrl":  srv.URL,
+		"botToken": "test-bot-token",
+		"appId":    "bot-user-1",
+	}
+
+	msg := IncomingMessage{
+		MessageID: "msg-100",
+		ChatID:    "chan-200",
+	}
+
+	// Test AddReaction
+	rxID, err := p.AddReaction(context.Background(), secrets, msg, "THINKING")
+	if err != nil {
+		t.Fatalf("AddReaction failed: %v", err)
+	}
+	if rxID != "thinking" {
+		t.Fatalf("expected reactionID 'thinking', got %q", rxID)
+	}
+	if receivedReaction["user_id"] != "bot-user-1" || receivedReaction["post_id"] != "msg-100" || receivedReaction["emoji_name"] != "thinking" {
+		t.Fatalf("unexpected reaction payload: %+v", receivedReaction)
+	}
+
+	// Test RemoveReaction
+	if err := p.RemoveReaction(context.Background(), secrets, msg, rxID); err != nil {
+		t.Fatalf("RemoveReaction failed: %v", err)
+	}
+	expectedDeleteURL := "/api/v4/users/bot-user-1/posts/msg-100/reactions/thinking"
+	if deletedURL != expectedDeleteURL {
+		t.Fatalf("expected DELETE url %q, got %q", expectedDeleteURL, deletedURL)
+	}
+
+	// Test SendMessage with ReplyToMessageID (Thread reply)
+	target := OutgoingTarget{
+		ChatID:           "chan-200",
+		ReplyToMessageID: "root-msg-50",
+	}
+	if err := p.SendMessage(context.Background(), secrets, target, OutgoingMessage{Text: "Threaded reply"}); err != nil {
+		t.Fatalf("SendMessage failed: %v", err)
+	}
+	if receivedPost["root_id"] != "root-msg-50" || receivedPost["message"] != "Threaded reply" {
+		t.Fatalf("unexpected post payload for SendMessage: %+v", receivedPost)
+	}
+
+	// Test ReplyText with root_id fallback
+	if err := p.ReplyText(context.Background(), secrets, msg, "Direct reply"); err != nil {
+		t.Fatalf("ReplyText failed: %v", err)
+	}
+	if receivedPost["root_id"] != "msg-100" || receivedPost["message"] != "Direct reply" {
+		t.Fatalf("unexpected post payload for ReplyText: %+v", receivedPost)
+	}
+}
