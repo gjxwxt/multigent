@@ -573,6 +573,16 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 			"help_text":    strings.Join(summaryParts, "\n"),
 			"optional":     true,
 		})
+		if imbridge.IsDesignConfirmationPreview(preview) {
+			elements = append(elements, map[string]any{
+				"type":         "textarea",
+				"name":         "design_waiver_reason",
+				"display_name": "设计豁免理由（无 OpenDesign 项目 ID 时必填）",
+				"placeholder":  "仅在没有可验证的 OpenDesign 设计凭证时填写，并说明为什么可以豁免...",
+				"help_text":    "有 approved_design_project_id 时优先冻结设计快照；只有明确填写本理由，才允许走豁免路径。",
+				"optional":     true,
+			})
+		}
 	}
 
 	// Call Mattermost /api/v4/actions/dialogs/open
@@ -819,6 +829,24 @@ func (s *Server) handleMattermostDialogSubmit(w http.ResponseWriter, r *http.Req
 		_ = s.controlDB.UpdateChatopsActionSessionState(tokenData.WorkspaceID, tokenData.SessionID, "failed")
 		writeMattermostDialogError(w, "comments", err.Error())
 		return
+	}
+	// design_waiver_reason is an audited design-gate control field. Some older
+	// persisted workflow definitions do not expose it in their output preview,
+	// but the ChatOps dialog still needs to be able to submit the explicit
+	// fail-closed waiver. Accept it only for a design confirmation preview.
+	if decision == "approved" && imbridge.IsDesignConfirmationPreview(preview) {
+		if waiver := strings.TrimSpace(payload.Submission["design_waiver_reason"]); waiver != "" {
+			if len(waiver) > 4000 {
+				writeMattermostDialogError(w, "design_waiver_reason", "设计豁免理由不能超过 4000 个字符。")
+				return
+			}
+			snap.ResolvedOutputs["design_waiver_reason"] = waiver
+			snap.ResolutionTrace["design_waiver_reason"] = workflow.ResolutionTraceItem{
+				Mode:   "human_input",
+				Source: "dialog.design_waiver_reason",
+				Actor:  platformUserID,
+			}
+		}
 	}
 
 	_, status, err := s.submitTaskWorkflowReview(r, tokenData.WorkspaceID, tokenData.ProjectID, tokenData.TaskID, workflowReviewBody{

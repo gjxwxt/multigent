@@ -369,6 +369,19 @@ func isSafeMattermostUsername(username string) bool {
 	return true
 }
 
+// IsDesignConfirmationPreview identifies the special human gate whose approval
+// must carry either a verified OpenDesign reference or an explicit waiver.
+// Keep this based on stable output keys rather than localized step titles.
+func IsDesignConfirmationPreview(preview workflow.ReviewResolutionPreview) bool {
+	for _, p := range preview.Parameters {
+		switch p.Key {
+		case "approved_design_source", "approved_design_project_id", "approved_design_preview_url", "approved_design_html", "approved_design_snapshot_path", "design_waiver_reason", "design_waived":
+			return true
+		}
+	}
+	return false
+}
+
 // FormatHumanReviewAttachment builds a Mattermost attachment with Interactive Buttons based on workflow.ReviewResolutionPreview.
 func FormatHumanReviewAttachment(workspaceID, projectID, taskID, channelID, connectionID string, preview workflow.ReviewResolutionPreview, signingSecret, callbackBaseURL string) map[string]any {
 	callbackBaseURL = strings.TrimRight(callbackBaseURL, "/")
@@ -439,24 +452,34 @@ func FormatHumanReviewAttachment(workspaceID, projectID, taskID, channelID, conn
 		}
 	}
 
-	switch preview.UXMode {
-	case "can_override":
+	// Design confirmation is never a zero-input approval. The server requires
+	// either a real design reference or an explicit waiver, so the card must
+	// open the parameter dialog instead of offering a misleading direct approve.
+	if IsDesignConfirmationPreview(preview) {
 		actions = append(actions,
-			createBtn("act-approve", "✅ 批准通过 (Approve)", "success", "approve"),
-			createBtn("act-edit", "✏️ 查看并微调... (Review / Edit)", "primary", "edit"),
+			createBtn("act-review-approve", "📝 填写设计凭证并批准 (Review & Approve)", "primary", "edit"),
 			createBtn("act-reject", "❌ 打回修改 (Reject)", "danger", "reject"),
 		)
-	case "decision_required":
-		actions = append(actions,
-			createBtn("act-review-approve", "📋 填写参数并审批... (Review & Approve)", "primary", "review_approve"),
-			createBtn("act-reject", "❌ 打回修改 (Reject)", "danger", "reject"),
-		)
-	default: // "zero_input"
-		actions = append(actions,
-			createBtn("act-approve", "✅ 批准通过 (Approve)", "success", "approve"),
-			createBtn("act-edit", "📋 查看审核摘要... (Review)", "primary", "edit"),
-			createBtn("act-reject", "❌ 打回修改 (Reject)", "danger", "reject"),
-		)
+	} else {
+		switch preview.UXMode {
+		case "can_override":
+			actions = append(actions,
+				createBtn("act-approve", "✅ 批准通过 (Approve)", "success", "approve"),
+				createBtn("act-edit", "✏️ 查看并微调... (Review / Edit)", "primary", "edit"),
+				createBtn("act-reject", "❌ 打回修改 (Reject)", "danger", "reject"),
+			)
+		case "decision_required":
+			actions = append(actions,
+				createBtn("act-review-approve", "📋 填写参数并审批... (Review & Approve)", "primary", "review_approve"),
+				createBtn("act-reject", "❌ 打回修改 (Reject)", "danger", "reject"),
+			)
+		default: // "zero_input"
+			actions = append(actions,
+				createBtn("act-approve", "✅ 批准通过 (Approve)", "success", "approve"),
+				createBtn("act-edit", "📋 查看审核摘要... (Review)", "primary", "edit"),
+				createBtn("act-reject", "❌ 打回修改 (Reject)", "danger", "reject"),
+			)
+		}
 	}
 
 	return map[string]any{

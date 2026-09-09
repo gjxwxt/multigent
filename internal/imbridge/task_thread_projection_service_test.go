@@ -11,7 +11,40 @@ import (
 	"testing"
 
 	controldb "github.com/multigent/multigent/internal/db"
+	"github.com/multigent/multigent/internal/workflow"
 )
+
+func TestFormatHumanReviewAttachment_DesignGateRequiresDialog(t *testing.T) {
+	preview := workflow.ReviewResolutionPreview{
+		StepID:               "design_review",
+		StepTitle:            "设计确认",
+		ExpectedStateVersion: 42,
+		ReviewSnapshotHash:   "sha256:design",
+		UXMode:               "zero_input",
+		Parameters: []workflow.ApprovalParameterPreview{
+			{Key: "approved_design_source", Label: "设计来源", Kind: workflow.KindHumanDecision, Resolution: workflow.ResolutionHumanOptional},
+			{Key: "approved_design_project_id", Label: "OpenDesign 项目 ID", Kind: workflow.KindHumanDecision, Resolution: workflow.ResolutionHumanOptional},
+			{Key: "design_waiver_reason", Label: "设计豁免理由", Kind: workflow.KindHumanDecision, Resolution: workflow.ResolutionHumanOptional},
+		},
+	}
+
+	attachment := FormatHumanReviewAttachment("ws", "project", "task", "channel", "connection", preview, "secret", "http://multigent")
+	actions, ok := attachment["actions"].([]map[string]any)
+	if !ok {
+		t.Fatalf("actions type = %T, want []map[string]any", attachment["actions"])
+	}
+	if len(actions) != 2 {
+		t.Fatalf("design gate actions = %d, want dialog + reject only", len(actions))
+	}
+	if got := actions[0]["name"]; got != "📝 填写设计凭证并批准 (Review & Approve)" {
+		t.Fatalf("first design action = %v", got)
+	}
+	firstIntegration, _ := actions[0]["integration"].(map[string]any)
+	firstContext, _ := firstIntegration["context"].(map[string]any)
+	if got := firstContext["action"]; got != "edit" {
+		t.Fatalf("design approval action verb = %v, want edit", got)
+	}
+}
 
 func TestHumanReviewAssigneeLineMentionsOnlyVerifiedSameInstanceUsername(t *testing.T) {
 	store, err := controldb.Open(filepath.Join(t.TempDir(), "control.db"))
