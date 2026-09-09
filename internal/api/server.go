@@ -467,6 +467,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/projects/{name}/agents/{agent}/context", s.handleGetAgentContext)
 	mux.HandleFunc("GET /api/v1/projects/{name}/agents/{agent}/runtime/readiness", s.handleGetAgentRuntimeReadiness)
 	mux.HandleFunc("GET /api/v1/projects/{name}/agents/{agent}/interactions/active", s.handleAgentInteractionStatus)
+	mux.HandleFunc("GET /api/v1/projects/{name}/channels", s.handleListProjectChannels)
+	mux.HandleFunc("POST /api/v1/projects/{name}/channels/provision", s.handleProvisionProjectChannel)
 	mux.HandleFunc("GET /api/v1/projects/{name}/agents/{agent}/channels", s.handleAgentChannels)
 	mux.HandleFunc("POST /api/v1/projects/{name}/agents/{agent}/channels/{provider}/setup/begin", s.handleAgentChannelSetupBegin)
 	mux.HandleFunc("POST /api/v1/projects/{name}/agents/{agent}/channels/{provider}/setup/poll", s.handleAgentChannelSetupPoll)
@@ -517,6 +519,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/design/start", s.handleDesignStart)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/design/status", s.handleDesignStatus)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/design/chat", s.handleDesignChat)
+	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/design/snapshot/{path...}", s.handleGetDesignSnapshotFile)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/start", s.handlePostTaskPreviewStart)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/stop", s.handlePostTaskPreviewStop)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/remote-sync/retry", s.handlePostTaskRemoteSyncRetry)
@@ -668,6 +671,7 @@ func (s *Server) Handler() http.Handler {
 	publicMux.HandleFunc("POST /api/v1/im/mattermost/actions", s.handleMattermostActionCallback)
 	publicMux.HandleFunc("POST /api/v1/im/mattermost/dialog-submit", s.handleMattermostDialogSubmit)
 	publicMux.HandleFunc("GET /api/v1/health", s.handleHealth)
+	publicMux.HandleFunc("GET /api/v1/version", s.handleHealth)
 	publicMux.HandleFunc("/preview/", s.handleTaskPreviewProxy)
 	// Design proxy + launch are iframe-bootstrap surfaces: the iframe carries
 	// only the task-scoped odt signature token (and the session cookie the

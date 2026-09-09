@@ -659,17 +659,50 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 	}
 	// Freeze the design reference at the moment of approval: the OD project
 	// keeps evolving, so the HTML the human approved is captured once and
-	// carried in the outputs. Best-effort — a failed capture leaves the
-	// transition untouched (the project id stays the contract).
-	if runFound && isDesignGateStep(currentStep) && isApprovalDecision(outputs["decision"]) && outputs["approved_design_project_id"] != "" && outputs["approved_design_html"] == "" {
-		inline, snapPath := s.captureDesignGateSnapshot(r, project, agent, t, outputs["approved_design_project_id"])
-		if inline != "" {
-			outputs["approved_design_html"] = inline
-		}
-		if snapPath != "" {
-			outputs["approved_design_snapshot_path"] = snapPath
+	// carried in the outputs. Atomic: all artifacts must be captured or an error
+	// is returned unless an explicit human waiver is provided.
+	if runFound && isDesignGateStep(currentStep) && isApprovalDecision(outputs["decision"]) {
+		// Cleanse client-supplied artifacts: these must NEVER be trusted from client request!
+		delete(outputs, "approved_design_snapshot_path")
+		delete(outputs, "approved_design_html")
+		delete(outputs, "design_waived")
+
+		odProjectID := strings.TrimSpace(outputs["approved_design_project_id"])
+		waiverReason := strings.TrimSpace(outputs["design_waiver_reason"])
+		if odProjectID != "" {
+			inline, snapPath, err := s.captureDesignGateSnapshot(r, project, agent, t, odProjectID)
+			if err != nil {
+				if waiverReason == "" {
+					return taskWorkflowResponse{}, http.StatusBadRequest, fmt.Errorf("design_snapshot_failed: %w", err)
+				}
+				outputs["design_waived"] = "true"
+				s.addComment(t, project, agent, fmt.Sprintf("design snapshot waived by reviewer: %s (reason: %s)", waiverReason, redactODDetail(err)))
+			} else {
+				if inline != "" {
+					outputs["approved_design_html"] = inline
+				}
+				if snapPath != "" {
+					outputs["approved_design_snapshot_path"] = snapPath
+				}
+			}
+		} else if waiverReason != "" {
+			outputs["design_waived"] = "true"
+			s.addComment(t, project, agent, fmt.Sprintf("design verification waived by reviewer: %s", waiverReason))
+		} else {
+			return taskWorkflowResponse{}, http.StatusBadRequest, errors.New("design verification requires either an approved design reference or an explicit design_waiver_reason")
 		}
 	}
+
+	// Enforce QA Sign-off risk-coverage gate before allowing transition toward merge.
+	if runFound && isQASignoffStep(currentStep) && isApprovalDecision(outputs["decision"]) {
+		if err := validateQASignoffGate(outputs, currentStep, run, wfStore); err != nil {
+			return taskWorkflowResponse{}, http.StatusBadRequest, err
+		}
+		if rawWaivers := strings.TrimSpace(outputs["manual_waivers"]); rawWaivers != "" {
+			s.addComment(t, project, agent, fmt.Sprintf("qa signoff approved with manual waivers: %s", rawWaivers))
+		}
+	}
+
 	if isApprovalDecision(outputs["decision"]) {
 		s.commitAndPushReviewChanges(project, agent, t)
 	}
@@ -743,7 +776,115 @@ func isPullRequestReviewStep(step entity.WorkflowStep) bool {
 // (greenfield design_review). Used to freeze the approved design snapshot at
 // confirm time.
 func isDesignGateStep(step entity.WorkflowStep) bool {
-	return step.Config != nil && step.Config["designGate"] == "true"
+	if step.Config != nil && strings.EqualFold(strings.TrimSpace(step.Config["designGate"]), "true") {
+		return true
+	}
+	id := strings.ToLower(strings.TrimSpace(step.ID))
+	return id == "design_review" || strings.Contains(id, "design_review")
+}
+
+// isQASignoffStep reports whether the step represents a QA sign-off gate.
+func isQASignoffStep(step entity.WorkflowStep) bool {
+	id := strings.ToLower(strings.TrimSpace(step.ID))
+	return id == "qa_signoff" || strings.Contains(id, "qa_signoff")
+}
+
+type qaRiskItem struct {
+	ItemID             string `json:"item_id"`
+	AcceptanceCriteria string `json:"acceptance_criteria"`
+	AffectedAPIs       any    `json:"affected_apis"`
+	RiskLevel          string `json:"risk_level"`
+	ExecutionType      string `json:"execution_type"`
+	Status             string `json:"status"`
+	Evidence           string `json:"evidence"`
+	UncoveredReason    string `json:"uncovered_reason"`
+}
+
+func validateQASignoffGate(outputs map[string]string, currentStep entity.WorkflowStep, run entity.WorkflowRun, wfStore *workflowstore.Store) error {
+	matrixRaw := strings.TrimSpace(outputs["risk_coverage_matrix"])
+	if matrixRaw == "" {
+		instances, err := wfStore.ListStepInstances(run.ID)
+		if err == nil {
+			if inst, ok := workflowStepInstanceByStepID(instances, currentStep.ID); ok {
+				matrixRaw = strings.TrimSpace(inst.InputValues["risk_coverage_matrix"])
+			}
+		}
+	}
+	if matrixRaw == "" {
+		return errors.New("qa_signoff blocked: missing required risk_coverage_matrix")
+	}
+
+	var items []qaRiskItem
+	if err := json.Unmarshal([]byte(matrixRaw), &items); err != nil {
+		var wrapper struct {
+			Items  []qaRiskItem `json:"items"`
+			Matrix []qaRiskItem `json:"matrix"`
+		}
+		if err2 := json.Unmarshal([]byte(matrixRaw), &wrapper); err2 == nil && (len(wrapper.Items) > 0 || len(wrapper.Matrix) > 0) {
+			if len(wrapper.Items) > 0 {
+				items = wrapper.Items
+			} else {
+				items = wrapper.Matrix
+			}
+		} else {
+			return fmt.Errorf("qa_signoff blocked: invalid risk_coverage_matrix JSON: %w", err)
+		}
+	}
+
+	if len(items) == 0 {
+		return errors.New("qa_signoff blocked: risk_coverage_matrix must contain at least one item")
+	}
+
+	var manualWaivers map[string]string
+	if rawWaivers := strings.TrimSpace(outputs["manual_waivers"]); rawWaivers != "" {
+		if err := json.Unmarshal([]byte(rawWaivers), &manualWaivers); err != nil {
+			return fmt.Errorf("qa_signoff blocked: invalid manual_waivers JSON: %w", err)
+		}
+	}
+
+	seenItemIDs := make(map[string]bool, len(items))
+	for _, item := range items {
+		itemID := strings.TrimSpace(item.ItemID)
+		if itemID == "" {
+			return errors.New("qa_signoff blocked: risk_coverage_matrix item missing required item_id")
+		}
+		if seenItemIDs[itemID] {
+			return fmt.Errorf("qa_signoff blocked: duplicate item_id %q in risk_coverage_matrix", itemID)
+		}
+		seenItemIDs[itemID] = true
+
+		risk := strings.ToLower(strings.TrimSpace(item.RiskLevel))
+		if risk != "high" && risk != "medium" && risk != "low" {
+			return fmt.Errorf("qa_signoff blocked: item %q has invalid risk_level %q (must be high, medium, or low)", itemID, item.RiskLevel)
+		}
+
+		status := strings.ToLower(strings.TrimSpace(item.Status))
+		switch status {
+		case "passed", "failed", "blocked", "waived", "unexecuted", "skipped":
+			// valid status
+		default:
+			return fmt.Errorf("qa_signoff blocked: item %q has invalid status %q", itemID, item.Status)
+		}
+
+		if risk == "high" {
+			if status == "passed" {
+				if strings.TrimSpace(item.Evidence) == "" {
+					return fmt.Errorf("qa_signoff blocked: high-risk item %q marked as passed requires non-empty evidence", itemID)
+				}
+			} else if status == "failed" {
+				return fmt.Errorf("qa_signoff blocked: high-risk test item %q failed", itemID)
+			} else {
+				waiverReason := ""
+				if manualWaivers != nil {
+					waiverReason = strings.TrimSpace(manualWaivers[itemID])
+				}
+				if waiverReason == "" {
+					return fmt.Errorf("qa_signoff blocked: unpassed high-risk item %q (%s) requires explicit manual waiver in manual_waivers", itemID, status)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func isApprovalDecision(decision string) bool {

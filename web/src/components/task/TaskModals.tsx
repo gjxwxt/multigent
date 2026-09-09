@@ -1089,6 +1089,30 @@ export function WorkflowRuntimePanel({
     Boolean(instance?.outputArtifact?.trim() || instance?.summary?.trim())
   )
 
+  const isQASignoff = Boolean(step && (step.id === 'qa_signoff' || step.id.includes('qa_signoff')))
+  const qaMatrixItems = useMemo(() => {
+    if (!isQASignoff) return []
+    const raw = inputValues['risk_coverage_matrix']
+    if (!raw) return []
+    try {
+      const p = JSON.parse(raw)
+      if (Array.isArray(p)) return p
+      if (p && Array.isArray(p.items)) return p.items
+      if (p && Array.isArray(p.matrix)) return p.matrix
+      return []
+    } catch {
+      return []
+    }
+  }, [isQASignoff, inputValues])
+
+  const highRiskFailedItems = useMemo(() => {
+    return qaMatrixItems.filter((item: any) => String(item.risk_level).toLowerCase() === 'high' && String(item.status).toLowerCase() === 'failed')
+  }, [qaMatrixItems])
+
+  const highRiskUnpassedItems = useMemo(() => {
+    return qaMatrixItems.filter((item: any) => String(item.risk_level).toLowerCase() === 'high' && String(item.status).toLowerCase() !== 'passed' && String(item.status).toLowerCase() !== 'failed')
+  }, [qaMatrixItems])
+
   return (
     <WorkflowDocTitleContext.Provider value={docTitleMap}>
     <div className="flex min-h-0 flex-1 flex-col">
@@ -1110,7 +1134,7 @@ export function WorkflowRuntimePanel({
 
         {hasInput && (
           <WorkflowPanelBlock title={t('workflows.detail.input')}>
-            <WorkflowFieldList fields={step.inputFields ?? []} values={inputValues} />
+            <WorkflowFieldList fields={step.inputFields ?? []} values={inputValues} project={project} taskID={taskID} />
             {instance?.inputArtifact && !hasStructuredInput && <WorkflowArtifact value={instance.inputArtifact} />}
           </WorkflowPanelBlock>
         )}
@@ -1226,6 +1250,48 @@ export function WorkflowRuntimePanel({
                   </label>
                 )
               })}
+              {isQASignoff && highRiskFailedItems.length > 0 && (
+                <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-xs text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300 font-medium">
+                  ⚠️ {t('workflows.qa.highRiskFailedAlert', { defaultValue: '存在高风险测试失败项，准入主干已被系统硬阻断。请点击「需要修改」打回修复。' })}
+                </div>
+              )}
+              {isQASignoff && highRiskUnpassedItems.length > 0 && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50/60 p-3 dark:border-amber-900/40 dark:bg-amber-950/30">
+                  <p className="text-xs font-semibold text-amber-800 dark:text-amber-300">
+                    ⚠️ {t('workflows.qa.highRiskWaiverRequired', { defaultValue: '存在未执行或阻塞的高风险项，必须逐项填写特批豁免理由后方可批准：' })}
+                  </p>
+                  <div className="mt-2 space-y-2">
+                    {highRiskUnpassedItems.map((item: any) => {
+                      let currentWaivers: Record<string, string> = {}
+                      try {
+                        currentWaivers = JSON.parse(reviewOutputs['manual_waivers'] || '{}')
+                      } catch {}
+                      const itemId = item.item_id || 'unspecified'
+                      return (
+                        <div key={itemId} className="rounded border border-amber-200/80 bg-white p-2 text-xs dark:border-zinc-700 dark:bg-zinc-900">
+                          <div className="flex items-center justify-between font-mono font-semibold text-neutral-800 dark:text-zinc-200">
+                            <span>{itemId} ({item.status})</span>
+                            <span className="text-[10px] text-amber-700 dark:text-amber-400 font-sans">需人工豁免</span>
+                          </div>
+                          {item.acceptance_criteria && (
+                            <p className="mt-0.5 text-xs text-neutral-600 dark:text-zinc-400 font-sans">{item.acceptance_criteria}</p>
+                          )}
+                          <input
+                            type="text"
+                            value={currentWaivers[itemId] || ''}
+                            onChange={(e) => {
+                              const next = { ...currentWaivers, [itemId]: e.target.value }
+                              onChangeOutput('manual_waivers', JSON.stringify(next))
+                            }}
+                            placeholder={t('workflows.qa.waiverPlaceholder', { defaultValue: '填写该高风险项的人工豁免/验证理由（必填）' })}
+                            className="mt-1.5 w-full rounded border border-neutral-300 bg-white px-2 py-1 text-xs text-neutral-900 outline-none focus:border-amber-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                          />
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
               {reviewErr && <p className="text-sm text-red-600 dark:text-red-400">{reviewErr}</p>}
               <div className="flex justify-end gap-2">
                 {usesDefaultReviewButtons ? (
@@ -1233,7 +1299,13 @@ export function WorkflowRuntimePanel({
                     <button type="button" onClick={() => onSubmitReview('request_changes')} disabled={Boolean(reviewBusy)} className="rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm font-medium text-neutral-600 hover:bg-neutral-50 disabled:opacity-50 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800">
                       {reviewBusy === 'request_changes' ? t('forms.working') : t('workflows.review.requestChanges')}
                     </button>
-                    <button type="button" onClick={() => onSubmitReview('approve')} disabled={Boolean(reviewBusy)} className="rounded-lg border border-sky-600 bg-white px-3 py-2 text-sm font-medium text-sky-700 hover:bg-sky-50 disabled:opacity-50 dark:border-sky-500 dark:bg-zinc-900 dark:text-sky-400 dark:hover:bg-zinc-800">
+                    <button
+                      type="button"
+                      onClick={() => onSubmitReview('approve')}
+                      disabled={Boolean(reviewBusy) || (isQASignoff && highRiskFailedItems.length > 0)}
+                      title={isQASignoff && highRiskFailedItems.length > 0 ? t('workflows.qa.highRiskBlockedTitle', { defaultValue: '存在高风险失败项，禁止准入' }) : undefined}
+                      className="rounded-lg border border-sky-600 bg-white px-3 py-2 text-sm font-medium text-sky-700 hover:bg-sky-50 disabled:opacity-50 dark:border-sky-500 dark:bg-zinc-900 dark:text-sky-400 dark:hover:bg-zinc-800"
+                    >
                       {reviewBusy === 'approve' ? t('forms.working') : t('workflows.review.approve')}
                     </button>
                   </>
@@ -1246,7 +1318,7 @@ export function WorkflowRuntimePanel({
               </div>
             ) : (
               <>
-                <WorkflowFieldList fields={step.outputFields ?? []} values={outputValues} />
+                <WorkflowFieldList fields={step.outputFields ?? []} values={outputValues} project={project} taskID={taskID} />
                 {Object.keys(outputValues).length > 0
                   ? null
                   : <WorkflowValuesOrArtifact values={instance?.outputValues} fields={step.outputFields} artifact={instance?.outputArtifact || instance?.summary} />}
@@ -1474,6 +1546,86 @@ function hasWorkflowValues(values?: Record<string, string>) {
   return Boolean(values && Object.values(values).some((value) => String(value ?? '').trim()))
 }
 
+function RiskCoverageMatrixTable({ json }: { json: string }) {
+  const { t } = useTranslation()
+  const items = useMemo(() => {
+    try {
+      const parsed = JSON.parse(json)
+      if (Array.isArray(parsed)) return parsed
+      if (parsed && Array.isArray(parsed.items)) return parsed.items
+      if (parsed && Array.isArray(parsed.matrix)) return parsed.matrix
+      return null
+    } catch {
+      return null
+    }
+  }, [json])
+
+  if (!items || items.length === 0) {
+    return <WorkflowValueText value={json} />
+  }
+
+  return (
+    <div className="mt-2 overflow-x-auto rounded-lg border border-neutral-200 dark:border-zinc-800">
+      <table className="w-full text-left text-xs">
+        <thead className="border-b border-neutral-200 bg-neutral-50 font-semibold text-neutral-700 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300">
+          <tr>
+            <th className="px-3 py-2">{t('workflows.qa.itemId', { defaultValue: '验收项 / ID' })}</th>
+            <th className="px-3 py-2">{t('workflows.qa.riskLevel', { defaultValue: '风险等级' })}</th>
+            <th className="px-3 py-2">{t('workflows.qa.status', { defaultValue: '状态' })}</th>
+            <th className="px-3 py-2">{t('workflows.qa.type', { defaultValue: '验证方式' })}</th>
+            <th className="px-3 py-2">{t('workflows.qa.evidence', { defaultValue: '证据 / 未覆盖原因' })}</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-neutral-100 dark:divide-zinc-800/60 bg-white dark:bg-zinc-950">
+          {items.map((item: any, idx: number) => {
+            const risk = String(item.risk_level || 'low').toLowerCase()
+            const status = String(item.status || 'not_run').toLowerCase()
+            const isHigh = risk === 'high'
+            return (
+              <tr key={item.item_id || idx} className={cn(isHigh && status !== 'passed' ? 'bg-red-50/40 dark:bg-red-950/20' : undefined)}>
+                <td className="px-3 py-2 align-top font-medium text-neutral-900 dark:text-zinc-100">
+                  <div className="font-mono font-semibold text-[11px] text-sky-700 dark:text-sky-400">{item.item_id || `#${idx + 1}`}</div>
+                  {item.acceptance_criteria && (
+                    <div className="mt-0.5 text-xs text-neutral-600 dark:text-zinc-400 font-normal leading-relaxed">{item.acceptance_criteria}</div>
+                  )}
+                </td>
+                <td className="px-3 py-2 align-top whitespace-nowrap">
+                  <span className={cn(
+                    'inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold',
+                    risk === 'high' ? 'bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300' :
+                    risk === 'medium' ? 'bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300' :
+                    'bg-neutral-100 text-neutral-600 dark:bg-zinc-800 dark:text-zinc-400'
+                  )}>
+                    {risk.toUpperCase()}
+                  </span>
+                </td>
+                <td className="px-3 py-2 align-top whitespace-nowrap">
+                  <span className={cn(
+                    'inline-block px-1.5 py-0.5 rounded text-[10px] font-medium',
+                    status === 'passed' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300' :
+                    status === 'failed' ? 'bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300' :
+                    status === 'blocked' ? 'bg-orange-100 text-orange-700 dark:bg-orange-950/60 dark:text-orange-300' :
+                    status === 'waived' ? 'bg-purple-100 text-purple-700 dark:bg-purple-950/60 dark:text-purple-300' :
+                    'bg-neutral-100 text-neutral-600 dark:bg-zinc-800 dark:text-zinc-400'
+                  )}>
+                    {status}
+                  </span>
+                </td>
+                <td className="px-3 py-2 align-top whitespace-nowrap text-neutral-500 dark:text-zinc-400">
+                  {item.execution_type || 'automated'}
+                </td>
+                <td className="px-3 py-2 align-top text-neutral-700 dark:text-zinc-300 max-w-xs break-words">
+                  {item.evidence || item.uncovered_reason || '-'}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 function WorkflowValueMap({ values, fields = [], compact = false }: { values: Record<string, string>; fields?: WorkflowField[]; compact?: boolean }) {
   const entries = Object.entries(values).filter(([, value]) => String(value ?? '').trim())
   const fieldByName = new Map(fields.map((field) => [field.name, field]))
@@ -1486,7 +1638,11 @@ function WorkflowValueMap({ values, fields = [], compact = false }: { values: Re
           <div key={key} className="rounded-lg border border-neutral-100 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-950">
             <WorkflowFieldTitle fieldName={key} description={field?.description} />
             <div className="mt-2 rounded-md bg-neutral-50 px-3 py-2 break-words text-sm leading-relaxed text-neutral-800 dark:bg-zinc-900 dark:text-zinc-200">
-              <WorkflowValueText value={String(value)} />
+              {key === 'risk_coverage_matrix' ? (
+                <RiskCoverageMatrixTable json={String(value)} />
+              ) : (
+                <WorkflowValueText value={String(value)} />
+              )}
             </div>
           </div>
         )
@@ -1504,7 +1660,17 @@ function WorkflowPanelBlock({ title, children }: { title: string; children: Reac
   )
 }
 
-function WorkflowFieldList({ fields, values }: { fields: WorkflowField[]; values: Record<string, string> }) {
+function WorkflowFieldList({
+  fields,
+  values,
+  project,
+  taskID,
+}: {
+  fields: WorkflowField[]
+  values: Record<string, string>
+  project?: string
+  taskID?: string
+}) {
   const { t } = useTranslation()
   if (fields.length === 0) return null
   return (
@@ -1513,25 +1679,44 @@ function WorkflowFieldList({ fields, values }: { fields: WorkflowField[]; values
         const val = values[field.name]
         const isUrlField = (field.name === 'pr_url' || field.name === 'preview_url') && val && val.toLowerCase() !== 'none'
         const isHttpUrl = isUrlField && (val.startsWith('http://') || val.startsWith('https://') || val.startsWith('/preview/'))
+        const isSnapshotField = (field.name === 'approved_design_snapshot_path' || field.name === 'approved_design_preview_url') && Boolean(val && val.toLowerCase() !== 'none' && project && taskID)
+
         return (
           <div key={field.name} className="rounded-lg border border-neutral-100 bg-white p-2.5 dark:border-zinc-800 dark:bg-zinc-950">
             <div className="flex items-center justify-between gap-2">
               <WorkflowFieldTitle fieldName={field.name} description={field.description} />
-              {isHttpUrl && (
-                <a
-                  href={val}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1 font-sans text-xs font-semibold text-sky-600 hover:text-sky-700 dark:text-sky-400"
-                >
-                  <ExternalLink className="size-3" />
-                  <span>{t('tasks.openDirectly', { defaultValue: '直接打开' })}</span>
-                </a>
-              )}
+              <div className="flex items-center gap-2">
+                {isHttpUrl && (
+                  <a
+                    href={val}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 font-sans text-xs font-semibold text-sky-600 hover:text-sky-700 dark:text-sky-400"
+                  >
+                    <ExternalLink className="size-3" />
+                    <span>{t('tasks.openDirectly', { defaultValue: '直接打开' })}</span>
+                  </a>
+                )}
+                {isSnapshotField && (
+                  <a
+                    href={`/api/v1/projects/${encodeURIComponent(project!)}/tasks/${encodeURIComponent(taskID!)}/design/snapshot/`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 font-sans text-xs font-semibold text-violet-600 hover:text-violet-700 dark:text-violet-400"
+                  >
+                    <ExternalLink className="size-3" />
+                    <span>{t('designGate.viewSnapshot', { defaultValue: '预览冻结设计快照' })}</span>
+                  </a>
+                )}
+              </div>
             </div>
             {val && (
               <div className="mt-1.5 break-words text-sm text-neutral-800 dark:text-zinc-200">
-                <WorkflowValueText value={val} />
+                {field.name === 'risk_coverage_matrix' ? (
+                  <RiskCoverageMatrixTable json={val} />
+                ) : (
+                  <WorkflowValueText value={val} />
+                )}
               </div>
             )}
           </div>

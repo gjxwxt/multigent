@@ -21,6 +21,7 @@ const (
 	ErrCodeServiceUnavailable = "service_unavailable"
 	ErrCodeUpstreamError      = "upstream_error"
 	ErrCodeInternal           = "internal_error"
+	ErrCodeDesignSnapshotFailed = "design_snapshot_failed"
 
 	ErrCodeAdminRequired                = "admin_required"
 	ErrCodeAgentAccessRequired          = "agent_access_required"
@@ -128,6 +129,9 @@ func classifyErrorCode(status int, msg string) string {
 	switch status {
 	case http.StatusBadRequest:
 		lower := strings.ToLower(strings.TrimSpace(msg))
+		if strings.Contains(lower, "design_snapshot_failed") {
+			return ErrCodeDesignSnapshotFailed
+		}
 		if strings.Contains(lower, "invalid json") || strings.Contains(lower, "invalid json body") || strings.Contains(lower, "invalid body") {
 			return ErrCodeInvalidJSON
 		}
