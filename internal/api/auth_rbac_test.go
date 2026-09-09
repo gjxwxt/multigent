@@ -475,6 +475,86 @@ func TestListUsersReturnsWorkspaceRole(t *testing.T) {
 	}
 }
 
+func TestListUsersReturnsIMBindingInfo(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	if err := s.users.CreateUser("alex", "pass123", RoleMember, "Alex Newbie", "alex@example.com", "", "", ""); err != nil {
+		t.Fatalf("create alex: %v", err)
+	}
+	if err := s.controlDB.UpsertWorkspaceMember(workspaceID, "alex", WorkspaceRoleMember); err != nil {
+		t.Fatalf("workspace member: %v", err)
+	}
+
+	connID := "conn-mm-1"
+	if err := s.controlDB.UpsertConnection(controldb.Connection{
+		ID:             connID,
+		WorkspaceID:    workspaceID,
+		Provider:       "mattermost",
+		ConnectionName: "mattermost-bot-main",
+		OwnerType:      ConnectionOwnerWorkspace,
+		OwnerID:        workspaceID,
+		AuthType:       "bot_token",
+		Status:         "active",
+	}); err != nil {
+		t.Fatalf("upsert connection: %v", err)
+	}
+
+	// Bind alex to mattermost in controlDB
+	seedBinding := controldb.AgentChannelBinding{
+		ID:           "chan-dummy-alex",
+		WorkspaceID:  workspaceID,
+		ProjectID:    "sample",
+		AgentID:      "pm",
+		Provider:     "mattermost",
+		ConnectionID: connID,
+		Status:       "connected",
+	}
+	if err := s.controlDB.UpsertAgentChannelBinding(seedBinding); err != nil {
+		t.Fatalf("save binding: %v", err)
+	}
+	if err := s.controlDB.UpsertUserChannelIdentity(controldb.UserChannelIdentity{
+		ID:               "uch-alex-test",
+		WorkspaceID:      workspaceID,
+		UserID:           "alex",
+		ChannelBindingID: seedBinding.ID,
+		Provider:         "mattermost",
+		ExternalUserID:   "ext-alex-123",
+	}); err != nil {
+		t.Fatalf("upsert identity: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	s.handleListUsers(rec, providerTestRequest(http.MethodGet, "/api/v1/users", "admin", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list users status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var users []struct {
+		Username    string   `json:"username"`
+		IMBound     bool     `json:"imBound"`
+		IMProviders []string `json:"imProviders"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &users); err != nil {
+		t.Fatalf("decode users: %v", err)
+	}
+
+	var foundAlex bool
+	for _, u := range users {
+		if u.Username == "alex" {
+			foundAlex = true
+			if !u.IMBound {
+				t.Fatalf("expected alex to be imBound=true")
+			}
+			if len(u.IMProviders) != 1 || u.IMProviders[0] != "mattermost" {
+				t.Fatalf("expected alex imProviders=['mattermost'], got %#v", u.IMProviders)
+			}
+		}
+	}
+	if !foundAlex {
+		t.Fatal("alex not found in user list")
+	}
+}
+
+
 func TestWorkspaceAdminCanUpdateMemberScopedAccess(t *testing.T) {
 	s, workspaceID := newConnectionGrantPolicyServer(t)
 	seedAgentWorkerWithIDForTest(t, s, workspaceID, "sample", "pm", "aw-pm", "pm-sample-pm")

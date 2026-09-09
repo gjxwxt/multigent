@@ -33,6 +33,8 @@ type WorkspaceUser = {
   role?: string
   email?: string
   projects?: Array<{ project: string; role: string }>
+  imBound?: boolean
+  imProviders?: string[]
 }
 
 type IMInstance = {
@@ -239,6 +241,18 @@ export function CreateProjectDialog({
     return 'Mattermost'
   }, [selectedInstanceId, imInstances, imConnections])
 
+  // Active IM Instance provider
+  const activeProvider = useMemo(() => {
+    if (selectedInstanceId) {
+      const found = imInstances.find((i) => i.id === selectedInstanceId)
+      if (found?.provider) return found.provider.toLowerCase()
+    }
+    if (imConnections.length > 0 && imConnections[0].provider) {
+      return imConnections[0].provider.toLowerCase()
+    }
+    return 'mattermost'
+  }, [selectedInstanceId, imInstances, imConnections])
+
   // Member binding preview in channel
   const memberChannelPreview = useMemo(() => {
     const boundExternalUsernames = new Set<string>()
@@ -249,14 +263,25 @@ export function CreateProjectDialog({
     }
 
     return selectedUsernames.map((u) => {
-      // Check if user is known to be bound
-      const isBound = u === currentUsername ? boundExternalUsernames.size > 0 : false
+      const userInfo = users.find((usr) => usr.username === u)
+      let isBound = false
+      if (userInfo?.imProviders && userInfo.imProviders.length > 0) {
+        isBound = userInfo.imProviders.some((p) => p.toLowerCase() === activeProvider)
+      } else if (userInfo?.imBound !== undefined) {
+        isBound = userInfo.imBound
+      } else if (u === currentUsername) {
+        isBound =
+          boundExternalUsernames.size > 0 ||
+          imConnections.some(
+            (c) => (c.bound || c.sharedBinding) && (!activeProvider || c.provider.toLowerCase() === activeProvider)
+          )
+      }
       return {
         username: u,
         isBound,
       }
     })
-  }, [selectedUsernames, currentUsername, imConnections])
+  }, [selectedUsernames, users, currentUsername, imConnections, activeProvider])
 
   // Toggle worker selection
   function toggleWorker(workerId: string) {
@@ -860,7 +885,7 @@ export function CreateProjectDialog({
                         {m.isBound ? (
                           <>
                             <Check className="size-3 text-emerald-600 dark:text-emerald-400" />
-                            <span>@{m.username} (已绑定 Mattermost，将自动加入频道)</span>
+                            <span>@{m.username} (已绑定 {activeInstance}，将自动加入频道)</span>
                           </>
                         ) : (
                           <>

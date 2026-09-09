@@ -1197,6 +1197,30 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		s.jsonErrorCode(w, http.StatusForbidden, ErrCodeWorkspaceAccessRequired, "workspace access required")
 		return
 	}
+	imProvidersByUser := make(map[string][]string)
+	if s.controlDB != nil {
+		if idents, err := s.controlDB.ListUserChannelIdentities(controldb.UserChannelIdentityFilter{
+			WorkspaceID: workspaceID,
+		}); err == nil {
+			for _, id := range idents {
+				uid := strings.TrimSpace(id.UserID)
+				prov := strings.TrimSpace(id.Provider)
+				if uid != "" && prov != "" {
+					found := false
+					for _, existing := range imProvidersByUser[uid] {
+						if existing == prov {
+							found = true
+							break
+						}
+					}
+					if !found {
+						imProvidersByUser[uid] = append(imProvidersByUser[uid], prov)
+					}
+				}
+			}
+		}
+	}
+
 	isAdmin := cur.Role == RoleAdmin || s.canAdminWorkspace(r, workspaceID)
 	type safeUser struct {
 		Username     string          `json:"username"`
@@ -1213,6 +1237,8 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		LinkedAgents []string        `json:"linkedAgents,omitempty"`
 		Disabled     bool            `json:"disabled,omitempty"`
 		CreatedAt    string          `json:"createdAt,omitempty"`
+		IMBound      bool            `json:"imBound"`
+		IMProviders  []string        `json:"imProviders,omitempty"`
 	}
 	out := make([]safeUser, 0, len(members))
 	for _, member := range members {
@@ -1220,6 +1246,7 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		if u == nil {
 			continue
 		}
+		providers := imProvidersByUser[u.Username]
 		row := safeUser{
 			Username:    u.Username,
 			Role:        member.Role,
@@ -1228,6 +1255,8 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 			Email:       u.Email,
 			Avatar:      u.Avatar,
 			CreatedAt:   member.CreatedAt,
+			IMBound:     len(providers) > 0,
+			IMProviders: providers,
 		}
 		if isAdmin || cur.Username == u.Username {
 			row.Phone = u.Phone
