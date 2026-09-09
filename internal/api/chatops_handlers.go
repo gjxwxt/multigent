@@ -360,6 +360,7 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 
 	// 7. Dual CAS check (StateVersion + SnapshotHash)
 	if err := workflow.ValidateReviewCAS(preview.ExpectedStateVersion, tokenData.ExpectedStateVersion, preview.ReviewSnapshotHash, tokenData.ReviewSnapshotHash); err != nil {
+		log.Printf("[chatops] mattermost action callback CAS values project=%s task=%s step=%s current_version=%d token_version=%d current_hash=%s token_hash=%s", tokenData.ProjectID, tokenData.TaskID, tokenData.StepID, preview.ExpectedStateVersion, tokenData.ExpectedStateVersion, shortSensitiveHash(preview.ReviewSnapshotHash), shortSensitiveHash(tokenData.ReviewSnapshotHash))
 		msg := "### ⚠️ 审批标的已发生更新 (409 Conflict: Protected)\n" +
 			"> **保护机制触发**: 系统检测到您查看卡片后，上游产物或工作流状态已发生变更（版本/指纹防漂移）。\n" +
 			"> **安全说明**: 原卡片已为您保护性失效，防止误批旧代码。\n\n" +

@@ -710,7 +710,6 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 	if err != nil {
 		return taskWorkflowResponse{}, http.StatusBadRequest, err
 	}
-	s.notifyTaskThreadStepTransition(workspaceID, project, t, transition, outputs)
 	_ = s.ts.RemoveFromInbox(taskID)
 	if transition.Done {
 		now := time.Now().UTC()
@@ -744,6 +743,10 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 	} else if err := s.activateNextWorkflowStep(workspaceID, project, agent, t, transition, r); err != nil {
 		return taskWorkflowResponse{}, http.StatusInternalServerError, err
 	}
+	// Project the next review only after the task's new assignee/status and
+	// UpdatedAt have been persisted. Otherwise the card token is stale on
+	// arrival and its dual-CAS check rejects every Mattermost click.
+	s.notifyTaskThreadStepTransition(workspaceID, project, t, transition, outputs)
 	steps, err := wfStore.ListStepInstances(transition.Run.ID)
 	if err != nil {
 		return taskWorkflowResponse{}, http.StatusInternalServerError, err

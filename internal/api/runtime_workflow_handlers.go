@@ -1120,6 +1120,11 @@ func (s *Server) handleRuntimeWorkflowStepComplete(w http.ResponseWriter, r *htt
 		s.serverError(w, err)
 		return
 	}
+	// Persist the next human-review assignee before projecting the review card.
+	// The card's dual-CAS token is derived from task.UpdatedAt; projecting it
+	// before activateNextWorkflowStep would sign the previous agent step and
+	// make every click fail with 409 Conflict.
+	s.notifyTaskThreadStepTransition(principal.WorkspaceID, principal.Project, t, transition, body.Outputs)
 	archived := transition.Done && t.Status.IsTerminal()
 	s.auditLog(auditLogInput{
 		WorkspaceID:  principal.WorkspaceID,
@@ -1153,7 +1158,6 @@ func (s *Server) completeRuntimeWorkflowStep(workspaceID, project string, t *ent
 	if err != nil {
 		return result, false, err
 	}
-	s.notifyTaskThreadStepTransition(workspaceID, project, t, result, outputs)
 	return result, result.Next != nil || result.Done, nil
 }
 
