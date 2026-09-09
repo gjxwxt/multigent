@@ -3,21 +3,30 @@
 ## Start here
 
 Branch: `feat/chatops-live-card-and-d6`.
+Latest commit: `d15e7fd` (Harden binding conflict defense and ChatOps approval identity resolution).
 
-P0 for the IM identity center is complete in commit `9650f924`. The current branch adds administrator-attested IM instances and safe D6 notification reuse: a user bound through one Bot can receive a direct message from another Bot only inside the same attested instance and only while they retain destination-route access. Account-page cards show that as same-instance reuse; bind/unbind storage remains scoped to one `ConnectionID`.
+All 4 mandates from the architecture review have been completed, verified with automated tests, and deployed to the VM:
+1. `UserChannelIdentity` is the sole source of truth for Mattermost (stopped writing to global `external_identities`).
+2. `ActionTokenPayload` and `DialogTokenPayload` strictly enforce `ConnectionID`; missing or tampered connection fails closed.
+3. `ClaimMattermostIdentityInScope` enforces atomic check-and-insert in an SQLite transaction lock.
+4. Unified trusted boundary helpers in `internal/api/im_boundary_helper.go` shared across D6, `/mg bind`, and ChatOps callbacks.
 
 ## Non-negotiable boundaries
 
 - A URL is a display hint, not an IM-instance identity or authorization boundary.
 - `admin_attested` is an administrator's explicit control-plane assertion, not a Mattermost protocol fingerprint.
-- D6 may cross `ConnectionID` only when both connections are active, share one `admin_attested` instance, and the recipient has live access to the destination route.
+- D6 and ChatOps approvals may cross `ConnectionID` only when both connections are active, share one `admin_attested` instance, and the recipient has live access to the destination route.
 - A cross-Bot Mattermost delivery must discard the source DM `ChatID`; the driver creates a destination-Bot DM from `ExternalUserID`.
-- Project or Agent Worker access is required before exposing a route or generating its bind code.
+- Card and dialog callbacks must load secrets directly from the token's verified `ConnectionID`; never fall back to "first binding".
+- Ambiguous identity in a trusted scope must fail closed and record a security audit alert.
 
 ## Next work
 
-Harden approval and binding identity resolution. Mattermost conflict detection in `agent_channel_mattermost_handlers.go` and callback user resolution in `chatops_handlers.go` still consult provider-global `external_identities`; they must be source-binding or instance-scoped before this feature can safely promise cross-Bot Slash Command/approval continuity. Do not weaken the D6 fail-closed checks while doing so.
+IM Slash Command instance gateway convergence:
+Moving to a single unified Slash Command gateway (`/mg`) per Mattermost Team/Instance so multiple Bot endpoints share one slash command webhook, routing subcommands safely to the appropriate project/agent.
 
 ## Evidence
 
-See `../evidence/2026-09-08-im-identity-center-p0.md`, `../evidence/2026-09-08-im-instance-association-foundation.md`, `../evidence/2026-09-09-im-instance-d6-routing.md`, and the paired decision records.
+- `internal/db/user_channel_identities_test.go`: `TestClaimMattermostIdentityInScope`, `TestClaimMattermostIdentity_ConcurrentMutualExclusion`.
+- `internal/api/chatops_identity_hardening_test.go`: All 5 acceptance tests covering cross-instance isolation, same-instance conflict defense, fail-closed connection checks, ambiguous identity defense, and same-instance cross-Bot approval with detachment revocation.
+- Live VM deployment at `192.168.139.231:27892`.

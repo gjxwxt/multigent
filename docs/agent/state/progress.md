@@ -33,6 +33,24 @@ Verified locally on 2026-09-09:
 - `make test`
 - `make web`
 
-## Next: IM approval identity hardening
+## Completed: IM approval identity hardening & atomic binding claim
 
-`external_identities` is still keyed by `(workspace, provider, external_user_id)`. Do not use it as an instance-safe Mattermost lookup for binding conflicts or interactive-card approvals. Migrate those paths to source-binding or administrator-attested-instance scope before changing Slash Command registration or allowing a callback to resolve a user from a different Bot route.
+Commit `d15e7fd` hardened Mattermost identity resolution, binding conflict defense, and ChatOps callbacks:
+
+1. **Mattermost authoritative source**: Ceased writing Mattermost bindings to global `external_identities`; `UserChannelIdentity` is the single source of truth for Mattermost identity claims.
+2. **Atomic binding claim**: Added `ClaimMattermostIdentityInScope` with SQLite transaction locking, ensuring mutual exclusion against concurrent double-bind race conditions.
+3. **Unified trusted boundary**: Extracted `connectionsShareDeliveryBoundary`, `bindingsShareDeliveryBoundary`, and `getTrustedConnectionIDsForConnection` into `internal/api/im_boundary_helper.go`, shared uniformly across `/mg bind`, D6 notify, and ChatOps approvals.
+4. **ChatOps token connection hardening**: Action and dialog callbacks strictly require `peek.ConnectionID`, load secrets for that specific connection, verify signature, and reject empty/tampered tokens immediately.
+5. **Scoped user resolution**: `resolvePlatformUserForAction` resolves users strictly within the trusted connection or attested instance scope. Fails closed with security audit if multiple distinct users claim the same external ID in scope. Removed insecure `mmUserName == u.Username` fallback.
+
+Verified locally and on live VM (2026-09-09):
+- `go test -v ./internal/db -run TestClaimMattermostIdentity` (PASS)
+- `go test -v ./internal/api -run "TestChatops_|TestMattermostSlashBind"` (PASS)
+- `make test` (all packages PASS)
+- `make web` (TypeScript + Vite PASS)
+- `make build` (PASS)
+- Deployed to VM `192.168.139.231:27892` and verified live callback intercept for empty ConnectionID.
+
+## Next: IM Slash Command instance gateway convergence
+
+Currently, Slash Commands (`/mg`) in Mattermost register per Bot webhook. Moving to a single unified Slash Command gateway per Mattermost Team/Instance requires routing commands through an instance gateway dispatcher to the appropriate Agent/Project.
