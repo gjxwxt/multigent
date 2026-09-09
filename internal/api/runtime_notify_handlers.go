@@ -1104,29 +1104,7 @@ func (s *Server) runtimeIdentityCanReachBinding(principal runtimeAgentPrincipal,
 // a verified external user identity. The second result is true only for a
 // cross-Bot relationship; callers must then discard the source Bot's ChatID.
 func (s *Server) runtimeBindingsShareDeliveryBoundary(destination, source controldb.AgentChannelBinding) (bool, bool) {
-	if s == nil || s.controlDB == nil || destination.WorkspaceID == "" ||
-		destination.WorkspaceID != source.WorkspaceID || destination.Provider != source.Provider ||
-		destination.Status != "connected" || source.Status != "connected" {
-		return false, false
-	}
-	if strings.TrimSpace(destination.ConnectionID) != "" && destination.ConnectionID == source.ConnectionID {
-		return true, false
-	}
-	destinationConn, destinationFound, destinationErr := s.controlDB.ConnectionByID(destination.ConnectionID)
-	sourceConn, sourceFound, sourceErr := s.controlDB.ConnectionByID(source.ConnectionID)
-	if destinationErr != nil || sourceErr != nil || !destinationFound || !sourceFound ||
-		destinationConn.WorkspaceID != destination.WorkspaceID || sourceConn.WorkspaceID != source.WorkspaceID ||
-		destinationConn.Provider != destination.Provider || sourceConn.Provider != source.Provider ||
-		destinationConn.Status != "active" || sourceConn.Status != "active" ||
-		strings.TrimSpace(destinationConn.IMInstanceID) == "" || destinationConn.IMInstanceID != sourceConn.IMInstanceID {
-		return false, false
-	}
-	instance, found, err := s.controlDB.IMInstanceByID(destinationConn.IMInstanceID)
-	if err != nil || !found || instance.WorkspaceID != destination.WorkspaceID ||
-		instance.Provider != destination.Provider || instance.Attestation != imInstanceAttestationAdmin {
-		return false, false
-	}
-	return true, true
+	return s.bindingsShareDeliveryBoundary(destination, source)
 }
 
 func (s *Server) userCanAccessAgentChannelBinding(workspaceID, userID string, binding controldb.AgentChannelBinding) (bool, error) {

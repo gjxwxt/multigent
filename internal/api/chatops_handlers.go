@@ -51,41 +51,24 @@ type mattermostDialogPayload struct {
 	Cancelled  bool              `json:"cancelled"`
 }
 
-// resolveMattermostTarget resolves baseUrl, botToken, and hmacSecret for ChatOps operations.
-func (s *Server) resolveMattermostTarget(workspaceID, projectID string) (baseURL, botToken, hmacSecret string, err error) {
-	bindings, err := s.controlDB.ListAgentChannelBindings(controldb.AgentChannelBindingFilter{
-		WorkspaceID: workspaceID,
-		ProjectID:   projectID,
-		Provider:    "mattermost",
-		Status:      "connected",
-	})
-	if err != nil {
-		return "", "", "", fmt.Errorf("list bindings: %w", err)
+// resolveMattermostConnectionTarget resolves baseUrl, botToken, and hmacSecret directly from a ConnectionID.
+func (s *Server) resolveMattermostConnectionTarget(connectionID string) (baseURL, botToken, hmacSecret string, err error) {
+	connectionID = strings.TrimSpace(connectionID)
+	if connectionID == "" {
+		return "", "", "", errors.New("missing connection ID")
 	}
-	if len(bindings) == 0 {
-		bindings, err = s.controlDB.ListAgentChannelBindings(controldb.AgentChannelBindingFilter{
-			WorkspaceID: workspaceID,
-			Provider:    "mattermost",
-			Status:      "connected",
-		})
-		if err != nil {
-			return "", "", "", fmt.Errorf("list workspace bindings: %w", err)
-		}
+	conn, found, err := s.controlDB.ConnectionByID(connectionID)
+	if err != nil || !found || conn.Status != "active" {
+		return "", "", "", fmt.Errorf("connection %s not found or inactive", connectionID)
 	}
-	if len(bindings) == 0 {
-		return "", "", "", fmt.Errorf("no connected mattermost binding found")
-	}
-
-	b := bindings[0]
-	secret, found, err := s.controlDB.ConnectionSecret(b.ConnectionID)
+	secret, found, err := s.controlDB.ConnectionSecret(connectionID)
 	if err != nil || !found {
-		return "", "", "", fmt.Errorf("connection secret not found for %s: %v", b.ConnectionID, err)
+		return "", "", "", fmt.Errorf("connection secret not found for %s: %v", connectionID, err)
 	}
 	values, err := controldb.OpenConnectionSecret(secret)
 	if err != nil {
-		return "", "", "", fmt.Errorf("open connection secret for %s: %w", b.ConnectionID, err)
+		return "", "", "", fmt.Errorf("open connection secret for %s: %w", connectionID, err)
 	}
-
 	baseURL = values["baseUrl"]
 	botToken = values["botToken"]
 	hmacSecret = strings.TrimSpace(values["bridgeHmacSecret"])
@@ -123,32 +106,66 @@ func (s *Server) verifyMattermostUser(ctx context.Context, baseURL, botToken, mm
 	return false, nil
 }
 
-// resolvePlatformUser maps a Mattermost sender user ID to a Multigent platform user ID.
-func (s *Server) resolvePlatformUser(workspaceID, mmUserID, mmUserName string) string {
+// resolvePlatformUserForAction resolves a Mattermost sender user ID to a Multigent platform user ID
+// strictly within the trusted scope of targetConnectionID (the exact connection, or an active
+// connection in the same administrator-attested IM instance).
+// If multiple distinct platform users claim the same external ID in this scope, it fails closed
+// and logs a security audit event.
+func (s *Server) resolvePlatformUserForAction(r *http.Request, workspaceID, targetConnectionID, mmUserID string) (string, error) {
+	workspaceID = strings.TrimSpace(workspaceID)
+	targetConnectionID = strings.TrimSpace(targetConnectionID)
+	mmUserID = strings.TrimSpace(mmUserID)
+	if workspaceID == "" || targetConnectionID == "" || mmUserID == "" {
+		return "", errors.New("missing required resolution parameters")
+	}
+
+	targetConn, found, err := s.controlDB.ConnectionByID(targetConnectionID)
+	if err != nil || !found || targetConn.Status != "active" || targetConn.WorkspaceID != workspaceID {
+		return "", errors.New("target connection not found or inactive")
+	}
+
 	identities, err := s.controlDB.ListUserChannelIdentities(controldb.UserChannelIdentityFilter{
 		WorkspaceID:    workspaceID,
 		Provider:       "mattermost",
 		ExternalUserID: mmUserID,
 	})
-	if err == nil && len(identities) > 0 {
-		return identities[0].UserID
+	if err != nil || len(identities) == 0 {
+		return "", nil
 	}
-	// Check external_identities as well (per-workspace user identity mapping)
-	exts, err := s.controlDB.ListExternalIdentities(controldb.ExternalIdentityFilter{
-		WorkspaceID:    workspaceID,
-		Provider:       "mattermost",
-		ExternalUserID: mmUserID,
-	})
-	if err == nil && len(exts) > 0 {
-		return exts[0].UserID
-	}
-	// Fallback to match username in workspace users store if available
-	if mmUserName != "" && s.users != nil {
-		if u := s.users.GetUser(mmUserName); u != nil && u.Username != "" {
-			return u.Username
+
+	matchedUsers := make(map[string]struct{})
+	for _, id := range identities {
+		binding, bFound, bErr := s.controlDB.AgentChannelBindingByID(id.ChannelBindingID)
+		if bErr != nil || !bFound || binding.Status != "connected" || binding.WorkspaceID != workspaceID {
+			continue
+		}
+		sourceConn, cFound, cErr := s.controlDB.ConnectionByID(binding.ConnectionID)
+		if cErr != nil || !cFound || sourceConn.Status != "active" || sourceConn.WorkspaceID != workspaceID {
+			continue
+		}
+		usable, _ := s.connectionsShareDeliveryBoundary(targetConn, sourceConn)
+		if usable && strings.TrimSpace(id.UserID) != "" {
+			matchedUsers[id.UserID] = struct{}{}
 		}
 	}
-	return ""
+
+	if len(matchedUsers) > 1 {
+		// Ambiguity check: multiple platform users claimed this external identity within the same trusted boundary!
+		s.auditLog(auditLogInput{
+			WorkspaceID:  workspaceID,
+			Action:       "chatops.identity_resolution_ambiguity_blocked",
+			ResourceType: "connection",
+			ResourceID:   targetConnectionID,
+			Summary:      fmt.Sprintf("Security alert: ambiguous platform users for Mattermost user %s in trusted scope", mmUserID),
+			Request:      r,
+		})
+		return "", errors.New("ambiguous identity in trusted scope")
+	}
+
+	for u := range matchedUsers {
+		return u, nil
+	}
+	return "", nil
 }
 
 // handleMattermostActionCallback processes button clicks from Mattermost cards.
@@ -170,32 +187,28 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// 1. Peek token without secret to get workspaceID & projectID for credential lookup
+	// 1. Peek token without secret to get connectionID for credential lookup
 	parts := strings.Split(actionToken, ".")
 	if len(parts) != 2 {
 		writeMattermostEphemeral(w, "审批卡片已过期或格式错误。请刷新任务 Thread 获取最新卡片。")
 		return
 	}
 
-	workspaceID, _ := s.currentWorkspaceID()
-	if workspaceID == "" {
-		workspaceID = "default"
-	}
-	projectID := ""
+	var peek imbridge.ActionTokenPayload
 	if raw, err := base64.RawURLEncoding.DecodeString(parts[0]); err == nil {
-		var peek imbridge.ActionTokenPayload
-		if err := json.Unmarshal(raw, &peek); err == nil {
-			if strings.TrimSpace(peek.WorkspaceID) != "" {
-				workspaceID = strings.TrimSpace(peek.WorkspaceID)
-			}
-			projectID = strings.TrimSpace(peek.ProjectID)
-		}
+		_ = json.Unmarshal(raw, &peek)
 	}
 
-	baseURL, botToken, hmacSecret, err := s.resolveMattermostTarget(workspaceID, projectID)
+	connectionID := strings.TrimSpace(peek.ConnectionID)
+	if connectionID == "" {
+		writeMattermostEphemeral(w, "安全拦截：审批令牌缺少连接标识，无法完成安全验证。")
+		return
+	}
+
+	baseURL, botToken, hmacSecret, err := s.resolveMattermostConnectionTarget(connectionID)
 	if err != nil {
-		log.Printf("[chatops] resolve mattermost target error: %v", err)
-		writeMattermostEphemeral(w, "无法获取 Mattermost 配置，请检查多渠道绑定。")
+		log.Printf("[chatops] resolve mattermost connection target error: %v", err)
+		writeMattermostEphemeral(w, "无法获取连接验证密钥，请求已被安全拦截。")
 		return
 	}
 
@@ -203,6 +216,10 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 	tokenData, err := imbridge.VerifyActionToken(hmacSecret, actionToken)
 	if err != nil {
 		writeMattermostEphemeral(w, "审批卡片已超过有效时限（2小时）或签名失效。请刷新任务 Thread 获取最新卡片，或前往 Web 控制台完成审批。")
+		return
+	}
+	if tokenData.ConnectionID != connectionID {
+		writeMattermostEphemeral(w, "安全拦截：审批令牌连接标识被篡改。")
 		return
 	}
 
@@ -238,7 +255,11 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 	}
 
 	// 6. User Identity Mapping & Dynamic RBAC check
-	platformUserID := s.resolvePlatformUser(tokenData.WorkspaceID, payload.UserID, payload.UserName)
+	platformUserID, err := s.resolvePlatformUserForAction(r, tokenData.WorkspaceID, tokenData.ConnectionID, payload.UserID)
+	if err != nil {
+		writeMattermostEphemeral(w, "身份验证异常：您的账号在此可信范围内存在歧义或连接异常，已被安全拦截。")
+		return
+	}
 	if platformUserID == "" {
 		writeMattermostEphemeral(w, "您的 Mattermost 账号未与 Multigent 平台关联。请先在控制台或私聊中使用 /bind 命令完成绑定。")
 		return
@@ -519,22 +540,18 @@ func (s *Server) handleMattermostDialogSubmit(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	workspaceID, _ := s.currentWorkspaceID()
-	if workspaceID == "" {
-		workspaceID = "default"
-	}
-	projectID := ""
+	var peek imbridge.DialogTokenPayload
 	if raw, err := base64.RawURLEncoding.DecodeString(parts[0]); err == nil {
-		var peek imbridge.DialogTokenPayload
-		if err := json.Unmarshal(raw, &peek); err == nil {
-			if strings.TrimSpace(peek.WorkspaceID) != "" {
-				workspaceID = strings.TrimSpace(peek.WorkspaceID)
-			}
-			projectID = strings.TrimSpace(peek.ProjectID)
-		}
+		_ = json.Unmarshal(raw, &peek)
 	}
 
-	baseURL, botToken, hmacSecret, err := s.resolveMattermostTarget(workspaceID, projectID)
+	connectionID := strings.TrimSpace(peek.ConnectionID)
+	if connectionID == "" {
+		writeMattermostDialogError(w, "comments", "安全拦截：对话框令牌缺少连接标识。")
+		return
+	}
+
+	baseURL, botToken, hmacSecret, err := s.resolveMattermostConnectionTarget(connectionID)
 	if err != nil {
 		writeMattermostDialogError(w, "comments", "无法获取 Mattermost 验证密钥。")
 		return
@@ -543,6 +560,10 @@ func (s *Server) handleMattermostDialogSubmit(w http.ResponseWriter, r *http.Req
 	tokenData, err := imbridge.VerifyDialogToken(hmacSecret, dialogToken)
 	if err != nil {
 		writeMattermostDialogError(w, "comments", "对话框签名失效或已超时（10分钟），请重新在卡片中发起。")
+		return
+	}
+	if tokenData.ConnectionID != connectionID {
+		writeMattermostDialogError(w, "comments", "安全拦截：对话框令牌连接标识被篡改。")
 		return
 	}
 
@@ -576,9 +597,13 @@ func (s *Server) handleMattermostDialogSubmit(w http.ResponseWriter, r *http.Req
 	}
 
 	// 4. User Identity Mapping & Dynamic RBAC check
-	platformUserID := s.resolvePlatformUser(tokenData.WorkspaceID, payload.UserID, "")
+	platformUserID, err := s.resolvePlatformUserForAction(r, tokenData.WorkspaceID, tokenData.ConnectionID, payload.UserID)
+	if err != nil {
+		writeMattermostDialogError(w, "comments", "身份验证异常：账号在此可信范围内存在歧义或连接异常，已被安全拦截。")
+		return
+	}
 	if platformUserID == "" {
-		writeMattermostDialogError(w, "comments", "未关联 Multigent 平台账号。")
+		writeMattermostDialogError(w, "comments", "未关联 Multigent 平台账号。请先在控制台或私聊中使用 /bind 命令完成绑定。")
 		return
 	}
 	if err := s.validateWorkflowDecisionReviewer(tokenData.WorkspaceID, tokenData.ProjectID, tokenData.TaskID, platformUserID); err != nil {

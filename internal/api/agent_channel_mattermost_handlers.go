@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -247,46 +248,33 @@ func (s *Server) handleMattermostSlashBind(w http.ResponseWriter, r *http.Reques
 		"workspaceId":      binding.WorkspaceID,
 	})
 
-	// Conflict defense: reject if this external Mattermost account is already bound to another Multigent user
-	existingExt, foundExt, err := s.controlDB.ExternalIdentityByExternalID(binding.WorkspaceID, "mattermost", senderUserID)
+	// Conflict defense & atomic claim: check within the connection or administrator-attested IM instance
+	allowedConnIDs, err := s.getTrustedConnectionIDsForConnection(binding.WorkspaceID, binding.ConnectionID)
 	if err != nil {
 		s.serverError(w, err)
 		return
 	}
-	if foundExt && existingExt.UserID != "" && existingExt.UserID != codeRow.UserID {
-		writeMattermostEphemeral(w, fmt.Sprintf("绑定失败：该 Mattermost 账号已绑定至 Multigent 用户 @%s。如需改绑，请先由原账号在个人中心解除绑定或联系管理员。", existingExt.UserID))
-		return
-	}
 
-	if err := s.controlDB.UpsertUserChannelIdentity(controldb.UserChannelIdentity{
+	claimErr := s.controlDB.ClaimMattermostIdentityInScope(controldb.ClaimMattermostIdentityInput{
 		ID:               newChannelID("uch"),
 		WorkspaceID:      binding.WorkspaceID,
 		UserID:           codeRow.UserID,
 		ChannelBindingID: binding.ID,
-		Provider:         "mattermost",
+		AllowedConnIDs:   allowedConnIDs,
 		ExternalUserID:   senderUserID,
 		ExternalChatID:   channelID,
 		MetadataJSON:     string(metaRaw),
 		CreatedBy:        codeRow.UserID,
 		CreatedAt:        nowStr,
 		UpdatedAt:        nowStr,
-	}); err != nil {
-		s.serverError(w, err)
-		return
-	}
-
-	if err := s.controlDB.UpsertExternalIdentity(controldb.ExternalIdentity{
-		ID:             newChannelID("ext"),
-		WorkspaceID:    binding.WorkspaceID,
-		Provider:       "mattermost",
-		ExternalUserID: senderUserID,
-		UserID:         codeRow.UserID,
-		MetadataJSON:   string(metaRaw),
-		CreatedBy:      codeRow.UserID,
-		CreatedAt:      nowStr,
-		UpdatedAt:      nowStr,
-	}); err != nil {
-		s.serverError(w, err)
+	})
+	if claimErr != nil {
+		var conflictErr *controldb.IdentityConflictError
+		if errors.As(claimErr, &conflictErr) {
+			writeMattermostEphemeral(w, fmt.Sprintf("绑定失败：该 Mattermost 账号已绑定至 Multigent 用户 @%s。如需改绑，请先由原账号在个人中心解除绑定或联系管理员。", conflictErr.ConflictingUserID))
+			return
+		}
+		s.serverError(w, claimErr)
 		return
 	}
 

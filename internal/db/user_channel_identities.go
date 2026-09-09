@@ -302,3 +302,79 @@ WHERE workspace_id = ? AND user_id = ? AND channel_binding_id IN (` + placeholde
 
 	return tx.Commit()
 }
+
+func (db *SQLiteStore) ClaimMattermostIdentityInScope(input ClaimMattermostIdentityInput) error {
+	input.WorkspaceID = strings.TrimSpace(input.WorkspaceID)
+	input.UserID = strings.TrimSpace(input.UserID)
+	input.ChannelBindingID = strings.TrimSpace(input.ChannelBindingID)
+	input.ExternalUserID = strings.TrimSpace(input.ExternalUserID)
+	if input.WorkspaceID == "" || input.UserID == "" || input.ChannelBindingID == "" || input.ExternalUserID == "" {
+		return errors.New("workspaceID, userID, channelBindingID, and externalUserID are required")
+	}
+	if input.CreatedAt == "" {
+		input.CreatedAt = nowUTC()
+	}
+	if input.UpdatedAt == "" {
+		input.UpdatedAt = nowUTC()
+	}
+	if input.MetadataJSON == "" {
+		input.MetadataJSON = "{}"
+	}
+
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// 1. Check if external_user_id is already bound to another user within the allowed connections.
+	if len(input.AllowedConnIDs) > 0 {
+		placeholders := strings.Repeat("?,", len(input.AllowedConnIDs))
+		placeholders = placeholders[:len(placeholders)-1]
+		checkQuery := `SELECT u.user_id FROM user_channel_identities u
+JOIN agent_channel_bindings b ON u.channel_binding_id = b.id
+WHERE u.workspace_id = ? AND u.provider = 'mattermost' AND u.external_user_id = ?
+  AND b.connection_id IN (` + placeholders + `)`
+		args := []any{input.WorkspaceID, input.ExternalUserID}
+		for _, connID := range input.AllowedConnIDs {
+			args = append(args, connID)
+		}
+		rows, err := tx.Query(checkQuery, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var existingUser string
+			if err := rows.Scan(&existingUser); err != nil {
+				return err
+			}
+			existingUser = strings.TrimSpace(existingUser)
+			if existingUser != "" && existingUser != input.UserID {
+				return &IdentityConflictError{ConflictingUserID: existingUser}
+			}
+		}
+		rows.Close()
+	}
+
+	// 2. Clean up any existing mapping for this channel_binding and (external_user_id or user_id)
+	_, err = tx.Exec(`DELETE FROM user_channel_identities WHERE workspace_id = ? AND channel_binding_id = ? AND (external_user_id = ? OR user_id = ?)`,
+		input.WorkspaceID, input.ChannelBindingID, input.ExternalUserID, input.UserID)
+	if err != nil {
+		return err
+	}
+
+	// 3. Insert the new claim
+	_, err = tx.Exec(`INSERT INTO user_channel_identities (
+	id, workspace_id, user_id, channel_binding_id, provider, external_user_id,
+	external_chat_id, metadata_json, created_by, created_at, updated_at
+) VALUES (?, ?, ?, ?, 'mattermost', ?, ?, ?, ?, ?, ?)`,
+		input.ID, input.WorkspaceID, input.UserID, input.ChannelBindingID,
+		input.ExternalUserID, input.ExternalChatID, input.MetadataJSON, input.CreatedBy,
+		input.CreatedAt, input.UpdatedAt)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}

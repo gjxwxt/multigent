@@ -314,11 +314,6 @@ func TestMattermostSlashBind_Success_UserAndB4Routing(t *testing.T) {
 	if identitiesA[0].ExternalUserID != "mm-user-alpha" || identitiesA[0].ExternalChatID != "ch-direct-lina" {
 		t.Fatalf("unexpected user channel identity: %#v", identitiesA[0])
 	}
-	// Verify external identities
-	extA, found, err := s.controlDB.ExternalIdentityByExternalID(workspaceID, "mattermost", "mm-user-alpha")
-	if err != nil || !found || extA.UserID != "user-a" {
-		t.Fatalf("expected external identity for mm-user-alpha -> user-a, got found=%v %#v", found, extA)
-	}
 
 	// 2. Bind to Mira using codeB (B4 verification: routes to Mira, NOT Lina!)
 	formB := url.Values{
@@ -435,13 +430,17 @@ func TestMattermostSlashBind_ConflictRejectsTakeover(t *testing.T) {
 		t.Fatalf("expected codeB to remain unused on conflict rejection")
 	}
 
-	// Verify external identity is STILL alice
-	ext, ok, err := s.controlDB.ExternalIdentityByExternalID(workspaceID, "mattermost", "mm-alice")
-	if err != nil || !ok {
-		t.Fatalf("external identity lookup: ok=%v err=%v", ok, err)
+	// Verify user channel identity is STILL alice
+	identities, err := s.controlDB.ListUserChannelIdentities(controldb.UserChannelIdentityFilter{
+		WorkspaceID:      workspaceID,
+		ChannelBindingID: binding.ID,
+		ExternalUserID:   "mm-alice",
+	})
+	if err != nil || len(identities) != 1 {
+		t.Fatalf("user channel identity lookup: len=%d err=%v", len(identities), err)
 	}
-	if ext.UserID != "alice" {
-		t.Fatalf("expected external identity to remain 'alice', but got: %s", ext.UserID)
+	if identities[0].UserID != "alice" {
+		t.Fatalf("expected identity to remain 'alice', but got: %s", identities[0].UserID)
 	}
 }
 

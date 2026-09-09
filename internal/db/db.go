@@ -131,6 +131,7 @@ type Store interface {
 	AgentChannelBindCodeByCode(code string) (AgentChannelBindCode, bool, error)
 	MarkAgentChannelBindCodeUsed(code, usedAt string) error
 	UnbindUserConnection(workspaceID, userID, connectionID string) error
+	ClaimMattermostIdentityInScope(input ClaimMattermostIdentityInput) error
 
 	CreateInteractionSession(session InteractionSession) error
 	UpdateInteractionSession(session InteractionSession) error
@@ -699,6 +700,28 @@ type UserChannelIdentityFilter struct {
 	ChannelBindingID string
 	Provider         string
 	ExternalUserID   string
+}
+
+type ClaimMattermostIdentityInput struct {
+	ID               string
+	WorkspaceID      string
+	UserID           string
+	ChannelBindingID string
+	AllowedConnIDs   []string
+	ExternalUserID   string
+	ExternalChatID   string
+	MetadataJSON     string
+	CreatedBy        string
+	CreatedAt        string
+	UpdatedAt        string
+}
+
+type IdentityConflictError struct {
+	ConflictingUserID string
+}
+
+func (e *IdentityConflictError) Error() string {
+	return "mattermost identity claimed by another user: " + e.ConflictingUserID
 }
 
 type AgentChannelTarget struct {
