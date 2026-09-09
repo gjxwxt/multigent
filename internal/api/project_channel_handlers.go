@@ -529,6 +529,15 @@ func (s *Server) provisionProjectChannelCore(ctx context.Context, workspaceID, p
 			bindingStatus = "error"
 		}
 
+		metaMap := map[string]any{
+			"appId": agentBotID,
+		}
+		if len(existingBindings) > 0 && strings.TrimSpace(existingBindings[0].MetadataJSON) != "" {
+			_ = json.Unmarshal([]byte(existingBindings[0].MetadataJSON), &metaMap)
+			metaMap["appId"] = agentBotID
+		}
+		metaBytes, _ := json.Marshal(metaMap)
+
 		binding := controldb.AgentChannelBinding{
 			ID:             bindingID,
 			WorkspaceID:    workspaceID,
@@ -540,6 +549,7 @@ func (s *Server) provisionProjectChannelCore(ctx context.Context, workspaceID, p
 			ExternalBotID:  agentBotID,
 			ExternalChatID: mmChan.ID,
 			Status:         bindingStatus,
+			MetadataJSON:   string(metaBytes),
 			CreatedBy:      actorUsername,
 			CreatedAt:      createdAt,
 			UpdatedAt:      nowStr,

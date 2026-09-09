@@ -269,6 +269,7 @@ func (s *Server) requestAgentAttentionWakeup(binding controldb.AgentChannelBindi
 			Summary:      "Skipped attention wakeup because agent is already running",
 			After:        providerContext,
 		})
+		s.notifyIMAgentBusy(binding, attentionID)
 		return
 	}
 	meta, err := s.agentMetaForProjectMember(binding.WorkspaceID, binding.ProjectID, binding.AgentID)
@@ -292,6 +293,7 @@ func (s *Server) requestAgentAttentionWakeup(binding controldb.AgentChannelBindi
 	}
 	if s.usesAssignedRuntimeNode(binding.WorkspaceID, meta) {
 		if s.hasActiveRuntimeRunForTarget(binding.WorkspaceID, target, "") {
+			s.notifyIMAgentBusy(binding, attentionID)
 			return
 		}
 		run, task, err := s.enqueueRuntimeWakeupRunFromRequest(binding.WorkspaceID, binding.ProjectID, binding.AgentID, hb, runtimeAPIURL, actor)
@@ -355,6 +357,53 @@ func (s *Server) requestAgentAttentionWakeupAfterDebounce(binding controldb.Agen
 		<-timer.C
 	}
 	s.requestAgentAttentionWakeup(binding, reason, runtimeAPIURL, actor, attentionID)
+}
+
+func (s *Server) notifyIMAgentBusy(binding controldb.AgentChannelBinding, attentionID string) {
+	if s == nil || s.controlDB == nil || strings.TrimSpace(attentionID) == "" {
+		return
+	}
+	signal, found, err := s.controlDB.AttentionSignalByID(binding.WorkspaceID, attentionID)
+	if err != nil || !found {
+		return
+	}
+	if !isIMAttentionSignal(signal) {
+		return
+	}
+	var refs struct {
+		ChatID    string `json:"chatId"`
+		MessageID string `json:"messageId"`
+	}
+	_ = json.Unmarshal([]byte(signal.RefsJSON), &refs)
+	chatID := strings.TrimSpace(refs.ChatID)
+	messageID := strings.TrimSpace(refs.MessageID)
+	if chatID == "" && messageID == "" {
+		return
+	}
+	channelProvider, ok := imbridge.LookupProvider(binding.Provider)
+	if !ok {
+		return
+	}
+	secret, ok, err := s.controlDB.ConnectionSecret(binding.ConnectionID)
+	if err != nil || !ok {
+		return
+	}
+	values, err := openConnectionSecret(secret)
+	if err != nil {
+		return
+	}
+	replyMsg := "已收到您的消息，当前正在处理前序任务，已加入排队，稍后为您解答。"
+	target := imbridge.OutgoingTarget{
+		ChatID:           chatID,
+		ReplyToMessageID: messageID,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = channelProvider.SendMessage(ctx, values, target, imbridge.OutgoingMessage{
+		Format:  "text",
+		Subject: agentChannelReplySubject(binding.AgentID),
+		Text:    replyMsg,
+	})
 }
 
 func randomizedAttentionWakeupDelay(reason string) time.Duration {
@@ -710,6 +759,25 @@ func (s *Server) acceptIMMessage(channelProvider imbridge.Provider, appID, verif
 			ResourceType: "agent_channel",
 			ResourceID:   resolved.Binding.ID,
 			Summary:      fmt.Sprintf("Ignored %s group message for %s/%s because the chat is not bound and the bot was not addressed", provider, resolved.Binding.ProjectID, resolved.Binding.AgentID),
+			After: map[string]any{
+				"provider":  provider,
+				"messageId": message.MessageID,
+				"chatId":    message.ChatID,
+				"chatType":  message.ChatType,
+			},
+		})
+		return map[string]any{"ok": true, "ignored": true, "reason": "group_not_addressed"}, nil
+	}
+	if !isDirectChatType(message.ChatType) && !s.isBotAddressedInGroupMessage(resolved.Binding, message) {
+		s.recordAgentChannelCallback(resolved.Binding, "ignored", "group_not_addressed", message, "")
+		s.auditLog(auditLogInput{
+			WorkspaceID:  resolved.Binding.WorkspaceID,
+			ActorType:    "user",
+			ActorID:      resolved.Identity.UserID,
+			Action:       "agent_channel.message_ignored",
+			ResourceType: "agent_channel",
+			ResourceID:   resolved.Binding.ID,
+			Summary:      fmt.Sprintf("Ignored %s group message for %s/%s because this specific bot was not addressed", provider, resolved.Binding.ProjectID, resolved.Binding.AgentID),
 			After: map[string]any{
 				"provider":  provider,
 				"messageId": message.MessageID,
@@ -1446,6 +1514,25 @@ func (s *Server) resolveChannelEventBindingDetailed(provider, appID, chatID, ext
 			}, nil
 		}
 	}
+	if len(identities) == 0 && len(userChannelIdentities) > 0 {
+		for _, uci := range userChannelIdentities {
+			if strings.TrimSpace(uci.WorkspaceID) != "" && strings.TrimSpace(uci.UserID) != "" {
+				extId := controldb.ExternalIdentity{
+					ID:             newChannelID("ext"),
+					WorkspaceID:    uci.WorkspaceID,
+					Provider:       provider,
+					ExternalUserID: strings.TrimSpace(externalUserID),
+					UserID:         uci.UserID,
+					MetadataJSON:   uci.MetadataJSON,
+					CreatedBy:      uci.CreatedBy,
+					CreatedAt:      uci.CreatedAt,
+					UpdatedAt:      uci.UpdatedAt,
+				}
+				identities = append(identities, extId)
+				_ = s.controlDB.UpsertExternalIdentity(extId)
+			}
+		}
+	}
 	if len(identities) == 0 {
 		return channelEventResolution{Candidate: bindings[0], HasCandidate: true}, nil
 	}
@@ -1724,17 +1811,52 @@ func (s *Server) matchChannelEventBindings(provider, appID, chatID string) ([]co
 			out = append(out, binding)
 		}
 	}
+	// If chatID was provided, and there are bindings whose ExternalChatID == chatID, prioritize those exact matches
+	if strings.TrimSpace(chatID) != "" && len(out) > 1 {
+		exact := make([]controldb.AgentChannelBinding, 0, len(out))
+		for _, b := range out {
+			if strings.TrimSpace(b.ExternalChatID) == strings.TrimSpace(chatID) {
+				exact = append(exact, b)
+			}
+		}
+		if len(exact) > 0 {
+			out = exact
+		}
+	}
 	return out, nil
 }
 
 func channelEventBindingMatches(binding controldb.AgentChannelBinding, appID, chatID string) bool {
+	appID = strings.TrimSpace(appID)
+	chatID = strings.TrimSpace(chatID)
+
+	// 1. Bot ID / App ID matching
 	var meta struct {
 		AppID string `json:"appId"`
 	}
 	_ = json.Unmarshal([]byte(binding.MetadataJSON), &meta)
-	if strings.TrimSpace(meta.AppID) != "" {
-		return strings.TrimSpace(appID) == strings.TrimSpace(meta.AppID)
+
+	bindingBotID := strings.TrimSpace(binding.ExternalBotID)
+	if bindingBotID == "" {
+		bindingBotID = strings.TrimSpace(meta.AppID)
 	}
+
+	if bindingBotID != "" {
+		if appID == "" || (bindingBotID != appID && strings.TrimSpace(meta.AppID) != appID) {
+			return false
+		}
+	} else if appID != "" {
+		return false
+	}
+
+	// 2. Chat ID matching
+	if chatID != "" {
+		boundChatID := strings.TrimSpace(binding.ExternalChatID)
+		if boundChatID != "" && boundChatID != chatID {
+			return false
+		}
+	}
+
 	return true
 }
 
@@ -2074,6 +2196,66 @@ func isDirectChatType(chatType string) bool {
 			return true
 		}
 	}
+	return false
+}
+
+func (s *Server) isBotAddressedInGroupMessage(binding controldb.AgentChannelBinding, message imbridge.IncomingMessage) bool {
+	if isDirectChatType(message.ChatType) {
+		return true
+	}
+	text := message.Text
+	raw := message.RawContent
+	botID := strings.TrimSpace(binding.ExternalBotID)
+	agentID := strings.TrimSpace(binding.AgentID)
+
+	// 1. Check explicit mentions list if present
+	if botID != "" && len(message.Mentions) > 0 {
+		for _, m := range message.Mentions {
+			var mention struct {
+				ID  string `json:"id"`
+				Key string `json:"key"`
+			}
+			if err := json.Unmarshal(m, &mention); err == nil {
+				if strings.EqualFold(mention.ID, botID) || strings.EqualFold(mention.Key, "@"+botID) {
+					return true
+				}
+			}
+		}
+	}
+
+	// 2. Fetch bot username from connection profile if available
+	botUsername := ""
+	if s != nil && s.controlDB != nil && strings.TrimSpace(binding.ConnectionID) != "" {
+		if conn, found, err := s.controlDB.ConnectionByID(binding.ConnectionID); err == nil && found {
+			var profile map[string]any
+			if json.Unmarshal([]byte(conn.ProfileJSON), &profile) == nil {
+				if u, ok := profile["username"].(string); ok {
+					botUsername = strings.TrimSpace(u)
+				}
+			}
+		}
+	}
+
+	// 3. Check text mentions
+	content := strings.ToLower(text + " " + raw)
+	candidates := make([]string, 0, 4)
+	if botUsername != "" {
+		candidates = append(candidates, "@"+strings.ToLower(botUsername))
+	}
+	if agentID != "" {
+		candidates = append(candidates, "@"+strings.ToLower(agentID))
+		candidates = append(candidates, "@bot-"+strings.ToLower(agentID))
+	}
+	if botID != "" {
+		candidates = append(candidates, "@"+strings.ToLower(botID))
+	}
+
+	for _, cand := range candidates {
+		if strings.Contains(content, cand) {
+			return true
+		}
+	}
+
 	return false
 }
 
@@ -3003,4 +3185,96 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+func (s *Server) healAgentChannelBindingsAndIdentities() {
+	if s == nil || s.controlDB == nil {
+		return
+	}
+	// 1. Backfill appId into MetadataJSON for bindings where ExternalBotID != "" but MetadataJSON lacks appId
+	bindings, err := s.controlDB.ListAgentChannelBindings(controldb.AgentChannelBindingFilter{})
+	if err == nil {
+		for _, b := range bindings {
+			if strings.TrimSpace(b.ExternalBotID) == "" {
+				continue
+			}
+			var meta map[string]any
+			if strings.TrimSpace(b.MetadataJSON) != "" {
+				_ = json.Unmarshal([]byte(b.MetadataJSON), &meta)
+			}
+			if meta == nil {
+				meta = map[string]any{}
+			}
+			if currAppID, _ := meta["appId"].(string); strings.TrimSpace(currAppID) == "" {
+				meta["appId"] = strings.TrimSpace(b.ExternalBotID)
+				if raw, err := json.Marshal(meta); err == nil {
+					b.MetadataJSON = string(raw)
+					b.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+					if err := s.controlDB.UpsertAgentChannelBinding(b); err != nil {
+						log.Printf("[heal] failed to backfill appId for binding %s: %v", b.ID, err)
+					} else {
+						log.Printf("[heal] backfilled appId=%s into binding %s (%s/%s)", b.ExternalBotID, b.ID, b.ProjectID, b.AgentID)
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Backfill external_identities from user_channel_identities
+	uchList, err := s.controlDB.ListUserChannelIdentities(controldb.UserChannelIdentityFilter{})
+	if err == nil {
+		for _, uch := range uchList {
+			if strings.TrimSpace(uch.WorkspaceID) == "" || strings.TrimSpace(uch.ExternalUserID) == "" || strings.TrimSpace(uch.UserID) == "" {
+				continue
+			}
+			exts, _ := s.controlDB.ListExternalIdentities(controldb.ExternalIdentityFilter{
+				WorkspaceID:    uch.WorkspaceID,
+				Provider:       uch.Provider,
+				ExternalUserID: uch.ExternalUserID,
+			})
+			if len(exts) == 0 {
+				ext := controldb.ExternalIdentity{
+					ID:             newChannelID("ext"),
+					WorkspaceID:    uch.WorkspaceID,
+					Provider:       uch.Provider,
+					ExternalUserID: uch.ExternalUserID,
+					UserID:         uch.UserID,
+					MetadataJSON:   uch.MetadataJSON,
+					CreatedBy:      uch.CreatedBy,
+					CreatedAt:      uch.CreatedAt,
+					UpdatedAt:      uch.UpdatedAt,
+				}
+				if err := s.controlDB.UpsertExternalIdentity(ext); err != nil {
+					log.Printf("[heal] failed to promote user_channel_identity %s to external_identity: %v", uch.ID, err)
+				} else {
+					log.Printf("[heal] promoted user_channel_identity %s to external_identity for user %s (ext=%s)", uch.ID, uch.UserID, uch.ExternalUserID)
+				}
+			}
+		}
+	}
+
+	// 3. Backfill default AttentionPolicyJSON for workers where AttentionPolicyJSON is empty or "{}"
+	// Note: Intentionally constrained to im_mention and im_direct_message to safely awaken workers
+	// on explicit user contact without noisy side-effects (e.g. card_action).
+	defaultAttentionJSON := `{"rules":[{"signalType":"im.message","reasons":["im_mention","im_direct_message"],"wake":true}]}`
+	workspaces, err := s.controlDB.ListWorkspaces()
+	if err == nil {
+		for _, ws := range workspaces {
+			workers, err := s.controlDB.ListAgentWorkers(ws.ID)
+			if err == nil {
+				for _, w := range workers {
+					raw := strings.TrimSpace(w.AttentionPolicyJSON)
+					if raw == "" || raw == "{}" {
+						w.AttentionPolicyJSON = defaultAttentionJSON
+						w.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+						if err := s.controlDB.UpsertAgentWorker(w); err != nil {
+							log.Printf("[heal] failed to backfill attention policy for worker %s: %v", w.ID, err)
+						} else {
+							log.Printf("[heal] backfilled default attention policy for agent worker %s (%s)", w.Name, w.ID)
+						}
+					}
+				}
+			}
+		}
+	}
 }

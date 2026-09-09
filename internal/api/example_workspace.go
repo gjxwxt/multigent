@@ -873,7 +873,7 @@ func seedExampleAgentWorkers(db controldb.Store, workspaceID string, agents []*e
 			Model:               string(meta.Model),
 			DefaultRuntimeMode:  meta.RuntimeMode,
 			ScheduleJSON:        marshalExampleHeartbeat(heartbeats[meta.Name]),
-			AttentionPolicyJSON: "{}",
+			AttentionPolicyJSON: `{"rules":[{"signalType":"im.message","reasons":["im_mention","im_direct_message"],"wake":true}]}`,
 			MemoryPolicyJSON:    "{}",
 			SkillsJSON:          "[]",
 			RuntimeConfigJSON:   encodeAgentWorkerRuntimeConfig(runtimeConfig),

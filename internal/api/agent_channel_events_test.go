@@ -2464,3 +2464,215 @@ func TestMattermostForwardedEventInboundAndC3Isolation(t *testing.T) {
 		}
 	})
 }
+
+func TestChannelEventBindingPreciseRoutingAndAddressing(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+
+	for _, connID := range []string{"conn-lina", "conn-mira"} {
+		if err := s.controlDB.UpsertConnection(controldb.Connection{
+			ID:             connID,
+			WorkspaceID:    workspaceID,
+			Provider:       "mattermost",
+			ConnectionName: connID,
+			OwnerType:      ConnectionOwnerWorkspace,
+			OwnerID:        workspaceID,
+			Status:         "active",
+		}); err != nil {
+			t.Fatalf("failed to insert connection %s: %v", connID, err)
+		}
+	}
+
+	// Create 4 bindings across 2 projects and 2 bots
+	bAlphaLina := controldb.AgentChannelBinding{
+		ID:             "bind-alpha-lina",
+		WorkspaceID:    workspaceID,
+		ProjectID:      "proj-alpha",
+		AgentID:        "Lina",
+		Provider:       "mattermost",
+		ConnectionID:   "conn-lina",
+		ExternalBotID:  "bot-id-lina",
+		ExternalChatID: "chan-alpha",
+		Status:         "connected",
+		MetadataJSON:   `{"appId":"bot-id-lina"}`,
+	}
+	bAlphaMira := controldb.AgentChannelBinding{
+		ID:             "bind-alpha-mira",
+		WorkspaceID:    workspaceID,
+		ProjectID:      "proj-alpha",
+		AgentID:        "Mira",
+		Provider:       "mattermost",
+		ConnectionID:   "conn-mira",
+		ExternalBotID:  "bot-id-mira",
+		ExternalChatID: "chan-alpha",
+		Status:         "connected",
+		MetadataJSON:   `{"appId":"bot-id-mira"}`,
+	}
+	bBetaLina := controldb.AgentChannelBinding{
+		ID:             "bind-beta-lina",
+		WorkspaceID:    workspaceID,
+		ProjectID:      "proj-beta",
+		AgentID:        "Lina",
+		Provider:       "mattermost",
+		ConnectionID:   "conn-lina",
+		ExternalBotID:  "bot-id-lina",
+		ExternalChatID: "chan-beta",
+		Status:         "connected",
+		MetadataJSON:   `{"appId":"bot-id-lina"}`,
+	}
+	bBetaMira := controldb.AgentChannelBinding{
+		ID:             "bind-beta-mira",
+		WorkspaceID:    workspaceID,
+		ProjectID:      "proj-beta",
+		AgentID:        "Mira",
+		Provider:       "mattermost",
+		ConnectionID:   "conn-mira",
+		ExternalBotID:  "bot-id-mira",
+		ExternalChatID: "chan-beta",
+		Status:         "connected",
+		MetadataJSON:   `{"appId":"bot-id-mira"}`,
+	}
+
+	for _, b := range []controldb.AgentChannelBinding{bAlphaLina, bAlphaMira, bBetaLina, bBetaMira} {
+		if err := s.controlDB.UpsertAgentChannelBinding(b); err != nil {
+			t.Fatalf("failed to upsert binding %s: %v", b.ID, err)
+		}
+	}
+
+	// 1. Precise routing test
+	matches, err := s.matchChannelEventBindings("mattermost", "bot-id-lina", "chan-beta")
+	if err != nil {
+		t.Fatalf("matchChannelEventBindings failed: %v", err)
+	}
+	if len(matches) != 1 || matches[0].ID != "bind-beta-lina" {
+		t.Fatalf("expected exactly [bind-beta-lina], got %v", matches)
+	}
+
+	matchesMira, err := s.matchChannelEventBindings("mattermost", "bot-id-mira", "chan-alpha")
+	if err != nil {
+		t.Fatalf("matchChannelEventBindings for mira failed: %v", err)
+	}
+	if len(matchesMira) != 1 || matchesMira[0].ID != "bind-alpha-mira" {
+		t.Fatalf("expected exactly [bind-alpha-mira], got %v", matchesMira)
+	}
+
+	// 2. Addressing test in group channel
+	msgMentionLina := imbridge.IncomingMessage{
+		ChatType: "P",
+		ChatID:   "chan-beta",
+		Text:     "@bot-lina what branches are active?",
+	}
+	if !s.isBotAddressedInGroupMessage(bBetaLina, msgMentionLina) {
+		t.Fatalf("expected Lina to be addressed by @bot-lina")
+	}
+	if s.isBotAddressedInGroupMessage(bBetaMira, msgMentionLina) {
+		t.Fatalf("expected Mira NOT to be addressed by @bot-lina")
+	}
+
+	msgNoMention := imbridge.IncomingMessage{
+		ChatType: "P",
+		ChatID:   "chan-beta",
+		Text:     "just chatting between developers",
+	}
+	if s.isBotAddressedInGroupMessage(bBetaLina, msgNoMention) {
+		t.Fatalf("expected Lina NOT to be addressed when no mention")
+	}
+	if s.isBotAddressedInGroupMessage(bBetaMira, msgNoMention) {
+		t.Fatalf("expected Mira NOT to be addressed when no mention")
+	}
+}
+
+func TestHealAgentChannelBindingsAndIdentities(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+
+	// Ensure connection and user exist for foreign keys
+	if err := s.controlDB.UpsertConnection(controldb.Connection{
+		ID:             "conn-heal",
+		WorkspaceID:    workspaceID,
+		Provider:       "mattermost",
+		ConnectionName: "heal-conn",
+		OwnerType:      ConnectionOwnerWorkspace,
+		OwnerID:        workspaceID,
+		Status:         "active",
+	}); err != nil {
+		t.Fatalf("failed to insert connection: %v", err)
+	}
+	if err := s.controlDB.UpsertUser(controldb.User{
+		Username:  "alex",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("failed to insert user: %v", err)
+	}
+
+	// 1. Binding with ExternalBotID but empty MetadataJSON
+	bMissingAppId := controldb.AgentChannelBinding{
+		ID:             "bind-heal-1",
+		WorkspaceID:    workspaceID,
+		ProjectID:      "proj-heal",
+		AgentID:        "Lina",
+		Provider:       "mattermost",
+		ConnectionID:   "conn-heal",
+		ExternalBotID:  "bot-heal-botid",
+		ExternalChatID: "chan-heal",
+		Status:         "connected",
+		MetadataJSON:   "{}",
+	}
+	if err := s.controlDB.UpsertAgentChannelBinding(bMissingAppId); err != nil {
+		t.Fatalf("failed to insert binding: %v", err)
+	}
+
+	// 2. User channel identity without corresponding external_identity
+	uch := controldb.UserChannelIdentity{
+		ID:               "uch-heal-1",
+		WorkspaceID:      workspaceID,
+		UserID:           "alex",
+		ChannelBindingID: "bind-heal-1",
+		Provider:         "mattermost",
+		ExternalUserID:   "ext-alex-123",
+		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
+	}
+	_ = s.controlDB.UpsertUserChannelIdentity(uch)
+
+	// 3. Agent worker with empty AttentionPolicyJSON
+	worker := controldb.AgentWorker{
+		ID:                  "worker-heal-1",
+		WorkspaceID:         workspaceID,
+		Name:                "Lina",
+		Status:              "available",
+		AttentionPolicyJSON: "{}",
+		CreatedAt:           time.Now().UTC().Format(time.RFC3339),
+	}
+	_ = s.controlDB.UpsertAgentWorker(worker)
+
+	// Run self-healing
+	s.healAgentChannelBindingsAndIdentities()
+
+	// Verify binding metadata backfilled appId
+	healedBinding, ok, _ := s.controlDB.AgentChannelBindingByID("bind-heal-1")
+	if !ok {
+		t.Fatalf("expected binding to exist")
+	}
+	var meta map[string]any
+	_ = json.Unmarshal([]byte(healedBinding.MetadataJSON), &meta)
+	if meta["appId"] != "bot-heal-botid" {
+		t.Fatalf("expected metadata appId to be 'bot-heal-botid', got %v", meta["appId"])
+	}
+
+	// Verify external identity was promoted
+	extList, _ := s.controlDB.ListExternalIdentities(controldb.ExternalIdentityFilter{
+		WorkspaceID:    workspaceID,
+		Provider:       "mattermost",
+		ExternalUserID: "ext-alex-123",
+	})
+	if len(extList) == 0 || extList[0].UserID != "alex" {
+		t.Fatalf("expected external_identity for alex to be promoted, got %v", extList)
+	}
+
+	// Verify attention policy was backfilled
+	healedWorker, ok, _ := s.controlDB.AgentWorkerByID(workspaceID, "worker-heal-1")
+	if !ok {
+		t.Fatalf("expected worker to exist")
+	}
+	if !strings.Contains(healedWorker.AttentionPolicyJSON, "im_mention") {
+		t.Fatalf("expected worker AttentionPolicyJSON to contain im_mention, got %s", healedWorker.AttentionPolicyJSON)
+	}
+}

@@ -280,6 +280,7 @@ func (s *Server) SetLocalRuntimeAPIURL(url string) {
 	s.attentionRecoveryOnce.Do(func() {
 		go s.ensurePlatformWorkflowDefinitions()
 		go func() {
+			s.healAgentChannelBindingsAndIdentities()
 			s.recoverActiveWorkflowRunsWithDelay(3 * time.Second)
 			s.recoverPendingAttentionWakeups()
 		}()
