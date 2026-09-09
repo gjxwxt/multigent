@@ -58,7 +58,8 @@ func Ensure(repoDir string) (Report, error) {
 }
 
 func seedMissing(repoDir string) ([]string, error) {
-	files, err := projecttemplate.CIBaselineFiles()
+	templateID := detectTemplateID(repoDir)
+	files, err := projecttemplate.CIBaselineFilesForTemplate(templateID)
 	if err != nil {
 		return nil, err
 	}
@@ -79,6 +80,32 @@ func seedMissing(repoDir string) ([]string, error) {
 		seeded = append(seeded, path)
 	}
 	return seeded, nil
+}
+
+func detectTemplateID(repoDir string) string {
+	if raw, err := os.ReadFile(filepath.Join(repoDir, ".multigent", "runtime.json")); err == nil {
+		var rt struct {
+			TemplateID string `json:"templateId"`
+			Backend    struct {
+				Command string `json:"command"`
+			} `json:"backend"`
+		}
+		if err := json.Unmarshal(raw, &rt); err == nil {
+			if strings.TrimSpace(rt.TemplateID) != "" {
+				return strings.TrimSpace(rt.TemplateID)
+			}
+			if strings.Contains(rt.Backend.Command, "gradle") || strings.Contains(rt.Backend.Command, "mvn") || strings.Contains(rt.Backend.Command, "java") {
+				return projecttemplate.ReactSpringBootID
+			}
+		}
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, "server", "build.gradle")); err == nil {
+		return projecttemplate.ReactSpringBootID
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, "server", "pom.xml")); err == nil {
+		return projecttemplate.ReactSpringBootID
+	}
+	return projecttemplate.ReactGoFullstackID
 }
 
 // Verify runs every deterministic verification item against a repository.
@@ -103,6 +130,7 @@ func Verify(repoDir string) Report {
 	} else {
 		add("baseline_files", StatusPass, "")
 	}
+	checkPrerequisites(repoDir, add)
 	if err != nil {
 		report.Overall = OverallNotReady
 		return report
@@ -364,6 +392,58 @@ func checkHealthPath(repoDir string, add func(string, string, string)) {
 		add("health_path", StatusPass, "")
 	} else {
 		add("health_path", StatusFail, "deploy/compose.yml healthcheck does not probe the runtime contract path "+runtime.Backend.HealthPath)
+	}
+}
+
+func checkPrerequisites(repoDir string, add func(string, string, string)) {
+	if _, err := os.Stat(filepath.Join(repoDir, "web", "package.json")); err == nil {
+		if _, err := os.Stat(filepath.Join(repoDir, "web", "package-lock.json")); err != nil {
+			add("lockfile", StatusFail, "web/package-lock.json is required for deterministic npm ci")
+		} else {
+			add("lockfile", StatusPass, "")
+		}
+	} else {
+		add("lockfile", StatusSkip, "no web/package.json")
+	}
+
+	if _, err := os.Stat(filepath.Join(repoDir, "server", "build.gradle")); err == nil {
+		var gradleIssues []string
+		wrapperJar := filepath.Join(repoDir, "server", "gradle", "wrapper", "gradle-wrapper.jar")
+		if _, err := os.Stat(wrapperJar); err != nil {
+			gradleIssues = append(gradleIssues, "server/gradle/wrapper/gradle-wrapper.jar is missing")
+		}
+		gradlewPath := filepath.Join(repoDir, "server", "gradlew")
+		if info, err := os.Stat(gradlewPath); err != nil {
+			gradleIssues = append(gradleIssues, "server/gradlew is missing")
+		} else if info.Mode()&0111 == 0 {
+			gradleIssues = append(gradleIssues, "server/gradlew is not executable")
+		}
+		if len(gradleIssues) > 0 {
+			add("build_tool_readiness", StatusFail, strings.Join(gradleIssues, "; "))
+		} else {
+			add("build_tool_readiness", StatusPass, "")
+		}
+	} else {
+		add("build_tool_readiness", StatusPass, "")
+	}
+
+	makefilePath := filepath.Join(repoDir, "Makefile")
+	if raw, err := os.ReadFile(makefilePath); err == nil {
+		content := string(raw)
+		var missingTargets []string
+		for _, target := range []string{"install", "verify"} {
+			pattern := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(target) + `\s*:`)
+			if !pattern.MatchString(content) {
+				missingTargets = append(missingTargets, target)
+			}
+		}
+		if len(missingTargets) > 0 {
+			add("makefile_targets", StatusFail, "Makefile missing required targets: "+strings.Join(missingTargets, ", "))
+		} else {
+			add("makefile_targets", StatusPass, "")
+		}
+	} else {
+		add("makefile_targets", StatusSkip, "no Makefile")
 	}
 }
 

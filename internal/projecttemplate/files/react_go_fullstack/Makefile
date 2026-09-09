@@ -4,7 +4,8 @@ dev:
 	@trap 'kill 0' EXIT; (cd server && PORT=8080 go run .) & (cd web && npm run dev -- --host 0.0.0.0 --port 27891) & wait
 
 install:
-	@if [ -f web/package-lock.json ]; then cd web && npm ci; else cd web && npm install; fi
+	@test -f web/package-lock.json || (echo "error: web/package-lock.json is required for deterministic install" && exit 1)
+	cd web && npm ci
 	cd server && go mod download
 
 test:

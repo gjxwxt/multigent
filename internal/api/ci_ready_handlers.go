@@ -3,8 +3,11 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -93,9 +96,15 @@ func (s *Server) handleRuntimeCIReady(w http.ResponseWriter, r *http.Request) {
 // until it reaches a terminal state or the bounded wait elapses. Polling
 // failures are surfaced as errors, never silently swallowed.
 func (s *Server) ciReadyPipelineEvidence(r *http.Request, project *entity.Project, waitSeconds int) (*ciReadyPipelineEvidence, error) {
-	shaOut, err := exec.CommandContext(r.Context(), "git", "-C", strings.TrimSpace(project.Repo), "rev-parse", "HEAD").Output()
+	gitDir := strings.TrimSpace(project.Repo)
+	if gitDir == "" || !dirHasGit(gitDir) {
+		if resolved := s.resolveProjectGitRoot(project.Name); resolved != "" && dirHasGit(resolved) {
+			gitDir = resolved
+		}
+	}
+	shaOut, err := exec.CommandContext(r.Context(), "git", "-C", gitDir, "rev-parse", "HEAD").Output()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("git -C %s rev-parse HEAD: %w", gitDir, err)
 	}
 	sha := strings.TrimSpace(string(shaOut))
 	if sha == "" {
@@ -147,4 +156,12 @@ func isPipelineTerminal(status string) bool {
 	default:
 		return false
 	}
+}
+
+func dirHasGit(dir string) bool {
+	if strings.TrimSpace(dir) == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
 }

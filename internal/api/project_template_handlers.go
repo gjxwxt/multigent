@@ -177,10 +177,16 @@ func (s *Server) handleInitializeProjectTemplate(w http.ResponseWriter, r *http.
 			s.jsonErrorCode(w, http.StatusNotFound, ErrCodeAgentNotFound, "agent not found")
 			return
 		}
-		if _, err := projecttemplate.Seed(s.st.AgentDir(name, agent), templateID); err != nil {
-			removeMaterializedTemplate(repo, report.Files)
-			s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, err.Error())
-			return
+		// If the repository is distinct from the agent directory, do not duplicate
+		// template files into the agent directory. The project repo / workspace is
+		// the single source of truth for project code.
+		agentDir := filepath.Clean(s.st.AgentDir(name, agent))
+		if repoClean := filepath.Clean(repo); repoClean == agentDir {
+			if _, err := projecttemplate.Seed(agentDir, templateID); err != nil {
+				removeMaterializedTemplate(repo, report.Files)
+				s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, err.Error())
+				return
+			}
 		}
 	}
 	if strings.Contains(repo, "://") {

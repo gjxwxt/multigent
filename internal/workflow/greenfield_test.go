@@ -11,18 +11,18 @@ func TestGreenfieldTemplateShape(t *testing.T) {
 	if !ok {
 		t.Fatal("greenfield template not registered")
 	}
-	if len(tmpl.Steps) != 9 {
-		t.Fatalf("expected 9 steps, got %d", len(tmpl.Steps))
+	if len(tmpl.Steps) != 11 {
+		t.Fatalf("expected 11 steps, got %d", len(tmpl.Steps))
 	}
 	if tmpl.StartStepID != "requirement_draft" {
 		t.Fatalf("start step = %q", tmpl.StartStepID)
 	}
 	var design *struct{}
 	_ = design
-	found := false
+	foundDesign, foundQA, foundQASignoff := false, false, false
 	for _, s := range tmpl.Steps {
 		if s.ID == "design_review" {
-			found = true
+			foundDesign = true
 			if s.Type != "human_review" {
 				t.Fatalf("design_review type = %q", s.Type)
 			}
@@ -33,7 +33,7 @@ func TestGreenfieldTemplateShape(t *testing.T) {
 			for _, f := range s.OutputFields {
 				outputs[f.Name] = true
 			}
-			for _, want := range []string{"decision", "comments", "approved_design_source", "approved_design_project_id", "approved_design_preview_url"} {
+			for _, want := range []string{"decision", "comments", "approved_design_source", "approved_design_project_id", "approved_design_preview_url", "design_waiver_reason", "design_waived"} {
 				if !outputs[want] {
 					t.Fatalf("design_review missing output %q", want)
 				}
@@ -44,9 +44,39 @@ func TestGreenfieldTemplateShape(t *testing.T) {
 				}
 			}
 		}
+		if s.ID == "qa" {
+			foundQA = true
+			if s.Type != "agent_task" || s.ActorRole != "qa-agent" {
+				t.Fatalf("qa step mismatch: type=%s role=%s", s.Type, s.ActorRole)
+			}
+			hasMatrix := false
+			for _, f := range s.OutputFields {
+				if f.Name == "risk_coverage_matrix" {
+					hasMatrix = true
+					if f.Optional {
+						t.Fatalf("risk_coverage_matrix MUST be mandatory (not optional)")
+					}
+				}
+			}
+			if !hasMatrix {
+				t.Fatalf("qa step missing risk_coverage_matrix output")
+			}
+		}
+		if s.ID == "qa_signoff" {
+			foundQASignoff = true
+			if s.Type != "human_review" || s.ActorRole != "qa-owner" {
+				t.Fatalf("qa_signoff step mismatch: type=%s role=%s", s.Type, s.ActorRole)
+			}
+		}
 	}
-	if !found {
+	if !foundDesign {
 		t.Fatal("design_review step missing")
+	}
+	if !foundQA {
+		t.Fatal("qa step missing")
+	}
+	if !foundQASignoff {
+		t.Fatal("qa_signoff step missing")
 	}
 	// rework edge design_review -> requirement_draft
 	rework := false
@@ -178,5 +208,89 @@ func TestGreenfieldSelfReviewRouting(t *testing.T) {
 	edge, ok = chooseNextEdge(tmpl.Edges, "self_review", map[string]string{"self_review_verdict": "issues_fixed", "review_comments": "需修复"}, "")
 	if !ok || edge.To != "implementation" {
 		t.Fatalf("explicit issues_fixed should rework, got %q ok=%v", edge.To, ok)
+	}
+}
+
+func TestGreenfieldDesignContractAndQAPreMergeFlow(t *testing.T) {
+	tmpl, ok := Template("greenfield-delivery-pipeline", "zh-CN")
+	if !ok {
+		t.Fatal("greenfield template not registered")
+	}
+
+	// 1. Verify all 3 rework edges preserve the design contract and requirement
+	reworkTargets := map[string]string{
+		"self_review": "e-self-review-rework",
+		"code_review": "e-code-review-rework",
+		"qa_signoff":  "e-qa-rework",
+	}
+
+	for fromStep, edgeID := range reworkTargets {
+		var found bool
+		for _, e := range tmpl.Edges {
+			if e.From == fromStep && e.To == "implementation" {
+				found = true
+				if e.ID != edgeID {
+					t.Fatalf("unexpected edge ID %q for %s->implementation, want %q", e.ID, fromStep, edgeID)
+				}
+				mapping := e.InputMapping
+				for _, requiredKey := range []string{
+					"approved_requirement",
+					"approved_design_source",
+					"approved_design_project_id",
+					"approved_design_preview_url",
+					"approved_design_html",
+					"approved_design_snapshot_path",
+					"design_waiver_reason",
+					"design_waived",
+				} {
+					if mapping[requiredKey] != "$input."+requiredKey {
+						t.Fatalf("rework edge %s missing mapping for %s: got %v", edgeID, requiredKey, mapping)
+					}
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("missing rework edge from %s to implementation", fromStep)
+		}
+	}
+
+	// 2. Verify Pre-Merge QA flow: code_review -> qa -> qa_signoff -> pr_open_and_merge
+	var crToQA, qaToSignoff, signoffToMerge bool
+	for _, e := range tmpl.Edges {
+		if e.From == "code_review" && e.To == "qa" {
+			crToQA = true
+			if e.Condition == nil || e.Condition.Field != "decision" || e.Condition.Value != "approve" {
+				t.Fatalf("code_review->qa condition mismatch: %+v", e.Condition)
+			}
+			mapping := e.InputMapping
+			if mapping["approved_design_snapshot_path"] != "$input.approved_design_snapshot_path" ||
+				mapping["approved_requirement"] != "$input.approved_requirement" {
+				t.Fatalf("code_review->qa missing design inputs: %v", mapping)
+			}
+		}
+		if e.From == "qa" && e.To == "qa_signoff" {
+			qaToSignoff = true
+			mapping := e.InputMapping
+			if mapping["risk_coverage_matrix"] != "$output.risk_coverage_matrix" ||
+				mapping["test_report"] != "$output.test_report" {
+				t.Fatalf("qa->qa_signoff missing matrix/report mapping: %v", mapping)
+			}
+		}
+		if e.From == "qa_signoff" && e.To == "pr_open_and_merge" {
+			signoffToMerge = true
+			if e.Condition == nil || e.Condition.Field != "decision" || e.Condition.Value != "approve" {
+				t.Fatalf("qa_signoff->pr_open_and_merge condition mismatch: %+v", e.Condition)
+			}
+		}
+	}
+
+	if !crToQA {
+		t.Fatal("missing code_review -> qa edge")
+	}
+	if !qaToSignoff {
+		t.Fatal("missing qa -> qa_signoff edge")
+	}
+	if !signoffToMerge {
+		t.Fatal("missing qa_signoff -> pr_open_and_merge edge (QA MUST strictly precede merge to protect main!)")
 	}
 }

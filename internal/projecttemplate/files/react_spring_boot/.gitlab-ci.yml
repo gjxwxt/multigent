@@ -1,0 +1,145 @@
+# Spring Boot + React 全栈基线 CI/CD：lint / test / build 三 stage（push 与 MR 触发），
+# tag 流水线追加 package / deploy 两 stage（仅 $CI_COMMIT_TAG 触发，就地构建不推送）。
+#
+# 本文件遵循平台确定性基线（react_spring_boot 模板 1.0.0）：
+# 1. workflow:rules 去重——feature 分支 push 不建流水线，卡点收敛到 MR；
+#    保留 tag（部署链触发）、默认分支（合并后兜底）、web/api（手动触发调试）。
+# 2. 前端 job 统一 npmmirror 源 + package-lock 键控缓存（web/.npm）。
+# 3. 独立 job 用 needs: [] 打平 stage 屏障，避免 runner 并发不足时串行排队。
+# 4. default.interruptible：同分支新提交自动取消过时流水线；package/deploy 不可中断。
+# 5. apk 用 --cache-dir /cache/apk（runner 已挂载宿主 /cache 卷）：
+#    禁用 --no-cache，使用宿主卷复用缓存。
+# 6. runner tags 统一指定为 [docker]。
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "api"
+
+default:
+  interruptible: true
+
+variables:
+  APP_PORT: "8088"
+  GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
+
+stages:
+  - lint
+  - test
+  - build
+  - package
+  - deploy
+
+# 前端 job 公共模板：npmmirror 源 + lockfile 键控 npm 缓存
+.frontend:
+  image: node:22
+  tags: [docker]
+  cache:
+    key:
+      files:
+        - web/package-lock.json
+    paths:
+      - web/.npm
+  before_script:
+    - cd web
+    - npm config set registry https://registry.npmmirror.com
+    - npm ci --cache .npm --prefer-offline
+
+# 后端 job 公共配置：Gradle 缓存
+.backend:
+  image: eclipse-temurin:21-jdk-alpine
+  tags: [docker]
+  cache:
+    key: gradle-cache
+    paths:
+      - .gradle/caches
+      - .gradle/wrapper
+
+# ---------- lint ----------
+lint:backend:
+  extends: .backend
+  stage: lint
+  needs: []
+  script:
+    - cd server && ./gradlew check -x test
+
+# ---------- test ----------
+test:backend:
+  extends: .backend
+  stage: test
+  needs: []
+  script:
+    - cd server && ./gradlew test
+
+# ---------- build ----------
+build:frontend:
+  extends: .frontend
+  stage: build
+  needs: []
+  script:
+    - npm run build
+  artifacts:
+    paths:
+      - web/dist
+    expire_in: 1 hour
+
+build:backend:
+  extends: .backend
+  stage: build
+  needs:
+    - job: build:frontend
+      artifacts: true
+  script:
+    - mkdir -p server/src/main/resources/static
+    - cp -r web/dist/* server/src/main/resources/static/
+    - cd server && ./gradlew bootJar -x test
+    - mkdir -p build/libs && cp server/build/libs/*.jar build/libs/app.jar
+  artifacts:
+    paths:
+      - build/libs/app.jar
+    expire_in: 1 hour
+
+# ---------- package（仅 tag 流水线）----------
+package:
+  stage: package
+  image: alpine:3.20
+  tags: [docker]
+  interruptible: false
+  rules:
+    - if: $CI_COMMIT_TAG
+  needs:
+    - job: build:backend
+      artifacts: true
+  script:
+    - sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories && apk add --cache-dir /cache/apk docker-cli
+    - docker build -f deploy/Dockerfile -t "$CI_PROJECT_NAME:$CI_COMMIT_TAG" .
+    - docker images "$CI_PROJECT_NAME:$CI_COMMIT_TAG"
+
+# ---------- deploy（仅 tag 流水线）----------
+deploy:
+  stage: deploy
+  image: alpine:3.20
+  tags: [docker]
+  interruptible: false
+  rules:
+    - if: $CI_COMMIT_TAG
+  needs:
+    - job: package
+      artifacts: false
+  environment:
+    name: production
+    url: http://localhost:8088
+  script:
+    - sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories && apk add --cache-dir /cache/apk docker-cli docker-cli-compose
+    - IMAGE_NAME="$CI_PROJECT_NAME" TAG="$CI_COMMIT_TAG" docker compose -f deploy/compose.yml up -d
+    - |
+      ok=0
+      for i in $(seq 1 30); do
+        if wget -q -O /dev/null "http://host.docker.internal:${APP_PORT}/api/health"; then ok=1; echo "health OK after ${i} attempts"; break; fi
+        sleep 2
+      done
+      [ "$ok" = "1" ] || { echo "health check timed out (~60s)"; docker compose -f deploy/compose.yml ps; exit 1; }
+    - IMAGE_NAME="$CI_PROJECT_NAME" TAG="$CI_COMMIT_TAG" docker compose -f deploy/compose.yml ps

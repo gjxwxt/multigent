@@ -214,3 +214,15 @@ func TestGitLabHostCreateAndMergeMR(t *testing.T) {
 		t.Fatalf("expected MergeMR with wrong sha to fail")
 	}
 }
+
+func TestGitLabHostNormalizesCloneURLWithBaseURLHost(t *testing.T) {
+	host := NewGitLabHost(GitLabConfig{BaseURL: "http://192.168.139.3:8083", Token: "secret"})
+	repo := host.toRepository(gitlabProjectResp{
+		ID:            123,
+		Name:          "demo-repo",
+		HTTPURLToRepo: "http://localhost:8083/root/demo-repo.git",
+	})
+	if repo.HTTPCloneURL != "http://192.168.139.3:8083/root/demo-repo.git" {
+		t.Fatalf("expected clone URL rewritten to baseURL host, got: %q", repo.HTTPCloneURL)
+	}
+}

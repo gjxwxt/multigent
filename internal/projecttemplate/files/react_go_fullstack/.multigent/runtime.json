@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "templateId": "react_go_fullstack",
   "backend": {
     "directory": "server",
     "command": "go run .",

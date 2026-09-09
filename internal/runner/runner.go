@@ -447,7 +447,18 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 	}
 
 	scopedBoundary := ""
-	if task.BranchName != "" || task.WorktreeDir != "" {
+	isInitTask := false
+	if task != nil {
+		for _, l := range task.Labels {
+			if strings.TrimSpace(l) == "project-initialization" {
+				isInitTask = true
+				break
+			}
+		}
+	}
+	if isInitTask {
+		scopedBoundary = "【工程初始化工作区说明】\n- 你当前工作在待初始化的项目代码库根目录中。\n- 你的工作根目录已映射至沙箱 `/workspace`。所有初始化操作（依赖安装、构建验证、git init/commit/push、ci ready）均在 `/workspace` 内部执行。\n- 平台已将基础文件物化就绪，请按工作流阶段顺序执行，完成当前阶段后汇报结果，不要跳过或虚报状态。\n\n"
+	} else if task.BranchName != "" || task.WorktreeDir != "" {
 		base := task.BaseBranch
 		if base == "" {
 			base = "main"
@@ -2929,10 +2940,28 @@ func materializeGitLabConfig(cfg runtimeConfigFileRef, secretValues map[string]s
 	// so agents sometimes normalise the remote to a different alias before
 	// pushing. Accept every equivalent alias in the helper instead of making
 	// the agent guess which one carries credentials.
-	helperHosts := []string{credentialHost}
+	helperHosts := []string{parsed.Host}
+	if credentialHost != parsed.Host {
+		helperHosts = append(helperHosts, credentialHost)
+	}
 	if alias := dockerHostAlias(credentialHost); alias != "" && alias != credentialHost {
 		helperHosts = append(helperHosts, alias)
 	}
+	if _, port, splitErr := net.SplitHostPort(parsed.Host); splitErr == nil && port != "" {
+		for _, name := range []string{"host.docker.internal", "host.orb.internal"} {
+			helperHosts = append(helperHosts, net.JoinHostPort(name, port))
+		}
+	}
+	seenHosts := make(map[string]bool, len(helperHosts))
+	var uniqueHosts []string
+	for _, h := range helperHosts {
+		h = strings.TrimSpace(h)
+		if h != "" && !seenHosts[h] {
+			seenHosts[h] = true
+			uniqueHosts = append(uniqueHosts, h)
+		}
+	}
+	helperHosts = uniqueHosts
 
 	helperPath := cfg.MaterializedPath + ".credential-helper"
 	cases := ""

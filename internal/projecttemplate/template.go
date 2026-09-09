@@ -17,6 +17,9 @@ import (
 const (
 	ReactGoFullstackID      = "react_go_fullstack"
 	ReactGoFullstackVersion = "1.1.0"
+
+	ReactSpringBootID      = "react_spring_boot"
+	ReactSpringBootVersion = "1.0.0"
 )
 
 // CI baseline assets shipped with the starter. They are exported separately
@@ -24,7 +27,7 @@ const (
 // CI/CD chain without re-materializing the whole starter.
 var ciBaselinePaths = []string{".gitlab-ci.yml", "deploy/Dockerfile", "deploy/compose.yml"}
 
-//go:embed files/react_go_fullstack/* files/react_go_fullstack/.gitignore files/react_go_fullstack/.env.example files/react_go_fullstack/.gitlab-ci.yml files/react_go_fullstack/.multigent/* files/react_go_fullstack/deploy/* files/react_go_fullstack/web/* files/react_go_fullstack/web/src/* files/react_go_fullstack/server/*
+//go:embed all:files/react_go_fullstack all:files/react_spring_boot
 var templateFiles embed.FS
 
 type Report struct {
@@ -41,19 +44,29 @@ type fileEntry struct {
 }
 
 func templateEntries(templateID string) ([]fileEntry, Report, error) {
-	if strings.TrimSpace(templateID) != ReactGoFullstackID {
+	trimmedID := strings.TrimSpace(templateID)
+	var dir string
+	var version string
+	switch trimmedID {
+	case ReactGoFullstackID:
+		dir = "files/react_go_fullstack"
+		version = ReactGoFullstackVersion
+	case ReactSpringBootID:
+		dir = "files/react_spring_boot"
+		version = ReactSpringBootVersion
+	default:
 		return nil, Report{}, fmt.Errorf("unsupported project template %q", templateID)
 	}
 
 	var files []fileEntry
-	err := fs.WalkDir(templateFiles, "files/react_go_fullstack", func(path string, entry fs.DirEntry, walkErr error) error {
+	err := fs.WalkDir(templateFiles, dir, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
 		if entry.IsDir() {
 			return nil
 		}
-		rel, err := filepath.Rel("files/react_go_fullstack", filepath.FromSlash(path))
+		rel, err := filepath.Rel(dir, filepath.FromSlash(path))
 		if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("invalid template path %q", path)
 		}
@@ -72,7 +85,7 @@ func templateEntries(templateID string) ([]fileEntry, Report, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, Report{}, fmt.Errorf("read %s template: %w", ReactGoFullstackID, err)
+		return nil, Report{}, fmt.Errorf("read %s template: %w", trimmedID, err)
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].path < files[j].path })
 
@@ -86,19 +99,26 @@ func templateEntries(templateID string) ([]fileEntry, Report, error) {
 	}
 	digest := sha256.Sum256(canonical)
 	report := Report{
-		ID:              ReactGoFullstackID,
-		Version:         ReactGoFullstackVersion,
+		ID:              trimmedID,
+		Version:         version,
 		Digest:          hex.EncodeToString(digest[:]),
 		RuntimeContract: filepath.ToSlash(filepath.Join(".multigent", "runtime.json")),
 	}
 	return files, report, nil
 }
 
-// CIBaselineFiles returns the CI/CD baseline assets (repo-relative path ->
-// content) so deterministic tooling can seed them into existing repositories
-// without touching any other starter file.
+// CIBaselineFiles returns the CI/CD baseline assets for the default Go fullstack starter.
 func CIBaselineFiles() (map[string][]byte, error) {
-	files, _, err := templateEntries(ReactGoFullstackID)
+	return CIBaselineFilesForTemplate(ReactGoFullstackID)
+}
+
+// CIBaselineFilesForTemplate returns the CI/CD baseline assets (repo-relative path ->
+// content) for the specified template.
+func CIBaselineFilesForTemplate(templateID string) (map[string][]byte, error) {
+	if strings.TrimSpace(templateID) == "" {
+		templateID = ReactGoFullstackID
+	}
+	files, _, err := templateEntries(templateID)
 	if err != nil {
 		return nil, err
 	}
@@ -113,9 +133,17 @@ func CIBaselineFiles() (map[string][]byte, error) {
 		}
 	}
 	if len(out) != len(ciBaselinePaths) {
-		return nil, fmt.Errorf("CI baseline incomplete: %d/%d files", len(out), len(ciBaselinePaths))
+		return nil, fmt.Errorf("CI baseline incomplete for %s: %d/%d files", templateID, len(out), len(ciBaselinePaths))
 	}
 	return out, nil
+}
+
+func templateFileMode(relPath string) os.FileMode {
+	base := filepath.Base(relPath)
+	if base == "gradlew" || strings.HasSuffix(base, ".sh") {
+		return 0755
+	}
+	return 0644
 }
 
 // Materialize writes a new template into an empty directory. Existing files
@@ -153,7 +181,7 @@ func Materialize(root, templateID string) (Report, error) {
 		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 			return Report{}, fmt.Errorf("create template directory: %w", err)
 		}
-		if err := os.WriteFile(target, file.data, 0644); err != nil {
+		if err := os.WriteFile(target, file.data, templateFileMode(file.path)); err != nil {
 			return Report{}, fmt.Errorf("write template file %s: %w", file.path, err)
 		}
 		created = append(created, file.path)
@@ -202,6 +230,9 @@ func Seed(root, templateID string) (Report, error) {
 			if !bytes.Equal(existing, file.data) {
 				return Report{}, fmt.Errorf("template seed would overwrite existing file: %s", file.path)
 			}
+			if info.Mode().Perm() != templateFileMode(file.path) {
+				_ = os.Chmod(target, templateFileMode(file.path))
+			}
 			continue
 		}
 		if !os.IsNotExist(err) {
@@ -210,7 +241,7 @@ func Seed(root, templateID string) (Report, error) {
 		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 			return Report{}, fmt.Errorf("create template seed directory for %s: %w", file.path, err)
 		}
-		if err := os.WriteFile(target, file.data, 0644); err != nil {
+		if err := os.WriteFile(target, file.data, templateFileMode(file.path)); err != nil {
 			return Report{}, fmt.Errorf("write template seed file %s: %w", file.path, err)
 		}
 		created = append(created, file.path)

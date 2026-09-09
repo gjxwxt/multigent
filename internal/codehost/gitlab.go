@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -231,17 +232,51 @@ func (g *GitLabHost) toRepository(p gitlabProjectResp) *Repository {
 		Name:              p.Name,
 		PathWithNamespace: p.PathWithNamespace,
 		WebURL:            p.WebURL,
-		HTTPCloneURL:      normalizeGitLabCloneURL(p.HTTPURLToRepo),
+		HTTPCloneURL:      g.normalizeGitLabCloneURL(p.HTTPURLToRepo),
 		SSHCloneURL:       p.SSHURLToRepo,
 		DefaultBranch:     defaultBranch,
 	}
 }
 
-func normalizeGitLabCloneURL(raw string) string {
+func (g *GitLabHost) normalizeGitLabCloneURL(raw string) string {
 	raw = strings.TrimSpace(raw)
-	raw = strings.Replace(raw, "//localhost", "//host.docker.internal", 1)
-	raw = strings.Replace(raw, "//127.0.0.1", "//host.docker.internal", 1)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		raw = strings.Replace(raw, "//localhost", "//host.docker.internal", 1)
+		raw = strings.Replace(raw, "//127.0.0.1", "//host.docker.internal", 1)
+		return raw
+	}
+	h := u.Hostname()
+	if h == "localhost" || h == "127.0.0.1" || h == "::1" {
+		targetHost := ""
+		if g != nil && g.baseURL != "" {
+			if parsed, bErr := url.Parse(g.baseURL); bErr == nil && parsed.Host != "" {
+				baseH := parsed.Hostname()
+				if baseH != "localhost" && baseH != "127.0.0.1" && baseH != "::1" {
+					targetHost = parsed.Host
+				}
+			}
+		}
+		if targetHost != "" {
+			u.Host = targetHost
+		} else {
+			if u.Port() != "" {
+				u.Host = net.JoinHostPort("host.docker.internal", u.Port())
+			} else {
+				u.Host = "host.docker.internal"
+			}
+		}
+		return u.String()
+	}
 	return raw
+}
+
+func normalizeGitLabCloneURL(raw string) string {
+	var g *GitLabHost
+	return g.normalizeGitLabCloneURL(raw)
 }
 
 func (g *GitLabHost) DeleteRepository(ctx context.Context, projectID string) error {

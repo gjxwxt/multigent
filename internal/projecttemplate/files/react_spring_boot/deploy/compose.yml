@@ -1,0 +1,16 @@
+# 部署编排：单容器交付（Spring Boot Jar 已内嵌前端静态资源）。
+# 变量由 CI deploy job 注入；本地手动部署示例：
+#   docker build -f deploy/Dockerfile -t app:dev .
+#   IMAGE_NAME=app TAG=dev docker compose -f deploy/compose.yml up -d
+services:
+  app:
+    image: ${IMAGE_NAME:-app}:${TAG:-dev}
+    ports:
+      - "${APP_PORT:-8088}:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s

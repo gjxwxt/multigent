@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "templateId": "react_spring_boot",
+  "backend": {
+    "directory": "server",
+    "command": "./gradlew bootRun",
+    "port": 8080,
+    "healthPath": "/api/health"
+  },
+  "frontend": {
+    "directory": "web",
+    "command": "npm run dev -- --host 0.0.0.0 --port ${PORT}"
+  },
+  "preview": {
+    "healthPath": "/",
+    "startupTimeoutSeconds": 60
+  }
+}

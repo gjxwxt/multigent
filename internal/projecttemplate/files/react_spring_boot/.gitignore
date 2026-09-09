@@ -1,0 +1,35 @@
+# Gradle & Java
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+# Node & Frontend
+web/node_modules/
+web/dist/
+web/.npm/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDE & Editor
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs & Environment
+logs/
+*.log
+.env
+.env.local
+.env.*.local
+
+# Multigent platform local runtime
+.multigent/runtime-home/

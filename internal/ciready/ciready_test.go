@@ -3,7 +3,10 @@ package ciready
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/multigent/multigent/internal/projecttemplate"
 )
 
 func writeFixtureRepo(t *testing.T) string {
@@ -17,6 +20,9 @@ func writeFixtureRepo(t *testing.T) string {
 	}
 	pkg := `{"name":"web","scripts":{"build":"vite build"}}`
 	if err := os.WriteFile(filepath.Join(root, "web", "package.json"), []byte(pkg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "web", "package-lock.json"), []byte(`{"name":"web","lockfileVersion":3}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	runtime := `{"version":1,"backend":{"directory":"server","command":"go run .","port":8080,"healthPath":"/api/health"}}`
@@ -142,5 +148,121 @@ func TestCheckPassesOnSeededBaselineWithScripts(t *testing.T) {
 	}
 	if got := findCheck(t, report, "health_path"); got.Status != StatusPass {
 		t.Fatalf("health_path: %#v", got)
+	}
+}
+
+func TestVerifyReactSpringBoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "repo")
+	if _, err := projecttemplate.Materialize(root, projecttemplate.ReactSpringBootID); err != nil {
+		t.Fatalf("materialize react_spring_boot: %v", err)
+	}
+	report := Verify(root)
+	if report.Overall != OverallReady {
+		for _, c := range report.Checks {
+			if c.Status == StatusFail {
+				t.Errorf("failing check %s: %s", c.Name, c.Detail)
+			}
+		}
+		t.Fatalf("expected react_spring_boot repo to be OverallReady, got %s", report.Overall)
+	}
+}
+
+func TestEnsureSeedsSpringBootBaselineAndPasses(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "server"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "web"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".multigent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "server", "build.gradle"), []byte("plugins {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "server", "gradle", "wrapper"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "server", "gradle", "wrapper", "gradle-wrapper.jar"), []byte("jar"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "server", "gradlew"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pkg := `{"name":"web","scripts":{"build":"vite build"}}`
+	if err := os.WriteFile(filepath.Join(root, "web", "package.json"), []byte(pkg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "web", "package-lock.json"), []byte(`{"name":"web","lockfileVersion":3}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runtime := `{"version":1,"backend":{"directory":"server","command":"./gradlew bootRun","port":8080,"healthPath":"/api/health"}}`
+	if err := os.WriteFile(filepath.Join(root, ".multigent", "runtime.json"), []byte(runtime), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := Ensure(root)
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if len(report.Seeded) != 3 {
+		t.Fatalf("expected 3 seeded files, got %#v", report.Seeded)
+	}
+	if report.Overall != OverallReady {
+		for _, c := range report.Checks {
+			if c.Status == StatusFail {
+				t.Errorf("check failed: %s - %s", c.Name, c.Detail)
+			}
+		}
+		t.Fatalf("expected OverallReady, got %s", report.Overall)
+	}
+
+	ciData, err := os.ReadFile(filepath.Join(root, ".gitlab-ci.yml"))
+	if err != nil {
+		t.Fatalf("read seeded .gitlab-ci.yml: %v", err)
+	}
+	if !strings.Contains(string(ciData), "react_spring_boot") {
+		t.Errorf("expected seeded .gitlab-ci.yml to be for react_spring_boot, got: %s", string(ciData))
+	}
+}
+
+func TestCheckFlagsMissingLockfile(t *testing.T) {
+	root := writeFixtureRepo(t)
+	// Remove package-lock.json
+	_ = os.Remove(filepath.Join(root, "web", "package-lock.json"))
+	if _, err := Ensure(root); err != nil {
+		t.Fatal(err)
+	}
+	report := Verify(root)
+	check := findCheck(t, report, "lockfile")
+	if check.Status != StatusFail {
+		t.Fatalf("expected lockfile check to fail when package-lock.json is missing, got: %#v", check)
+	}
+	if report.Overall != OverallNotReady {
+		t.Fatalf("expected report overall not_ready, got %s", report.Overall)
+	}
+}
+
+func TestCheckFlagsUnexecutableGradlewOrMissingWrapper(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "server"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "server", "build.gradle"), []byte("plugins {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// gradlew exists but not executable (0644)
+	if err := os.WriteFile(filepath.Join(root, "server", "gradlew"), []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// missing wrapper jar
+	report := Verify(root)
+	check := findCheck(t, report, "build_tool_readiness")
+	if check.Status != StatusFail {
+		t.Fatalf("expected build_tool_readiness check to fail, got: %#v", check)
+	}
+	if !strings.Contains(check.Detail, "gradle-wrapper.jar is missing") || !strings.Contains(check.Detail, "not executable") {
+		t.Fatalf("unexpected detail: %s", check.Detail)
 	}
 }

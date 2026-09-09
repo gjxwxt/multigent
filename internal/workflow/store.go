@@ -276,7 +276,7 @@ const ProjectInitializationWorkflowID = "project-initialization-v1"
 // v3 shape spent one full container lifecycle per `make` target; the model
 // was acting as an expensive shell with no decisions to make in between.
 func (s *Store) EnsureProjectInitializationDefinition() error {
-	const definitionVersion = 4
+	const definitionVersion = 5
 	if existing, ok, err := s.Definition(ProjectInitializationWorkflowID); err != nil {
 		return err
 	} else if ok && existing.Version >= definitionVersion {
@@ -300,9 +300,9 @@ func (s *Store) EnsureProjectInitializationDefinition() error {
 		Description: "确定性的项目初始化：一个有界的就绪命令序列（工作区、依赖、构建验证、健康检查），提交并同步远端仓库，最后通过 CI/CD 就绪闸门。",
 		Version:     definitionVersion, Scope: "workspace", StartStepID: "ready",
 		Steps: []entity.WorkflowStep{
-			step("ready", "确定性就绪", "工作区已由平台物化（对远端已有仓库则核对/拉取请求分支，绝不覆盖用户文件）。按序执行且每条都设超时上界：(1) 标准全栈模板 `timeout 180s make install`（否则依据包管理清单）；(2) `timeout 300s make verify`，确认前端构建、后端测试与声明的运行时契约全部通过，不得凭部分成功宣称就绪；(3) 按 .multigent/runtime.json 契约有界启动后端/前端入口，curl 验证健康检查端点及前端到后端的代理连通后，停止全部临时进程并确认无残留。四项全过才可 done；任一失败即如实报告失败与诊断，不进入下一步。", 80),
-			step("sync", "提交并同步", "创建或更新初始 Git 提交，存在远端时推送配置的默认分支。严禁把 .multigent/ 运行时产物（含凭据 helper、会话密钥）、编译二进制或任何密钥写进提交——先审计 git ls-files 再提交。严禁把凭据写进远端 URL；推送目标主机不可达时，按部署环境配置选择等价主机名。同步失败时保留本地提交并上报可重试错误。", 440),
-			step("ci_ready", "CI/CD 就绪", "运行 `mga ci ready --wait 300` 执行确定性 CI/CD 闸门：平台会自动补齐缺失的基线文件（.gitlab-ci.yml、deploy/），随后逐项校验基线文件、job 契约、runner 标签、tag 触发约束、npm 镜像源、apk 缓存、脚本引用与健康路径。绑定了 GitLab 远端时以返回的流水线证据为准。任何 check 为 fail 时按 detail 修复后重跑，禁止带 fail 声明完成；不要手工改写基线文件内容。", 800),
+			step("ready", "确定性就绪", "工作区已由平台物化于沙箱 /workspace。在 /workspace 内部按序执行有界就绪命令：(1) 标准全栈模板执行 `timeout 180s make install`（安装前后端依赖）；(2) 执行 `timeout 300s make verify`，确认前端构建、后端单测与契约全部通过；(3) 校验 .multigent/runtime.json 契约完整性。全部通过后立即执行 `mga task step done` 汇报就绪结果，严禁跳过或在失败时上报完成。", 80),
+			step("sync", "提交并同步", "在 /workspace 内部提交并同步远端仓库：(1) 若尚未初始化 Git 则执行 `git init -b main`；(2) 预提交审计，确保未将凭据或密钥加入暂存区；(3) 执行 `git add . && git commit -m \"chore: initialize project\"`；(4) 若配置了 GitLab 远端，直接推送到配置的默认分支（如 `git remote add origin <remote> && git push -u origin main`，凭据由平台 helper 自动注入，严禁把凭据写进 URL）；(5) 推送完成后立即执行 `mga task step done`。", 440),
+			step("ci_ready", "CI/CD 就绪", "在 /workspace 运行 `mga ci ready --wait 300` 执行确定性 CI/CD 闸门：平台会自动补齐缺失的基线文件（.gitlab-ci.yml、deploy/）并运行 10 项基线校验；绑定了 GitLab 远端时会等待流水线构建完成。校验与流水线通过后立即执行 `mga task step done`。", 800),
 		},
 		Edges: []entity.WorkflowEdge{
 			edge("e-ready-sync", "ready", "sync", "", nil, nil, true),
