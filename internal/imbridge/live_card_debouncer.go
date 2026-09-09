@@ -188,9 +188,13 @@ func FormatLiveCardContent(req LiveCardUpdateRequest) string {
 			}
 			if base != "" {
 				targetURL = strings.TrimRight(base, "/") + targetURL
+			} else {
+				targetURL = ""
 			}
 		}
-		content += fmt.Sprintf(" [🔗 在 Multigent 控制台查看详情](%s)", targetURL)
+		if targetURL != "" && !strings.HasPrefix(targetURL, "/") {
+			content += fmt.Sprintf(" [🔗 在 Multigent 控制台查看详情](%s)", targetURL)
+		}
 	}
 	return content
 }

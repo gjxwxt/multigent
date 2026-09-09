@@ -24,23 +24,16 @@ func (s *Server) consoleBaseURL() string {
 		if v := strings.TrimSpace(os.Getenv("CHATOPS_CALLBACK_BASE_URL")); v != "" {
 			return strings.TrimRight(v, "/")
 		}
-		if strings.TrimSpace(s.localRuntimeAPIURL) != "" {
-			return strings.TrimRight(s.localRuntimeAPIURL, "/")
-		}
-		if v := strings.TrimSpace(os.Getenv("MULTIGENT_API_URL")); v != "" {
-			return strings.TrimRight(v, "/")
-		}
 	}
 	return ""
 }
 
 func (s *Server) taskConsoleURL(project, taskID string) string {
-	path := fmt.Sprintf("/projects/%s/tasks/%s", project, taskID)
 	base := s.consoleBaseURL()
 	if base == "" {
-		return path
+		return ""
 	}
-	return fmt.Sprintf("%s%s", base, path)
+	return fmt.Sprintf("%s/projects/%s/tasks/%s", base, project, taskID)
 }
 
 func (s *Server) notifyTaskThreadStarted(workspaceID, project string, t *entity.Task, workflowID string) {

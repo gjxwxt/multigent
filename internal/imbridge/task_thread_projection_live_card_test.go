@@ -262,4 +262,25 @@ func TestLiveCard_ConsoleURLResolution(t *testing.T) {
 	if !strings.Contains(content, expectedAbs) {
 		t.Fatalf("expected live card content to contain %q, got:\n%s", expectedAbs, content)
 	}
+
+	// 4. When no public URL env var is set and ConsoleURL is relative: DO NOT show link
+	t.Setenv("CHATOPS_CALLBACK_BASE_URL", "")
+	t.Setenv("MULTIGENT_CONSOLE_URL", "")
+	t.Setenv("MULTIGENT_PUBLIC_URL", "")
+	contentNoPublic := FormatLiveCardContent(req)
+	if strings.Contains(contentNoPublic, "在 Multigent 控制台查看详情") {
+		t.Fatalf("expected live card to omit console link when no public URL is configured, but got:\n%s", contentNoPublic)
+	}
+
+	// 5. When ConsoleURL is empty: DO NOT show link
+	reqEmpty := LiveCardUpdateRequest{
+		WorkspaceID: "ws-1",
+		ProjectID:   "order",
+		TaskID:      "t-123456",
+		ConsoleURL:  "",
+	}
+	contentEmpty := FormatLiveCardContent(reqEmpty)
+	if strings.Contains(contentEmpty, "在 Multigent 控制台查看详情") {
+		t.Fatalf("expected live card to omit console link when ConsoleURL is empty, but got:\n%s", contentEmpty)
+	}
 }

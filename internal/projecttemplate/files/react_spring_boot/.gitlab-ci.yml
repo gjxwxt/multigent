@@ -96,7 +96,7 @@ build:backend:
     - mkdir -p server/src/main/resources/static
     - cp -r web/dist/* server/src/main/resources/static/
     - cd server && ./gradlew bootJar -x test
-    - mkdir -p build/libs && cp server/build/libs/*.jar build/libs/app.jar
+    - cd "$CI_PROJECT_DIR" && mkdir -p build/libs && cp server/build/libs/*.jar build/libs/app.jar
   artifacts:
     paths:
       - build/libs/app.jar

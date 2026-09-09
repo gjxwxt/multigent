@@ -2,11 +2,14 @@ package projecttemplate
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestMaterializeReactGoFullstack(t *testing.T) {
@@ -299,5 +302,103 @@ func TestReactSpringBootControlledCIIntegration(t *testing.T) {
 	cmdVerify.Dir = root
 	if output, err := cmdVerify.CombinedOutput(); err != nil {
 		t.Fatalf("make verify failed: %v\n%s", err, output)
+	}
+}
+
+func TestReactSpringBootGitLabCIScriptSingleShellExecution(t *testing.T) {
+	files, err := CIBaselineFilesForTemplate(ReactSpringBootID)
+	if err != nil {
+		t.Fatalf("CIBaselineFilesForTemplate: %v", err)
+	}
+	rawCI, ok := files[".gitlab-ci.yml"]
+	if !ok {
+		t.Fatalf("missing .gitlab-ci.yml in CI baseline files")
+	}
+
+	var doc map[string]any
+	if err := yaml.Unmarshal(rawCI, &doc); err != nil {
+		t.Fatalf("unmarshal .gitlab-ci.yml: %v", err)
+	}
+
+	buildBackend, ok := doc["build:backend"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing build:backend job")
+	}
+
+	scriptEntries, ok := buildBackend["script"].([]any)
+	if !ok {
+		t.Fatalf("missing script in build:backend")
+	}
+
+	var scriptLines []string
+	for _, entry := range scriptEntries {
+		scriptLines = append(scriptLines, fmt.Sprint(entry))
+	}
+
+	singleShellScript := strings.Join(scriptLines, "\n")
+
+	// Set up mock directory simulating artifacts from previous stages
+	tmpDir := t.TempDir()
+	webDist := filepath.Join(tmpDir, "web", "dist")
+	if err := os.MkdirAll(webDist, 0755); err != nil {
+		t.Fatalf("mkdir web/dist: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<html></html>"), 0644); err != nil {
+		t.Fatalf("write index.html: %v", err)
+	}
+
+	serverDir := filepath.Join(tmpDir, "server")
+	serverLibs := filepath.Join(serverDir, "build", "libs")
+	if err := os.MkdirAll(serverLibs, 0755); err != nil {
+		t.Fatalf("mkdir server/build/libs: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(serverLibs, "app-0.0.1-SNAPSHOT.jar"), []byte("mock-jar-content"), 0644); err != nil {
+		t.Fatalf("write mock jar: %v", err)
+	}
+
+	// Create dummy gradlew in server that simulates bootJar without invoking real JVM
+	dummyGradlew := filepath.Join(serverDir, "gradlew")
+	gradlewContent := "#!/bin/sh\necho 'Mock gradlew bootJar successful'\nexit 0\n"
+	if err := os.WriteFile(dummyGradlew, []byte(gradlewContent), 0755); err != nil {
+		t.Fatalf("write dummy gradlew: %v", err)
+	}
+
+	// Execute in a single shell session simulating GitLab Runner semantics
+	cmd := exec.Command("sh", "-e", "-c", singleShellScript)
+	cmd.Dir = tmpDir
+	cmd.Env = append(os.Environ(), fmt.Sprintf("CI_PROJECT_DIR=%s", tmpDir))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("GitLab CI build:backend script failed in single-shell execution: %v\nOutput:\n%s", err, output)
+	}
+
+	// Verify app.jar was created at $CI_PROJECT_DIR/build/libs/app.jar
+	targetJar := filepath.Join(tmpDir, "build", "libs", "app.jar")
+	content, err := os.ReadFile(targetJar)
+	if err != nil {
+		t.Fatalf("expected artifact at %s, but read failed: %v", targetJar, err)
+	}
+	if string(content) != "mock-jar-content" {
+		t.Fatalf("expected artifact content 'mock-jar-content', got %q", string(content))
+	}
+
+	// Negative assertion: verify that without returning to $CI_PROJECT_DIR,
+	// running with cd server persisting causes cp to fail
+	brokenScript := strings.Replace(singleShellScript, `cd "$CI_PROJECT_DIR" && `, "", 1)
+	if brokenScript != singleShellScript {
+		tmpDirBroken := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(tmpDirBroken, "web", "dist"), 0755)
+		_ = os.WriteFile(filepath.Join(tmpDirBroken, "web", "dist", "index.html"), []byte("<html></html>"), 0644)
+		_ = os.MkdirAll(filepath.Join(tmpDirBroken, "server", "build", "libs"), 0755)
+		_ = os.WriteFile(filepath.Join(tmpDirBroken, "server", "build", "libs", "app-0.0.1-SNAPSHOT.jar"), []byte("mock-jar-content"), 0644)
+		_ = os.WriteFile(filepath.Join(tmpDirBroken, "server", "gradlew"), []byte(gradlewContent), 0755)
+
+		brokenCmd := exec.Command("sh", "-e", "-c", brokenScript)
+		brokenCmd.Dir = tmpDirBroken
+		brokenCmd.Env = append(os.Environ(), fmt.Sprintf("CI_PROJECT_DIR=%s", tmpDirBroken))
+		brokenOut, brokenErr := brokenCmd.CombinedOutput()
+		if brokenErr == nil {
+			t.Fatalf("expected broken script without cd $CI_PROJECT_DIR to fail in single shell, but succeeded:\n%s", brokenOut)
+		}
 	}
 }
