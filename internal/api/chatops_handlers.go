@@ -311,12 +311,23 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// 5. Anti-Replay Check: Ensure action token has not already been used
+	// 5. Anti-Replay Check: Ensure action token has not already been used.
+	// A dialog session can remain dialog_opened when the user closes an expired
+	// Mattermost modal without submitting it. In that narrow case, reissue a
+	// fresh card after the normal identity/RBAC/CAS checks below.
+	expiredDialogReplay := false
 	if strings.TrimSpace(tokenData.Nonce) != "" {
 		if existing, found, err := s.controlDB.ChatopsActionSessionByNonce(tokenData.WorkspaceID, strings.TrimSpace(tokenData.Nonce)); err == nil && found && existing != nil && existing.State != "failed" {
-			stage = "action_replay_blocked"
-			writeMattermostActionError(w, "该审批操作已被处理或正在处理中，请勿重复操作。")
-			return
+			if (tokenData.Action == "edit" || tokenData.Action == "review_approve") &&
+				(existing.State == "dialog_opened" || existing.State == "dialog_opening") &&
+				!existing.ExpiresAt.IsZero() && !time.Now().UTC().Before(existing.ExpiresAt) {
+				expiredDialogReplay = true
+				_ = s.controlDB.UpdateChatopsActionSessionState(tokenData.WorkspaceID, existing.ID, "expired")
+			} else {
+				stage = "action_replay_blocked"
+				writeMattermostActionError(w, "该审批操作已被处理或正在处理中，请勿重复操作。")
+				return
+			}
 		}
 	}
 
@@ -369,6 +380,16 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 		stage = "review_cas_stale"
 		s.reissueCurrentMattermostReviewCard(r, actionToken, *tokenData, payload.UserID, task, preview, platformUserID)
 		writeMattermostActionError(w, msg)
+		return
+	}
+	if expiredDialogReplay {
+		if err := s.postCurrentMattermostReviewCard(r, *tokenData, task, preview); err != nil {
+			stage = "expired_dialog_refresh_failed"
+			writeMattermostActionError(w, "原审批弹窗已过期，补发当前审批卡片失败："+err.Error())
+			return
+		}
+		stage = "expired_dialog_reissued"
+		writeMattermostActionSuccess(w, "♻️ 原审批弹窗已过期，系统已补发当前版本审批卡片。", "请使用 Thread 中最新的审批卡片。")
 		return
 	}
 
@@ -664,6 +685,16 @@ func (s *Server) reissueCurrentMattermostReviewCard(r *http.Request, actionToken
 		return
 	}
 
+	if err := s.postCurrentMattermostReviewCard(r, tokenData, task, preview); err != nil {
+		_ = s.controlDB.UpdateChatopsActionSessionState(tokenData.WorkspaceID, session.ID, "failed")
+		log.Printf("[chatops] reissue current review card failed for %s/%s: %v", tokenData.ProjectID, tokenData.TaskID, err)
+	}
+}
+
+func (s *Server) postCurrentMattermostReviewCard(r *http.Request, tokenData imbridge.ActionTokenPayload, task *entity.Task, preview workflow.ReviewResolutionPreview) error {
+	if s == nil || s.threadProjections == nil || task == nil {
+		return errors.New("review card projection unavailable")
+	}
 	ctx := context.Background()
 	if r != nil {
 		ctx = r.Context()
@@ -680,10 +711,7 @@ func (s *Server) reissueCurrentMattermostReviewCard(r *http.Request, actionToken
 		Preview:         preview,
 		CallbackBaseURL: s.consoleBaseURL(),
 	})
-	if err != nil {
-		_ = s.controlDB.UpdateChatopsActionSessionState(tokenData.WorkspaceID, session.ID, "failed")
-		log.Printf("[chatops] reissue current review card failed for %s/%s: %v", tokenData.ProjectID, tokenData.TaskID, err)
-	}
+	return err
 }
 
 // handleMattermostDialogSubmit processes modal submissions from Mattermost dialogs.
