@@ -1223,3 +1223,87 @@ func TestDockerRuntimeControlEnvUsesHostGateway(t *testing.T) {
 		t.Fatalf("mutated source env: %q", env["MULTIGENT_API_URL"])
 	}
 }
+
+func TestMaterializeGitLabConfigForWorktreeOrWorkspace(t *testing.T) {
+	root := t.TempDir()
+	agentDir := filepath.Join(root, "projects", "order", "agents", "Lina")
+	execAgentDir := filepath.Join(root, "projects", "order", "workspace")
+	if err := os.MkdirAll(agentDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(execAgentDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	manifestJSON := []byte(`{
+		"tools": [
+			{
+				"connectionId": "conn_gitlab",
+				"connectionAlias": "gitlab",
+				"provider": "gitlab",
+				"adapters": [
+					{
+						"type": "cli",
+						"cli": {
+							"configFiles": [
+								{
+									"path": "home/gitlab/gitlab/.gitconfig"
+								}
+							]
+						}
+					}
+				]
+			}
+		]
+	}`)
+
+	runID := "t-worktree-test"
+	connectionsPath := filepath.Join(execAgentDir, ".multigent", "connections.json")
+	toolDir, _, extraEnv, err := writeRuntimeToolsFile(root, execAgentDir, runID, connectionsPath, manifestJSON, func(connectionID string) (map[string]string, bool, error) {
+		return map[string]string{
+			"baseUrl": "https://gitlab.example.com",
+			"token":   "glpat-secret-12345",
+		}, true, nil
+	})
+	if err != nil {
+		t.Fatalf("writeRuntimeToolsFile: %v", err)
+	}
+
+	// 1. Files must be materialized under execAgentDir, NOT agentDir
+	if !strings.HasPrefix(toolDir, execAgentDir) {
+		t.Fatalf("toolDir %q must be under execAgentDir %q", toolDir, execAgentDir)
+	}
+	if strings.HasPrefix(toolDir, agentDir) {
+		t.Fatalf("toolDir %q must NOT be under agentDir %q", toolDir, agentDir)
+	}
+
+	configPath := extraEnv["GIT_CONFIG_GLOBAL"]
+	if !strings.HasPrefix(configPath, execAgentDir) {
+		t.Fatalf("GIT_CONFIG_GLOBAL %q must be under execAgentDir %q", configPath, execAgentDir)
+	}
+
+	configBody, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read gitconfig: %v", err)
+	}
+	// The helper path inside .gitconfig must reference the container path /workspace, NOT the host path
+	if strings.Contains(string(configBody), execAgentDir) || strings.Contains(string(configBody), agentDir) {
+		t.Fatalf("gitconfig leaked host path: %s", configBody)
+	}
+	if !strings.Contains(string(configBody), sandbox.WorkspaceMount+"/.multigent/runtime-tools/") {
+		t.Fatalf("gitconfig helper must point under /workspace/.multigent/runtime-tools: %s", configBody)
+	}
+
+	// 2. Docker env mapping with execAgentDir must rewrite to /workspace
+	env := map[string]string{
+		"GIT_CONFIG_GLOBAL": configPath,
+		runtimeToolDirEnv:   toolDir,
+	}
+	dockerEnv := runtimeControlEnvForProvider(env, entity.SandboxDocker, execAgentDir)
+	if strings.Contains(dockerEnv["GIT_CONFIG_GLOBAL"], execAgentDir) {
+		t.Fatalf("docker env leaked host execAgentDir: %q", dockerEnv["GIT_CONFIG_GLOBAL"])
+	}
+	if !strings.HasPrefix(dockerEnv["GIT_CONFIG_GLOBAL"], sandbox.WorkspaceMount+"/") {
+		t.Fatalf("docker env must map to /workspace: %q", dockerEnv["GIT_CONFIG_GLOBAL"])
+	}
+}

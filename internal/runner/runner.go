@@ -195,14 +195,24 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 	}
 
 	agentDir := filepath.Join(r.root, "projects", project, "agents", agentName)
+	execAgentDir := agentDir
+	if wtDir := strings.TrimSpace(runtimeControlEnv["MULTIGENT_WORKTREE_DIR"]); wtDir != "" {
+		if _, err := os.Stat(wtDir); err == nil {
+			execAgentDir = wtDir
+		}
+	} else if wtDir := strings.TrimSpace(os.Getenv("MULTIGENT_WORKTREE_DIR")); wtDir != "" {
+		if _, err := os.Stat(wtDir); err == nil {
+			execAgentDir = wtDir
+		}
+	}
 
 	// HTTP agent: bypass CLI subprocess.
 	if entity.NormaliseModel(meta.Model) == entity.ModelHTTPAgent {
-		return r.execPromptHTTP(agentDir, meta, prompt)
+		return r.execPromptHTTP(execAgentDir, meta, prompt)
 	}
 
 	// Write prompt to a temp file.
-	promptFile, err := writeTempPrompt(agentDir, prompt)
+	promptFile, err := writeTempPrompt(execAgentDir, prompt)
 	if err != nil {
 		return nil, fmt.Errorf("write prompt file: %w", err)
 	}
@@ -210,24 +220,24 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 
 	model := entity.NormaliseModel(meta.Model)
 	agentEnv := resolveProviderEnv(r.root, meta)
-	if err := r.materializeProviderCredentials(agentDir, meta); err != nil {
+	if err := r.materializeProviderCredentials(execAgentDir, meta); err != nil {
 		return nil, fmt.Errorf("materialize provider credentials: %w", err)
 	}
 	runtimeEnv := cloneStringMap(runtimeControlEnv)
 	if len(runtimeEnv) == 0 {
 		runtimeEnv = r.resolveRuntimeControlEnv(project, agentName, "exec-"+time.Now().UTC().Format("20060102-150405"))
 	}
-	if cleanup := r.materializeRuntimeFiles(agentDir, runtimeEnv); cleanup != nil {
+	if cleanup := r.materializeRuntimeFiles(execAgentDir, runtimeEnv); cleanup != nil {
 		defer cleanup()
 	}
 	effectiveEnv := mergeEnv(os.Environ(), agentEnv)
 	effectiveEnv = mergeEnv(effectiveEnv, runtimeEnv)
-	if err := materializeCodexProviderConfig(agentDir, model, effectiveEnv); err != nil {
+	if err := materializeCodexProviderConfig(execAgentDir, model, effectiveEnv); err != nil {
 		return nil, fmt.Errorf("materialize codex provider config: %w", err)
 	}
 	apiModel, apiBaseURL := resolveAPIModelFromEnv(model, effectiveEnv)
 	invoker := InvokerFor(model, meta.RunCommand, meta.AddDirs)
-	resumeSessionID := r.validateResumeSessionID(agentDir, model, sessionID)
+	resumeSessionID := r.validateResumeSessionID(execAgentDir, model, sessionID)
 	innerArgs := invoker.Args(promptFile, resumeSessionID)
 
 	var (
@@ -246,27 +256,16 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 		}
 		runtimeCfg := cloneRuntimeCfg(meta.Sandbox)
 		agentCLI := agentcli.Effective(model, runtimeCfg.AgentCLI)
-		processRuntimeEnv := runtimeControlEnvForProvider(runtimeEnv, meta.Sandbox.Provider, agentDir)
+		processRuntimeEnv := runtimeControlEnvForProvider(runtimeEnv, meta.Sandbox.Provider, execAgentDir)
 		effectiveEnv = mergeEnv(effectiveEnv, processRuntimeEnv)
 		injectProviderEnvIntoRuntime(runtimeCfg, agentEnv)
 		injectRuntimeControlEnvIntoRuntime(runtimeCfg, processRuntimeEnv)
 		mounts := append([]entity.RuntimeMount(nil), runtimeCfg.Mounts...)
 		mounts = r.appendWorkspaceFilesMount(mounts, meta.Sandbox.Provider, runtimeCfg)
 		r.addRuntimeDockerSystemMounts(runtimeCfg)
-		containerPromptFile := "/workspace/" + filepath.Base(promptFile)
+		containerPromptFile := containerRuntimePath(promptFile, execAgentDir)
 		remappedInner := remapPromptFile(innerArgs, promptFile, containerPromptFile)
 		remappedInner = adaptSandboxArgs(model, remappedInner)
-		execAgentDir := agentDir
-		if wtDir := strings.TrimSpace(runtimeEnv["MULTIGENT_WORKTREE_DIR"]); wtDir != "" {
-			if _, err := os.Stat(wtDir); err == nil {
-				execAgentDir = wtDir
-			}
-		}
-		if wtDir := strings.TrimSpace(os.Getenv("MULTIGENT_WORKTREE_DIR")); wtDir != "" && execAgentDir == agentDir {
-			if _, err := os.Stat(wtDir); err == nil {
-				execAgentDir = wtDir
-			}
-		}
 
 		var err error
 		executable, args, err = provider.Command(runenv.ProcessSpec{
@@ -286,18 +285,6 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 			return nil, fmt.Errorf("runtime %s: build command: %w", meta.Sandbox.Provider, err)
 		}
 	} else {
-		execAgentDir := agentDir
-		if wtDir := strings.TrimSpace(runtimeEnv["MULTIGENT_WORKTREE_DIR"]); wtDir != "" {
-			if _, err := os.Stat(wtDir); err == nil {
-				execAgentDir = wtDir
-			}
-		}
-		if wtDir := strings.TrimSpace(os.Getenv("MULTIGENT_WORKTREE_DIR")); wtDir != "" && execAgentDir == agentDir {
-			if _, err := os.Stat(wtDir); err == nil {
-				execAgentDir = wtDir
-			}
-		}
-
 		effectiveEnv = mergeEnv(effectiveEnv, directHostRuntimeEnv(model))
 		effectiveEnv = mergeEnv(effectiveEnv, directHostRuntimeHomeEnv(execAgentDir, model))
 		effectiveEnv = ensureDirectHostCLIPath(effectiveEnv)
@@ -323,15 +310,16 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 		return nil, fmt.Errorf("create log file: %w", err)
 	}
 	defer logFile.Close()
+	redactedLogFile := newRedactingWriter(logFile)
 
 	sandboxLabel := "host"
 	if meta.Sandbox != nil && meta.Sandbox.Provider != entity.SandboxNone {
 		sandboxLabel = string(meta.Sandbox.Provider)
 	}
-	fmt.Fprintf(logFile, "=== multigent exec: %s/%s sandbox=%s ===\n", project, agentName, sandboxLabel)
-	fmt.Fprintf(logFile, "Command: %s\n", telemetry.FormatExecCommand(executable, args))
-	fmt.Fprintf(logFile, "Started: %s\n\n", time.Now().UTC().Format(time.RFC3339))
-	writePromptMessageToLog(logFile, prompt)
+	fmt.Fprintf(redactedLogFile, "=== multigent exec: %s/%s sandbox=%s ===\n", project, agentName, sandboxLabel)
+	fmt.Fprintf(redactedLogFile, "Command: %s\n", telemetry.FormatExecCommand(executable, args))
+	fmt.Fprintf(redactedLogFile, "Started: %s\n\n", time.Now().UTC().Format(time.RFC3339))
+	writePromptMessageToLog(redactedLogFile, prompt)
 
 	// Stream output to stdout AND the log file simultaneously.
 	cmd := exec.Command(executable, args...)
@@ -359,9 +347,10 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 	}
 
 	outBuf := newBoundedOutput(maxCapturedOutputBytes)
-	var multiOut io.Writer = io.MultiWriter(outBuf, logFile, os.Stdout)
+	redactedOutBuf := newRedactingWriter(outBuf)
+	var multiOut io.Writer = io.MultiWriter(redactedOutBuf, redactedLogFile, os.Stdout)
 	if r.SuppressStdout {
-		multiOut = io.MultiWriter(outBuf, logFile)
+		multiOut = io.MultiWriter(redactedOutBuf, redactedLogFile)
 	}
 	cmd.Stdout = multiOut
 	cmd.Stderr = multiOut
@@ -370,13 +359,13 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 	runErr := runCommandContext(ctx, cmd)
 	runFinished := time.Now()
 	if outBuf.Truncated() {
-		fmt.Fprintf(logFile, "\n=== in-memory output capture truncated at %d bytes; full output remains in this log ===\n", maxCapturedOutputBytes)
+		fmt.Fprintf(redactedLogFile, "\n=== in-memory output capture truncated at %d bytes; full output remains in this log ===\n", maxCapturedOutputBytes)
 	}
 
-	fmt.Fprintf(logFile, "\n=== exit code: %v  finished: %s ===\n",
+	fmt.Fprintf(redactedLogFile, "\n=== exit code: %v  finished: %s ===\n",
 		cmd.ProcessState.ExitCode(), time.Now().UTC().Format(time.RFC3339))
 
-	output := outBuf.String()
+	output := telemetry.RedactSensitiveOutput(outBuf.String())
 	result := &RunResult{LogPath: logPath}
 
 	if sid := invoker.ParseSessionID(output); sid != "" {
@@ -456,14 +445,36 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 			}
 		}
 	}
-	if isInitTask {
+
+	execAgentDir := agentDir
+	if task != nil && task.Type == "wakeup" {
+		scopedBoundary = "【Attention 唤醒与信号处理安全边界】\n" +
+			"- 你当前在 Agent 私有家目录中执行 Attention 信号处理/唤醒任务。\n" +
+			"- 【绝对红线】严禁在当前目录执行 `git init`、创建分支、提交代码或 `git push`！当前目录不是项目代码库工作区。\n" +
+			"- 你的职责仅限于：读取与处理 Attention 信号、通过 `mga` 汇报状态或回复消息；如涉及代码开发与交付，请等待或指引对应任务流转至工作流代码工作区。\n\n"
+	} else if isInitTask {
 		scopedBoundary = "【工程初始化工作区说明】\n- 你当前工作在待初始化的项目代码库根目录中。\n- 你的工作根目录已映射至沙箱 `/workspace`。所有初始化操作（依赖安装、构建验证、git init/commit/push、ci ready）均在 `/workspace` 内部执行。\n- 平台已将基础文件物化就绪，请按工作流阶段顺序执行，完成当前阶段后汇报结果，不要跳过或虚报状态。\n\n"
+		if strings.TrimSpace(task.WorktreeDir) != "" {
+			if _, err := os.Stat(task.WorktreeDir); err == nil {
+				execAgentDir = task.WorktreeDir
+			}
+		} else {
+			projectWorkspace := filepath.Join(r.root, "projects", project, "workspace")
+			if _, err := os.Stat(projectWorkspace); err == nil {
+				execAgentDir = projectWorkspace
+			}
+		}
 	} else if task.BranchName != "" || task.WorktreeDir != "" {
 		base := task.BaseBranch
 		if base == "" {
 			base = "main"
 		}
 		scopedBoundary = fmt.Sprintf("【Git Worktree 独立分支安全边界约束】\n- 你当前工作在独立特性分支 `%s` (基于 `%s`) 的专用工作区 (Worktree) 中。\n- 你的工作根目录已映射至 `/workspace`。所有代码修改、新增文件与单测验证必须严格限定在 `/workspace` 内部。\n- 严禁执行 git checkout 切换到其他分支，严禁修改父仓库或其他任务的文件。\n- 严禁执行 `git worktree prune`、`git worktree remove` 或任何修改父仓库 `.git` 目录与共享 Git 配置（含 credential.helper、remote URL）的命令——这些元数据由平台统一管理，破坏会同时毁掉其他任务的工作区。\n- 严禁向 git 配置写入任何凭据（token/密码）；推送凭据由平台在推送瞬时注入，无需也不允许你自行配置。\n- 【工作区环境与依赖状态】当前工作区的所有代码、Git 历史与已安装依赖（如 node_modules）均已持久化就绪。严禁执行 rm -rf .git 或重新 git init，严禁无故全量重装依赖。请直接在现有代码库上进行增量改动、构建和测试。\n\n", task.BranchName, base)
+		if strings.TrimSpace(task.WorktreeDir) != "" {
+			if _, err := os.Stat(task.WorktreeDir); err == nil {
+				execAgentDir = task.WorktreeDir
+			}
+		}
 	}
 
 	// BuildTaskPrompt carries the workflow context, the agent-worker contract
@@ -472,7 +483,7 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 	fullPrompt := scopedBoundary + r.BuildTaskPrompt(project, agentName, task)
 
 	// Write prompt to a temp file (avoids shell escaping issues).
-	promptFile, err := writeTempPrompt(agentDir, fullPrompt)
+	promptFile, err := writeTempPrompt(execAgentDir, fullPrompt)
 	if err != nil {
 		return nil, fmt.Errorf("write prompt file: %w", err)
 	}
@@ -480,21 +491,21 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 
 	model := entity.NormaliseModel(meta.Model)
 	agentEnv := resolveProviderEnv(r.root, meta)
-	if err := r.materializeProviderCredentials(agentDir, meta); err != nil {
+	if err := r.materializeProviderCredentials(execAgentDir, meta); err != nil {
 		return nil, fmt.Errorf("materialize provider credentials: %w", err)
 	}
 	runtimeEnv := r.resolveRuntimeControlEnv(project, agentName, task.ID)
-	if cleanup := r.materializeRuntimeFiles(agentDir, runtimeEnv); cleanup != nil {
+	if cleanup := r.materializeRuntimeFiles(execAgentDir, runtimeEnv); cleanup != nil {
 		defer cleanup()
 	}
 	effectiveEnv := mergeEnv(os.Environ(), agentEnv)
 	effectiveEnv = mergeEnv(effectiveEnv, runtimeEnv)
-	if err := materializeCodexProviderConfig(agentDir, model, effectiveEnv); err != nil {
+	if err := materializeCodexProviderConfig(execAgentDir, model, effectiveEnv); err != nil {
 		return nil, fmt.Errorf("materialize codex provider config: %w", err)
 	}
 	apiModel, apiBaseURL := resolveAPIModelFromEnv(model, effectiveEnv)
 	invoker := InvokerFor(model, meta.RunCommand, meta.AddDirs)
-	resumeSessionID := r.validateResumeSessionID(agentDir, model, sessionID)
+	resumeSessionID := r.validateResumeSessionID(execAgentDir, model, sessionID)
 
 	// Build the inner agent CLI arguments.
 	innerArgs := invoker.Args(promptFile, resumeSessionID)
@@ -508,13 +519,6 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 		execDir    string // working directory for the host process
 	)
 
-	execAgentDir := agentDir
-	if strings.TrimSpace(task.WorktreeDir) != "" {
-		if _, err := os.Stat(task.WorktreeDir); err == nil {
-			execAgentDir = task.WorktreeDir
-		}
-	}
-
 	if meta.Sandbox != nil && meta.Sandbox.Provider != entity.SandboxNone {
 		provider, ok := runenv.ProviderFor(meta.Sandbox.Provider)
 		if !ok {
@@ -526,7 +530,7 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 
 		runtimeCfg := cloneRuntimeCfg(meta.Sandbox)
 		agentCLI := agentcli.Effective(model, runtimeCfg.AgentCLI)
-		processRuntimeEnv := runtimeControlEnvForProvider(runtimeEnv, meta.Sandbox.Provider, agentDir)
+		processRuntimeEnv := runtimeControlEnvForProvider(runtimeEnv, meta.Sandbox.Provider, execAgentDir)
 		effectiveEnv = mergeEnv(effectiveEnv, processRuntimeEnv)
 		injectProviderEnvIntoRuntime(runtimeCfg, agentEnv)
 		injectRuntimeControlEnvIntoRuntime(runtimeCfg, processRuntimeEnv)
@@ -536,8 +540,7 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 		r.addRuntimeDockerSystemMounts(runtimeCfg)
 
 		// The prompt file path inside the container.
-		// innerArgs reference the host promptFile path — remap it to the real agent path.
-		containerPromptFile := "/workspace/" + filepath.Base(promptFile)
+		containerPromptFile := containerRuntimePath(promptFile, execAgentDir)
 		remappedInner := remapPromptFile(innerArgs, promptFile, containerPromptFile)
 		remappedInner = adaptSandboxArgs(model, remappedInner)
 
@@ -563,7 +566,7 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 	} else {
 		// Direct host execution.
 		effectiveEnv = mergeEnv(effectiveEnv, directHostRuntimeEnv(model))
-		effectiveEnv = mergeEnv(effectiveEnv, directHostRuntimeHomeEnv(agentDir, model))
+		effectiveEnv = mergeEnv(effectiveEnv, directHostRuntimeHomeEnv(execAgentDir, model))
 		effectiveEnv = ensureDirectHostCLIPath(effectiveEnv)
 		effectiveEnv = mergeEnv(effectiveEnv, r.workspaceFilesEnv(filepath.Join(r.root, ".multigent", "files")))
 		innerArgs = adaptDirectHostArgs(model, innerArgs)
@@ -572,7 +575,7 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 		}
 		executable = resolveExecutableFromEnv(innerArgs[0], effectiveEnv)
 		args = innerArgs[1:]
-		execDir = agentDir
+		execDir = execAgentDir
 	}
 
 	// Prepare log file.
@@ -587,15 +590,16 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 		return nil, fmt.Errorf("create log file: %w", err)
 	}
 	defer logFile.Close()
+	redactedLogFile := newRedactingWriter(logFile)
 
 	sandboxLabel := "host"
 	if meta.Sandbox != nil && meta.Sandbox.Provider != entity.SandboxNone {
 		sandboxLabel = string(meta.Sandbox.Provider)
 	}
-	fmt.Fprintf(logFile, "=== multigent run: %s/%s task=%s sandbox=%s ===\n",
+	fmt.Fprintf(redactedLogFile, "=== multigent run: %s/%s task=%s sandbox=%s ===\n",
 		project, agentName, task.ID, sandboxLabel)
-	fmt.Fprintf(logFile, "Command: %s\n", telemetry.FormatExecCommand(executable, args))
-	fmt.Fprintf(logFile, "Started: %s\n\n", time.Now().UTC().Format(time.RFC3339))
+	fmt.Fprintf(redactedLogFile, "Command: %s\n", telemetry.FormatExecCommand(executable, args))
+	fmt.Fprintf(redactedLogFile, "Started: %s\n\n", time.Now().UTC().Format(time.RFC3339))
 
 	// Run the agent.
 	cmd := exec.Command(executable, args...)
@@ -619,7 +623,8 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 	}
 
 	outBuf := newBoundedOutput(maxCapturedOutputBytes)
-	multiOut := io.MultiWriter(outBuf, logFile)
+	redactedOutBuf := newRedactingWriter(outBuf)
+	multiOut := io.MultiWriter(redactedOutBuf, redactedLogFile)
 	cmd.Stdout = multiOut
 	cmd.Stderr = multiOut
 
@@ -627,10 +632,10 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 	runErr := runCommandContext(ctx, cmd)
 	runFinished := time.Now()
 
-	fmt.Fprintf(logFile, "\n=== exit code: %v  finished: %s ===\n",
+	fmt.Fprintf(redactedLogFile, "\n=== exit code: %v  finished: %s ===\n",
 		cmd.ProcessState.ExitCode(), time.Now().UTC().Format(time.RFC3339))
 
-	output := outBuf.String()
+	output := telemetry.RedactSensitiveOutput(outBuf.String())
 	result := &RunResult{LogPath: logPath}
 
 	// Parse session ID (model-specific + universal sentinel).
@@ -1373,6 +1378,28 @@ func resolveAPIModelFromEnv(modelType entity.AgentModel, env []string) (apiModel
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────────
+
+type redactingWriter struct {
+	w io.Writer
+}
+
+func newRedactingWriter(w io.Writer) io.Writer {
+	if w == nil {
+		return nil
+	}
+	return &redactingWriter{w: w}
+}
+
+func (rw *redactingWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	redacted := telemetry.RedactSensitiveOutput(string(p))
+	if _, err := rw.w.Write([]byte(redacted)); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
 
 func writeTempPrompt(agentDir, content string) (string, error) {
 	// Store temp prompt files in .multigent/ to keep agent root clean.

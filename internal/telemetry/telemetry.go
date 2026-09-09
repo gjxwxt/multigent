@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -240,9 +241,35 @@ func TruncateCommand(s string, maxRunes int) string {
 // FormatExecCommand builds "executable arg1 arg2 ...".
 func FormatExecCommand(executable string, args []string) string {
 	if len(args) == 0 {
-		return executable
+		return RedactSensitiveOutput(executable)
 	}
-	return fmt.Sprintf("%s %s", executable, strings.Join(RedactCommandArgs(args), " "))
+	return RedactSensitiveOutput(fmt.Sprintf("%s %s", executable, strings.Join(RedactCommandArgs(args), " ")))
+}
+
+var (
+	jwtPattern        = regexp.MustCompile(`eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_\-\.]+`)
+	envTokenPattern   = regexp.MustCompile(`(?i)(MULTIGENT_AGENT_TOKEN|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|GITLAB_TOKEN|GITHUB_TOKEN|PASSWORD|SECRET|ACCESS_TOKEN|API_KEY)=["']?[^"'\s\r\n]+["']?`)
+	bearerPattern     = regexp.MustCompile(`(?i)(Bearer\s+)[a-zA-Z0-9_\-\.]{16,}`)
+	privateKeyPattern = regexp.MustCompile(`(?s)-----BEGIN [A-Z ]+ PRIVATE KEY-----.*?-----END [A-Z ]+ PRIVATE KEY-----`)
+)
+
+// RedactSensitiveOutput masks sensitive credentials, tokens, JWTs, and private keys
+// before text is written to logs or persisted in telemetry.
+func RedactSensitiveOutput(text string) string {
+	if text == "" {
+		return ""
+	}
+	text = privateKeyPattern.ReplaceAllString(text, "[REDACTED PRIVATE KEY]")
+	text = envTokenPattern.ReplaceAllStringFunc(text, func(m string) string {
+		idx := strings.Index(m, "=")
+		if idx >= 0 {
+			return m[:idx+1] + "<redacted>"
+		}
+		return m
+	})
+	text = bearerPattern.ReplaceAllString(text, "${1}<redacted>")
+	text = jwtPattern.ReplaceAllString(text, "eyJ...<redacted>")
+	return text
 }
 
 // RedactCommandArgs removes explicit environment variable values from command

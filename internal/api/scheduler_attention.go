@@ -10,6 +10,7 @@ import (
 	"github.com/multigent/multigent/internal/attention"
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
+	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
 
 const (
@@ -137,6 +138,37 @@ func (s *Server) pendingAttentionWakeupSectionAndVars(workspaceID, project, agen
 			}
 		}
 		signals = focused
+	}
+	filteredSignals := make([]controldb.AttentionSignal, 0, len(signals))
+	for _, signal := range signals {
+		var refs struct {
+			Project string `json:"project"`
+			Agent   string `json:"agent"`
+			TaskID  string `json:"taskId"`
+		}
+		_ = json.Unmarshal([]byte(signal.RefsJSON), &refs)
+		taskID := strings.TrimSpace(refs.TaskID)
+		if taskID == "" && strings.EqualFold(strings.TrimSpace(signal.SourceKind), "task") {
+			taskID = strings.TrimSpace(signal.SourceID)
+		}
+		if taskID != "" && s.controlDB != nil {
+			wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+			if run, found, err := wfStore.RunForTask(project, taskID); err == nil && found && run.Status == "active" {
+				// Task is actively executing in a workflow run; don't trigger duplicate attention wakeup
+				continue
+			}
+		}
+		if taskID != "" && s.ts != nil {
+			if t, err := s.ts.GetTask(project, agent, taskID); err == nil && t != nil && t.Status == entity.TaskStatusInProgress {
+				// Task is currently in progress; don't trigger duplicate attention wakeup
+				continue
+			}
+		}
+		filteredSignals = append(filteredSignals, signal)
+	}
+	signals = filteredSignals
+	if len(signals) == 0 {
+		return "", nil, nil, nil
 	}
 	vars := s.attentionWakeupTaskVars(workspaceID, signals)
 	if len(signals) > 0 {
@@ -307,12 +339,31 @@ func (s *Server) recoverablePendingAttentionWakeupTargets(limit int) ([]attentio
 		var refs struct {
 			Project string `json:"project"`
 			Agent   string `json:"agent"`
+			TaskID  string `json:"taskId"`
 		}
 		_ = json.Unmarshal([]byte(signal.RefsJSON), &refs)
 		project := strings.TrimSpace(refs.Project)
 		agent := strings.TrimSpace(refs.Agent)
 		if project == "" || agent == "" || strings.TrimSpace(signal.WorkspaceID) == "" || strings.TrimSpace(signal.AgentWorkerID) == "" {
 			continue
+		}
+		taskID := strings.TrimSpace(refs.TaskID)
+		if taskID == "" && strings.EqualFold(strings.TrimSpace(signal.SourceKind), "task") {
+			taskID = strings.TrimSpace(signal.SourceID)
+		}
+		if taskID != "" && s.controlDB != nil {
+			wfStore := workflowstore.NewStore(s.controlDB, strings.TrimSpace(signal.WorkspaceID))
+			if run, found, err := wfStore.RunForTask(project, taskID); err == nil && found && run.Status == "active" {
+				// Task is actively tracked by a workflow run; let workflow auto-recovery handle it.
+				continue
+			}
+		}
+		if taskID != "" && s.ts != nil {
+			if t, err := s.ts.GetTask(project, agent, taskID); err == nil && t != nil &&
+				(t.Status == entity.TaskStatusInProgress || t.Status == entity.TaskStatusPending) {
+				// Task is already active/pending in task store and will execute directly.
+				continue
+			}
 		}
 		k := key{
 			workspaceID:   strings.TrimSpace(signal.WorkspaceID),
@@ -342,7 +393,7 @@ func (s *Server) recoverPendingAttentionWakeups() {
 	if s == nil {
 		return
 	}
-	time.Sleep(2 * time.Second)
+	time.Sleep(500 * time.Millisecond)
 	targets, err := s.recoverablePendingAttentionWakeupTargets(500)
 	if err != nil {
 		log.Printf("[attention] recover pending wakeups failed: %v", err)

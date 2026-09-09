@@ -1011,6 +1011,11 @@ func (s *Server) nextRuntimeWakeupTask(workspaceID, project, agent string, hb *e
 	} else if due != nil {
 		return due, nil, nil
 	}
+	if urgent, err := s.nextRuntimeUrgentPendingTask(project, agent); err != nil {
+		return nil, nil, err
+	} else if urgent != nil {
+		return urgent, nil, nil
+	}
 	if task, ids, err := s.ensurePendingAttentionWakeupTask(workspaceID, project, agent); err != nil {
 		return nil, nil, err
 	} else if task != nil {
@@ -1078,6 +1083,33 @@ func (s *Server) createRuntimeWakeupTask(project, agent, prompt string) *entity.
 	}
 }
 
+func (s *Server) nextRuntimeUrgentPendingTask(project, agent string) (*entity.Task, error) {
+	tasks, err := s.ts.ListTasks(project, agent, entity.TaskStatusPending)
+	if err != nil {
+		return nil, err
+	}
+	var selected *entity.Task
+	now := time.Now().UTC()
+	for _, task := range tasks {
+		if task == nil || task.Type == "wakeup" {
+			continue
+		}
+		if !entity.TaskReady(task, now) {
+			continue
+		}
+		if task.Priority > 0 {
+			continue
+		}
+		if selected == nil ||
+			task.Priority < selected.Priority ||
+			(task.Priority == selected.Priority && task.CreatedAt.Before(selected.CreatedAt)) ||
+			(task.Priority == selected.Priority && task.CreatedAt.Equal(selected.CreatedAt) && task.ID < selected.ID) {
+			selected = task
+		}
+	}
+	return selected, nil
+}
+
 func (s *Server) nextRuntimePendingTask(project, agent string) (*entity.Task, error) {
 	tasks, err := s.ts.ListTasks(project, agent, entity.TaskStatusPending)
 	if err != nil {
@@ -1086,7 +1118,7 @@ func (s *Server) nextRuntimePendingTask(project, agent string) (*entity.Task, er
 	var selected *entity.Task
 	now := time.Now().UTC()
 	for _, task := range tasks {
-		if task == nil {
+		if task == nil || task.Type == "wakeup" {
 			continue
 		}
 		if !entity.TaskReady(task, now) {

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
@@ -186,5 +188,67 @@ func TestCommitAndPushReviewChanges(t *testing.T) {
 	out, _ = logCmd.Output()
 	if !strings.Contains(string(out), "user in-context preview feedback fixes") {
 		t.Fatalf("expected commit created with review message, got %s", string(out))
+	}
+}
+
+func TestRecoverablePendingAttentionWakeupTargetsExcludesActiveWorkflowTasks(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	seedTaskAttentionWorker(t, s, workspaceID, "sample", "pm", true)
+	now := time.Now().UTC()
+
+	task := &entity.Task{
+		ID:        "t-active-workflow-task",
+		Status:    entity.TaskStatusInProgress,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	_ = s.ts.AddTask("sample", "pm", task)
+
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	def := &entity.WorkflowDefinition{
+		ID:          "wf-active-test",
+		Name:        "Active Test",
+		Version:     1,
+		Scope:       "workspace",
+		StartStepID: "step1",
+		Steps: []entity.WorkflowStep{{
+			ID:       "step1",
+			Type:     "agent_task",
+			Title:    "Step 1",
+			Position: entity.WorkflowPosition{X: 0, Y: 0},
+		}},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := wfStore.SaveDefinition(def); err != nil {
+		t.Fatalf("save def: %v", err)
+	}
+	if _, _, err := wfStore.StartRun("sample", task.ID, def.ID, nil); err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+
+	// Add an attention signal referencing this active workflow task
+	if err := s.controlDB.UpsertAttentionSignal(controldb.AttentionSignal{
+		ID:            "sig-active-workflow-task",
+		WorkspaceID:   workspaceID,
+		AgentWorkerID: "aw-pm",
+		DedupeKey:     "test:active-wf-task",
+		SourceKind:    "task",
+		SourceID:      task.ID,
+		Reason:        "task_assigned",
+		Summary:       "Task assigned signal",
+		Status:        "pending",
+		RefsJSON:      fmt.Sprintf(`{"project":"sample","agent":"pm","taskId":%q}`, task.ID),
+		CreatedAt:     now.Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("upsert attention: %v", err)
+	}
+
+	targets, err := s.recoverablePendingAttentionWakeupTargets(100)
+	if err != nil {
+		t.Fatalf("recoverable targets: %v", err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("expected active workflow task signal to be excluded from wakeup recovery targets, got: %+v", targets)
 	}
 }
