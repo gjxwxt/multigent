@@ -53,6 +53,11 @@ Key status & deliverables:
    - 覆盖设计闸门空输入阻断、伪造快照路径输入阻断以及特批豁免放行；
    - 覆盖 QA 准出闸门高风险未测项拦截与 per-item manual waiver 特批放行；
    - 覆盖项目删除时本地 `project_channel_links` 与 `agent_channel_bindings` 的级联清理断言。
+6. **统一项目创建载荷与原子级联初始化 (Unified Project Creation & Atomic Provisioning)**:
+   - 后端 `POST /api/v1/projects` 原生支持一体化载荷：接收 `name` (Key)、`description`、`workerIds`、`memberUsernames` 及 `channel` 配置；
+   - 原子化完成项目脚手架建立、Agent Team 成员绑定（`project_memberships`）、工作区成员权限同步及 ChatOps 频道接入；若频道创建遭遇冲突或异常，自动回滚已建项目与本地关系，杜绝僵尸项目并支持原地修正重试；
+   - 前端新建项目弹窗（`CreateProjectDialog`）交互重构：将项目标识 `Key`（严格要求 `[a-zA-Z0-9-_.]`）与业务名称 `Description`（支持中文业务描述并在卡片展现）清晰区分，并配齐实时正则校验反馈；
+   - API 异常透传（`web/src/lib/api.ts`）：`localizedAPIErrorMessage` 优先展示服务端具体的校验与业务原因，彻底消除因通用 `validation_failed` 掩盖真实输入错误的问题。
 
 ## Non-negotiable boundaries
 
@@ -61,9 +66,14 @@ Key status & deliverables:
 - 快照文件提供端点必须校验任务所属项目，且对原型 HTML 内容实行沙箱隔离。
 - `approved_design_snapshot_path` 和 `approved_design_html` 严禁信任客户端请求输入，必须由服务端抓取生成。
 - `gradlew` 必须保持 `0755` 权限且必须内置 `gradle-wrapper.jar`。
+- 项目标识 `Project.Name` 严格受 `validateWorkspaceObjectName` 约束，只能包含英文、数字、`-`、`_` 与 `.`，严禁包含中文与空格；若包含频道开通配置，开通失败必须原子回滚项目。
 
 ## Evidence
 
+- `internal/api/project_handlers_test.go`:
+  - `TestHandleCreateProject_Validation`: PASS (非法字符、中文字符、空格与前缀点严格拦截，0 漏放)
+  - `TestHandleCreateProject_UnifiedPayload`: PASS (验证单次请求原子完成项目创建、Agent Worker 绑定及工作区成员授权)
+  - `TestHandleCreateProject_WithChannelProvisionAndRollback`: PASS (频道创建冲突时自动回滚项目目录与全部 DB 授权关系)
 - `internal/api/pilot_greenfield_test.go`:
   - `TestPilotGreenfieldDeliveryPipelineFullLifecycle`: PASS (0.33s，11 步全流程、伪造路径拦截、安全闸门与删除清理全绿)
 - `internal/api/delete_handlers_test.go`:
@@ -77,14 +87,19 @@ Key status & deliverables:
   - `TestGetDesignSnapshotRejectsSymlinkEscape`: PASS (符号链接逃逸任务目录拦截通过)
 - `internal/api/design_gate_pipeline_test.go`:
   - `TestDesignSnapshotPreviewEndpoint`: PASS (CSP sandbox 响应头、nosniff 与跨项目访问 404 拦截)
-  - `TestQASignoffGateValidation`: PASS (全部 9 项严格校验子用例全绿：涵盖空矩阵、高风险失败硬阻断、无豁免未测项阻断、逐项有效豁免放行、全通过放行、非法 waivers JSON 阻断、缺失/重复 ID 阻断、未知风险/状态枚举阻断、高风险无证据通过阻断)
+  - `TestQASignoffGateValidation`: PASS (全部 9 项严格校验子用例全绿)
 - `internal/projecttemplate/template_test.go`: 全部 9 个单元与集成测试通过：
   - `TestReactSpringBootControlledCIIntegration`: PASS (实测 `make install` -> `make verify` 全链路全绿)
   - `TestReactSpringBootMakeInstallFailsWithoutLockfile`: PASS (实测拦截无锁安装)
 - `make build`: 产出 `dist/multigent` 与 `dist/mga`；前端 `web` 目录 `npm run build` 0 报错。
 - `git diff --check`: 退出码 0，零代码与格式缺陷。
+- **运行环境实测验证**:
+  - VM 二进制部署后查询 `/api/v1/version`，精确返回 `{"ok":true,"version":"101d7dda"}`。
+  - 实测创建带成员的真实项目 `pilot-live-test` 成功并完成权限赋权；测试完成后已成功清理。
 - **结构化提交演进 (Logical Commits)**:
   - `ce93dce` fix(security): Phase 1 安全门禁严密加固与反向测试闭环
   - `e6268e69` feat(im): 频道绑定管理与项目删除级联清理
   - `0e70a534` feat(template): 新增 React+Spring Boot 模板及初始化与 CI 确定性基线
   - `d1f1f46d` fix(web): 新建项目弹窗展示全部成员的实际 IM 绑定状态
+  - `101d7dda` fix(project): unify project creation payload, atomic provisioning and transparent validation
+
