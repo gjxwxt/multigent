@@ -79,6 +79,40 @@ func scanUserChannelIdentity(row interface{ Scan(dest ...any) error }) (UserChan
 	return identity, err
 }
 
+// UserExternalIDForInstance resolves a user's external ID strictly within an IM instance.
+func (db *SQLiteStore) UserExternalIDForInstance(workspaceID, userID, provider, imInstanceID string) (string, error) {
+	if strings.TrimSpace(imInstanceID) != "" {
+		var extID string
+		err := db.sql.QueryRow(`
+			SELECT u.external_user_id
+			FROM user_channel_identities u
+			JOIN agent_channel_bindings b ON u.channel_binding_id = b.id
+			JOIN connections c ON b.connection_id = c.id
+			WHERE u.workspace_id = ? AND u.user_id = ? AND u.provider = ? AND c.im_instance_id = ?
+			ORDER BY u.updated_at DESC, u.created_at DESC LIMIT 1
+		`, workspaceID, userID, provider, strings.TrimSpace(imInstanceID)).Scan(&extID)
+		if err == nil && extID != "" {
+			return extID, nil
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
+		// When imInstanceID is explicitly required, do not leak identity from another instance
+		return "", nil
+	}
+
+	// Fallback when no instance ID is specified
+	idents, err := db.ListUserChannelIdentities(UserChannelIdentityFilter{
+		WorkspaceID: workspaceID,
+		UserID:      userID,
+		Provider:    provider,
+	})
+	if err == nil && len(idents) > 0 {
+		return idents[0].ExternalUserID, nil
+	}
+	return "", nil
+}
+
 func (db *SQLiteStore) UpsertAgentChannelTarget(target AgentChannelTarget) error {
 	if target.CreatedAt == "" {
 		target.CreatedAt = nowUTC()

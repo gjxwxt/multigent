@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -278,5 +279,116 @@ func TestMattermostVerifyForwardedEvent(t *testing.T) {
 	reqNilNonLoopback.RemoteAddr = "192.168.1.50:54321"
 	if err := p.VerifyForwardedEvent(reqNilNonLoopback, rawBody, nil); err == nil {
 		t.Fatalf("expected non-loopback with nil secrets to fail")
+	}
+}
+
+func TestSanitizeMattermostChannelName(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected string
+	}{
+		{"#proj-order-center", "proj-order-center"},
+		{"proj-order-center", "proj-order-center"},
+		{"Project 123!", "project-123"},
+		{"--test--channel--", "test-channel"},
+		{"a", "proj-a"},
+		{"", "proj-chat"},
+		{"UPPER_case-Name", "upper_case-name"},
+	}
+	for _, c := range cases {
+		got := SanitizeMattermostChannelName(c.input)
+		if got != c.expected {
+			t.Errorf("SanitizeMattermostChannelName(%q) = %q, expected %q", c.input, got, c.expected)
+		}
+	}
+}
+
+func TestMattermostClient_Operations(t *testing.T) {
+	createCalled := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer bot-token-xyz" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/users/me/teams":
+			_ = json.NewEncoder(w).Encode([]MattermostTeam{
+				{ID: "team-1", Name: "myteam", DisplayName: "My Team"},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v4/channels":
+			if !createCalled {
+				createCalled = true
+				var ch MattermostChannel
+				_ = json.NewDecoder(r.Body).Decode(&ch)
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(MattermostChannel{
+					ID:          "chan-123",
+					TeamID:      ch.TeamID,
+					Name:        ch.Name,
+					DisplayName: ch.DisplayName,
+					Type:        ch.Type,
+				})
+			} else {
+				// Second call simulates channel already exists
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"id":"store.sql_channel.saved.create.found.app_error","message":"A channel with that name already exists"}`))
+			}
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v4/teams/team-1/channels/name/"):
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(MattermostChannel{
+				ID:          "chan-123",
+				TeamID:      "team-1",
+				Name:        "proj-test",
+				DisplayName: "Project Test",
+				Type:        "P",
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/members"):
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	client := NewMattermostClient(ts.URL, "bot-token-xyz", ts.Client())
+	ctx := context.Background()
+
+	// 1. Get teams
+	teams, err := client.GetMyTeams(ctx)
+	if err != nil || len(teams) != 1 || teams[0].ID != "team-1" {
+		t.Fatalf("unexpected teams result: %v, %v", teams, err)
+	}
+
+	// 2. Create channel (fresh)
+	created, err := client.CreateChannel(ctx, MattermostChannel{
+		TeamID:      "team-1",
+		Name:        "proj-test",
+		DisplayName: "Project Test",
+		Type:        "P",
+	})
+	if err != nil || created.ID != "chan-123" {
+		t.Fatalf("unexpected created channel: %v, %v", created, err)
+	}
+
+	// 3. Create channel (already exists -> returns ErrChannelAlreadyExists)
+	_, err = client.CreateChannel(ctx, MattermostChannel{
+		TeamID:      "team-1",
+		Name:        "proj-test",
+		DisplayName: "Project Test",
+		Type:        "P",
+	})
+	if !errors.Is(err, ErrChannelAlreadyExists) {
+		t.Fatalf("expected ErrChannelAlreadyExists, got %v", err)
+	}
+
+	// 4. Add user to team
+	if err := client.AddUserToTeam(ctx, "team-1", "user-456"); err != nil {
+		t.Fatalf("AddUserToTeam failed: %v", err)
+	}
+
+	// 5. Add user to channel
+	if err := client.AddUserToChannel(ctx, "chan-123", "user-456"); err != nil {
+		t.Fatalf("AddUserToChannel failed: %v", err)
 	}
 }

@@ -16,6 +16,7 @@ import {
   Layers,
   Loader2,
   Lock,
+  MessageSquare,
   Plus,
   RotateCw,
   Save,
@@ -104,6 +105,9 @@ export default function ProjectSettingsPage() {
 
           {/* Installed connection tools (agent tool bindings) */}
           {projectId && <InstalledConnections projectId={projectId} />}
+
+          {/* Project ChatOps Channel */}
+          {projectId && <ProjectChatOpsChannel projectId={projectId} />}
 
           {projectId && (
             <DangerZone
@@ -214,7 +218,7 @@ function InstalledConnections({ projectId }: { projectId: string }) {
   // connection via grant matching with no binding left to narrow it).
   // Server errors stop the loop: a silent half-uninstall is the worst
   // outcome (bindings gone, grant still admits the connection at runtime).
-  async function uninstallConnection(connectionId: string, label: string) {
+  async function uninstallConnection(connectionId: string, _label?: string) {
     setBusyId(connectionId)
     try {
       const rows = bindings.filter((b) => b.connectionId === connectionId)
@@ -407,6 +411,254 @@ function InstalledConnections({ projectId }: { projectId: string }) {
         onCancel={() => setRemoving(null)}
         onConfirm={() => { if (removing) void uninstallConnection(removing.connectionId, removing.label) }}
       />
+    </section>
+  )
+}
+
+type ProjectChannelLink = {
+  id: string
+  workspaceId: string
+  projectId: string
+  provider: string
+  imInstanceId: string
+  teamId: string
+  channelId: string
+  channelName: string
+  displayName: string
+  visibility: string
+  status: string
+  createdAt: string
+  updatedAt: string
+}
+
+type AgentChannelBinding = {
+  id: string
+  workspaceId: string
+  agentWorkerId?: string
+  projectId: string
+  agentId: string
+  provider: string
+  connectionId: string
+  externalBotId?: string
+  externalChatId: string
+  status: string
+  lastActivityAt?: string
+}
+
+type ProjectChannelListItem = {
+  link: ProjectChannelLink
+  bindings: AgentChannelBinding[]
+  hasError: boolean
+}
+
+function ProjectChatOpsChannel({ projectId }: { projectId: string }) {
+  const { t } = useTranslation()
+  const fmt = useFormatDateTime()
+  const [reloadKey, setReloadKey] = useState(0)
+  const [retrying, setRetrying] = useState(false)
+
+  const path = `/api/v1/projects/${encodeURIComponent(projectId)}/channels`
+  const state = useApiJson<{ ok: boolean; channels: ProjectChannelListItem[] }>(path, reloadKey, {
+    silentStatuses: [404],
+    keepPreviousDataOnReload: true,
+  })
+  const channels = state.status === 'ok' ? (state.data.channels ?? []) : []
+
+  async function handleRetrySync(item: ProjectChannelListItem) {
+    setRetrying(true)
+    try {
+      const res = await apiPost<{
+        ok: boolean
+        status?: string
+        warning?: string
+        failedMembers?: string[]
+        failedAgents?: string[]
+        boundAgents?: string[]
+      }>(`/api/v1/projects/${encodeURIComponent(projectId)}/channels/provision`, {
+        provider: item.link.provider || 'mattermost',
+        mode: 'link',
+        instanceId: item.link.imInstanceId || undefined,
+        teamId: item.link.teamId || undefined,
+        channelName: item.link.channelName,
+        displayName: item.link.displayName,
+        visibility: item.link.visibility,
+      })
+
+      if (res?.status === 'partial' && res.warning) {
+        showToast(res.warning, 'info')
+      } else {
+        showToast(t('projectSettings.chatopsSyncSuccess', { defaultValue: '协同频道与 Agent 机器人同步成功' }), 'success')
+      }
+      setReloadKey((k) => k + 1)
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : String(e), 'error')
+    } finally {
+      setRetrying(false)
+    }
+  }
+
+  return (
+    <section className="rounded-lg border border-neutral-200/80 bg-white dark:border-zinc-700/60 dark:bg-zinc-900/40">
+      <div className="flex items-center justify-between border-b border-neutral-100 px-5 py-3 dark:border-zinc-800">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold text-neutral-800 dark:text-zinc-100">
+              {t('projectSettings.chatopsTitle', { defaultValue: '项目协同频道 (ChatOps)' })}
+            </span>
+          </div>
+          <p className="mt-1 text-xs leading-relaxed text-neutral-500 dark:text-zinc-500">
+            {t('projectSettings.chatopsDesc', {
+              defaultValue: '管理与本项目绑定的即时通讯 (Mattermost) 协同频道及团队 Agent 机器人状态。',
+            })}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setReloadKey((k) => k + 1)}
+          disabled={state.status === 'loading'}
+          className="inline-flex items-center gap-1 rounded border border-neutral-200 bg-white px-2 py-1 text-xs text-neutral-600 transition-colors hover:bg-neutral-50 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+          title={t('common.refresh', { defaultValue: '刷新' })}
+        >
+          <RotateCw className={cn('size-3', state.status === 'loading' && 'animate-spin')} />
+          {t('common.refresh', { defaultValue: '刷新' })}
+        </button>
+      </div>
+
+      {state.status === 'loading' && channels.length === 0 ? (
+        <div className="flex items-center gap-2 px-5 py-4 text-sm text-neutral-500 dark:text-zinc-400">
+          <Loader2 className="size-4 animate-spin" />
+          {t('common.loading', { defaultValue: '加载中…' })}
+        </div>
+      ) : channels.length === 0 ? (
+        <div className="px-5 py-6 text-center text-sm text-neutral-500 dark:text-zinc-400">
+          <MessageSquare className="mx-auto mb-2 size-8 text-neutral-300 dark:text-zinc-600" />
+          <p className="font-medium text-neutral-700 dark:text-zinc-300">
+            {t('projectSettings.chatopsEmptyTitle', { defaultValue: '未关联或创建协同频道' })}
+          </p>
+          <p className="mt-1 text-xs text-neutral-400 dark:text-zinc-500">
+            {t('projectSettings.chatopsEmptyDesc', {
+              defaultValue: '新建项目时开启协同频道，系统将自动在 Mattermost 中创建专属项目频道并完成机器人与成员配置。',
+            })}
+          </p>
+        </div>
+      ) : (
+        <div className="divide-y divide-neutral-100 dark:divide-zinc-800">
+          {channels.map((chan) => {
+            const hasError = chan.hasError
+            const errorCount = chan.bindings.filter((b) => b.status === 'error').length
+
+            return (
+              <div key={chan.link.id} className="p-5 space-y-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex items-start gap-3">
+                    <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600 dark:bg-indigo-950/50 dark:text-indigo-400">
+                      <MessageSquare className="size-5" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-neutral-900 dark:text-zinc-100">
+                          {chan.link.displayName || `#${chan.link.channelName}`}
+                        </span>
+                        <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[11px] font-medium text-neutral-600 dark:bg-zinc-800 dark:text-zinc-400">
+                          {chan.link.provider.toUpperCase()}
+                        </span>
+                        <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[11px] text-neutral-500 dark:bg-zinc-800 dark:text-zinc-400">
+                          {chan.link.visibility === 'public'
+                            ? t('projects.channelVisibilityPublic', { defaultValue: '公开频道' })
+                            : t('projects.channelVisibilityPrivate', { defaultValue: '私有频道' })}
+                        </span>
+                        {hasError ? (
+                          <span className="inline-flex items-center gap-1 rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
+                            <AlertTriangle className="size-3" />
+                            {t('projectSettings.chatopsPartialError', {
+                              defaultValue: '存在异常绑定 ({{count}})',
+                              count: errorCount,
+                            })}
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 rounded bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300">
+                            <CheckCircle2 className="size-3" />
+                            {t('projectSettings.chatopsStatusNormal', { defaultValue: '正常' })}
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-1 flex items-center gap-3 text-xs text-neutral-500 dark:text-zinc-400">
+                        <span>频道名: <code className="rounded bg-neutral-100 px-1 py-0.5 text-neutral-700 dark:bg-zinc-800 dark:text-zinc-300">{chan.link.channelName}</code></span>
+                        {chan.link.updatedAt && <span>更新于: {fmt(chan.link.updatedAt)}</span>}
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={retrying}
+                    onClick={() => void handleRetrySync(chan)}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-xs font-medium text-neutral-700 shadow-sm transition-colors hover:bg-neutral-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                  >
+                    <RotateCw className={cn('size-3.5', retrying && 'animate-spin')} />
+                    {hasError
+                      ? t('projectSettings.chatopsRetrySync', { defaultValue: '重试恢复绑定' })
+                      : t('projectSettings.chatopsResync', { defaultValue: '重新同步频道' })}
+                  </button>
+                </div>
+
+                {hasError && (
+                  <div className="flex items-start gap-2.5 rounded-lg border border-amber-200 bg-amber-50/70 p-3 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-300">
+                    <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                    <div>
+                      <p className="font-semibold">
+                        {t('projectSettings.chatopsWarningTitle', { defaultValue: '协同机器人部分同步失败' })}
+                      </p>
+                      <p className="mt-0.5 leading-relaxed text-amber-700 dark:text-amber-300/90">
+                        {t('projectSettings.chatopsWarningDesc', {
+                          defaultValue:
+                            '标记为异常的 Agent 机器人未能加入该频道（可能由于权限不足或频道限制）。请确认 Mattermost 团队与机器人设置后，点击上方【重试恢复绑定】。',
+                        })}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <h4 className="text-xs font-medium text-neutral-500 dark:text-zinc-400 mb-2">
+                    {t('projectSettings.chatopsAgentsTitle', { defaultValue: '已绑定的 Agent 机器人' })}
+                  </h4>
+                  {chan.bindings.length === 0 ? (
+                    <p className="text-xs text-neutral-400 dark:text-zinc-500">
+                      {t('projectSettings.chatopsNoAgents', { defaultValue: '尚未配置绑定的 Agent 机器人。' })}
+                    </p>
+                  ) : (
+                    <div className="flex flex-wrap gap-2">
+                      {chan.bindings.map((b) => {
+                        const isErr = b.status === 'error'
+                        return (
+                          <div
+                            key={b.id}
+                            className={cn(
+                              'inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs',
+                              isErr
+                                ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-200'
+                                : 'border-neutral-200 bg-neutral-50 text-neutral-700 dark:border-zinc-700 dark:bg-zinc-800/80 dark:text-zinc-200'
+                            )}
+                          >
+                            {isErr ? (
+                              <AlertTriangle className="size-3.5 text-amber-600 dark:text-amber-400" />
+                            ) : (
+                              <CheckCircle2 className="size-3.5 text-emerald-600 dark:text-emerald-400" />
+                            )}
+                            <span className="font-medium">{b.agentId}</span>
+                            <span className="text-[10px] opacity-70">({b.status})</span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
     </section>
   )
 }
@@ -784,6 +1036,7 @@ function BasicInfoEditor({
 
 const TEMPLATES = [
   { id: 'react_go_fullstack', label: 'projectSettings.templateReactGo', icon: Layers },
+  { id: 'react_spring_boot', label: 'projectSettings.templateReactSpringBoot', icon: Layers },
   { id: 'tauri_desktop', label: 'projectSettings.templateTauri', icon: Laptop },
   { id: 'react_vite', label: 'projectSettings.templateReactVite', icon: Globe },
   { id: 'go_api', label: 'projectSettings.templateGoApi', icon: Zap },
@@ -1052,10 +1305,13 @@ function InitializeProjectModal({
         })
       }
 
-      // React + Go is currently the first deterministic project template. The
-      // server writes its fixed files before the Agent task starts; the Agent
+      // React + Go and React + Spring Boot are deterministic project templates. The
+      // server writes their fixed files before the Agent task starts; the Agent
       // then installs dependencies, verifies the result and handles Git.
-      const deterministicTemplate = activeTab === 'create_new' && useTemplate && selectedTemplate === 'react_go_fullstack'
+      const deterministicTemplate =
+        activeTab === 'create_new' &&
+        useTemplate &&
+        (selectedTemplate === 'react_go_fullstack' || selectedTemplate === 'react_spring_boot')
       if (deterministicTemplate) {
         await apiPost<{ templateId: string; templateVersion: string; templateDigest: string }>(
           `/api/v1/projects/${encodeURIComponent(projectId)}/initialize-template`,
@@ -1087,16 +1343,17 @@ function InitializeProjectModal({
       }
 
       // 4. Create and directly start the persisted initialization workflow.
+      const resolvedRemote = (activeTab === 'bind_existing' && existingType === 'remote' ? remoteUrl.trim() : cleanCloneUrl) || 'none'
       const initializationRequest = [
         `mode=${activeTab === 'bind_existing' ? `bind_${existingType}` : 'create_new'}`,
-        `repo=${targetRepo}`,
+        `repo=/workspace (host: ${targetRepo})`,
         `template=${activeTab === 'create_new' && useTemplate ? selectedTemplate : 'none'}`,
-        `remote=${(activeTab === 'bind_existing' && existingType === 'remote' ? remoteUrl.trim() : cleanCloneUrl) || 'none'}`,
+        `remote=${resolvedRemote}`,
       ].join('; ')
       // Keep the root prompt as context only. The workflow step descriptions
       // are the executable contract; repeating the whole procedure here
       // would encourage the agent to skip the persisted stage boundaries.
-      taskPrompt = `initialization_request: ${initializationRequest}\n\n请按「项目初始化」工作流逐阶段执行当前初始化任务。只完成当前阶段并使用 workflow step done 汇报结构化结果；不要跳过失败阶段或把未验证的状态报告为完成。`
+      taskPrompt = `initialization_request: ${initializationRequest}\n\n当前项目工作区已挂载至沙箱 /workspace。请按「项目初始化」工作流逐阶段执行当前初始化任务。只完成当前阶段并使用 workflow step done 汇报结构化结果；不要跳过失败阶段或把未验证的状态报告为完成。`
 
       const createdTask = await apiPost<{ id: string }>(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks`, {
         agent: selectedAgent,

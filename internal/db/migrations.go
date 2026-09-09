@@ -672,6 +672,26 @@ func (db *SQLiteStore) migrate() error {
 		`ALTER TABLE chatops_action_sessions ADD COLUMN resolution_trace_json TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE chatops_action_sessions ADD COLUMN resolved_outputs_json TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_chatops_sessions_lookup ON chatops_action_sessions(workspace_id, task_id, step_id, state)`,
+		`CREATE TABLE IF NOT EXISTS project_channel_links (
+	id TEXT PRIMARY KEY,
+	workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+	project_id TEXT NOT NULL,
+	provider TEXT NOT NULL,
+	im_instance_id TEXT NOT NULL DEFAULT '',
+	team_id TEXT NOT NULL DEFAULT '',
+	channel_id TEXT NOT NULL,
+	channel_name TEXT NOT NULL DEFAULT '',
+	display_name TEXT NOT NULL DEFAULT '',
+	visibility TEXT NOT NULL DEFAULT 'private',
+	status TEXT NOT NULL DEFAULT 'active',
+	metadata_json TEXT NOT NULL DEFAULT '{}',
+	created_by TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL DEFAULT '',
+	UNIQUE(workspace_id, project_id, provider, im_instance_id)
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_channel_links_project ON project_channel_links(workspace_id, project_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_channel_links_channel ON project_channel_links(workspace_id, provider, channel_id)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.sql.Exec(stmt); err != nil {

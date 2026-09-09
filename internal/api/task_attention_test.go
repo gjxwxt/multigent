@@ -1,6 +1,7 @@
 package api
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -77,6 +78,43 @@ func TestRecordTaskAttentionSignalSkipsDisabledMembership(t *testing.T) {
 func TestNormalizeTaskAttentionReasonWorkflow(t *testing.T) {
 	if got := normalizeTaskAttentionReason("workflow next task"); got != string(entity.TriggerOnWorkflowStepAssigned) {
 		t.Fatalf("expected workflow reason, got %q", got)
+	}
+}
+
+func TestRecordTaskAttentionSignalWorkspaceInstructionForProjectInitialization(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	seedTaskAttentionWorker(t, s, workspaceID, "sample", "pm", true)
+	task := &entity.Task{
+		ID:          "task-init-1",
+		Title:       "Scaffold project",
+		Labels:      []string{"project-initialization"},
+		WorktreeDir: "/opt/multigent/data/projects/sample/workspace",
+		Assignee:    "sample/pm",
+		Status:      entity.TaskStatusPending,
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+
+	sigID := s.recordTaskAttentionSignal(workspaceID, "sample", "pm", task, "task assigned")
+	if sigID == "" {
+		t.Fatal("expected attention signal id")
+	}
+
+	signals, err := s.controlDB.ListAttentionSignals(controldb.AttentionSignalFilter{
+		WorkspaceID:   workspaceID,
+		AgentWorkerID: "aw-pm",
+	})
+	if err != nil {
+		t.Fatalf("list signals: %v", err)
+	}
+	if len(signals) != 1 {
+		t.Fatalf("expected 1 signal, got %d", len(signals))
+	}
+	if !strings.Contains(signals[0].PayloadJSON, "【工程初始化工作区说明】当前沙箱根目录 /workspace 即为项目代码库根目录") {
+		t.Fatalf("expected initialization workspace instruction, got %s", signals[0].PayloadJSON)
+	}
+	if strings.Contains(signals[0].PayloadJSON, "/workspace/.multigent/worktrees/workspace") {
+		t.Fatalf("expected no fabricated worktree path, got %s", signals[0].PayloadJSON)
 	}
 }
 

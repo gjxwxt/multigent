@@ -81,8 +81,9 @@ async function handleResponse<T>(res: Response, options?: Pick<APIRequestInit, '
   }
   if (!res.ok) {
     const err = await parseAPIError(res)
-    if (res.status === 403) handle403(err)
-    if (!options?.suppressToast && !options?.silentStatuses?.includes(res.status)) {
+    const isSilent = Boolean(options?.silentStatuses?.includes(res.status))
+    if (res.status === 403 && !isSilent) handle403(err)
+    if (!options?.suppressToast && !isSilent) {
       showToast(err.message, 'error')
     }
     throw err

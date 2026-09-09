@@ -595,6 +595,11 @@ func (s *TaskThreadProjectionService) resolveMMTarget(workspaceID, projectID, pr
 
 	channelID = preferredChannelID
 	if channelID == "" {
+		if link, found, _ := s.store.GetProjectChannelLink(workspaceID, projectID, "mattermost", ""); found && link.ChannelID != "" {
+			channelID = link.ChannelID
+		}
+	}
+	if channelID == "" {
 		channelID = b.ExternalChatID
 	}
 

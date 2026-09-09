@@ -224,6 +224,31 @@ func (s *Server) createProjectTaskFromBody(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
+
+	if t.WorktreeDir == "" && (hasTaskLabel(t, "project-initialization") ||
+		workflowID == workflowstore.ProjectInitializationWorkflowID ||
+		(t.Vars != nil && strings.TrimSpace(t.Vars["initialization_repo"]) != "")) {
+		targetRepo := ""
+		if t.Vars != nil {
+			targetRepo = strings.TrimSpace(t.Vars["initialization_repo"])
+		}
+		if targetRepo == "" {
+			if p, pErr := s.st.Project(name); pErr == nil && p != nil && strings.TrimSpace(p.Repo) != "" {
+				targetRepo = strings.TrimSpace(p.Repo)
+			}
+		}
+		if targetRepo == "" {
+			targetRepo = filepath.Join(s.st.ProjectDir(name), "workspace")
+		}
+		if !strings.Contains(targetRepo, "://") {
+			targetRepo = filepath.Clean(targetRepo)
+			_ = os.MkdirAll(targetRepo, 0o755)
+		}
+		t.WorktreeDir = targetRepo
+		if t.BaseBranch == "" {
+			t.BaseBranch = "main"
+		}
+	}
 	if est, err := entity.NormalizeEstimateDuration(body.EstimateDuration); err != nil {
 		s.jsonError(w, http.StatusBadRequest, err.Error())
 		return

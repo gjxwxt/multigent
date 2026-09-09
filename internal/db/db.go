@@ -119,12 +119,14 @@ type Store interface {
 	AgentChannelBindingByID(id string) (AgentChannelBinding, bool, error)
 	ListAgentChannelBindings(filter AgentChannelBindingFilter) ([]AgentChannelBinding, error)
 	DeleteAgentChannelBinding(id string) error
+	DeleteAgentChannelBindingsByProject(workspaceID, projectID string) error
 
 	UpsertExternalIdentity(identity ExternalIdentity) error
 	ExternalIdentityByExternalID(workspaceID, provider, externalUserID string) (ExternalIdentity, bool, error)
 	ListExternalIdentities(filter ExternalIdentityFilter) ([]ExternalIdentity, error)
 	UpsertUserChannelIdentity(identity UserChannelIdentity) error
 	ListUserChannelIdentities(filter UserChannelIdentityFilter) ([]UserChannelIdentity, error)
+	UserExternalIDForInstance(workspaceID, userID, provider, imInstanceID string) (string, error)
 	UpsertAgentChannelTarget(target AgentChannelTarget) error
 	ListAgentChannelTargets(filter AgentChannelTargetFilter) ([]AgentChannelTarget, error)
 	CreateAgentChannelBindCode(code AgentChannelBindCode) error
@@ -177,6 +179,11 @@ type Store interface {
 	CompleteChatopsActionSession(workspaceID, id, resolutionTraceJSON, resolvedOutputsJSON string) error
 	UpdateChatopsActionSessionState(workspaceID, id, state string) error
 	ExpireStaleChatopsActionSessions(workspaceID string, now time.Time) error
+
+	UpsertProjectChannelLink(l ProjectChannelLink) error
+	GetProjectChannelLink(workspaceID, projectID, provider, imInstanceID string) (ProjectChannelLink, bool, error)
+	ListProjectChannelLinks(workspaceID, projectID string) ([]ProjectChannelLink, error)
+	DeleteProjectChannelLinks(workspaceID, projectID string) error
 }
 
 type SQLiteStore struct {
@@ -659,6 +666,24 @@ type AgentChannelBindingFilter struct {
 	Provider      string
 	ConnectionID  string
 	Status        string
+}
+
+type ProjectChannelLink struct {
+	ID           string `json:"id"`
+	WorkspaceID  string `json:"workspaceId"`
+	ProjectID    string `json:"projectId"`
+	Provider     string `json:"provider"`
+	IMInstanceID string `json:"imInstanceId"`
+	TeamID       string `json:"teamId"`
+	ChannelID    string `json:"channelId"`
+	ChannelName  string `json:"channelName"`
+	DisplayName  string `json:"displayName"`
+	Visibility   string `json:"visibility"`
+	Status       string `json:"status"`
+	MetadataJSON string `json:"metadataJson"`
+	CreatedBy    string `json:"createdBy"`
+	CreatedAt    string `json:"createdAt"`
+	UpdatedAt    string `json:"updatedAt"`
 }
 
 type ExternalIdentity struct {

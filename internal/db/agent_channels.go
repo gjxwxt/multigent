@@ -134,6 +134,21 @@ func (db *SQLiteStore) DeleteAgentChannelBinding(id string) error {
 	return err
 }
 
+func (db *SQLiteStore) DeleteAgentChannelBindingsByProject(workspaceID, projectID string) error {
+	trimmedProjectID := strings.TrimSpace(projectID)
+	if trimmedProjectID == "" {
+		return nil
+	}
+	trimmedWorkspaceID := strings.TrimSpace(workspaceID)
+	if trimmedWorkspaceID == "" {
+		_, err := db.sql.Exec(`DELETE FROM agent_channel_bindings WHERE project_id = ?`, trimmedProjectID)
+		return err
+	}
+	_, err := db.sql.Exec(`DELETE FROM agent_channel_bindings WHERE workspace_id = ? AND project_id = ?`, trimmedWorkspaceID, trimmedProjectID)
+	return err
+}
+
+
 type agentChannelBindingScanner interface {
 	Scan(dest ...any) error
 }

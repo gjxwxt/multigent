@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Check, CheckCircle2, Copy, ExternalLink, Link2, Loader2, MessageSquare, RefreshCw, ShieldAlert, Unlink, X } from 'lucide-react'
+import { Check, CheckCircle2, Copy, Link2, Loader2, MessageSquare, ShieldAlert, Unlink, X } from 'lucide-react'
 import { apiDelete, apiFetch, apiPost } from '../../lib/api'
 import { copyTextToClipboard } from '../../lib/clipboard'
 import { useFormatDateTime } from '../../lib/format-datetime'

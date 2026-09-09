@@ -90,22 +90,34 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	workspaceID, _ := s.currentWorkspaceID()
-	if workspaceID != "" {
-		memberships, err := s.controlDB.ListProjectMemberships(controldb.ProjectMembershipFilter{
-			WorkspaceID: workspaceID,
-			ProjectID:   project,
-		})
-		if err != nil {
-			log.Printf("[project:delete] failed to list memberships for project %s: %v", project, err)
+	if s.controlDB != nil {
+		if workspaceID != "" {
+			memberships, err := s.controlDB.ListProjectMemberships(controldb.ProjectMembershipFilter{
+				WorkspaceID: workspaceID,
+				ProjectID:   project,
+			})
+			if err != nil {
+				log.Printf("[project:delete] failed to list memberships for project %s: %v", project, err)
+				s.serverError(w, err)
+				return
+			}
+			for _, m := range memberships {
+				if delErr := s.controlDB.DeleteProjectMembership(workspaceID, m.ID); delErr != nil {
+					log.Printf("[project:delete] failed to delete membership %s for project %s: %v", m.ID, project, delErr)
+					s.serverError(w, delErr)
+					return
+				}
+			}
+		}
+		if err := s.controlDB.DeleteProjectChannelLinks(workspaceID, project); err != nil {
+			log.Printf("[project:delete] failed to delete channel links for project %s: %v", project, err)
 			s.serverError(w, err)
 			return
 		}
-		for _, m := range memberships {
-			if delErr := s.controlDB.DeleteProjectMembership(workspaceID, m.ID); delErr != nil {
-				log.Printf("[project:delete] failed to delete membership %s for project %s: %v", m.ID, project, delErr)
-				s.serverError(w, delErr)
-				return
-			}
+		if err := s.controlDB.DeleteAgentChannelBindingsByProject(workspaceID, project); err != nil {
+			log.Printf("[project:delete] failed to delete agent channel bindings for project %s: %v", project, err)
+			s.serverError(w, err)
+			return
 		}
 	}
 

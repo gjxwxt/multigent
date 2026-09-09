@@ -59,6 +59,39 @@ func TestDeleteRoleTeamAndProjectRequireWorkspaceAdmin(t *testing.T) {
 		t.Fatalf("team still exists")
 	}
 
+	conn := controldb.Connection{
+		ID:             "conn-sample-1",
+		WorkspaceID:    workspaceID,
+		Provider:       "mattermost",
+		ConnectionName: "Test MM Conn",
+		Status:         "active",
+		CreatedBy:      "admin",
+	}
+	if err := s.controlDB.UpsertConnection(conn); err != nil {
+		t.Fatalf("upsert connection: %v", err)
+	}
+	if err := s.controlDB.UpsertProjectChannelLink(controldb.ProjectChannelLink{
+		ID:          "link-sample-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		Provider:    "mattermost",
+		ChannelID:   "chan-sample-1",
+		ChannelName: "sample-channel",
+	}); err != nil {
+		t.Fatalf("upsert project channel link: %v", err)
+	}
+	if err := s.controlDB.UpsertAgentChannelBinding(controldb.AgentChannelBinding{
+		ID:           "bind-sample-1",
+		WorkspaceID:  workspaceID,
+		ProjectID:    "sample",
+		AgentID:      "agent-sample-1",
+		ConnectionID: "conn-sample-1",
+		Provider:     "mattermost",
+		Status:       "connected",
+	}); err != nil {
+		t.Fatalf("upsert agent channel binding: %v", err)
+	}
+
 	memberProjectRec := httptest.NewRecorder()
 	memberProjectReq := providerTestRequest(http.MethodDelete, "/api/v1/projects/sample", "member", nil)
 	memberProjectReq.SetPathValue("name", "sample")
@@ -86,5 +119,22 @@ func TestDeleteRoleTeamAndProjectRequireWorkspaceAdmin(t *testing.T) {
 	}
 	if len(memberships) != 0 {
 		t.Fatalf("project memberships after delete len=%d", len(memberships))
+	}
+	links, err := s.controlDB.ListProjectChannelLinks(workspaceID, "sample")
+	if err != nil {
+		t.Fatalf("project channel links after delete: %v", err)
+	}
+	if len(links) != 0 {
+		t.Fatalf("project channel links after delete len=%d", len(links))
+	}
+	bindings, err := s.controlDB.ListAgentChannelBindings(controldb.AgentChannelBindingFilter{
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+	})
+	if err != nil {
+		t.Fatalf("agent channel bindings after delete: %v", err)
+	}
+	if len(bindings) != 0 {
+		t.Fatalf("agent channel bindings after delete len=%d", len(bindings))
 	}
 }

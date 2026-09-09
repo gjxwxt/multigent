@@ -1402,6 +1402,7 @@ func (s *Server) findAgentChannelBinding(workspaceID, project, agent, provider s
 	if workerID := s.agentWorkerIDForProjectAgent(workspaceID, project, agent); workerID != "" {
 		bindings, err := s.controlDB.ListAgentChannelBindings(controldb.AgentChannelBindingFilter{
 			WorkspaceID:   workspaceID,
+			ProjectID:     project,
 			AgentWorkerID: workerID,
 			Provider:      provider,
 		})

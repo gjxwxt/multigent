@@ -7,11 +7,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -315,4 +317,248 @@ func (mattermostProvider) VerifyForwardedEvent(r *http.Request, rawBody []byte, 
 		return fmt.Errorf("signature verification failed")
 	}
 	return nil
+}
+
+// MattermostClient provides operations for interacting with Mattermost REST API v4.
+type MattermostClient struct {
+	BaseURL    string
+	BotToken   string
+	HTTPClient *http.Client
+}
+
+type MattermostTeam struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name"`
+}
+
+type MattermostChannel struct {
+	ID          string `json:"id"`
+	TeamID      string `json:"team_id"`
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name"`
+	Type        string `json:"type"` // "P" for private, "O" for public
+	Header      string `json:"header,omitempty"`
+	Purpose     string `json:"purpose,omitempty"`
+}
+
+// NewMattermostClient initializes a new Mattermost REST API v4 client.
+func NewMattermostClient(baseURL, botToken string, client *http.Client) *MattermostClient {
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
+	return &MattermostClient{
+		BaseURL:    strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		BotToken:   strings.TrimSpace(botToken),
+		HTTPClient: client,
+	}
+}
+
+// SanitizeMattermostChannelName normalizes a string into a valid Mattermost channel handle:
+// lowercase alphanumeric and dashes/underscores, 2 to 64 chars.
+func SanitizeMattermostChannelName(name string) string {
+	name = strings.TrimPrefix(strings.TrimSpace(name), "#")
+	name = strings.ToLower(name)
+	var b strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	res := b.String()
+	for strings.Contains(res, "--") {
+		res = strings.ReplaceAll(res, "--", "-")
+	}
+	res = strings.Trim(res, "-_")
+	if len(res) > 64 {
+		res = res[:64]
+		res = strings.Trim(res, "-_")
+	}
+	if res == "" {
+		return "proj-chat"
+	}
+	if len(res) < 2 {
+		res = "proj-" + res
+	}
+	return res
+}
+
+// GetMyTeams returns all teams the bot belongs to.
+func (c *MattermostClient) GetMyTeams(ctx context.Context) ([]MattermostTeam, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/api/v4/users/me/teams", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.BotToken)
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("mattermost users/me/teams: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("mattermost users/me/teams failed (%d): %s", resp.StatusCode, string(b))
+	}
+	var teams []MattermostTeam
+	if err := json.NewDecoder(resp.Body).Decode(&teams); err != nil {
+		return nil, fmt.Errorf("decode mattermost teams: %w", err)
+	}
+	return teams, nil
+}
+
+// CreateChannel creates a public or private channel on Mattermost.
+// If the channel already exists on the team, it falls back to fetching and returning the existing channel.
+func (c *MattermostClient) CreateChannel(ctx context.Context, channel MattermostChannel) (*MattermostChannel, error) {
+	if channel.TeamID == "" {
+		return nil, fmt.Errorf("team_id is required")
+	}
+	if channel.Name == "" {
+		return nil, fmt.Errorf("channel name is required")
+	}
+	if channel.Type == "" {
+		channel.Type = "P"
+	}
+	if channel.DisplayName == "" {
+		channel.DisplayName = channel.Name
+	}
+
+	raw, err := json.Marshal(channel)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/v4/channels", bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.BotToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("mattermost create channel: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusOK {
+		var created MattermostChannel
+		if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+			return nil, fmt.Errorf("decode created channel: %w", err)
+		}
+		return &created, nil
+	}
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	bodyStr := string(body)
+
+	// If channel already exists on the team, return ErrChannelAlreadyExists for explicit handling
+	if resp.StatusCode == http.StatusBadRequest && (strings.Contains(bodyStr, "store.sql_channel.saved.create.found.app_error") || strings.Contains(strings.ToLower(bodyStr), "already exists")) {
+		return nil, ErrChannelAlreadyExists
+	}
+
+	return nil, fmt.Errorf("mattermost create channel failed (%d): %s", resp.StatusCode, bodyStr)
+}
+
+var (
+	ErrChannelNotFound      = errors.New("mattermost channel not found")
+	ErrChannelAlreadyExists = errors.New("mattermost channel already exists")
+)
+
+// GetChannelByName retrieves a channel on a team by its handle name.
+func (c *MattermostClient) GetChannelByName(ctx context.Context, teamID, channelName string) (*MattermostChannel, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/api/v4/teams/%s/channels/name/%s", c.BaseURL, url.PathEscape(teamID), url.PathEscape(channelName)), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.BotToken)
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("mattermost get channel by name: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, ErrChannelNotFound
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("mattermost get channel failed (%d): %s", resp.StatusCode, string(b))
+	}
+
+	var ch MattermostChannel
+	if err := json.NewDecoder(resp.Body).Decode(&ch); err != nil {
+		return nil, fmt.Errorf("decode channel response: %w", err)
+	}
+	return &ch, nil
+}
+
+// AddUserToTeam adds a user to a team (idempotent, ignores already exists).
+func (c *MattermostClient) AddUserToTeam(ctx context.Context, teamID, userID string) error {
+	if teamID == "" || userID == "" {
+		return nil
+	}
+	payload := map[string]string{
+		"team_id": teamID,
+		"user_id": userID,
+	}
+	raw, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/api/v4/teams/%s/members", c.BaseURL, url.PathEscape(teamID)), bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.BotToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
+		return nil
+	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	bodyStr := string(b)
+	if strings.Contains(bodyStr, "store.sql_team.save_member.exists.app_error") ||
+		strings.Contains(bodyStr, "store.sql_team_member.get.app_error") ||
+		strings.Contains(strings.ToLower(bodyStr), "already in team") ||
+		strings.Contains(strings.ToLower(bodyStr), "already a member") ||
+		strings.Contains(strings.ToLower(bodyStr), "already exists") {
+		return nil
+	}
+	return fmt.Errorf("mattermost add user to team failed (%d): %s", resp.StatusCode, bodyStr)
+}
+
+// AddUserToChannel adds a user (bot or human) to a channel.
+func (c *MattermostClient) AddUserToChannel(ctx context.Context, channelID, userID string) error {
+	if channelID == "" || userID == "" {
+		return nil
+	}
+	payload := map[string]string{
+		"user_id": userID,
+	}
+	raw, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/api/v4/channels/%s/members", c.BaseURL, url.PathEscape(channelID)), bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.BotToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
+		return nil
+	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	bodyStr := string(b)
+	if strings.Contains(bodyStr, "store.sql_channel.save_member.exists.app_error") ||
+		strings.Contains(strings.ToLower(bodyStr), "already in channel") ||
+		strings.Contains(strings.ToLower(bodyStr), "already a member") {
+		return nil
+	}
+	return fmt.Errorf("mattermost add user to channel failed (%d): %s", resp.StatusCode, bodyStr)
 }

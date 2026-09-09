@@ -64,7 +64,13 @@ func (s *Server) recordTaskAttentionSignal(workspaceID, project, agent string, t
 		if branch := strings.TrimSpace(task.BranchName); branch != "" {
 			payload["branchName"] = branch
 		}
-		payload["workspaceInstruction"] = taskWorktreeWorkspaceInstruction(task.ID, worktreeDir)
+		if hasTaskLabel(task, "project-initialization") ||
+			(task.Vars != nil && strings.TrimSpace(task.Vars["initialization_repo"]) != "") ||
+			strings.HasSuffix(strings.TrimRight(worktreeDir, "/"), "/workspace") {
+			payload["workspaceInstruction"] = "【工程初始化工作区说明】当前沙箱根目录 /workspace 即为项目代码库根目录（宿主路径 " + worktreeDir + "）。请直接在 /workspace 根目录下执行初始化、依赖安装与代码提交，严禁寻找或切换到其他 worktree 路径。"
+		} else {
+			payload["workspaceInstruction"] = taskWorktreeWorkspaceInstruction(task.ID, worktreeDir)
+		}
 	}
 	refsRaw, _ := json.Marshal(refs)
 	now := time.Now().UTC()
