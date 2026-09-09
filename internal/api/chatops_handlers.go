@@ -315,15 +315,26 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 	// A dialog session can remain dialog_opened when the user closes an expired
 	// Mattermost modal without submitting it. In that narrow case, reissue a
 	// fresh card after the normal identity/RBAC/CAS checks below.
-	expiredDialogReplay := false
-	if strings.TrimSpace(tokenData.Nonce) != "" {
-		if existing, found, err := s.controlDB.ChatopsActionSessionByNonce(tokenData.WorkspaceID, strings.TrimSpace(tokenData.Nonce)); err == nil && found && existing != nil && existing.State != "failed" {
-			if (tokenData.Action == "edit" || tokenData.Action == "review_approve") &&
+	reissueDialogCard := false
+	if nonce := strings.TrimSpace(tokenData.Nonce); nonce != "" {
+		if existing, found, err := s.controlDB.ChatopsActionSessionByNonce(tokenData.WorkspaceID, nonce); err == nil && found && existing != nil {
+			isDialogAction := tokenData.Action == "edit" || tokenData.Action == "review_approve"
+			switch {
+			case existing.State == "failed" && isDialogAction:
+				// A failed dialog cannot be retried with the same nonce because the
+				// session table enforces nonce uniqueness. Reissue a fresh card instead.
+				reissueDialogCard = true
+				_ = s.controlDB.UpdateChatopsActionSessionState(tokenData.WorkspaceID, existing.ID, "stale")
+			case existing.State == "failed":
+				stage = "action_replay_blocked"
+				writeMattermostActionError(w, "该审批操作已失败，请使用最新审批卡片重试。")
+				return
+			case isDialogAction &&
 				(existing.State == "dialog_opened" || existing.State == "dialog_opening") &&
-				!existing.ExpiresAt.IsZero() && !time.Now().UTC().Before(existing.ExpiresAt) {
-				expiredDialogReplay = true
+				!existing.ExpiresAt.IsZero() && !time.Now().UTC().Before(existing.ExpiresAt):
+				reissueDialogCard = true
 				_ = s.controlDB.UpdateChatopsActionSessionState(tokenData.WorkspaceID, existing.ID, "expired")
-			} else {
+			default:
 				stage = "action_replay_blocked"
 				writeMattermostActionError(w, "该审批操作已被处理或正在处理中，请勿重复操作。")
 				return
@@ -382,7 +393,7 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 		writeMattermostActionError(w, msg)
 		return
 	}
-	if expiredDialogReplay {
+	if reissueDialogCard {
 		if err := s.postCurrentMattermostReviewCard(r, *tokenData, task, preview); err != nil {
 			stage = "expired_dialog_refresh_failed"
 			writeMattermostActionError(w, "原审批弹窗已过期，补发当前审批卡片失败："+err.Error())

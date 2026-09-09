@@ -429,6 +429,68 @@ func TestMattermostActionCallback_ExpiredDialogReissuesCurrentCard(t *testing.T)
 	}
 }
 
+func TestMattermostActionCallback_FailedDialogReissuesCurrentCard(t *testing.T) {
+	s, workspaceID, _, postCount, _, hmacSecret := setupTestChatopsEnv(t)
+	task, preview := setupTestWorkflowTask(t, s, workspaceID)
+
+	nonce := imbridge.GenerateNonce()
+	if err := s.controlDB.CreateChatopsActionSession(&controldb.ChatopsActionSession{
+		ID:                   "cas-failed-dialog",
+		WorkspaceID:          workspaceID,
+		Project:              "sample",
+		TaskID:               task.ID,
+		StepID:               preview.StepID,
+		ExpectedStateVersion: preview.ExpectedStateVersion,
+		ReviewSnapshotHash:   preview.ReviewSnapshotHash,
+		ActionType:           "edit",
+		ActorMMUserID:        "mm-user-admin",
+		ActorPlatformUserID:  "admin",
+		State:                "failed",
+		ActionNonce:          nonce,
+		TokenHash:            "failed-dialog-token",
+		ExpiresAt:            time.Now().UTC().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("CreateChatopsActionSession: %v", err)
+	}
+
+	tok, err := imbridge.SignActionToken(hmacSecret, imbridge.ActionTokenPayload{
+		WorkspaceID:          workspaceID,
+		ProjectID:            "sample",
+		TaskID:               task.ID,
+		StepID:               preview.StepID,
+		Action:               "edit",
+		ChannelID:            "chan-chatops-1",
+		ConnectionID:         "conn-mm-chatops-test",
+		ExpectedStateVersion: preview.ExpectedStateVersion,
+		ReviewSnapshotHash:   preview.ReviewSnapshotHash,
+		Nonce:                nonce,
+		ExpiresAt:            time.Now().UTC().Add(time.Hour).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("SignActionToken: %v", err)
+	}
+
+	bodyBytes, _ := json.Marshal(mattermostActionPayload{
+		UserID:    "mm-user-admin",
+		UserName:  "admin",
+		ChannelID: "chan-chatops-1",
+		PostID:    "mock-post-card-1",
+		Context:   mattermostActionContext{ActionToken: tok, Action: "edit"},
+	})
+	rec := httptest.NewRecorder()
+	s.handleMattermostActionCallback(rec, httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/actions", bytes.NewReader(bodyBytes)))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "补发当前版本审批卡片") {
+		t.Fatalf("expected failed dialog recovery, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if postCount.Load() != 1 {
+		t.Fatalf("expected one fresh review card post, got %d", postCount.Load())
+	}
+	session, found, err := s.controlDB.ChatopsActionSessionByNonce(workspaceID, nonce)
+	if err != nil || !found || session.State != "stale" {
+		t.Fatalf("expected old failed dialog session marked stale, found=%v state=%q err=%v", found, session.State, err)
+	}
+}
+
 func TestMattermostActionCallback_OpenDialog_Reject(t *testing.T) {
 	s, workspaceID, _, postCount, receivedPosts, hmacSecret := setupTestChatopsEnv(t)
 	task, preview := setupTestWorkflowTask(t, s, workspaceID)
