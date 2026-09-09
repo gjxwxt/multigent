@@ -1262,6 +1262,19 @@ func (s *Server) findTaskInProject(project, taskID string) (*entity.Task, string
 			return t, agentName, nil
 		}
 	}
+	// Human-review transitions can change the task's assignee without moving
+	// its durable queue record from the implementing Agent. If memberships or
+	// worker discovery are temporarily incomplete, fall back to the project
+	// record index rather than reporting a false task-missing error to ChatOps,
+	// preview, or workflow review endpoints.
+	if records, listErr := s.ts.ListAllTaskRecords(project); listErr == nil {
+		for _, record := range records {
+			if record.Task == nil || strings.TrimSpace(record.Task.ID) != strings.TrimSpace(taskID) {
+				continue
+			}
+			return record.Task, strings.TrimSpace(record.Agent), nil
+		}
+	}
 	return nil, "", errors.New("task not found")
 }
 
