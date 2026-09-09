@@ -1254,7 +1254,6 @@ func (s *Server) findTaskInProject(project, taskID string) (*entity.Task, string
 		err = workspaceErr
 	}
 	if err != nil {
-		log.Printf("[tasks] find task failed before record fallback project=%s task=%s workspace=%s err=%v", project, taskID, workspaceID, err)
 		return nil, "", err
 	}
 	for _, agentName := range agents {
@@ -1275,9 +1274,6 @@ func (s *Server) findTaskInProject(project, taskID string) (*entity.Task, string
 			}
 			return record.Task, strings.TrimSpace(record.Agent), nil
 		}
-		log.Printf("[tasks] task record fallback missed project=%s task=%s workspace=%s agents=%v records=%d", project, taskID, workspaceID, agents, len(records))
-	} else {
-		log.Printf("[tasks] task record fallback failed project=%s task=%s workspace=%s agents=%v err=%v", project, taskID, workspaceID, agents, listErr)
 	}
 	return nil, "", errors.New("task not found")
 }
