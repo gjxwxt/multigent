@@ -15,7 +15,7 @@ import {
   Users,
   X,
 } from 'lucide-react'
-import { apiFetch, apiPost, apiPut } from '../../lib/api'
+import { apiFetch, apiPost } from '../../lib/api'
 import { useAuth } from '../../lib/auth'
 import { overlayDismissProps } from '../ui/overlay'
 import { showToast } from '../ui/Toast'
@@ -70,8 +70,6 @@ export function CreateProjectDialog({
 
   // Basic info state
   const [name, setName] = useState('')
-  const [slug, setSlug] = useState('')
-  const [slugManuallyEdited, setSlugManuallyEdited] = useState(false)
   const [description, setDescription] = useState('')
   const [saving, setSaving] = useState(false)
   const [saveStep, setSaveStep] = useState<string>('')
@@ -98,21 +96,6 @@ export function CreateProjectDialog({
   const [imInstances, setImInstances] = useState<IMInstance[]>([])
   const [selectedInstanceId, setSelectedInstanceId] = useState<string>('')
   const [imConnections, setImConnections] = useState<UserIMConnection[]>([])
-  const [projectCreated, setProjectCreated] = useState(false)
-
-  // Auto-generate slug when name changes unless manually edited
-  function handleNameChange(val: string) {
-    setName(val)
-    if (!slugManuallyEdited) {
-      const generated = val
-        .toLowerCase()
-        .trim()
-        .replace(/[\s_]+/g, '-')
-        .replace(/[^a-z0-9\u4e00-\u9fa5-]/g, '')
-        .slice(0, 40)
-      setSlug(generated)
-    }
-  }
 
   // Fetch initial data: agents, users, IM instances, connections
   useEffect(() => {
@@ -198,9 +181,9 @@ export function CreateProjectDialog({
       if (!c.startsWith('#')) c = `#${c}`
       return c
     }
-    const baseSlug = slug.trim() || 'project'
-    return `#proj-${baseSlug}`
-  }, [customChannelName, slug])
+    const baseKey = name.trim() || 'project'
+    return `#proj-${baseKey.toLowerCase()}`
+  }, [customChannelName, name])
 
   // Preselected Agent Team Summary Text
   const agentTeamSummary = useMemo(() => {
@@ -302,122 +285,59 @@ export function CreateProjectDialog({
   async function handleCreate() {
     const projectName = name.trim()
     if (!projectName) {
-      setError(t('forms.fillRequired', { defaultValue: '请填写项目名称' }))
+      setError(t('forms.fillRequired', { defaultValue: '请填写项目标识 / 代码' }))
+      return
+    }
+
+    const nameRegex = /^[a-zA-Z0-9-_.]+$/
+    if (!nameRegex.test(projectName) || projectName.startsWith('.') || projectName.includes('..')) {
+      setError('项目标识仅支持英文字母、数字、短横线(-)、下划线(_)与点(.)，不可包含中文或空格，且不能以点开头')
+      return
+    }
+    if (projectName.length > 80) {
+      setError('项目标识长度不能超过 80 个字符')
       return
     }
 
     setError(null)
     setSaving(true)
+    setSaveStep(t('projects.creatingProject', { defaultValue: '正在创建项目及配置资源...' }))
 
     try {
-      // 1. Create Core Project Entity (skip if already created in this dialog session)
-      if (!projectCreated) {
-        setSaveStep(t('projects.creatingProject', { defaultValue: '正在创建项目结构...' }))
-        try {
-          await apiPost('/api/v1/projects', {
-            name: projectName,
-            description: description.trim(),
-          })
-          setProjectCreated(true)
-        } catch (err: any) {
-          // If retrying after a previous failure during this session, ignore "already exists" for the project
-          if (
-            err?.code === 'conflict' ||
-            err?.status === 409 ||
-            err?.message?.toLowerCase().includes('already exists') ||
-            err?.message?.toLowerCase().includes('conflict')
-          ) {
-            setProjectCreated(true)
-          } else {
-            throw err
-          }
-        }
+      const cleanChan = effectiveChannelName ? effectiveChannelName.replace(/^#/, '') : ''
+      const channelPayload = (chatopsEnabled && cleanChan) ? {
+        provider: 'mattermost',
+        mode: channelMode,
+        instanceId: selectedInstanceId || undefined,
+        channelName: cleanChan,
+        displayName: effectiveChannelName,
+        visibility: channelVisibility,
+        workerIds: selectedWorkerIds,
+        memberUsernames: selectedUsernames,
+      } : undefined
+
+      const payload = {
+        name: projectName,
+        description: description.trim(),
+        workerIds: selectedWorkerIds,
+        memberUsernames: selectedUsernames,
+        channel: channelPayload,
       }
 
-      // 2. Assign Agent Team Memberships
-      if (selectedWorkerIds.length > 0) {
-        setSaveStep(t('projects.assigningAgents', { defaultValue: '正在配置 Agent Team 成员...' }))
-        for (const workerId of selectedWorkerIds) {
-          const w = workers.find((item) => item.id === workerId)
-          const title = w?.name || workerId
-          const lower = title.toLowerCase()
-          let role = 'member'
-          if (lower.includes('mira') || lower.includes('coder') || lower.includes('dev')) {
-            role = 'developer'
-          } else if (lower.includes('lina') || lower.includes('review')) {
-            role = 'reviewer'
-          }
-
-          try {
-            await apiPost(`/api/v1/projects/${encodeURIComponent(projectName)}/memberships`, {
-              workerId,
-              role,
-              title,
-              autoPickTasks: true,
-              attentionEnabled: true,
-            })
-          } catch (e) {
-            console.warn(`Failed to assign agent ${title} to project:`, e)
-          }
+      const res = await apiPost<{
+        ok: boolean
+        project: string
+        channel?: {
+          status?: string
+          warning?: string
+          failedMembers?: string[]
+          failedAgents?: string[]
+          failedBots?: string[]
         }
-      }
+      }>('/api/v1/projects', payload)
 
-      // 3. Grant Project Access to Selected Workspace Members
-      const otherMembers = selectedUsernames.filter((u) => u !== currentUsername)
-      if (otherMembers.length > 0) {
-        setSaveStep(t('projects.grantingMemberAccess', { defaultValue: '正在同步项目成员权限...' }))
-        for (const u of otherMembers) {
-          try {
-            const userObj = users.find((usr) => usr.username === u)
-            const existingProjects = userObj?.projects ?? []
-            if (!existingProjects.some((p) => p.project === projectName)) {
-              await apiPut(`/api/v1/users/${encodeURIComponent(u)}`, {
-                projects: [...existingProjects, { project: projectName, role: 'member' }],
-              })
-            }
-          } catch (e) {
-            console.warn(`Failed to update project permissions for user ${u}:`, e)
-          }
-        }
-      }
-
-      // 4. Provision ChatOps Channel (if enabled and applicable)
-      if (chatopsEnabled && effectiveChannelName) {
-        setSaveStep(
-          channelMode === 'create'
-            ? t('projects.provisioningChatOps', { defaultValue: '正在自动创建并配置协同频道...' })
-            : t('projects.configuringChatOps', { defaultValue: '正在关联协作频道...' })
-        )
-        const cleanChan = effectiveChannelName.replace(/^#/, '')
-
-        try {
-          const res = await apiPost<{
-            ok: boolean
-            status?: string
-            warning?: string
-            failedMembers?: string[]
-            failedAgents?: string[]
-            failedBots?: string[]
-          }>(
-            `/api/v1/projects/${encodeURIComponent(projectName)}/channels/provision`,
-            {
-              provider: 'mattermost',
-              mode: channelMode,
-              instanceId: selectedInstanceId || undefined,
-              channelName: cleanChan,
-              displayName: effectiveChannelName,
-              visibility: channelVisibility,
-              workerIds: selectedWorkerIds,
-              memberUsernames: selectedUsernames,
-            }
-          )
-          if (res?.status === 'partial' && res.warning) {
-            showToast(res.warning, 'info')
-          }
-        } catch (e) {
-          console.warn('ChatOps channel provisioning error:', e)
-          throw new Error(e instanceof Error ? e.message : String(e))
-        }
+      if (res?.channel?.status === 'partial' && res.channel.warning) {
+        showToast(res.channel.warning, 'info')
       }
 
       onCreated(projectName)
@@ -474,51 +394,46 @@ export function CreateProjectDialog({
           {/* Section 1: Project Basics */}
           <div className="space-y-3">
             <div>
-              <label className="block text-xs font-medium text-neutral-700 dark:text-zinc-300">
-                {t('projects.name', { defaultValue: '项目名称' })} <span className="text-red-500">*</span>
-              </label>
+              <div className="flex items-center justify-between">
+                <label className="block text-xs font-medium text-neutral-700 dark:text-zinc-300">
+                  {t('projects.key', { defaultValue: '项目唯一标识 / 代码 (Key)' })} <span className="text-red-500">*</span>
+                </label>
+                <span className="text-[11px] text-neutral-400 dark:text-zinc-500">
+                  仅支持英文、数字、-、_、. (最多 80 字符)
+                </span>
+              </div>
               <input
                 type="text"
                 autoFocus
                 value={name}
-                onChange={(e) => handleNameChange(e.target.value)}
-                placeholder={t('projects.namePlaceholder', { defaultValue: '例如：订单中心重构' })}
-                className="mt-1 w-full rounded-lg border border-neutral-200 bg-white px-3.5 py-2 text-sm text-neutral-900 outline-none transition placeholder:text-neutral-400 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/15 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+                onChange={(e) => {
+                  setName(e.target.value)
+                  if (error) setError(null)
+                }}
+                placeholder="例如：pilot-change-request 或 orderhub"
+                className="mt-1 w-full rounded-lg border border-neutral-200 bg-white px-3.5 py-2 font-mono text-sm text-neutral-900 outline-none transition placeholder:text-neutral-400 placeholder:font-sans focus:border-sky-500 focus:ring-2 focus:ring-sky-500/15 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
               />
+              {name.trim() && !/^[a-zA-Z0-9-_.]+$/.test(name.trim()) && (
+                <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">
+                  项目标识包含非法字符。请仅使用英文字母、数字、短横线(-)、下划线(_)或点(.)，不可包含中文或空格。
+                </p>
+              )}
             </div>
 
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div>
-                <label className="block text-xs font-medium text-neutral-700 dark:text-zinc-300">
-                  {t('projects.slug', { defaultValue: '项目代码 / 标识' })}
-                </label>
-                <div className="mt-1 flex items-center rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-900 focus-within:border-sky-500 focus-within:ring-2 focus-within:ring-sky-500/15 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100">
-                  <span className="font-mono text-xs text-neutral-400 dark:text-zinc-500 select-none">proj-</span>
-                  <input
-                    type="text"
-                    value={slug}
-                    onChange={(e) => {
-                      setSlugManuallyEdited(true)
-                      setSlug(e.target.value)
-                    }}
-                    placeholder="order-center"
-                    className="min-w-0 flex-1 bg-transparent font-mono text-xs outline-none"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-neutral-700 dark:text-zinc-300">
-                  {t('projects.description', { defaultValue: '项目描述 (选填)' })}
-                </label>
-                <input
-                  type="text"
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  placeholder={t('projects.descPlaceholder', { defaultValue: '简要说明项目目标或业务范围' })}
-                  className="mt-1 w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-xs text-neutral-900 outline-none transition placeholder:text-neutral-400 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/15 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
-                />
-              </div>
+            <div>
+              <label className="block text-xs font-medium text-neutral-700 dark:text-zinc-300">
+                {t('projects.description', { defaultValue: '项目名称 / 描述 (Description)' })}
+              </label>
+              <input
+                type="text"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="例如：变更申请台账 MVP，支持端到端审批与工单协同"
+                className="mt-1 w-full rounded-lg border border-neutral-200 bg-white px-3.5 py-2 text-sm text-neutral-900 outline-none transition placeholder:text-neutral-400 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/15 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+              />
+              <p className="mt-1 text-[11px] text-neutral-400 dark:text-zinc-500">
+                可填写中文业务名称或目标说明，将在项目列表及卡片中展示
+              </p>
             </div>
           </div>
 

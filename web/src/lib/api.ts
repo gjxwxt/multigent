@@ -184,10 +184,15 @@ async function parseAPIError(res: Response): Promise<ApiError> {
 }
 
 function localizedAPIErrorMessage(code: string, fallback: string): string {
+  const trimmed = (fallback || '').trim()
+  const isGeneric = !trimmed || /^\d{3}$/.test(trimmed) || trimmed.toLowerCase() === code.toLowerCase()
+  if (!isGeneric) {
+    return trimmed
+  }
   const key = `apiErrors.${code}`
   const translated = i18n.t(key)
   if (translated && translated !== key) return translated
-  return fallback || i18n.t('apiErrors.unknown')
+  return trimmed || i18n.t('apiErrors.unknown')
 }
 
 function fallbackCodeForStatus(status: number): string {

@@ -70,17 +70,66 @@ func (s *Server) handleProvisionProjectChannel(w http.ResponseWriter, r *http.Re
 
 	var req projectChannelProvisionRequest
 	if err := s.readJSON(w, r, &req); err != nil {
-		s.jsonError(w, http.StatusBadRequest, "invalid JSON body")
+		s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeInvalidJSON, "invalid JSON body")
 		return
 	}
 
+	resp, pErr := s.provisionProjectChannelCore(r.Context(), workspaceID, projectName, req, requestUsername(r))
+	if pErr != nil {
+		if pErr.Code != "" {
+			s.jsonErrorCode(w, pErr.StatusCode, pErr.Code, pErr.Message)
+		} else {
+			s.jsonError(w, pErr.StatusCode, pErr.Message)
+		}
+		return
+	}
+
+	s.auditLog(auditLogInput{
+		WorkspaceID:  workspaceID,
+		Action:       "agent_channel.provisioned",
+		ResourceType: "project",
+		ResourceID:   projectName,
+		Summary:      fmt.Sprintf("Provisioned Mattermost channel %s (%s) for project %s (mode=%s, status=%s)", resp.DisplayName, resp.ChannelID, projectName, req.Mode, resp.Status),
+		After: map[string]any{
+			"channelId":      resp.ChannelID,
+			"channelName":    resp.ChannelName,
+			"displayName":    resp.DisplayName,
+			"type":           resp.Visibility,
+			"mode":           req.Mode,
+			"status":         resp.Status,
+			"teamId":         resp.TeamID,
+			"instanceId":     resp.InstanceID,
+			"boundAgents":    resp.BoundAgents,
+			"failedAgents":   resp.FailedAgents,
+			"failedBots":     resp.FailedBots,
+			"invitedMembers": resp.InvitedMembers,
+			"failedMembers":  resp.FailedMembers,
+			"unboundMembers": resp.UnboundMembers,
+		},
+		Request: r,
+	})
+
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+type channelProvisionError struct {
+	StatusCode int
+	Code       string
+	Message    string
+}
+
+func (e *channelProvisionError) Error() string {
+	return e.Message
+}
+
+func (s *Server) provisionProjectChannelCore(ctx context.Context, workspaceID, projectName string, req projectChannelProvisionRequest, actorUsername string) (*projectChannelProvisionResponse, *channelProvisionError) {
 	provider := strings.TrimSpace(req.Provider)
 	if provider == "" {
 		provider = "mattermost"
 	}
 	if provider != "mattermost" {
-		s.jsonError(w, http.StatusBadRequest, fmt.Sprintf("unsupported channel provisioning provider %q", provider))
-		return
+		return nil, &channelProvisionError{StatusCode: http.StatusBadRequest, Message: fmt.Sprintf("unsupported channel provisioning provider %q", provider)}
 	}
 
 	mode := strings.ToLower(strings.TrimSpace(req.Mode))
@@ -88,8 +137,7 @@ func (s *Server) handleProvisionProjectChannel(w http.ResponseWriter, r *http.Re
 		mode = "create"
 	}
 	if mode != "create" && mode != "link" {
-		s.jsonError(w, http.StatusBadRequest, fmt.Sprintf("invalid channel mode %q: must be 'create' or 'link'", req.Mode))
-		return
+		return nil, &channelProvisionError{StatusCode: http.StatusBadRequest, Message: fmt.Sprintf("invalid channel mode %q: must be 'create' or 'link'", req.Mode)}
 	}
 
 	// 1. Resolve active Mattermost connection strictly scoped to instance / workspace
@@ -99,8 +147,7 @@ func (s *Server) handleProvisionProjectChannel(w http.ResponseWriter, r *http.Re
 		Status:      "active",
 	})
 	if err != nil {
-		s.serverError(w, err)
-		return
+		return nil, &channelProvisionError{StatusCode: http.StatusInternalServerError, Message: err.Error()}
 	}
 
 	var targetConn controldb.Connection
@@ -109,24 +156,19 @@ func (s *Server) handleProvisionProjectChannel(w http.ResponseWriter, r *http.Re
 	if connID := strings.TrimSpace(req.ConnectionID); connID != "" {
 		conn, found, err := s.controlDB.ConnectionByID(connID)
 		if err != nil {
-			s.serverError(w, err)
-			return
+			return nil, &channelProvisionError{StatusCode: http.StatusInternalServerError, Message: err.Error()}
 		}
 		if !found {
-			s.jsonError(w, http.StatusBadRequest, "specified connection not found")
-			return
+			return nil, &channelProvisionError{StatusCode: http.StatusBadRequest, Message: "specified connection not found"}
 		}
 		if conn.WorkspaceID != workspaceID || conn.Provider != provider {
-			s.jsonError(w, http.StatusBadRequest, "specified connection does not belong to workspace or provider mismatch")
-			return
+			return nil, &channelProvisionError{StatusCode: http.StatusBadRequest, Message: "specified connection does not belong to workspace or provider mismatch"}
 		}
 		if conn.Status != "active" {
-			s.jsonError(w, http.StatusBadRequest, "specified connection is not active")
-			return
+			return nil, &channelProvisionError{StatusCode: http.StatusBadRequest, Message: "specified connection is not active"}
 		}
 		if instID := strings.TrimSpace(req.InstanceID); instID != "" && conn.IMInstanceID != instID {
-			s.jsonError(w, http.StatusBadRequest, "specified connection does not match requested instanceId")
-			return
+			return nil, &channelProvisionError{StatusCode: http.StatusBadRequest, Message: "specified connection does not match requested instanceId"}
 		}
 		targetConn = conn
 		foundConn = true
@@ -141,8 +183,7 @@ func (s *Server) handleProvisionProjectChannel(w http.ResponseWriter, r *http.Re
 			}
 		}
 		if !foundConn {
-			s.jsonError(w, http.StatusBadRequest, fmt.Sprintf("no active connection found for instance %q", req.InstanceID))
-			return
+			return nil, &channelProvisionError{StatusCode: http.StatusBadRequest, Message: fmt.Sprintf("no active connection found for instance %q", req.InstanceID)}
 		}
 	}
 
@@ -155,8 +196,7 @@ func (s *Server) handleProvisionProjectChannel(w http.ResponseWriter, r *http.Re
 			}
 		}
 		if len(distinctInstances) > 1 {
-			s.jsonError(w, http.StatusBadRequest, "multiple IM instances found in workspace; please specify instanceId")
-			return
+			return nil, &channelProvisionError{StatusCode: http.StatusBadRequest, Message: "multiple IM instances found in workspace; please specify instanceId"}
 		}
 		if len(activeConns) > 0 {
 			targetConn = activeConns[0]
@@ -165,8 +205,7 @@ func (s *Server) handleProvisionProjectChannel(w http.ResponseWriter, r *http.Re
 	}
 
 	if !foundConn {
-		s.jsonError(w, http.StatusBadRequest, "no active Mattermost connection found in workspace")
-		return
+		return nil, &channelProvisionError{StatusCode: http.StatusBadRequest, Message: "no active Mattermost connection found in workspace"}
 	}
 
 	imInstanceID := targetConn.IMInstanceID
@@ -174,29 +213,25 @@ func (s *Server) handleProvisionProjectChannel(w http.ResponseWriter, r *http.Re
 	// 2. Open credentials
 	secret, found, err := s.controlDB.ConnectionSecret(targetConn.ID)
 	if err != nil {
-		s.serverError(w, err)
-		return
+		return nil, &channelProvisionError{StatusCode: http.StatusInternalServerError, Message: err.Error()}
 	}
 	if !found {
-		s.jsonError(w, http.StatusBadRequest, "connection credentials secret not found")
-		return
+		return nil, &channelProvisionError{StatusCode: http.StatusBadRequest, Message: "connection credentials secret not found"}
 	}
 
 	secValues, err := openConnectionSecret(secret)
 	if err != nil {
-		s.serverError(w, err)
-		return
+		return nil, &channelProvisionError{StatusCode: http.StatusInternalServerError, Message: err.Error()}
 	}
 
 	baseURL := strings.TrimRight(strings.TrimSpace(secValues["baseUrl"]), "/")
 	botToken := strings.TrimSpace(secValues["botToken"])
 	if baseURL == "" || botToken == "" {
-		s.jsonError(w, http.StatusBadRequest, "Mattermost server URL or bot token not configured")
-		return
+		return nil, &channelProvisionError{StatusCode: http.StatusBadRequest, Message: "Mattermost server URL or bot token not configured"}
 	}
 
 	client := imbridge.NewMattermostClient(baseURL, botToken, nil)
-	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
 
 	// 3. Resolve Mattermost team deterministically (no arbitrary teams[0] blind-guess)
@@ -215,18 +250,15 @@ func (s *Server) handleProvisionProjectChannel(w http.ResponseWriter, r *http.Re
 	if teamID == "" {
 		teams, err := client.GetMyTeams(ctx)
 		if err != nil {
-			s.jsonError(w, http.StatusBadGateway, fmt.Sprintf("failed to get Mattermost teams: %v", err))
-			return
+			return nil, &channelProvisionError{StatusCode: http.StatusBadGateway, Message: fmt.Sprintf("failed to get Mattermost teams: %v", err)}
 		}
 		if len(teams) == 0 {
-			s.jsonError(w, http.StatusBadRequest, "Mattermost bot user has not joined any team")
-			return
+			return nil, &channelProvisionError{StatusCode: http.StatusBadRequest, Message: "Mattermost bot user has not joined any team"}
 		}
 		if len(teams) == 1 {
 			teamID = teams[0].ID
 		} else {
-			s.jsonError(w, http.StatusBadRequest, "Bot belongs to multiple Mattermost teams; please specify teamId")
-			return
+			return nil, &channelProvisionError{StatusCode: http.StatusBadRequest, Message: "Bot belongs to multiple Mattermost teams; please specify teamId"}
 		}
 	}
 
@@ -253,11 +285,9 @@ func (s *Server) handleProvisionProjectChannel(w http.ResponseWriter, r *http.Re
 		existing, err := client.GetChannelByName(ctx, teamID, cleanName)
 		if err != nil {
 			if errors.Is(err, imbridge.ErrChannelNotFound) {
-				s.jsonErrorCode(w, http.StatusNotFound, "channel_not_found", fmt.Sprintf("要关联的 Mattermost 频道 %q 不存在，请检查频道名称或切换为自动创建频道", cleanName))
-				return
+				return nil, &channelProvisionError{StatusCode: http.StatusNotFound, Code: "channel_not_found", Message: fmt.Sprintf("要关联的 Mattermost 频道 %q 不存在，请检查频道名称或切换为自动创建频道", cleanName)}
 			}
-			s.jsonError(w, http.StatusBadGateway, fmt.Sprintf("failed to get Mattermost channel %q: %v", cleanName, err))
-			return
+			return nil, &channelProvisionError{StatusCode: http.StatusBadGateway, Message: fmt.Sprintf("failed to get Mattermost channel %q: %v", cleanName, err)}
 		}
 		mmChan = existing
 	} else {
@@ -278,12 +308,10 @@ func (s *Server) handleProvisionProjectChannel(w http.ResponseWriter, r *http.Re
 					}
 				}
 				if mmChan == nil {
-					s.jsonErrorCode(w, http.StatusConflict, "channel_already_exists", fmt.Sprintf("Mattermost 频道 %q 已存在。如需复用已有频道请切换为“关联已有频道(link)”，或更改新频道名称。", cleanName))
-					return
+					return nil, &channelProvisionError{StatusCode: http.StatusConflict, Code: "channel_already_exists", Message: fmt.Sprintf("Mattermost 频道 %q 已存在。如需复用已有频道请切换为“关联已有频道(link)”，或更改新频道名称。", cleanName)}
 				}
 			} else {
-				s.jsonError(w, http.StatusBadGateway, fmt.Sprintf("failed to create Mattermost channel: %v", err))
-				return
+				return nil, &channelProvisionError{StatusCode: http.StatusBadGateway, Message: fmt.Sprintf("failed to create Mattermost channel: %v", err)}
 			}
 		} else {
 			mmChan = created
@@ -396,7 +424,7 @@ func (s *Server) handleProvisionProjectChannel(w http.ResponseWriter, r *http.Re
 		DisplayName:  mmChan.DisplayName,
 		Visibility:   req.Visibility,
 		Status:       "active",
-		CreatedBy:    requestUsername(r),
+		CreatedBy:    actorUsername,
 		CreatedAt:    nowStr,
 		UpdatedAt:    nowStr,
 	}
@@ -512,7 +540,7 @@ func (s *Server) handleProvisionProjectChannel(w http.ResponseWriter, r *http.Re
 			ExternalBotID:  agentBotID,
 			ExternalChatID: mmChan.ID,
 			Status:         bindingStatus,
-			CreatedBy:      requestUsername(r),
+			CreatedBy:      actorUsername,
 			CreatedAt:      createdAt,
 			UpdatedAt:      nowStr,
 			LastActivityAt: nowStr,
@@ -549,7 +577,7 @@ func (s *Server) handleProvisionProjectChannel(w http.ResponseWriter, r *http.Re
 			TargetType:       "chat",
 			DisplayName:      mmChan.DisplayName,
 			ExternalChatID:   mmChan.ID,
-			CreatedBy:        requestUsername(r),
+			CreatedBy:        actorUsername,
 			CreatedAt:        createdAt,
 			UpdatedAt:        nowStr,
 			LastActivityAt:   nowStr,
@@ -584,33 +612,7 @@ func (s *Server) handleProvisionProjectChannel(w http.ResponseWriter, r *http.Re
 		warningMsg = strings.Join(warnings, "；")
 	}
 
-	s.auditLog(auditLogInput{
-		WorkspaceID:  workspaceID,
-		Action:       "agent_channel.provisioned",
-		ResourceType: "project",
-		ResourceID:   projectName,
-		Summary:      fmt.Sprintf("Provisioned Mattermost channel %s (%s) for project %s (mode=%s, status=%s)", mmChan.DisplayName, mmChan.ID, projectName, mode, statusStr),
-		After: map[string]any{
-			"channelId":      mmChan.ID,
-			"channelName":    mmChan.Name,
-			"displayName":    mmChan.DisplayName,
-			"type":           mmChan.Type,
-			"mode":           mode,
-			"status":         statusStr,
-			"teamId":         teamID,
-			"instanceId":     imInstanceID,
-			"boundAgents":    boundAgents,
-			"failedAgents":   failedAgents,
-			"failedBots":     failedBots,
-			"invitedMembers": invitedMembers,
-			"failedMembers":  failedMembers,
-			"unboundMembers": unboundMembers,
-		},
-		Request: r,
-	})
-
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(projectChannelProvisionResponse{
+	return &projectChannelProvisionResponse{
 		OK:             true,
 		Status:         statusStr,
 		Provider:       provider,
@@ -627,7 +629,7 @@ func (s *Server) handleProvisionProjectChannel(w http.ResponseWriter, r *http.Re
 		FailedMembers:  failedMembers,
 		UnboundMembers: unboundMembers,
 		Warning:        warningMsg,
-	})
+	}, nil
 }
 
 type projectChannelListItem struct {

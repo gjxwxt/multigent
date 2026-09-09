@@ -89,6 +89,11 @@ func (db *SQLiteStore) DeleteProjectMembership(workspaceID, id string) error {
 	return err
 }
 
+func (db *SQLiteStore) DeleteProjectMembershipsByProject(workspaceID, projectID string) error {
+	_, err := db.sql.Exec(`DELETE FROM project_memberships WHERE workspace_id = ? AND project_id = ?`, strings.TrimSpace(workspaceID), strings.TrimSpace(projectID))
+	return err
+}
+
 type projectMembershipScanner interface {
 	Scan(dest ...any) error
 }
