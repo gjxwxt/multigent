@@ -366,6 +366,12 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 	}
 
 	callbackBaseURL := os.Getenv("CHATOPS_CALLBACK_BASE_URL")
+	if callbackBaseURL == "" {
+		callbackBaseURL = os.Getenv("MULTIGENT_PUBLIC_URL")
+	}
+	if callbackBaseURL == "" {
+		callbackBaseURL = os.Getenv("MULTIGENT_CONSOLE_URL")
+	}
 	if strings.TrimSpace(callbackBaseURL) == "" {
 		writeMattermostEphemeral(w, "系统未配置 CHATOPS_CALLBACK_BASE_URL，无法打开审批弹窗。")
 		return

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -90,6 +91,8 @@ func TestWorkflowTaskThreadProjection_Integration(t *testing.T) {
 	}
 	_ = s.ts.AddTask("sample", "Mira", task)
 
+	t.Setenv("CHATOPS_CALLBACK_BASE_URL", "http://192.168.139.231:27892")
+
 	// 1. Trigger workflow start notification
 	s.notifyTaskThreadStarted(workspaceID, "sample", task, "unified-delivery-pipeline")
 
@@ -101,6 +104,11 @@ func TestWorkflowTaskThreadProjection_Integration(t *testing.T) {
 	}
 	if receivedPosts[0]["channel_id"] != "chan-task-chat-1" {
 		t.Fatalf("expected channel_id chan-task-chat-1, got %v", receivedPosts[0]["channel_id"])
+	}
+	msg, _ := receivedPosts[0]["message"].(string)
+	expectedURL := "http://192.168.139.231:27892/projects/sample/tasks/task-flow-1"
+	if !strings.Contains(msg, expectedURL) {
+		t.Fatalf("expected root post message to contain %s, got: %s", expectedURL, msg)
 	}
 
 	// 2. Verify active projection saved in DB

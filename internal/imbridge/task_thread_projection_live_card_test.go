@@ -221,3 +221,45 @@ func TestTaskThreadProjectionService_LiveCardPatchE2E(t *testing.T) {
 		t.Errorf("expected final message to show completed badge, got: %s", lastPatchedMessage)
 	}
 }
+
+func TestLiveCard_ConsoleURLResolution(t *testing.T) {
+	req := LiveCardUpdateRequest{
+		WorkspaceID: "ws-1",
+		ProjectID:   "order",
+		TaskID:      "t-123456",
+		TaskTitle:   "测试订单微服务",
+		ConsoleURL:  "/projects/order/tasks/t-123456",
+	}
+
+	// 1. With CHATOPS_CALLBACK_BASE_URL set
+	t.Setenv("CHATOPS_CALLBACK_BASE_URL", "http://192.168.139.231:27892")
+	t.Setenv("MULTIGENT_CONSOLE_URL", "")
+	t.Setenv("MULTIGENT_PUBLIC_URL", "")
+
+	content := FormatLiveCardContent(req)
+	expectedLink := "[🔗 在 Multigent 控制台查看详情](http://192.168.139.231:27892/projects/order/tasks/t-123456)"
+	if !strings.Contains(content, expectedLink) {
+		t.Fatalf("expected live card content to contain %q, got:\n%s", expectedLink, content)
+	}
+
+	// 2. With MULTIGENT_CONSOLE_URL overriding CHATOPS_CALLBACK_BASE_URL
+	t.Setenv("MULTIGENT_CONSOLE_URL", "http://console.example.com")
+	content = FormatLiveCardContent(req)
+	expectedOverride := "[🔗 在 Multigent 控制台查看详情](http://console.example.com/projects/order/tasks/t-123456)"
+	if !strings.Contains(content, expectedOverride) {
+		t.Fatalf("expected live card content to contain %q, got:\n%s", expectedOverride, content)
+	}
+
+	// 3. With already absolute URL
+	reqAbsolute := LiveCardUpdateRequest{
+		WorkspaceID: "ws-1",
+		ProjectID:   "order",
+		TaskID:      "t-123456",
+		ConsoleURL:  "http://custom-host:9999/projects/order/tasks/t-123456",
+	}
+	content = FormatLiveCardContent(reqAbsolute)
+	expectedAbs := "[🔗 在 Multigent 控制台查看详情](http://custom-host:9999/projects/order/tasks/t-123456)"
+	if !strings.Contains(content, expectedAbs) {
+		t.Fatalf("expected live card content to contain %q, got:\n%s", expectedAbs, content)
+	}
+}

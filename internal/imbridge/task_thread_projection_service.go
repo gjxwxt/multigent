@@ -240,6 +240,12 @@ func (s *TaskThreadProjectionService) PostHumanReviewCard(ctx context.Context, r
 
 	callbackURL := req.CallbackBaseURL
 	if callbackURL == "" {
+		callbackURL = os.Getenv("MULTIGENT_CONSOLE_URL")
+	}
+	if callbackURL == "" {
+		callbackURL = os.Getenv("MULTIGENT_PUBLIC_URL")
+	}
+	if callbackURL == "" {
 		callbackURL = os.Getenv("CHATOPS_CALLBACK_BASE_URL")
 	}
 	if strings.TrimSpace(callbackURL) == "" {

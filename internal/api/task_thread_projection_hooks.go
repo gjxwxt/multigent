@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -11,6 +12,36 @@ import (
 	"github.com/multigent/multigent/internal/imbridge"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
+
+func (s *Server) consoleBaseURL() string {
+	if s != nil {
+		if v := strings.TrimSpace(os.Getenv("MULTIGENT_CONSOLE_URL")); v != "" {
+			return strings.TrimRight(v, "/")
+		}
+		if v := strings.TrimSpace(os.Getenv("MULTIGENT_PUBLIC_URL")); v != "" {
+			return strings.TrimRight(v, "/")
+		}
+		if v := strings.TrimSpace(os.Getenv("CHATOPS_CALLBACK_BASE_URL")); v != "" {
+			return strings.TrimRight(v, "/")
+		}
+		if strings.TrimSpace(s.localRuntimeAPIURL) != "" {
+			return strings.TrimRight(s.localRuntimeAPIURL, "/")
+		}
+		if v := strings.TrimSpace(os.Getenv("MULTIGENT_API_URL")); v != "" {
+			return strings.TrimRight(v, "/")
+		}
+	}
+	return ""
+}
+
+func (s *Server) taskConsoleURL(project, taskID string) string {
+	path := fmt.Sprintf("/projects/%s/tasks/%s", project, taskID)
+	base := s.consoleBaseURL()
+	if base == "" {
+		return path
+	}
+	return fmt.Sprintf("%s%s", base, path)
+}
 
 func (s *Server) notifyTaskThreadStarted(workspaceID, project string, t *entity.Task, workflowID string) {
 	if s == nil || s.threadProjections == nil || t == nil {
@@ -42,7 +73,7 @@ func (s *Server) notifyTaskThreadStarted(workspaceID, project string, t *entity.
 			}
 		}
 
-		consoleURL := fmt.Sprintf("/projects/%s/tasks/%s", project, t.ID)
+		consoleURL := s.taskConsoleURL(project, t.ID)
 
 		_, err := s.threadProjections.EnsureTaskRootPost(ctx, imbridge.TaskRootPostRequest{
 			WorkspaceID: workspaceID,
@@ -71,13 +102,14 @@ func (s *Server) notifyTaskThreadStarted(workspaceID, project string, t *entity.
 						preview, err := wfStore.GetReviewResolutionPreview(project, t, firstStep.ID)
 						if err == nil {
 							_, postErr := s.threadProjections.PostHumanReviewCard(ctx, imbridge.HumanReviewPostRequest{
-								WorkspaceID: workspaceID,
-								ProjectID:   project,
-								TaskID:      t.ID,
-								StepID:      firstStep.ID,
-								StepTitle:   firstStep.Title,
-								Assignee:    firstStep.Title,
-								Preview:     preview,
+								WorkspaceID:     workspaceID,
+								ProjectID:       project,
+								TaskID:          t.ID,
+								StepID:          firstStep.ID,
+								StepTitle:       firstStep.Title,
+								Assignee:        firstStep.Title,
+								Preview:         preview,
+								CallbackBaseURL: s.consoleBaseURL(),
 							})
 							if postErr != nil {
 								log.Printf("[task-thread-proj] post initial human review card failed for %s/%s: %v", project, t.ID, postErr)
@@ -141,7 +173,7 @@ func (s *Server) notifyTaskThreadStepTransition(workspaceID, project string, t *
 			elapsedSec = int(time.Since(t.CreatedAt).Seconds())
 		}
 
-		consoleURL := fmt.Sprintf("/projects/%s/tasks/%s", project, t.ID)
+		consoleURL := s.taskConsoleURL(project, t.ID)
 
 		// Extract Quality Summary if present in step outputs or status
 		var qualitySummary string
@@ -210,13 +242,14 @@ func (s *Server) notifyTaskThreadStepTransition(workspaceID, project string, t *
 				preview, err := wfStore.GetReviewResolutionPreview(project, t, transition.Next.ID)
 				if err == nil {
 					_, postErr := s.threadProjections.PostHumanReviewCard(ctx, imbridge.HumanReviewPostRequest{
-						WorkspaceID: workspaceID,
-						ProjectID:   project,
-						TaskID:      t.ID,
-						StepID:      transition.Next.ID,
-						StepTitle:   transition.Next.Title,
-						Assignee:    transition.Next.Title,
-						Preview:     preview,
+						WorkspaceID:     workspaceID,
+						ProjectID:       project,
+						TaskID:          t.ID,
+						StepID:          transition.Next.ID,
+						StepTitle:       transition.Next.Title,
+						Assignee:        transition.Next.Title,
+						Preview:         preview,
+						CallbackBaseURL: s.consoleBaseURL(),
 					})
 					if postErr != nil {
 						log.Printf("[task-thread-proj] post human review card error for %s/%s: %v", project, t.ID, postErr)

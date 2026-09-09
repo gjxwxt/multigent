@@ -3,6 +3,8 @@ package imbridge
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -175,7 +177,20 @@ func FormatLiveCardContent(req LiveCardUpdateRequest) string {
 
 	content += "\n---\n*💡 本卡片为实时任务看板（原地自动刷新），关键决策与里程碑将在本 Thread 持续沉淀。*"
 	if req.ConsoleURL != "" {
-		content += fmt.Sprintf(" [🔗 在 Multigent 控制台查看详情](%s)", req.ConsoleURL)
+		targetURL := req.ConsoleURL
+		if strings.HasPrefix(targetURL, "/") {
+			base := os.Getenv("MULTIGENT_CONSOLE_URL")
+			if base == "" {
+				base = os.Getenv("MULTIGENT_PUBLIC_URL")
+			}
+			if base == "" {
+				base = os.Getenv("CHATOPS_CALLBACK_BASE_URL")
+			}
+			if base != "" {
+				targetURL = strings.TrimRight(base, "/") + targetURL
+			}
+		}
+		content += fmt.Sprintf(" [🔗 在 Multigent 控制台查看详情](%s)", targetURL)
 	}
 	return content
 }
