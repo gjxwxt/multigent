@@ -24,6 +24,32 @@ func TestNormalizeWorkflowOutputValuesRequiresStructuredOutputs(t *testing.T) {
 	}
 }
 
+func TestNormalizeWorkflowOutputValuesAllowsDesignAuditFieldsForPersistedOldGate(t *testing.T) {
+	step := entity.WorkflowStep{
+		ID:    "design_review",
+		Title: "设计确认",
+		Config: map[string]string{
+			"designGate": "true",
+		},
+		OutputFields: []entity.WorkflowField{
+			{Name: "decision"},
+			{Name: "comments"},
+		},
+	}
+	values, err := normalizeWorkflowOutputValues(step, map[string]string{
+		"decision":             "approve",
+		"comments":             "approved with explicit waiver",
+		"design_waiver_reason": "legacy persisted gate has no OpenDesign reference",
+		"design_waived":        "true",
+	}, "", "", false)
+	if err != nil {
+		t.Fatalf("design audit compatibility fields should be accepted: %v", err)
+	}
+	if values["design_waived"] != "true" {
+		t.Fatalf("design_waived = %q", values["design_waived"])
+	}
+}
+
 func TestNormalizeWorkflowOutputValuesSkipsRequiredCheckForOptionalFields(t *testing.T) {
 	step := entity.WorkflowStep{
 		Title: "人工代码审核",
