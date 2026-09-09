@@ -4,6 +4,7 @@
 package entity
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -711,6 +712,38 @@ type Task struct {
 	DesignSystemID  string `yaml:"design_system_id,omitempty" json:"designSystemId,omitempty"`
 
 	Vars map[string]string `yaml:"vars,omitempty"`
+}
+
+// UnmarshalJSON accepts legacy task records that persisted nil time pointers
+// as empty strings instead of JSON null. Those records are still valid tasks;
+// an empty optional timestamp means the pointer should remain nil.
+func (t *Task) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	for _, key := range []string{
+		"StartedAt", "startedAt",
+		"FinishedAt", "finishedAt",
+		"ArchivedAt", "archivedAt",
+		"DueDate", "dueDate",
+		"NotBefore", "notBefore",
+	} {
+		if value, ok := raw[key]; ok && string(value) == `""` {
+			raw[key] = json.RawMessage("null")
+		}
+	}
+	normalized, err := json.Marshal(raw)
+	if err != nil {
+		return err
+	}
+	type taskAlias Task
+	var decoded taskAlias
+	if err := json.Unmarshal(normalized, &decoded); err != nil {
+		return err
+	}
+	*t = Task(decoded)
+	return nil
 }
 
 // NewTaskID generates a sortable unique task ID.
