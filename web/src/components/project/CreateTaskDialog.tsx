@@ -206,19 +206,14 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
 
   const workflowActorSlots = useMemo(() => {
     const steps = selectedWorkflow?.steps ?? []
-    const byRole = new Map<string, { role: string; preferredType: 'agent' | 'human'; titles: string[] }>()
+    const slots: { key: string; role: string; preferredType: 'agent' | 'human'; titles: string[] }[] = []
     function addStep(step: WorkflowStepOpt, titlePrefix = '') {
       const role = step.actorRole?.trim()
       if (!role) return
       const preferredType = step.type === 'human_review' ? 'human' : 'agent'
       const title = titlePrefix ? `${titlePrefix} / ${step.title}` : step.title
-      const existing = byRole.get(role)
-      if (existing) {
-        existing.titles.push(title)
-        if (preferredType === 'human') existing.preferredType = 'human'
-      } else {
-        byRole.set(role, { role, preferredType, titles: [title] })
-      }
+      const key = step.id?.trim() || role
+      slots.push({ key, role, preferredType, titles: [title] })
     }
     for (const step of steps) {
       if (step.type === 'parallel_stage') {
@@ -231,18 +226,13 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
           }
           const role = (branch.actorRole || branch.id).trim()
           if (!role) continue
-          const existing = byRole.get(role)
-          if (existing) {
-            existing.titles.push(branchTitle)
-          } else {
-            byRole.set(role, { role, preferredType: 'agent', titles: [branchTitle] })
-          }
+          slots.push({ key: branch.id.trim() || role, role, preferredType: 'agent', titles: [branchTitle] })
         }
         continue
       }
       addStep(step)
     }
-    return Array.from(byRole.values())
+    return slots
   }, [selectedWorkflow])
 
   function requiredMessage() {
@@ -298,7 +288,7 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
     }
     if (workflowDefinitionId && missingWorkflowActors.length > 0) {
       for (const slot of missingWorkflowActors) {
-        nextFieldErrors[`actor:${slot.role}`] = required
+        nextFieldErrors[`actor:${slot.key}`] = required
       }
       setErr(t('workflows.actorBindingsRequired'))
       setFieldErrors(nextFieldErrors)
@@ -379,8 +369,10 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
     const next: Record<string, ActorBinding> = {}
     function addRole(step: WorkflowStepOpt) {
       const role = step.actorRole?.trim()
-      if (!role || next[role]) return
-      next[role] = autoBindingFor(role, step.type === 'human_review' ? 'human' : 'agent')
+      if (!role) return
+      const key = step.id?.trim() || role
+      if (next[key]) return
+      next[key] = autoBindingFor(role, step.type === 'human_review' ? 'human' : 'agent')
     }
     for (const step of workflow?.steps ?? []) {
       if (step.type === 'parallel_stage') {
@@ -391,8 +383,9 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
             continue
           }
           const role = (branch.actorRole || branch.id).trim()
-          if (!role || next[role]) continue
-          next[role] = autoBindingFor(role, 'agent')
+          const key = branch.id.trim() || role
+          if (!role || next[key]) continue
+          next[key] = autoBindingFor(role, 'agent')
         }
         continue
       }
@@ -459,7 +452,8 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
     })
   }
 
-  const missingWorkflowActors = workflowActorSlots.filter((slot) => !actorBindings[slot.role]?.id.trim())
+  const bindingForSlot = (slot: { key: string; role: string }) => actorBindings[slot.key] ?? actorBindings[slot.role]
+  const missingWorkflowActors = workflowActorSlots.filter((slot) => !bindingForSlot(slot)?.id.trim())
 
   return (
     <>
@@ -729,14 +723,14 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
                   </div>
                   <div className="mt-3 space-y-2">
                     {workflowActorSlots.map((slot) => {
-                      const binding = actorBindings[slot.role] ?? { type: slot.preferredType, id: '' }
+                      const binding = bindingForSlot(slot) ?? { type: slot.preferredType, id: '' }
                       const options = binding.type === 'agent' ? currentAgentActors.map((a) => ({ id: a.name, label: a.name })) : humanAssignees
                       return (
                         <div
-                          key={slot.role}
+                          key={slot.key}
                           className={cn(
                             'rounded-md border bg-white p-2 dark:bg-zinc-900',
-                            fieldErrors[`actor:${slot.role}`]
+                            fieldErrors[`actor:${slot.key}`]
                               ? 'border-red-400 dark:border-red-500/70'
                               : 'border-neutral-200 dark:border-zinc-700',
                           )}
@@ -748,18 +742,18 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
                             </div>
                           </div>
                           <div className="mt-2 grid grid-cols-[96px_minmax(0,1fr)] gap-2">
-                            <select value={binding.type} onChange={(e) => updateActorBinding(slot.role, { type: e.target.value as 'agent' | 'human' })} className={fieldCls}>
+                            <select value={binding.type} onChange={(e) => updateActorBinding(slot.key, { type: e.target.value as 'agent' | 'human' })} className={fieldCls}>
                               <option value="agent">{t('workflows.actorTypeAgent')}</option>
                               <option value="human">{t('workflows.actorTypeHuman')}</option>
                             </select>
-                            <select value={binding.id} onChange={(e) => updateActorBinding(slot.role, { id: e.target.value })} className={fieldCls}>
+                            <select value={binding.id} onChange={(e) => updateActorBinding(slot.key, { id: e.target.value })} className={fieldCls}>
                               <option value="">{t('workflows.selectActor')}</option>
                               {options.map((option) => (
                                 <option key={option.id} value={option.id}>{option.label}</option>
                               ))}
                             </select>
                           </div>
-                          {fieldError(`actor:${slot.role}`)}
+                          {fieldError(`actor:${slot.key}`)}
                         </div>
                       )
                     })}

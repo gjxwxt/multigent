@@ -411,7 +411,7 @@ func workflowStartActor(def entity.WorkflowDefinition, bindings map[string]entit
 			ActorType: "",
 			ActorID:   "",
 		}
-		if binding, ok := bindings[def.Steps[i].ActorRole]; ok {
+		if binding, ok := workflowActorBindingForStep(bindings, def.Steps[i]); ok {
 			inst.ActorType = strings.TrimSpace(binding.Type)
 			inst.ActorID = strings.TrimSpace(binding.ID)
 		}
@@ -476,23 +476,76 @@ func (s *Server) defaultWorkflowActorBindings(workspaceID, project, taskAgent st
 		if role == "" {
 			continue
 		}
-		if _, ok := out[role]; ok {
+		bindingKey := workflowActorBindingKey(step)
+		if _, ok := out[bindingKey]; ok {
 			continue
 		}
 		if step.Type == "parallel_stage" {
 			continue
 		}
+		// Migrate legacy role-keyed input to the step key when the actor type
+		// matches this step. Do not copy an agent binding onto a human gate (or
+		// vice versa): the same role name may legitimately be reused by both.
+		if legacy, ok := out[role]; ok {
+			wantType := "agent"
+			if step.Type == "human_review" {
+				wantType = "human"
+			}
+			if strings.EqualFold(strings.TrimSpace(legacy.Type), wantType) {
+				out[bindingKey] = legacy
+				continue
+			}
+		}
 		if step.Type == "human_review" {
 			if h := humanForRole(); h != "" {
-				out[role] = entity.WorkflowActorBinding{Type: "human", ID: h}
+				out[bindingKey] = entity.WorkflowActorBinding{Type: "human", ID: h}
 			}
 			continue
 		}
 		if a := agentForRole(role); a != "" {
-			out[role] = entity.WorkflowActorBinding{Type: "agent", ID: a}
+			out[bindingKey] = entity.WorkflowActorBinding{Type: "agent", ID: a}
 		}
 	}
 	return out
+}
+
+// workflowActorBindingKey keeps actor assignment independent for each step.
+// Older clients and saved task templates may still send role-keyed bindings;
+// workflowActorBindingForStep below preserves that format as a fallback.
+func workflowActorBindingKey(step entity.WorkflowStep) string {
+	if id := strings.TrimSpace(step.ID); id != "" {
+		return id
+	}
+	return strings.TrimSpace(step.ActorRole)
+}
+
+func workflowActorBindingForStep(bindings map[string]entity.WorkflowActorBinding, step entity.WorkflowStep) (entity.WorkflowActorBinding, bool) {
+	for _, key := range []string{workflowActorBindingKey(step), strings.TrimSpace(step.ActorRole)} {
+		if key == "" {
+			continue
+		}
+		if binding, ok := bindings[key]; ok {
+			return binding, true
+		}
+	}
+	if strings.TrimSpace(step.ActorRole) == "" && strings.TrimSpace(step.Type) == "human_review" {
+		var fallback entity.WorkflowActorBinding
+		found := false
+		for _, binding := range bindings {
+			if strings.TrimSpace(binding.Type) != "human" || strings.TrimSpace(binding.ID) == "" {
+				continue
+			}
+			if found {
+				return entity.WorkflowActorBinding{}, false
+			}
+			fallback = binding
+			found = true
+		}
+		if found {
+			return fallback, true
+		}
+	}
+	return entity.WorkflowActorBinding{}, false
 }
 
 type taskActionBody struct {
