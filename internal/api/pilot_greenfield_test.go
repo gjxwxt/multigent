@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -337,5 +338,37 @@ func TestPilotGreenfieldDeliveryPipelineFullLifecycle(t *testing.T) {
 	})
 	if err != nil || len(bindings) != 0 {
 		t.Fatalf("expected 0 agent bindings, got %d, err=%v", len(bindings), err)
+	}
+}
+
+func TestValidateQASignoffGate_AliasFormat(t *testing.T) {
+	matrixAliasJSON := `{"matrix":[
+		{"id":"A1","risk_level":"HIGH","coverage_status":"covered","acceptance_item":"Create key","test_evidence":["ApiKeyControllerTest"]},
+		{"id":"A2","risk_level":"HIGH","coverage_status":"covered","acceptance_item":"List keys","test_evidence":["ApiKeyServiceTest"]}
+	]}`
+
+	var items []qaRiskItem
+	var wrapper struct {
+		Items  []qaRiskItem `json:"items"`
+		Matrix []qaRiskItem `json:"matrix"`
+	}
+	if err := json.Unmarshal([]byte(matrixAliasJSON), &wrapper); err != nil {
+		t.Fatalf("unmarshal wrapper: %v", err)
+	}
+	items = wrapper.Matrix
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(items))
+	}
+	if items[0].ItemID != "A1" {
+		t.Errorf("expected ItemID A1, got %q", items[0].ItemID)
+	}
+	if items[0].Status != "passed" {
+		t.Errorf("expected Status passed, got %q", items[0].Status)
+	}
+	if items[0].AcceptanceCriteria != "Create key" {
+		t.Errorf("expected AcceptanceCriteria 'Create key', got %q", items[0].AcceptanceCriteria)
+	}
+	if items[0].Evidence != "ApiKeyControllerTest" {
+		t.Errorf("expected Evidence 'ApiKeyControllerTest', got %q", items[0].Evidence)
 	}
 }

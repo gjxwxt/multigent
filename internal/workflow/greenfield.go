@@ -113,7 +113,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"tagField":           "发布 tag（如 v0.1.0）。",
 		"deployedField":      "部署版本标识。",
 		"healthField":        "部署后的健康探测结果。",
-		"riskMatrixField":    "必填的风险-覆盖矩阵 JSON，覆盖验收项、受影响接口、风险级别、测试维度与执行证据。",
+		"riskMatrixField":    "必填的风险-覆盖矩阵 JSON 数组：[{\"item_id\":\"A1\",\"acceptance_criteria\":\"...\",\"risk_level\":\"high\",\"status\":\"passed\",\"evidence\":\"...\"}]，覆盖验收项、风险级别、状态与执行证据。",
 		"testReportField":    "详细测试执行日志、用例输出与证据链接。",
 		"manualWaiversField": "可选的 JSON 映射：高风险项 item_id 到人工特批豁免理由的键值对。",
 		"designWaiverField":  "设计快照抓取异常时，人工特批放行的明确豁免理由。",

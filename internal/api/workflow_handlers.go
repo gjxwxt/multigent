@@ -803,6 +803,71 @@ type qaRiskItem struct {
 	UncoveredReason    string `json:"uncovered_reason"`
 }
 
+func (q *qaRiskItem) UnmarshalJSON(data []byte) error {
+	type rawItem struct {
+		ItemID             string `json:"item_id"`
+		ID                 string `json:"id"`
+		AcceptanceCriteria string `json:"acceptance_criteria"`
+		AcceptanceItem     string `json:"acceptance_item"`
+		AffectedAPIs       any    `json:"affected_apis"`
+		RiskLevel          string `json:"risk_level"`
+		ExecutionType      string `json:"execution_type"`
+		Status             string `json:"status"`
+		CoverageStatus     string `json:"coverage_status"`
+		Evidence           any    `json:"evidence"`
+		TestEvidence       any    `json:"test_evidence"`
+		UncoveredReason    string `json:"uncovered_reason"`
+	}
+	var r rawItem
+	if err := json.Unmarshal(data, &r); err != nil {
+		return err
+	}
+	q.ItemID = strings.TrimSpace(r.ItemID)
+	if q.ItemID == "" {
+		q.ItemID = strings.TrimSpace(r.ID)
+	}
+	q.AcceptanceCriteria = strings.TrimSpace(r.AcceptanceCriteria)
+	if q.AcceptanceCriteria == "" {
+		q.AcceptanceCriteria = strings.TrimSpace(r.AcceptanceItem)
+	}
+	q.AffectedAPIs = r.AffectedAPIs
+	q.RiskLevel = strings.TrimSpace(r.RiskLevel)
+	q.ExecutionType = strings.TrimSpace(r.ExecutionType)
+	q.Status = strings.ToLower(strings.TrimSpace(r.Status))
+	if q.Status == "" {
+		cov := strings.ToLower(strings.TrimSpace(r.CoverageStatus))
+		if cov == "covered" || cov == "accepted_with_mitigation" {
+			q.Status = "passed"
+		} else {
+			q.Status = cov
+		}
+	}
+	extractEvidence := func(v any) string {
+		if v == nil {
+			return ""
+		}
+		if s, ok := v.(string); ok {
+			return strings.TrimSpace(s)
+		}
+		if arr, ok := v.([]any); ok {
+			parts := make([]string, 0, len(arr))
+			for _, item := range arr {
+				if str, ok := item.(string); ok && strings.TrimSpace(str) != "" {
+					parts = append(parts, strings.TrimSpace(str))
+				}
+			}
+			return strings.Join(parts, "; ")
+		}
+		return fmt.Sprintf("%v", v)
+	}
+	q.Evidence = extractEvidence(r.Evidence)
+	if q.Evidence == "" {
+		q.Evidence = extractEvidence(r.TestEvidence)
+	}
+	q.UncoveredReason = strings.TrimSpace(r.UncoveredReason)
+	return nil
+}
+
 func validateQASignoffGate(outputs map[string]string, currentStep entity.WorkflowStep, run entity.WorkflowRun, wfStore *workflowstore.Store) error {
 	matrixRaw := strings.TrimSpace(outputs["risk_coverage_matrix"])
 	if matrixRaw == "" {

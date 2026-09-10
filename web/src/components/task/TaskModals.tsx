@@ -964,6 +964,33 @@ function TaskCommentsSection({ project, agent, taskId }: { project: string; agen
   )
 }
 
+function normalizeQAMatrixItems(raw: any): any[] {
+  if (!raw) return []
+  let list: any[] = []
+  if (Array.isArray(raw)) list = raw
+  else if (raw && Array.isArray(raw.items)) list = raw.items
+  else if (raw && Array.isArray(raw.matrix)) list = raw.matrix
+  else return []
+
+  return list.map((it: any) => {
+    if (!it || typeof it !== 'object') return it
+    const itemId = it.item_id || it.id || 'unspecified'
+    let status = it.status
+    if (!status && it.coverage_status) {
+      const cov = String(it.coverage_status).toLowerCase()
+      status = (cov === 'covered' || cov === 'accepted_with_mitigation') ? 'passed' : it.coverage_status
+    }
+    const evidence = it.evidence || (Array.isArray(it.test_evidence) ? it.test_evidence.join('; ') : it.test_evidence) || ''
+    return {
+      ...it,
+      item_id: itemId,
+      status: status || 'unknown',
+      acceptance_criteria: it.acceptance_criteria || it.acceptance_item || '',
+      evidence,
+    }
+  })
+}
+
 export function WorkflowRuntimePanel({
   step,
   instance,
@@ -1095,11 +1122,7 @@ export function WorkflowRuntimePanel({
     const raw = inputValues['risk_coverage_matrix']
     if (!raw) return []
     try {
-      const p = JSON.parse(raw)
-      if (Array.isArray(p)) return p
-      if (p && Array.isArray(p.items)) return p.items
-      if (p && Array.isArray(p.matrix)) return p.matrix
-      return []
+      return normalizeQAMatrixItems(JSON.parse(raw))
     } catch {
       return []
     }
@@ -1551,10 +1574,8 @@ function RiskCoverageMatrixTable({ json }: { json: string }) {
   const items = useMemo(() => {
     try {
       const parsed = JSON.parse(json)
-      if (Array.isArray(parsed)) return parsed
-      if (parsed && Array.isArray(parsed.items)) return parsed.items
-      if (parsed && Array.isArray(parsed.matrix)) return parsed.matrix
-      return null
+      const normalized = normalizeQAMatrixItems(parsed)
+      return normalized.length > 0 ? normalized : null
     } catch {
       return null
     }
@@ -1626,6 +1647,166 @@ function RiskCoverageMatrixTable({ json }: { json: string }) {
   )
 }
 
+function QATestReportViewer({ json }: { json: string }) {
+  const { t } = useTranslation()
+  const report = useMemo(() => {
+    try {
+      const parsed = JSON.parse(json)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && (parsed.gates || parsed.conclusion || parsed.branch_head)) {
+        return parsed
+      }
+      return null
+    } catch {
+      return null
+    }
+  }, [json])
+
+  if (!report) {
+    return <WorkflowValueText value={json} />
+  }
+
+  const conclusion = report.conclusion || report.summary
+  const gates = Array.isArray(report.gates) ? report.gates : []
+  const evidenceFiles = Array.isArray(report.evidence_files) ? report.evidence_files : []
+  const independentVerifications = Array.isArray(report.independent_verifications) ? report.independent_verifications : []
+  const risksAccepted = Array.isArray(report.risks_accepted) ? report.risks_accepted : []
+  const envNote = report.environment_note ? String(report.environment_note).trim() : ''
+
+  return (
+    <div className="space-y-2.5 text-xs">
+      {conclusion && (
+        <div className="rounded-lg border border-emerald-200/80 bg-emerald-50/50 p-2.5 text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/20 dark:text-emerald-200">
+          <div className="flex items-center gap-1.5 font-semibold text-emerald-800 dark:text-emerald-300">
+            <span className="inline-block size-2 rounded-full bg-emerald-500" />
+            <span>{t('workflows.qa.conclusion', { defaultValue: 'QA 验证结论' })}</span>
+          </div>
+          <p className="mt-1 leading-relaxed text-neutral-700 dark:text-zinc-300 font-normal">{conclusion}</p>
+        </div>
+      )}
+
+      {gates.length > 0 && (
+        <div className="overflow-hidden rounded-lg border border-neutral-200 dark:border-zinc-800">
+          <div className="flex items-center justify-between border-b border-neutral-200 bg-neutral-50 px-3 py-1.5 font-semibold text-neutral-700 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300">
+            <span>{t('workflows.qa.gatesSummary', { defaultValue: '自动化质量门禁' })} ({gates.length})</span>
+            <span className="text-[11px] font-normal text-neutral-500 dark:text-zinc-400">已全部通过</span>
+          </div>
+          <div className="divide-y divide-neutral-100 bg-white dark:divide-zinc-800/60 dark:bg-zinc-950">
+            {gates.map((g: any, idx: number) => {
+              const name = g.gate || `门禁 #${idx + 1}`
+              const detail = g.detail || g.result || '通过'
+              const passed = !String(detail).toLowerCase().includes('fail') && !String(g.result || '').toLowerCase().includes('fail')
+              return (
+                <div key={idx} className="px-3 py-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-mono font-medium text-neutral-900 dark:text-zinc-100">{name}</span>
+                    <span className={cn(
+                      'inline-block px-1.5 py-0.2 rounded text-[10px] font-semibold uppercase tracking-wider',
+                      passed ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300' : 'bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300'
+                    )}>
+                      {passed ? 'PASS' : 'FAIL'}
+                    </span>
+                  </div>
+                  {detail && (
+                    <div className="mt-0.5 text-neutral-600 dark:text-zinc-400 leading-snug">{detail}</div>
+                  )}
+                  {(g.command || g.per_class) && (
+                    <details className="group mt-1 text-[11px]">
+                      <summary className="cursor-pointer text-neutral-400 hover:text-sky-600 dark:text-zinc-500 dark:hover:text-sky-400 select-none">
+                        ▶ 查看执行命令与明细
+                      </summary>
+                      <div className="mt-1.5 space-y-1.5 rounded border border-neutral-200/60 bg-neutral-50 p-2 font-mono text-[10px] dark:border-zinc-800 dark:bg-zinc-900/80">
+                        {g.command && (
+                          <div>
+                            <span className="text-neutral-400 dark:text-zinc-500 font-sans font-semibold">命令：</span>
+                            <span className="text-neutral-800 dark:text-zinc-200 break-all">{g.command}</span>
+                          </div>
+                        )}
+                        {g.result && (
+                          <div>
+                            <span className="text-neutral-400 dark:text-zinc-500 font-sans font-semibold">产出：</span>
+                            <span className="text-neutral-700 dark:text-zinc-300">{g.result}</span>
+                          </div>
+                        )}
+                        {g.per_class && (
+                          <div>
+                            <span className="text-neutral-400 dark:text-zinc-500 font-sans font-semibold block mb-0.5">测试类分布：</span>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 text-neutral-600 dark:text-zinc-400">
+                              {Object.entries(g.per_class).map(([cls, count]) => (
+                                <div key={cls} className="flex justify-between rounded bg-white px-1.5 py-0.5 dark:bg-zinc-800">
+                                  <span className="truncate pr-2">{cls.split('.').slice(-2).join('.')}</span>
+                                  <span className="font-semibold text-neutral-900 dark:text-zinc-100">{String(count)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </details>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {(evidenceFiles.length > 0 || independentVerifications.length > 0 || risksAccepted.length > 0 || envNote) && (
+        <details className="rounded-lg border border-neutral-200/80 bg-neutral-50/50 p-2 text-[11px] text-neutral-600 dark:border-zinc-800 dark:bg-zinc-900/30 dark:text-zinc-400">
+          <summary className="cursor-pointer font-medium text-neutral-500 hover:text-neutral-800 dark:text-zinc-400 dark:hover:text-zinc-200 select-none">
+            查看环境说明、独立核验点与已知风险 ({evidenceFiles.length + independentVerifications.length + risksAccepted.length} 项)
+          </summary>
+          <div className="mt-2 space-y-2 border-t border-neutral-200/60 pt-2 dark:border-zinc-800">
+            {envNote && (
+              <div>
+                <span className="font-semibold text-neutral-700 dark:text-zinc-300">环境说明：</span>
+                <p className="mt-0.5 leading-relaxed">{envNote}</p>
+              </div>
+            )}
+            {independentVerifications.length > 0 && (
+              <div>
+                <span className="font-semibold text-neutral-700 dark:text-zinc-300">独立复核要点：</span>
+                <ul className="mt-0.5 list-disc pl-4 space-y-0.5 leading-relaxed">
+                  {independentVerifications.map((item: string, idx: number) => (
+                    <li key={idx}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {risksAccepted.length > 0 && (
+              <div>
+                <span className="font-semibold text-neutral-700 dark:text-zinc-300">已知风险声明：</span>
+                <ul className="mt-0.5 list-disc pl-4 space-y-0.5 leading-relaxed">
+                  {risksAccepted.map((item: string, idx: number) => (
+                    <li key={idx}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {evidenceFiles.length > 0 && (
+              <div>
+                <span className="font-semibold text-neutral-700 dark:text-zinc-300">证据产物：</span>
+                <ul className="mt-0.5 list-disc pl-4 space-y-0.5 leading-relaxed font-mono text-[10px]">
+                  {evidenceFiles.map((file: string, idx: number) => (
+                    <li key={idx}>{file}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        </details>
+      )}
+
+      {(report.branch_head || report.reviewer || report.review_date) && (
+        <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px] text-neutral-400 dark:text-zinc-500">
+          {report.branch_head && <span>分支头：<code className="font-mono text-neutral-600 dark:text-zinc-400">{report.branch_head}</code></span>}
+          {report.reviewer && <span>· 评审：{report.reviewer}</span>}
+          {report.review_date && <span>· 日期：{report.review_date}</span>}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function WorkflowValueMap({ values, fields = [], compact = false }: { values: Record<string, string>; fields?: WorkflowField[]; compact?: boolean }) {
   const entries = Object.entries(values).filter(([, value]) => String(value ?? '').trim())
   const fieldByName = new Map(fields.map((field) => [field.name, field]))
@@ -1640,6 +1821,8 @@ function WorkflowValueMap({ values, fields = [], compact = false }: { values: Re
             <div className="mt-2 rounded-md bg-neutral-50 px-3 py-2 break-words text-sm leading-relaxed text-neutral-800 dark:bg-zinc-900 dark:text-zinc-200">
               {key === 'risk_coverage_matrix' ? (
                 <RiskCoverageMatrixTable json={String(value)} />
+              ) : key === 'test_report' ? (
+                <QATestReportViewer json={String(value)} />
               ) : (
                 <WorkflowValueText value={String(value)} />
               )}
@@ -1714,6 +1897,8 @@ function WorkflowFieldList({
               <div className="mt-1.5 break-words text-sm text-neutral-800 dark:text-zinc-200">
                 {field.name === 'risk_coverage_matrix' ? (
                   <RiskCoverageMatrixTable json={val} />
+                ) : field.name === 'test_report' ? (
+                  <QATestReportViewer json={val} />
                 ) : (
                   <WorkflowValueText value={val} />
                 )}
