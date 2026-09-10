@@ -130,7 +130,10 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 	}
 
 	designStep := tmplStep("design_review", "human_review", text["designTitle"], text["designDesc"], "product-owner", "violet", 640,
-		[]entity.WorkflowField{field("requirement_draft", "requestField")},
+		[]entity.WorkflowField{
+			field("approved_requirement", "requestField"),
+			optionalField("requirement_draft", "requestField"),
+		},
 		[]entity.WorkflowField{
 			field("decision", "decisionField"),
 			field("comments", "commentsField"),
@@ -238,7 +241,10 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		},
 		[]entity.WorkflowEdge{
 			edge("e-req-draft-review", "requirement_draft", "requirement_review", "", nil, nil, true),
-			edge("e-req-review-design", "requirement_review", "design_review", text["approved"], cond("decision", "eq", "approve"), map[string]string{"approved_requirement": "$output.approved_requirement"}, false),
+			edge("e-req-review-design", "requirement_review", "design_review", text["approved"], cond("decision", "eq", "approve"), map[string]string{
+				"approved_requirement": "$output.approved_requirement",
+				"requirement_draft":    "$input.requirement_draft",
+			}, false),
 			edge("e-req-review-rework", "requirement_review", "requirement_draft", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "previous_draft": "$input.requirement_draft"}, false),
 			edge("e-design-approve", "design_review", "implementation", text["approved"], cond("decision", "eq", "approve"), map[string]string{
 				"approved_requirement":          "$input.approved_requirement",

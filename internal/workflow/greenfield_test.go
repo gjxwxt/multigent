@@ -64,6 +64,13 @@ func TestGreenfieldTemplateShape(t *testing.T) {
 					t.Fatalf("approved_design_source must be optional")
 				}
 			}
+			inputs := map[string]bool{}
+			for _, f := range s.InputFields {
+				inputs[f.Name] = true
+			}
+			if !inputs["approved_requirement"] {
+				t.Fatalf("design_review missing input approved_requirement")
+			}
 		}
 		if s.ID == "qa" {
 			foundQA = true

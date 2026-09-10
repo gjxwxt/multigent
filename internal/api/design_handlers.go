@@ -228,9 +228,16 @@ func (s *Server) handleDesignStart(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	reqText, err := s.designGateRequirement(project, taskID, task)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	finalPrompt := designGatePrompt(reqText)
+
 	projID := designProjectIDForTask(taskID)
 	name := "task_" + taskID
-	if err := client.CreateProject(r.Context(), projID, name, body.DesignSystemID, designPendingPrompt(task)); err != nil {
+	if err := client.CreateProject(r.Context(), projID, name, body.DesignSystemID, finalPrompt); err != nil {
 		s.writeDesignUpstreamError(w, err)
 		return
 	}
@@ -250,7 +257,7 @@ func (s *Server) handleDesignStart(w http.ResponseWriter, r *http.Request) {
 		s.writeDesignUpstreamError(w, err)
 		return
 	}
-	conversationID, err := client.StartRun(r.Context(), projID, designPendingPrompt(task), body.DesignSystemID, body.Model, creds)
+	conversationID, err := client.StartRun(r.Context(), projID, finalPrompt, body.DesignSystemID, body.Model, creds)
 	if err != nil {
 		s.writeDesignUpstreamError(w, err)
 		return
@@ -857,6 +864,81 @@ func sanitizeDesignID(id string) string {
 		out = out[:48]
 	}
 	return out
+}
+
+// designGateRequirement resolves the requirement text for the design gate.
+// For workflow runs parked at design_review, it strictly prioritizes
+// approved_requirement (or requirement_draft) from step inputs/outputs, and
+// fails closed if neither is present. For non-workflow tasks, it falls back
+// to the task's prompt/description.
+func (s *Server) designGateRequirement(project, taskID string, task *entity.Task) (string, error) {
+	workspaceID, err := s.currentWorkspaceID()
+	if err == nil && workspaceID != "" && s.controlDB != nil {
+		wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+		run, found, err := wfStore.RunForTask(project, taskID)
+		if err == nil && found {
+			insts, err := wfStore.ListStepInstances(run.ID)
+			if err != nil {
+				return "", fmt.Errorf("list workflow step instances: %w", err)
+			}
+			// 1. Check active step instance (matching run.ActiveStepID or "design_review")
+			for i := len(insts) - 1; i >= 0; i-- {
+				if insts[i].StepID == run.ActiveStepID || insts[i].StepID == "design_review" {
+					if req := strings.TrimSpace(insts[i].InputValues["approved_requirement"]); req != "" {
+						return req, nil
+					}
+					if req := strings.TrimSpace(insts[i].InputValues["requirement_draft"]); req != "" {
+						return req, nil
+					}
+					break
+				}
+			}
+			// 2. Fall back to scanning prior step instances for requirement outputs/inputs
+			for i := len(insts) - 1; i >= 0; i-- {
+				if req := strings.TrimSpace(insts[i].OutputValues["approved_requirement"]); req != "" {
+					return req, nil
+				}
+				if req := strings.TrimSpace(insts[i].InputValues["approved_requirement"]); req != "" {
+					return req, nil
+				}
+				if req := strings.TrimSpace(insts[i].OutputValues["requirement_draft"]); req != "" {
+					return req, nil
+				}
+				if req := strings.TrimSpace(insts[i].InputValues["requirement_draft"]); req != "" {
+					return req, nil
+				}
+			}
+			// In a workflow design gate, requirement cannot be empty (fail closed).
+			return "", fmt.Errorf("workflow design gate requires approved_requirement or requirement_draft")
+		}
+	}
+
+	// Standalone task (not part of a workflow run)
+	fallback := strings.TrimSpace(designPendingPrompt(task))
+	if fallback == "" {
+		return "", fmt.Errorf("task prompt and description are empty")
+	}
+	return fallback, nil
+}
+
+func designGatePrompt(requirement string) string {
+	return fmt.Sprintf(`【角色与使命】
+你是本次交付的原型设计专家（OpenDesign UI Designer）。
+你的唯一职责是：基于下方经过产品与用户确认的真实需求规格，设计并实现高保真、可交互的 UI 原型界面。
+
+【硬性边界 — 严禁越界】
+1. 原型沙箱内工作：你所有的界面设计、页面布局和交互逻辑均在当前 OpenDesign 设计工作区内完成。
+2. 严禁修改工程代码：严禁触碰、修改或提交目标项目的交付 Git 仓库代码（代码实现由后续研发 Agent 完成）。
+3. 严禁编写生产后端：严禁编写生产级后端服务、数据库迁移或独立 API 服务，原型中的数据展示请使用合理的前端 Mock 数据。
+
+【产出要求】
+- 完整覆盖下方需求中的核心业务流程、关键页面与交互状态（正常态、空状态、加载态、错误提示等）。
+- 产出高保真、视觉规范统一样式的 Web/UI 原型，以便人工审核后冻结快照，作为后续研发的唯一视觉基线。
+
+【经过确认的需求规格输入】
+<requirement>
+%s
+</requirement>`, strings.TrimSpace(requirement))
 }
 
 func designPendingPrompt(task *entity.Task) string {

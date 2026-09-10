@@ -22,6 +22,8 @@ type fakeODClient struct {
 	runCalls     []string
 	deleteCalls  []string
 	lastCreds    *designModelCreds
+	lastPrompt   string
+	lastMessage  string
 	runStatus    string
 	failCreate   bool
 	files        []ODProjectFile
@@ -40,18 +42,20 @@ func (f *fakeODClient) ListProjects(_ context.Context) ([]ODProject, error) {
 	return out, nil
 }
 
-func (f *fakeODClient) CreateProject(_ context.Context, id, _, _, _ string) error {
+func (f *fakeODClient) CreateProject(_ context.Context, id, _, _, pendingPrompt string) error {
 	if f.failCreate {
 		return &odAPIError{Status: 502, Detail: "upstream down"}
 	}
 	f.createCalls = append(f.createCalls, id)
 	f.projects[id] = true
+	f.lastPrompt = pendingPrompt
 	return nil
 }
 
-func (f *fakeODClient) StartRun(_ context.Context, projectID, _, _, _ string, creds *designModelCreds) (string, error) {
+func (f *fakeODClient) StartRun(_ context.Context, projectID, message, _, _ string, creds *designModelCreds) (string, error) {
 	f.runCalls = append(f.runCalls, projectID)
 	f.lastCreds = creds
+	f.lastMessage = message
 	return "conv-" + projectID, nil
 }
 
@@ -261,6 +265,9 @@ func TestDesignStartAllowsTaskAtHumanReviewStep(t *testing.T) {
 		if instances[i].StepID == stepID {
 			instances[i].Status = "open"
 			instances[i].StartedAt = now
+			instances[i].InputValues = map[string]string{
+				"approved_requirement": "澄清后的需求：用户认证中心界面规格",
+			}
 			if err := wfStore.SaveStepInstance(&instances[i]); err != nil {
 				t.Fatal(err)
 			}
@@ -277,6 +284,145 @@ func TestDesignStartAllowsTaskAtHumanReviewStep(t *testing.T) {
 	}
 	if len(fake.createCalls) != 1 {
 		t.Fatalf("createCalls = %v", fake.createCalls)
+	}
+	if !strings.Contains(fake.lastPrompt, "澄清后的需求：用户认证中心界面规格") {
+		t.Fatalf("lastPrompt missing approved requirement: %s", fake.lastPrompt)
+	}
+	if !strings.Contains(fake.lastPrompt, "【角色与使命】") || !strings.Contains(fake.lastPrompt, "严禁修改工程代码") {
+		t.Fatalf("lastPrompt missing role framing: %s", fake.lastPrompt)
+	}
+	if fake.lastMessage != fake.lastPrompt {
+		t.Fatalf("StartRun message should match CreateProject prompt")
+	}
+}
+
+func TestDesignStartWorkflowFallbackToRequirementDraft(t *testing.T) {
+	s, workspaceID, task := seedDesignTask(t, entity.TaskStatusInProgress)
+	fake := newFakeODClient()
+	s.designClient = fake
+	seedODConnection(t, s)
+
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	def, ok := workflowstore.DefinitionFromTemplate("greenfield-delivery-pipeline", "en", "design gate test")
+	if !ok {
+		t.Fatal("greenfield template missing")
+	}
+	if err := wfStore.SaveDefinition(&def); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := wfStore.StartRunWithInput("resproj", task.ID, def.ID, nil, map[string]string{}); err != nil {
+		t.Fatal(err)
+	}
+	run, found, err := wfStore.RunForTask("resproj", task.ID)
+	if err != nil || !found {
+		t.Fatalf("run not found: %v", err)
+	}
+	stepID := "design_review"
+	run.ActiveStepID = stepID
+	run.Status = "active"
+	if err := wfStore.SaveRun(&run); err != nil {
+		t.Fatal(err)
+	}
+	instances, err := wfStore.ListStepInstances(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for i := range instances {
+		if instances[i].StepID == stepID {
+			instances[i].Status = "open"
+			instances[i].StartedAt = now
+			instances[i].InputValues = map[string]string{
+				"requirement_draft": "草案需求：设计原型规格v1",
+			}
+			if err := wfStore.SaveStepInstance(&instances[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	w := designPost(t, s, "/api/v1/projects/resproj/tasks/t-res-1/design/start", `{"designSystemId":"ant"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected start allowed with requirement_draft fallback, got %d %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(fake.lastPrompt, "草案需求：设计原型规格v1") {
+		t.Fatalf("lastPrompt missing requirement_draft: %s", fake.lastPrompt)
+	}
+}
+
+func TestDesignStartWorkflowFailsClosedWhenRequirementEmpty(t *testing.T) {
+	s, workspaceID, task := seedDesignTask(t, entity.TaskStatusInProgress)
+	fake := newFakeODClient()
+	s.designClient = fake
+	seedODConnection(t, s)
+
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	def, ok := workflowstore.DefinitionFromTemplate("greenfield-delivery-pipeline", "en", "design gate test")
+	if !ok {
+		t.Fatal("greenfield template missing")
+	}
+	if err := wfStore.SaveDefinition(&def); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := wfStore.StartRunWithInput("resproj", task.ID, def.ID, nil, map[string]string{}); err != nil {
+		t.Fatal(err)
+	}
+	run, found, err := wfStore.RunForTask("resproj", task.ID)
+	if err != nil || !found {
+		t.Fatalf("run not found: %v", err)
+	}
+	stepID := "design_review"
+	run.ActiveStepID = stepID
+	run.Status = "active"
+	if err := wfStore.SaveRun(&run); err != nil {
+		t.Fatal(err)
+	}
+	instances, err := wfStore.ListStepInstances(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for i := range instances {
+		if instances[i].StepID == stepID {
+			instances[i].Status = "open"
+			instances[i].StartedAt = now
+			instances[i].InputValues = map[string]string{}
+			if err := wfStore.SaveStepInstance(&instances[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	w := designPost(t, s, "/api/v1/projects/resproj/tasks/t-res-1/design/start", `{"designSystemId":"ant"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 fail-closed when requirements missing, got %d %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "workflow design gate requires approved_requirement or requirement_draft") {
+		t.Fatalf("unexpected error body: %s", w.Body.String())
+	}
+	if len(fake.createCalls) != 0 || len(fake.runCalls) != 0 {
+		t.Fatalf("OD must not be called when requirement is missing: %v %v", fake.createCalls, fake.runCalls)
+	}
+}
+
+func TestDesignStartStandaloneTaskUsesPrompt(t *testing.T) {
+	s, _, task := seedDesignTask(t, entity.TaskStatusAwaitingConfirmation)
+	fake := newFakeODClient()
+	s.designClient = fake
+	task.Prompt = "独立任务：设计一个看板页面"
+	if err := s.ts.UpdateTask("resproj", "agent", task); err != nil {
+		t.Fatal(err)
+	}
+
+	w := designPost(t, s, "/api/v1/projects/resproj/tasks/t-res-1/design/start", `{"designSystemId":"ant"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected start allowed for standalone task, got %d %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(fake.lastPrompt, "独立任务：设计一个看板页面") {
+		t.Fatalf("lastPrompt missing task prompt: %s", fake.lastPrompt)
+	}
+	if !strings.Contains(fake.lastPrompt, "【角色与使命】") {
+		t.Fatalf("lastPrompt missing role framing: %s", fake.lastPrompt)
 	}
 }
 
