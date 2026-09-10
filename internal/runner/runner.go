@@ -196,7 +196,27 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 
 	agentDir := filepath.Join(r.root, "projects", project, "agents", agentName)
 	execAgentDir := agentDir
-	if wtDir := strings.TrimSpace(runtimeControlEnv["MULTIGENT_WORKTREE_DIR"]); wtDir != "" {
+	execBoundary := ""
+	if wtDir := strings.TrimSpace(runtimeControlEnv[wakeupWorktreeDirVar]); wtDir != "" {
+		// Wakeup runs carrying a scheduler-resolved worktree (attention-signal
+		// delivery of a workflow step) must execute inside that worktree, not
+		// the agent home. Unlike regular exec runs, a missing worktree fails
+		// closed: silently degrading to the agent home is what produced the
+		// "code repo is gone" misdiagnoses.
+		wakeupTask := &entity.Task{
+			ID: strings.TrimSpace(runtimeControlEnv["MULTIGENT_TASK_ID"]),
+			Vars: map[string]string{
+				wakeupWorktreeDirVar:    wtDir,
+				wakeupWorktreeBranchVar: strings.TrimSpace(runtimeControlEnv[wakeupWorktreeBranchVar]),
+			},
+		}
+		boundary, dir, err := wakeupRunScope(wakeupTask)
+		if err != nil {
+			return nil, err
+		}
+		execBoundary = boundary
+		execAgentDir = dir
+	} else if wtDir := strings.TrimSpace(runtimeControlEnv["MULTIGENT_WORKTREE_DIR"]); wtDir != "" {
 		if _, err := os.Stat(wtDir); err == nil {
 			execAgentDir = wtDir
 		}
@@ -208,7 +228,11 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 
 	// HTTP agent: bypass CLI subprocess.
 	if entity.NormaliseModel(meta.Model) == entity.ModelHTTPAgent {
+		prompt = execBoundary + prompt
 		return r.execPromptHTTP(execAgentDir, meta, prompt)
+	}
+	if execBoundary != "" {
+		prompt = execBoundary + prompt
 	}
 
 	// Write prompt to a temp file.
@@ -406,6 +430,64 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 	return result, nil
 }
 
+// wakeupWorktreeVar* names carry the resolved code worktree for a wakeup task
+// when the scheduler uses an attention signal as the delivery vehicle for a
+// workflow step. The scheduler sets them in task.Vars (local path) and the
+// control plane forwards them through RuntimeControlEnv (runtime-node path).
+const (
+	wakeupWorktreeDirVar    = "MULTIGENT_WAKEUP_WORKTREE_DIR"
+	wakeupWorktreeBranchVar = "MULTIGENT_WAKEUP_BRANCH"
+)
+
+// wakeupTargetWorktree resolves the code worktree a wakeup task must run in,
+// preferring the task entity fields and falling back to the scheduler-provided
+// vars. Pure reminders and IM notifications never carry worktree context, so
+// they resolve to empty and stay on the agent home directory.
+func wakeupTargetWorktree(task *entity.Task) (worktreeDir, branch string) {
+	if task == nil {
+		return "", ""
+	}
+	worktreeDir = strings.TrimSpace(task.WorktreeDir)
+	branch = strings.TrimSpace(task.BranchName)
+	if worktreeDir == "" && task.Vars != nil {
+		worktreeDir = strings.TrimSpace(task.Vars[wakeupWorktreeDirVar])
+	}
+	if branch == "" && task.Vars != nil {
+		branch = strings.TrimSpace(task.Vars[wakeupWorktreeBranchVar])
+	}
+	return worktreeDir, branch
+}
+
+// wakeupRunScope decides where a wakeup task executes and which safety
+// boundary the agent sees. Wakeup tasks that carry a real worktree target are
+// the delivery vehicle for workflow steps assigned via an attention signal
+// (e.g. workflow_step_assigned); they must run inside that worktree with the
+// standard Git Worktree boundary. Mounting the agent home there made agents
+// conclude "the code repo is gone" and misdiagnose platform state. A missing
+// worktree fails closed instead of silently degrading to the agent home; pure
+// reminders and IM wakeups keep the agent-home attention boundary.
+func wakeupRunScope(task *entity.Task) (boundary string, execDir string, err error) {
+	wtDir, wtBranch := wakeupTargetWorktree(task)
+	if wtDir == "" {
+		return "【Attention 唤醒与信号处理安全边界】\n" +
+			"- 你当前在 Agent 私有家目录中执行 Attention 信号处理/唤醒任务。\n" +
+			"- 【绝对红线】严禁在当前目录执行 `git init`、创建分支、提交代码或 `git push`！当前目录不是项目代码库工作区。\n" +
+			"- 你的职责仅限于：读取与处理 Attention 信号、通过 `mga` 汇报状态或回复消息；如涉及代码开发与交付，请等待或指引对应任务流转至工作流代码工作区。\n\n", "", nil
+	}
+	if wtBranch == "" {
+		wtBranch = "main"
+	}
+	base := task.BaseBranch
+	if base == "" {
+		base = "main"
+	}
+	boundary = fmt.Sprintf("【Git Worktree 独立分支安全边界约束】\n- 你当前工作在独立特性分支 `%s` (基于 `%s`) 的专用工作区 (Worktree) 中。\n- 你的工作根目录已映射至 `/workspace`。所有代码修改、新增文件与单测验证必须严格限定在 `/workspace` 内部。\n- 严禁执行 git checkout 切换到其他分支，严禁修改父仓库或其他任务的文件。\n- 严禁执行 `git worktree prune`、`git worktree remove` 或任何修改父仓库 `.git` 目录与共享 Git 配置（含 credential.helper、remote URL）的命令——这些元数据由平台统一管理，破坏会同时毁掉其他任务的工作区。\n- 严禁向 git 配置写入任何凭据（token/密码）；推送凭据由平台在推送瞬时注入，无需也不允许你自行配置。\n- 【工作区环境与依赖状态】当前工作区的所有代码、Git 历史与已安装依赖（如 node_modules）均已持久化就绪。严禁执行 rm -rf .git 或重新 git init，严禁无故全量重装依赖。请直接在现有代码库上进行增量改动、构建和测试。\n\n", wtBranch, base)
+	if _, err := os.Stat(wtDir); err != nil {
+		return "", "", fmt.Errorf("execution_scope_mismatch: task %s targets worktree %s but it is not accessible on the runtime host", task.ID, wtDir)
+	}
+	return boundary, wtDir, nil
+}
+
 // RunTask executes a single task in the context of the given agent.
 // It handles:
 //   - building the full prompt (task prompt + system footer)
@@ -448,10 +530,14 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 
 	execAgentDir := agentDir
 	if task != nil && task.Type == "wakeup" {
-		scopedBoundary = "【Attention 唤醒与信号处理安全边界】\n" +
-			"- 你当前在 Agent 私有家目录中执行 Attention 信号处理/唤醒任务。\n" +
-			"- 【绝对红线】严禁在当前目录执行 `git init`、创建分支、提交代码或 `git push`！当前目录不是项目代码库工作区。\n" +
-			"- 你的职责仅限于：读取与处理 Attention 信号、通过 `mga` 汇报状态或回复消息；如涉及代码开发与交付，请等待或指引对应任务流转至工作流代码工作区。\n\n"
+		boundary, dir, err := wakeupRunScope(task)
+		if err != nil {
+			return nil, err
+		}
+		scopedBoundary = boundary
+		if dir != "" {
+			execAgentDir = dir
+		}
 	} else if isInitTask {
 		scopedBoundary = "【工程初始化工作区说明】\n- 你当前工作在待初始化的项目代码库根目录中。\n- 你的工作根目录已映射至沙箱 `/workspace`。所有初始化操作（依赖安装、构建验证、git init/commit/push、ci ready）均在 `/workspace` 内部执行。\n- 平台已将基础文件物化就绪，请按工作流阶段顺序执行，完成当前阶段后汇报结果，不要跳过或虚报状态。\n\n"
 		if strings.TrimSpace(task.WorktreeDir) != "" {
@@ -3038,7 +3124,8 @@ func containerRuntimePath(hostPath, agentDir string) string {
 	return hostPath
 }
 
-func materializeNPMRegistryConfig(cfg runtimeConfigFileRef, secretValues map[string]string) (map[string]string, error) {	if cfg.MaterializedPath == "" || !strings.HasSuffix(strings.TrimSpace(cfg.Path), ".npmrc") {
+func materializeNPMRegistryConfig(cfg runtimeConfigFileRef, secretValues map[string]string) (map[string]string, error) {
+	if cfg.MaterializedPath == "" || !strings.HasSuffix(strings.TrimSpace(cfg.Path), ".npmrc") {
 		return nil, nil
 	}
 	registryURL := firstNonEmpty(secretValues["registryUrl"], "https://registry.npmjs.org/")

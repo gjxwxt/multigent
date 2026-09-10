@@ -1036,11 +1036,21 @@ func (s *Server) nextRuntimeWakeupTask(workspaceID, project, agent string, hb *e
 		return nil, nil, nil
 	}
 	var attentionIDs []string
-	if section, ids, err := s.pendingAttentionWakeupSection(workspaceID, project, agent); err == nil && section != "" {
+	section, ids, vars, secErr := s.pendingAttentionWakeupSectionAndVars(workspaceID, project, agent)
+	if secErr == nil && strings.TrimSpace(section) != "" {
 		prompt = section + prompt
 		attentionIDs = ids
 	}
 	task := s.createRuntimeWakeupTask(project, agent, prompt)
+	if len(vars) > 0 {
+		task.Vars = mergeTaskVars(task.Vars, vars)
+		if dir := strings.TrimSpace(vars["MULTIGENT_WAKEUP_WORKTREE_DIR"]); dir != "" {
+			task.WorktreeDir = dir
+		}
+		if branch := strings.TrimSpace(vars["MULTIGENT_WAKEUP_BRANCH"]); branch != "" {
+			task.BranchName = branch
+		}
+	}
 	if err := s.ts.AddTask(project, agent, task); err != nil {
 		return nil, nil, err
 	}

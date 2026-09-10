@@ -498,7 +498,7 @@ func (s *Server) enqueueRuntimeTaskRun(workspaceID, project, agent string, task 
 	if forkSessionID != "" {
 		runtimeControlEnv["MULTIGENT_FORK_SESSION_ID"] = forkSessionID
 	}
-	for k, v := range runtimeTaskControlEnv(task.Vars) {
+	for k, v := range runtimeTaskControlEnv(task) {
 		runtimeControlEnv[k] = v
 	}
 	spec := runtimeexec.Spec{
@@ -569,14 +569,22 @@ func runtimeForkSessionIDFromTask(task *entity.Task) string {
 	return ""
 }
 
-func runtimeTaskControlEnv(vars map[string]string) map[string]string {
-	if len(vars) == 0 {
+// runtimeTaskControlEnv forwards scheduler-controlled task vars into the run
+// spec. The wakeup worktree keys remount the run sandbox onto a host
+// directory, so they are only honoured on genuine wakeup tasks — even if a
+// vars map slipped past sanitizeTaskVars, a normal task can never carry them.
+func runtimeTaskControlEnv(task *entity.Task) map[string]string {
+	if task == nil || len(task.Vars) == 0 {
 		return nil
 	}
+	isWakeup := strings.EqualFold(string(task.Type), "wakeup")
 	out := map[string]string{}
-	for k, v := range vars {
+	for k, v := range task.Vars {
 		k = strings.TrimSpace(k)
 		if !isRuntimeTaskControlEnvKey(k) || strings.TrimSpace(v) == "" {
+			continue
+		}
+		if !isWakeup && (k == "MULTIGENT_WAKEUP_WORKTREE_DIR" || k == "MULTIGENT_WAKEUP_BRANCH") {
 			continue
 		}
 		out[k] = v
@@ -589,7 +597,7 @@ func runtimeTaskControlEnv(vars map[string]string) map[string]string {
 
 func isRuntimeTaskControlEnvKey(key string) bool {
 	switch key {
-	case "MULTIGENT_DELEGATION_TOKEN", "MULTIGENT_DELEGATION_EXPIRES_AT", "MULTIGENT_DELEGATION_INTERACTION_ID", "MULTIGENT_DELEGATION_TOKENS_JSON", "MULTIGENT_DELEGATION_EXPIRES_AT_JSON", "MULTIGENT_FORK_SESSION_ID":
+	case "MULTIGENT_DELEGATION_TOKEN", "MULTIGENT_DELEGATION_EXPIRES_AT", "MULTIGENT_DELEGATION_INTERACTION_ID", "MULTIGENT_DELEGATION_TOKENS_JSON", "MULTIGENT_DELEGATION_EXPIRES_AT_JSON", "MULTIGENT_FORK_SESSION_ID", "MULTIGENT_WAKEUP_WORKTREE_DIR", "MULTIGENT_WAKEUP_BRANCH":
 		return true
 	default:
 		return false
