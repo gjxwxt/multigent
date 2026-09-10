@@ -207,3 +207,40 @@ Key status & deliverables:
   - **SQLite 数据库验证**：`/opt/multigent/data/.multigent/multigent.db` 中 `alex` 在 `proj-rbac-5511` 的角色成功落库为 `operator`，`admin` 为 `manager`。
   - **通道与绑定验证**：Lina 绑定专用连接 `conn-4632f10ef701e6fa0174e723`（Bot `fq19z958...`），Mira 绑定专用连接 `conn-1bec7de71cae54f406a042d3`（Bot `h4notz95...`），1:1 独占分配，VM journalctl 日志中 DEFECT-C3 告警完全消除（0 告警）。
 
+## 2026-09-10 Code Review Invariants & Hardening Delivery
+
+- **成员角色合约、非法角色拦截与回滚补偿**:
+  - **后端创建者强制锁定** (`internal/api/project_handlers.go`)：创建者无论客户端传何角色，后端强制重写锁定为 `ProjectRoleManager`。
+  - **非法角色强校验拦截**：`role` 非 `viewer|operator|manager` 时直接返回 HTTP 400 `ErrCodeValidationFailed`（例如传入 `adminish` 返回 400），禁止静默降级为默认角色。
+  - **频道创建失败回滚补偿**：若频道创建阶段出错（`pErr != nil`），立即执行对 `s.users` 已写入该项目授权的补偿清理（采用 `make([]projectAccess, 0)` 解决 `UpdateUser` nil 切片被忽略陷阱），杜绝项目创建中断时的孤儿权限悬挂。
+  - **前端传参清理 (`web/src/components/project/CreateProjectDialog.tsx`)**：移除冗余的 `memberUsernames` 键，仅发送清晰语义的 `members: [{ username, role }]`。
+  - **回归单测**：`internal/api/project_write_rbac_test.go` (`TestProjectCreate_MemberRolesAndDefaults`, `TestProjectCreate_ChannelFailureRollsBackUserAssignments`) PASS。
+
+- **DEFECT-C3 确定性分配、专属拉群与入口 Fail-Closed**:
+  - **确定性 1:1 分配** (`internal/api/project_channel_handlers.go`)：`sortedAgentNames` 按字母序排序；连接匹配采用 `connectionMatchesAgent` 精准比对 Profile `botName/displayName/username/agentId`，避免泛模糊子串误伤；仅邀请分配成功的 Bot 入群；未分配独立连接的 Agent 跳过并标记 `status=partial`。
+  - **Bot 进群失败防御**：若 Mattermost 拉 Bot 入群失败（403），不为其生成 `AgentChannelTarget` 且不计入 `boundAgents`，明确记录于 `failedAgents`。
+  - **启动自愈清理历史重复**：`healAgentChannelBindingsAndIdentities()` 针对同一 `(chat_id, bot_id)` 下的多余活跃绑定自动标为 `unbound`，重启服务自动清理历史脏数据。
+  - **入口多候选验签与 Fail-Closed** (`internal/api/agent_channel_events.go`)：多绑定候选时逐一校验 HMAC 签名；若出现多个跨项目合法候选且皆合法，严格 Fail-Closed (401)，根除 `matches[0]` 盲选安全漏洞。
+  - **单测覆盖**：`project_channel_handlers_test.go` (`TestProvisionProjectChannel_Success`, `TestProvisionProjectChannel_BotFailureTracking`) PASS。
+
+- **Live Card 耗时冻结**:
+  - **耗时计算统一** (`internal/api/task_thread_projection_hooks.go`)：使用 `int(entity.TaskElapsed(t, time.Now()).Seconds())`，完结状态（`FinishedAt` 已设）严格冻结耗时，后续时间流逝耗时不再继续增长。
+  - **回归单测**：`internal/entity/task_timestamps_test.go` (`TestTaskElapsed_FreezesOnCompletion`) PASS。
+
+- **Mattermost Action 错误反馈与权限拦截**:
+  - **错误文字弹窗** (`internal/api/chatops_handlers.go`)：`writeMattermostActionError` 输出增加 `"ephemeral_text": message`，确保 Mattermost 客户端收到清晰的错误提示弹窗。
+  - **审批人说明合规** (`internal/imbridge/task_thread_projection_service.go`)：工作流人工审核无指定人类审批人时，文案显示为“`审批处理：待项目管理员认领`”，禁止将任务创建人误表述为“指定审批人”。
+  - **审批权限强校验** (`internal/api/runtime_workflow_decision_handlers.go`)：workflow decision 与 Action 回调校验用户具备全局 `admin` 或项目至少 `operator` 角色；Viewer 无论是否在项目中均严格拒绝推进工作流（403）。
+  - **回归单测**：`internal/api/chatops_handlers_test.go` (`TestMattermostActionCallback_RejectionScenarios`) 覆盖未绑定身份、Viewer 权限拒绝、过期 Token、CAS 409 冲突四类场景，全量断言工作流状态未被非法篡改或推进。
+
+- **生产部署与端到端实测验证证据**:
+  - **服务部署**：Linux amd64 产物编译部署至 VM 并重启 `multigent` 与 `multigent-mattermost-bridge` 服务。
+  - **自愈日志确认**：服务启动即刻触发自愈并准确清理了 3 条历史重复绑定：
+    - `deactivated duplicate binding chan-3f2b208a5d75052dad579cad (OrderCollab/Lina) on channel 9iotdnrgd7dtdggo8u96fsabja bot fq19z958a78stdxutq1ixbxsdw (DEFECT-C3)`
+    - `deactivated duplicate binding chan-9649d1d0d024472fa7c8966f (OrderCollab/Mira) on channel 9iotdnrgd7dtdggo8u96fsabja bot h4notz95xif8iehx4z88yyt6ka (DEFECT-C3)`
+    - `deactivated duplicate binding chan-b75213f3e362a5156ec5688f (api-key-hub/Nora) on channel en7zkc7s1b8nmxeqaf49yyy5fy bot h4notz95xif8iehx4z88yyt6ka (DEFECT-C3)`
+  - **UI 项目创建实测**：Playwright 脚本在 Web 控制台创建项目 `proj-rbac-3511`，添加成员 `alex`，确认其默认角色为 `operator`。
+  - **SQLite 落库验证**：数据库 `users.projects_json` 确认 `admin` 强制授予 `manager`，`alex` 正确记录为 `operator`。
+  - **非法角色 API 防御实测**：curl 提交 `role: "adminish"` 返回 `HTTP 400 Bad Request`，`code: "validation_failed"`, 验证通过。
+
+
