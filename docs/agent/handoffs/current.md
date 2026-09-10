@@ -243,4 +243,15 @@ Key status & deliverables:
   - **SQLite 落库验证**：数据库 `users.projects_json` 确认 `admin` 强制授予 `manager`，`alex` 正确记录为 `operator`。
   - **非法角色 API 防御实测**：curl 提交 `role: "adminish"` 返回 `HTTP 400 Bad Request`，`code: "validation_failed"`, 验证通过。
 
+- **Mattermost ChatOps 审批打回 (Reject) 400 路由不匹配缺陷修复与闭环**:
+  - **根本原因**: Mattermost 弹窗提交处理函数 (`chatops_handlers.go`) 硬编码传递 `decision = "rejected"`，而工作流引擎定义及边转移规则唯一定义为 `cond("decision", "eq", "request_changes")`，且决策归一化未覆盖 `rejected`，导致出边匹配失败抛出 400。此外，审核步骤定义了批准产物字段，打回时引擎仍过度校验必填；`isDialogAction` 未包含 `reject` 导致打回失败后重试被防重放拦截（`action_replay_blocked`）。
+  - **修复措施**:
+    1. `chatops_handlers.go`: `tokenData.Action == "reject"` 显式规范化为 `decision = "request_changes"`；将 `reject` 纳入 `isDialogAction`，失败或超时重试时自动补发新卡片。
+    2. `review_resolution.go` & `workflow_handlers.go`: `ResolveApprovalOutputs` 与 `normalizeWorkflowReviewDecision` 统一支持 `reject`、`rejected`、`needs_changes`、`rework` 自动归一化为 `"request_changes"`。
+    3. `store.go`: `workflowConditionMatches` 评估 `decision` / `review_decision` 时对两端进行语义归一化（`approve` / `request_changes`）；`normalizeWorkflowOutputValues` 在打回决策时豁免批准类产物的必填校验。
+  - **验证证据**:
+    - 单测覆盖：`TestMattermostDialogSubmit_RejectRework` 与 `TestMattermostActionCallback_FailedRejectDialogReissuesCurrentCard` 全部 PASS。
+    - 全量单测：`go test ./internal/...` 40+ 个包 100% PASS。
+    - 生产部署与自愈：Linux amd64 二进制热部署至 VM 并重启 `multigent.service`；清理旧失败会话锁，解冻卡片操作。
+
 
