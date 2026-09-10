@@ -1234,10 +1234,10 @@ func formatWorkflowReviewFields(fields map[string]string) string {
 }
 
 func normalizeWorkflowReviewDecision(decision string) string {
-	switch strings.TrimSpace(decision) {
+	switch strings.ToLower(strings.TrimSpace(decision)) {
 	case "approved":
 		return "approve"
-	case "needs_changes":
+	case "needs_changes", "reject", "rejected", "rework", "changes_requested":
 		return "request_changes"
 	default:
 		return strings.TrimSpace(decision)

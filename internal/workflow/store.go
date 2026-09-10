@@ -2292,13 +2292,14 @@ func normalizeWorkflowOutputValues(step entity.WorkflowStep, values map[string]s
 	if failed {
 		return out, nil
 	}
+	isReworkReview := step.Type == "human_review" && isWorkflowRejectionDecision(out["decision"])
 	for _, field := range step.OutputFields {
 		name := strings.TrimSpace(field.Name)
 		if name == "" {
 			continue
 		}
 		if strings.TrimSpace(out[name]) == "" {
-			if field.Optional {
+			if field.Optional || (isReworkReview && name != "decision" && name != "comments") {
 				continue
 			}
 			return nil, fmt.Errorf("workflow output field %q is required for step %q", name, step.Title)
@@ -2463,10 +2464,51 @@ func workflowConditionMatches(cond *entity.WorkflowEdgeCondition, outputValues m
 	value := strings.TrimSpace(cond.Value)
 	if field != "" {
 		if actual, ok := outputValues[field]; ok {
+			if isWorkflowDecisionField(field) {
+				actual = normalizeWorkflowDecisionValue(actual)
+				value = normalizeWorkflowDecisionValue(value)
+				var normValues []string
+				if len(cond.Values) > 0 {
+					normValues = make([]string, len(cond.Values))
+					for i, v := range cond.Values {
+						normValues[i] = normalizeWorkflowDecisionValue(v)
+					}
+				}
+				return compareWorkflowValue(actual, cond.Operator, value, normValues)
+			}
 			return compareWorkflowValue(actual, cond.Operator, value, cond.Values)
 		}
 	}
 	return compareWorkflowValue(output, cond.Operator, value, cond.Values)
+}
+
+func isWorkflowDecisionField(field string) bool {
+	switch strings.ToLower(strings.TrimSpace(field)) {
+	case "decision", "review_decision":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeWorkflowDecisionValue(val string) string {
+	switch strings.ToLower(strings.TrimSpace(val)) {
+	case "approve", "approved", "pass", "passed", "ok", "yes":
+		return "approve"
+	case "request_changes", "reject", "rejected", "needs_revision", "needs_changes", "rework", "changes_requested":
+		return "request_changes"
+	default:
+		return strings.TrimSpace(strings.ToLower(val))
+	}
+}
+
+func isWorkflowRejectionDecision(d string) bool {
+	switch strings.ToLower(strings.TrimSpace(d)) {
+	case "reject", "rejected", "request_changes", "needs_revision", "needs_changes", "rework", "changes_requested":
+		return true
+	default:
+		return false
+	}
 }
 
 func compareWorkflowValue(actual, op, value string, values []string) bool {

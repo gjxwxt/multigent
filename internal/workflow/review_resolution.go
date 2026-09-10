@@ -467,6 +467,24 @@ func latestCompletedOutput(ctx *reviewResolutionContext, key string, check func(
 	return "", false
 }
 
+func isRejectionDecision(d string) bool {
+	switch strings.ToLower(strings.TrimSpace(d)) {
+	case "reject", "rejected", "request_changes", "needs_revision", "needs_changes", "rework", "changes_requested":
+		return true
+	default:
+		return false
+	}
+}
+
+func isApprovalDecision(d string) bool {
+	switch strings.ToLower(strings.TrimSpace(d)) {
+	case "approve", "approved", "pass", "passed", "ok", "yes", "approve_push", "approve_local":
+		return true
+	default:
+		return false
+	}
+}
+
 // ResolveApprovalOutputs merges HumanInputs with system Evidence and Inherited Candidates into a complete ResolvedApprovalSnapshot.
 func ResolveApprovalOutputs(preview ReviewResolutionPreview, decision string, humanInputs map[string]string, actor string) (ResolvedApprovalSnapshot, error) {
 	decision = strings.ToLower(strings.TrimSpace(decision))
@@ -477,10 +495,8 @@ func ResolveApprovalOutputs(preview ReviewResolutionPreview, decision string, hu
 	outputs := make(map[string]string)
 	trace := make(map[string]ResolutionTraceItem)
 
-	outputs["decision"] = decision
-
-	// Handle reject
-	if decision == "rejected" || decision == "needs_revision" {
+	// Handle reject / request changes
+	if isRejectionDecision(decision) {
 		comments := strings.TrimSpace(humanInputs["comments"])
 		if comments == "" {
 			comments = strings.TrimSpace(humanInputs["rejection_reason"])
@@ -488,6 +504,7 @@ func ResolveApprovalOutputs(preview ReviewResolutionPreview, decision string, hu
 		if comments == "" {
 			return ResolvedApprovalSnapshot{}, errors.New("rejection requires comments")
 		}
+		outputs["decision"] = "request_changes"
 		outputs["comments"] = comments
 		trace["comments"] = ResolutionTraceItem{
 			Mode:   "human_input",
@@ -500,6 +517,12 @@ func ResolveApprovalOutputs(preview ReviewResolutionPreview, decision string, hu
 			ResolvedOutputs:    outputs,
 			ResolutionTrace:    trace,
 		}, nil
+	}
+
+	if isApprovalDecision(decision) {
+		outputs["decision"] = "approve"
+	} else {
+		outputs["decision"] = decision
 	}
 
 	// Handle approve
