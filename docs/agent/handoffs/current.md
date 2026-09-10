@@ -148,3 +148,62 @@ Key status & deliverables:
 
 - 任务根帖在中途曾出现“Completed/55%”这类历史投影与真实工作流状态不一致，最终完成时已刷新为 100%/9/9；建议后续单独加一条投影状态机回归测试，确保恢复和人工审批后的根帖不会提前显示终态。
 - 发布 Agent 等待外部 CI 时必须保持会话直到提交结构化输出；平台最好提供 release 节点级重试/续接入口，避免只能依靠人工恢复任务状态。
+
+## 2026-09-10 Enterprise Evolution Roadmap, Duration Bugfix & Mattermost Audit
+
+- **企业级演进架构路线图已沉淀**：
+  - 详细设计见架构文档：[`docs/architecture/enterprise-evolution-and-scale-roadmap.md`](file:///Users/imac/Documents/code/github/multigent/docs/architecture/enterprise-evolution-and-scale-roadmap.md)。
+  - **核心设计共识**：
+    - 确立“集中式单活控制面（API/调度/审计/SQLite）+ 分布式运行节点（Docker/Agent 水平外挂）”的务实拓扑，坚决避免在控制面盲目拆微服务引发的分布式一致性灾难。
+    - **P0 存量仓库接入**：建立 5 步只读探测与基线验证流水线，实施“失败但可解释（Fail-closed / not_ready）”原则，严禁直接改动 `main`，通过后固化 `.multigent/runtime.json`。
+    - **P0 内网 ChatOps 验收**：制定 `doctor --im` 双向探测规范，消除权限不足静默丢弃（提供友好反馈），解决 DEFECT-C3 多绑定冲突。
+    - **P1 四层限额治理**：落实 Workspace / Project / Agent / Node Quota 并发与容器资源配额，严密覆盖同项目多任务与跨项目多任务两组基准测试。
+    - **P1 测试质量治理**：建立研发 TDD -> 独立 QA 审用例 -> Signoff 追溯矩阵三层防线，高风险未测项必须显式 Waiver 特批。
+    - **P2 大需求拆分后置**：降级为“一页纸设计案 + 单批次审批推进”的规范流程，先禁用自动无穷递归派生子任务。
+
+- **多阶段任务“实际耗时显示 1m”根因修复**：
+  - **现象**：任务 `t-20260910-62lk48` 运行中前端动态展示真实历时（~50m），任务完成后弹窗与卡片耗时突变为 `1m`。
+  - **根因**：`cmd/multigent/scheduler.go` 在调度执行第 3 阶段（`ci_ready`）时硬编码执行了 `task.StartedAt = &now`，无条件洗掉了最初的启动时间戳（`02:02:50` -> `02:51:02`），导致任务完结时 `FinishedAt - StartedAt` 仅剩 89 秒。
+  - **修复**：`cmd/multigent/scheduler.go` 改用幂等的 `entity.ApplyStatusTimestamps(task, prev, now)`，并在 `internal/entity/task_timestamps_test.go` 中补充多步骤流转保留原有 `StartedAt` 的回归单测，全量测试已通过。
+
+- **Mattermost `proj-api-key-hub` 频道会话审计与诊断**：
+  - **Live Card 原地更新正常**：主帖 `thsdt1g3kbrx8mg4hybi359rwy` 原地更新至 100% 完结，历史旧卡片已安全软删除（`deleteat > 0`），未产生刷屏垃圾帖。
+  - **异常发现 1（用户提问被静默拒绝）**：用户 `alex` 在 Thread 询问 `@bot-lina 为什么这个初始化任务干的这么慢，卡点在哪`，因其在项目角色为 `viewer`（只读访客），被后端 `userCanOperateAgentInWorkspace` 判定权限不足（`rejected: permission_denied`）。系统静默丢弃未给任何文字回复，用户体感为机器人假死。
+  - **异常发现 2（通道多实例告警 DEFECT-C3）**：频道内同时绑定了 Lina、Mira、Nora 三位 Agent，其中 Mira 与 Nora 共享了相同的 AppId（`h4notz95xif8iehx4z88yyt6ka`），触发系统持续产生 `selecting matches[0]` 降级告警。
+
+## 2026-09-10 ChatOps RBAC, DEFECT-C3 Elimination & Permission Feedback Delivery
+
+- **新建项目弹窗成员角色选择与默认执行者 (Operator)**:
+  - **前端交互 (`web/src/components/project/CreateProjectDialog.tsx`)**：
+    - 展开「项目成员」手风琴后，为每个被勾选的项目成员提供角色下拉选择器（执行者 `operator`、查看者 `viewer`、项目管理者 `manager`）。
+    - 勾选非创建者成员默认赋予「执行者 (`operator`)」，创建者固定展示「创建者 · 管理员」徽章不可取消。
+    - 提交请求时向后端发送结构化 `members: [{ username, role }]` 并保留 `memberUsernames` 兼容性。
+  - **后端支持 (`internal/api/project_handlers.go`)**：
+    - `handleCreateProject` 接收 `members` 参数并规范化校验角色；如果老客户端仅提供 `memberUsernames`，默认角色一律分配为 `operator`（彻底废弃原 `"member"` 导致被降权为 `viewer` 的设计）。
+    - 单测覆盖：`internal/api/project_write_rbac_test.go` (`TestProjectCreate_MemberRolesAndDefaults`)。
+
+- **DEFECT-C3 多 Agent 绑定路由冲突彻底消除**:
+  - **根因**：`provisionProjectChannelCore` 为频道内 Agent 分配连接时，若缺少独立连接会 fallback 到第一个可用连接，导致 Mira 与 Nora 共享相同 BotID，引发 WebSocket 事件分发多重匹配与告警。
+  - **修复 (`internal/api/project_channel_handlers.go` & `internal/api/agent_channel_events.go`)**：
+    - 实施两阶段独占分配（Pass 1 专用名优先，Pass 2 空闲独占），同一频道内每个 Bot 连接最多绑定 1 个 Agent；多余 Agent 跳过绑定并在 warnings 中显式提示。
+    - `matchChannelEventBindings` 增加路由消歧保护：当同 BotID 存在历史残留绑定时，按 AgentID 与连接名一致性消歧。
+    - 单测覆盖：`internal/api/agent_channel_events_test.go` (`TestMatchChannelEventBindings_DisambiguatesDefectC3`)。
+
+- **Live Card 完结时耗时与标题归零彻底修复**:
+  - **根因**：`CloseTaskThread`（`internal/imbridge/task_thread_projection_service.go`）在关闭任务时直接调用 `patchLiveCardDirect`，漏传了真实 `ElapsedSeconds` 与 `TaskTitle`，导致最终主帖卡片被刷成 `< 1m` 且标题丢失。
+  - **修复**：`CloseTaskThread` 引入 `CloseTaskOptions`，在任务流转至 `Done` 时将真实运行耗时与任务标题显式透传写入归档卡片。
+  - **单测覆盖**：`internal/imbridge/task_thread_projection_live_card_test.go`。
+
+- **越权与未绑定操作明确文字反馈**:
+  - **文字消息拦截 (`internal/api/agent_channel_events.go: acceptIMMessage`)**：
+    - 权限不足时回复：“⚠️ 您在项目「%s」仅拥有只读权限（Viewer），无法唤醒 Agent 或下发操作指令。如需协作，请联系项目负责人为您分配执行者（Operator）或管理者权限。”
+  - **卡片按钮回调拦截 (`internal/api/agent_channel_events.go: acceptIMInteractionCallback`)**：
+    - 未绑定聊天账号时返回 ephemeral 消息提示先绑定账号；拥有只读权限时返回 ephemeral 消息明确说明只读无权审批。
+  - **人工审核审批人回退展示 (`internal/api/task_thread_projection_hooks.go`)**：
+    - 审核卡片在步骤实例未产生时，回退至 `run.ActorBindings` 与任务创建者/负责人，避免卡片显示“当前步骤未绑定具体用户”。
+
+- **端到端部署与验收证据 (Verification Evidence)**：
+  - **自动化 UI 与 API 测试**：执行 Playwright 脚本成功在 Web 控制台创建项目 `proj-rbac-5511`，勾选成员 `alex`，确认角色下拉框默认选中为 `operator`。
+  - **SQLite 数据库验证**：`/opt/multigent/data/.multigent/multigent.db` 中 `alex` 在 `proj-rbac-5511` 的角色成功落库为 `operator`，`admin` 为 `manager`。
+  - **通道与绑定验证**：Lina 绑定专用连接 `conn-4632f10ef701e6fa0174e723`（Bot `fq19z958...`），Mira 绑定专用连接 `conn-1bec7de71cae54f406a042d3`（Bot `h4notz95...`），1:1 独占分配，VM journalctl 日志中 DEFECT-C3 告警完全消除（0 告警）。
+
