@@ -717,3 +717,67 @@ func TestPushTagEnforcesAncestryAndVerifiesRemote(t *testing.T) {
 		t.Fatalf("remote peeled tag = %q, want commit %s", remote, mainSHA)
 	}
 }
+
+func TestPreserveRuntimeContract(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "gitworktree-contract-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	runGit(t, tempDir, "init", "-b", "main")
+	runGit(t, tempDir, "config", "user.email", "test@multigent.ai")
+	runGit(t, tempDir, "config", "user.name", "Multigent Tester")
+
+	// Create root runtime.json
+	validContract := `{"version": 1, "backend": {"command": "go run .", "port": 8080}}`
+	if err := os.MkdirAll(filepath.Join(tempDir, ".multigent"), 0755); err != nil {
+		t.Fatalf("mkdir .multigent: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, ".multigent", "runtime.json"), []byte(validContract), 0644); err != nil {
+		t.Fatalf("write runtime.json: %v", err)
+	}
+
+	// Git ignore .multigent so it won't be checked out by git automatically
+	if err := os.WriteFile(filepath.Join(tempDir, ".gitignore"), []byte(".multigent/\n"), 0644); err != nil {
+		t.Fatalf("write .gitignore: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "README.md"), []byte("# Test\n"), 0644); err != nil {
+		t.Fatalf("write README.md: %v", err)
+	}
+	runGit(t, tempDir, "add", ".gitignore", "README.md")
+	runGit(t, tempDir, "commit", "-m", "init")
+
+	mgr := NewManager()
+
+	// 1. EnsureWorktree copies contract when missing
+	wtDir, _, err := mgr.EnsureWorktree(tempDir, "task-contract-1", "main", "feature/task-contract-1")
+	if err != nil {
+		t.Fatalf("EnsureWorktree failed: %v", err)
+	}
+	wtContractPath := filepath.Join(wtDir, ".multigent", "runtime.json")
+	content, err := os.ReadFile(wtContractPath)
+	if err != nil {
+		t.Fatalf("worktree contract was not preserved: %v", err)
+	}
+	if string(content) != validContract {
+		t.Fatalf("contract mismatch: got %s, want %s", string(content), validContract)
+	}
+
+	// 2. Corrupt worktree contract with version 0 / metadata marker, verify EnsureWorktree repairs it
+	bogusContract := `{"taskId": "task-contract-1", "note": "Local runtime marker"}`
+	if err := os.WriteFile(wtContractPath, []byte(bogusContract), 0644); err != nil {
+		t.Fatalf("write bogus contract: %v", err)
+	}
+	wtDirReopen, _, err := mgr.EnsureWorktree(tempDir, "task-contract-1", "main", "feature/task-contract-1")
+	if err != nil {
+		t.Fatalf("EnsureWorktree reopen failed: %v", err)
+	}
+	repairedContent, err := os.ReadFile(filepath.Join(wtDirReopen, ".multigent", "runtime.json"))
+	if err != nil {
+		t.Fatalf("read repaired contract failed: %v", err)
+	}
+	if string(repairedContent) != validContract {
+		t.Fatalf("contract was not repaired: got %s, want %s", string(repairedContent), validContract)
+	}
+}

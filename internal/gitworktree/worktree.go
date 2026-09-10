@@ -2,6 +2,7 @@ package gitworktree
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -167,6 +168,7 @@ func (m *Manager) EnsureSnapshotWorktree(projectRoot, taskID, commit string) (st
 		if revErr != nil || current != commit {
 			return "", fmt.Errorf("snapshot worktree already exists at a different revision")
 		}
+		preserveRuntimeContract(projectRoot, targetDir)
 		return targetDir, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(targetDir), 0755); err != nil {
@@ -179,6 +181,7 @@ func (m *Manager) EnsureSnapshotWorktree(projectRoot, taskID, commit string) (st
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("git snapshot worktree add failed: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
 	}
+	preserveRuntimeContract(projectRoot, targetDir)
 	return targetDir, nil
 }
 
@@ -340,6 +343,7 @@ func (m *Manager) ensureWorktree(projectRoot, taskID, baseBranch, baseCommit, fe
 		if err != nil {
 			return "", "", fmt.Errorf("read existing worktree branch: %w", err)
 		}
+		preserveRuntimeContract(projectRoot, targetDir)
 		return targetDir, branch, nil
 	}
 
@@ -393,6 +397,7 @@ func (m *Manager) ensureWorktree(projectRoot, taskID, baseBranch, baseCommit, fe
 	if err != nil {
 		return "", "", fmt.Errorf("read created worktree branch: %w", err)
 	}
+	preserveRuntimeContract(projectRoot, targetDir)
 	return targetDir, branch, nil
 }
 
@@ -1110,4 +1115,40 @@ func (m *Manager) SyncMain(projectRoot, defaultBranch string) error {
 		}
 	}
 	return nil
+}
+
+func preserveRuntimeContract(projectRoot, targetDir string) {
+	projectRoot = strings.TrimSpace(projectRoot)
+	targetDir = strings.TrimSpace(targetDir)
+	if projectRoot == "" || targetDir == "" {
+		return
+	}
+	rootContract := filepath.Join(projectRoot, ".multigent", "runtime.json")
+	targetContract := filepath.Join(targetDir, ".multigent", "runtime.json")
+
+	rootRaw, err := os.ReadFile(rootContract)
+	if err != nil {
+		return
+	}
+	var rootSpec struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(rootRaw, &rootSpec); err != nil || rootSpec.Version != 1 {
+		return
+	}
+
+	targetRaw, err := os.ReadFile(targetContract)
+	if os.IsNotExist(err) {
+		_ = os.MkdirAll(filepath.Dir(targetContract), 0755)
+		_ = os.WriteFile(targetContract, rootRaw, 0644)
+		return
+	}
+	if err == nil {
+		var targetSpec struct {
+			Version int `json:"version"`
+		}
+		if json.Unmarshal(targetRaw, &targetSpec) != nil || targetSpec.Version != 1 {
+			_ = os.WriteFile(targetContract, rootRaw, 0644)
+		}
+	}
 }
