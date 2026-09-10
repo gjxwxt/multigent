@@ -1139,9 +1139,10 @@ func runAllPendingTasks(ctx context.Context, root, project, agentName string,
 		}
 
 		now := time.Now().UTC()
+		prev := task.Status
 		task.Status = entity.TaskStatusInProgress
-		task.StartedAt = &now
 		task.UpdatedAt = now
+		entity.ApplyStatusTimestamps(task, prev, now)
 		if err := ts.UpdateTask(project, agentName, task); err != nil {
 			return err
 		}

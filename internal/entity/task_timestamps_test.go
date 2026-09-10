@@ -19,6 +19,15 @@ func TestApplyStatusTimestamps(t *testing.T) {
 		}
 	})
 
+	t.Run("in_progress preserves existing started", func(t *testing.T) {
+		orig := now.Add(-30 * time.Minute)
+		task := &Task{Status: TaskStatusInProgress, StartedAt: &orig}
+		ApplyStatusTimestamps(task, TaskStatusPending, now)
+		if task.StartedAt == nil || !task.StartedAt.Equal(orig) {
+			t.Fatalf("StartedAt = %v, want original %v", task.StartedAt, orig)
+		}
+	})
+
 	t.Run("terminal sets finished", func(t *testing.T) {
 		started := now.Add(-time.Hour)
 		task := &Task{Status: TaskStatusDoneSuccess, StartedAt: &started}
