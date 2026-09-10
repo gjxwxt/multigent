@@ -46,6 +46,9 @@ func (f *fakeODClient) CreateProject(_ context.Context, id, _, _, pendingPrompt 
 	if f.failCreate {
 		return &odAPIError{Status: 502, Detail: "upstream down"}
 	}
+	if f.projects[id] {
+		return &odAPIError{Status: 400, Detail: `{"error":{"code":"BAD_REQUEST","message":"SqliteError: UNIQUE constraint failed: projects.id"}}`}
+	}
 	f.createCalls = append(f.createCalls, id)
 	f.projects[id] = true
 	f.lastPrompt = pendingPrompt
@@ -420,6 +423,33 @@ func TestDesignStartStandaloneTaskUsesPrompt(t *testing.T) {
 	}
 	if !strings.Contains(fake.lastPrompt, "独立任务：设计一个看板页面") {
 		t.Fatalf("lastPrompt missing task prompt: %s", fake.lastPrompt)
+	}
+	if !strings.Contains(fake.lastPrompt, "【角色与使命】") {
+		t.Fatalf("lastPrompt missing role framing: %s", fake.lastPrompt)
+	}
+}
+
+func TestDesignStartAutoHealsExistingODProject(t *testing.T) {
+	s, _, task := seedDesignTask(t, entity.TaskStatusAwaitingConfirmation)
+	fake := newFakeODClient()
+	s.designClient = fake
+	projID := designProjectIDForTask(task.ID)
+
+	// Pre-populate fake OD client with the project, simulating an existing orphan project in OD.
+	fake.projects[projID] = true
+
+	w := designPost(t, s, "/api/v1/projects/resproj/tasks/t-res-1/design/start", `{"designSystemId":"ant"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected start to auto-heal existing project, got %d %s", w.Code, w.Body.String())
+	}
+	if len(fake.deleteCalls) != 1 || fake.deleteCalls[0] != projID {
+		t.Fatalf("expected deleteCall for %s, got %v", projID, fake.deleteCalls)
+	}
+	if len(fake.createCalls) != 1 || fake.createCalls[0] != projID {
+		t.Fatalf("expected createCall for %s, got %v", projID, fake.createCalls)
+	}
+	if !fake.projects[projID] {
+		t.Fatal("expected project to exist after auto-heal creation")
 	}
 	if !strings.Contains(fake.lastPrompt, "【角色与使命】") {
 		t.Fatalf("lastPrompt missing role framing: %s", fake.lastPrompt)

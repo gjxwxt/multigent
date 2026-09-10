@@ -220,9 +220,16 @@ func (s *Server) handleDesignStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	projID := designProjectIDForTask(taskID)
+	name := "task_" + taskID
+
 	// Regenerate: delete the old OD project first so orphans don't accumulate.
-	if task.DesignProjectID != "" && body.Regenerate {
-		if err := client.DeleteProject(r.Context(), task.DesignProjectID); err != nil {
+	if body.Regenerate {
+		delID := task.DesignProjectID
+		if delID == "" {
+			delID = projID
+		}
+		if err := client.DeleteProject(r.Context(), delID); err != nil {
 			// Not fatal: continue creating the replacement, but leave a trail.
 			s.addComment(task, project, agent, "design regenerate: old OD project delete failed: "+err.Error())
 		}
@@ -235,11 +242,23 @@ func (s *Server) handleDesignStart(w http.ResponseWriter, r *http.Request) {
 	}
 	finalPrompt := designGatePrompt(reqText)
 
-	projID := designProjectIDForTask(taskID)
-	name := "task_" + taskID
 	if err := client.CreateProject(r.Context(), projID, name, body.DesignSystemID, finalPrompt); err != nil {
-		s.writeDesignUpstreamError(w, err)
-		return
+		created := false
+		if isODProjectAlreadyExistsErr(err) {
+			// Self-healing: if an orphan project already exists in OD (from an interrupted
+			// run or prior session), delete it and retry creation once with the fresh prompt.
+			if delErr := client.DeleteProject(r.Context(), projID); delErr == nil {
+				if retryErr := client.CreateProject(r.Context(), projID, name, body.DesignSystemID, finalPrompt); retryErr == nil {
+					created = true
+				} else {
+					err = retryErr
+				}
+			}
+		}
+		if !created {
+			s.writeDesignUpstreamError(w, err)
+			return
+		}
 	}
 	// Which OD connection this design session uses is part of the audit trail:
 	// multi-connection workspaces need to answer "which OD did this talk to".
@@ -964,6 +983,16 @@ func (s *Server) writeDesignUpstreamError(w http.ResponseWriter, err error) {
 		detail = detail[:300]
 	}
 	s.jsonError(w, http.StatusBadGateway, "OD service error: "+detail)
+}
+
+func isODProjectAlreadyExistsErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "unique constraint failed: projects.id") ||
+		strings.Contains(lower, "already exists") ||
+		strings.Contains(lower, "duplicate")
 }
 
 // allowDesignRequest caps proxied studio traffic per task per window. Writes
