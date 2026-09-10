@@ -238,13 +238,25 @@ func (s *Server) validateWorkflowDecisionReviewer(workspaceID, project, taskID, 
 				if u := s.users.GetUser(submittedBy); u != nil {
 					if u.Role == RoleAdmin {
 						allowed = true
-					} else if _, hasAccess := s.users.HasProjectAccess(submittedBy, project); hasAccess {
-						allowed = true
+					} else if role, hasAccess := s.users.HasProjectAccess(submittedBy, project); hasAccess {
+						if projectRoleLevel(role) >= projectRoleLevel(ProjectRoleOperator) {
+							allowed = true
+						}
 					}
 				}
 			}
 			if !allowed {
 				return errWorkflowDecisionReviewerForbidden
+			}
+		} else {
+			if s.users != nil {
+				if u := s.users.GetUser(submittedBy); u != nil && u.Role != RoleAdmin {
+					if role, hasAccess := s.users.HasProjectAccess(submittedBy, project); hasAccess {
+						if projectRoleLevel(role) < projectRoleLevel(ProjectRoleOperator) {
+							return errWorkflowDecisionReviewerForbidden
+						}
+					}
+				}
 			}
 		}
 		if !workflowStepInstanceOpen(inst.Status) {

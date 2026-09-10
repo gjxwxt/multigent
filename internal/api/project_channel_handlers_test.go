@@ -88,6 +88,35 @@ func TestProvisionProjectChannel_Success(t *testing.T) {
 		t.Fatalf("upsert secret: %v", err)
 	}
 
+	connID2 := "conn-mm-provision-test-2"
+	if err := s.controlDB.UpsertConnection(controldb.Connection{
+		ID:             connID2,
+		WorkspaceID:    workspaceID,
+		Provider:       "mattermost",
+		ConnectionName: "mattermost-bot-secondary",
+		OwnerType:      ConnectionOwnerWorkspace,
+		OwnerID:        workspaceID,
+		AuthType:       "bot_token",
+		Status:         "active",
+		ProfileJSON:    `{"botId":"bot-user-456","baseUrl":"` + mockMM.URL + `"}`,
+		IMInstanceID:   "inst-test-1",
+	}); err != nil {
+		t.Fatalf("upsert connection 2: %v", err)
+	}
+
+	secret2, err := sealConnectionSecret(map[string]string{
+		"baseUrl":  mockMM.URL,
+		"botToken": "test-bot-token-2",
+		"appId":    "bot-user-456",
+	})
+	if err != nil {
+		t.Fatalf("seal secret 2: %v", err)
+	}
+	secret2.ConnectionID = connID2
+	if err := s.controlDB.UpsertConnectionSecret(secret2); err != nil {
+		t.Fatalf("upsert secret 2: %v", err)
+	}
+
 	// 4. Setup bound user 'alex' in user_channel_identities
 	_ = s.users.CreateUser("admin", "adminpass", RoleAdmin, "", "", "", "", "")
 	_ = s.users.CreateUser("alex", "pass", RoleMember, "", "", "", "", "")

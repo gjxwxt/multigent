@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -39,6 +40,7 @@ type projectChannelProvisionResponse struct {
 	TeamID         string   `json:"teamId"`
 	BoundAgents    []string `json:"boundAgents"`
 	FailedAgents   []string `json:"failedAgents"`
+	SkippedAgents  []string `json:"skippedAgents"`
 	FailedBots     []string `json:"failedBots"`
 	InvitedMembers []string `json:"invitedMembers"`
 	FailedMembers  []string `json:"failedMembers"`
@@ -121,6 +123,28 @@ type channelProvisionError struct {
 
 func (e *channelProvisionError) Error() string {
 	return e.Message
+}
+
+func connectionMatchesAgent(ic controldb.Connection, agentName string) bool {
+	lowerAgent := strings.ToLower(strings.TrimSpace(agentName))
+	if lowerAgent == "" {
+		return false
+	}
+	connName := strings.ToLower(strings.TrimSpace(ic.ConnectionName))
+	if connName == lowerAgent || strings.Contains(connName, lowerAgent) {
+		return true
+	}
+	if ic.ProfileJSON != "" {
+		var prof map[string]any
+		if err := json.Unmarshal([]byte(ic.ProfileJSON), &prof); err == nil {
+			for _, k := range []string{"botName", "displayName", "username", "agentId"} {
+				if v, ok := prof[k].(string); ok && strings.EqualFold(strings.TrimSpace(v), lowerAgent) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (s *Server) provisionProjectChannelCore(ctx context.Context, workspaceID, projectName string, req projectChannelProvisionRequest, actorUsername string) (*projectChannelProvisionResponse, *channelProvisionError) {
@@ -318,18 +342,112 @@ func (s *Server) provisionProjectChannelCore(ctx context.Context, workspaceID, p
 		}
 	}
 
-	// 5. Invite all active agent bots in the workspace/instance to the channel
+	// 5. Resolve agents to bind
+	type agentEntry struct {
+		Name     string
+		WorkerID string
+	}
+	agentMap := make(map[string]agentEntry)
+
+	for _, workerID := range req.WorkerIDs {
+		workerID = strings.TrimSpace(workerID)
+		if workerID == "" {
+			continue
+		}
+		agentName := workerID
+		if w, found, err := s.controlDB.AgentWorkerByID(workspaceID, workerID); err == nil && found && strings.TrimSpace(w.Name) != "" {
+			agentName = strings.TrimSpace(w.Name)
+		}
+		agentMap[agentName] = agentEntry{Name: agentName, WorkerID: workerID}
+	}
+
+	if memberships, err := s.controlDB.ListProjectMemberships(controldb.ProjectMembershipFilter{
+		WorkspaceID: workspaceID,
+		ProjectID:   projectName,
+	}); err == nil {
+		for _, m := range memberships {
+			title := strings.TrimSpace(m.Title)
+			memberID := strings.TrimSpace(m.MemberID)
+			agentName := title
+			if agentName == "" {
+				agentName = memberID
+			}
+			if agentName != "" {
+				agentMap[agentName] = agentEntry{Name: agentName, WorkerID: memberID}
+			}
+		}
+	}
+
+	if len(agentMap) == 0 {
+		agentMap["Mira"] = agentEntry{Name: "Mira"}
+		agentMap["Lina"] = agentEntry{Name: "Lina"}
+	}
+
+	sortedAgentNames := make([]string, 0, len(agentMap))
+	for name := range agentMap {
+		sortedAgentNames = append(sortedAgentNames, name)
+	}
+	sort.Strings(sortedAgentNames)
+
+	// Pre-assign connections 1:1 to agents deterministically to prevent DEFECT-C3 duplicate bindings
+	assignedConnByAgent := make(map[string]controldb.Connection)
+	usedConnIDs := make(map[string]string) // connID -> agentName
+
+	// Pass 1: Named matches take highest priority (deterministic alphabetical order)
+	for _, agentName := range sortedAgentNames {
+		for _, ic := range activeConns {
+			if imInstanceID != "" && ic.IMInstanceID != imInstanceID {
+				continue
+			}
+			if _, used := usedConnIDs[ic.ID]; used {
+				continue
+			}
+			if connectionMatchesAgent(ic, agentName) {
+				assignedConnByAgent[agentName] = ic
+				usedConnIDs[ic.ID] = agentName
+				break
+			}
+		}
+	}
+
+	// Pass 2: For agents without named match, allocate targetConn or an unused activeConn (at most one per agent)
+	for _, agentName := range sortedAgentNames {
+		if _, has := assignedConnByAgent[agentName]; has {
+			continue
+		}
+		if targetConn.ID != "" {
+			if _, used := usedConnIDs[targetConn.ID]; !used {
+				assignedConnByAgent[agentName] = targetConn
+				usedConnIDs[targetConn.ID] = agentName
+				continue
+			}
+		}
+		for _, ic := range activeConns {
+			if imInstanceID != "" && ic.IMInstanceID != imInstanceID {
+				continue
+			}
+			if _, used := usedConnIDs[ic.ID]; !used {
+				assignedConnByAgent[agentName] = ic
+				usedConnIDs[ic.ID] = agentName
+				break
+			}
+		}
+	}
+
+	// 6. Invite ONLY successfully bound agent bots to the channel
 	failedBots := make([]string, 0)
 	failedBotIDs := make(map[string]string)
+	invitedBotIDs := make(map[string]bool)
 
-	for _, ic := range activeConns {
-		if imInstanceID != "" && ic.IMInstanceID != imInstanceID {
+	for _, agentName := range sortedAgentNames {
+		agentConn, ok := assignedConnByAgent[agentName]
+		if !ok || agentConn.ID == "" {
 			continue
 		}
 		var botID string
-		if ic.ProfileJSON != "" {
+		if agentConn.ProfileJSON != "" {
 			var prof map[string]any
-			if err := json.Unmarshal([]byte(ic.ProfileJSON), &prof); err == nil {
+			if err := json.Unmarshal([]byte(agentConn.ProfileJSON), &prof); err == nil {
 				if bid, ok := prof["botId"].(string); ok && bid != "" {
 					botID = bid
 				} else if aid, ok := prof["appId"].(string); ok && aid != "" {
@@ -338,23 +456,24 @@ func (s *Server) provisionProjectChannelCore(ctx context.Context, workspaceID, p
 			}
 		}
 		if botID == "" {
-			if sec, sFound, _ := s.controlDB.ConnectionSecret(ic.ID); sFound {
+			if sec, sFound, _ := s.controlDB.ConnectionSecret(agentConn.ID); sFound {
 				if vals, err := openConnectionSecret(sec); err == nil {
 					botID = vals["appId"]
 				}
 			}
 		}
-		if botID != "" {
+		if botID != "" && !invitedBotIDs[botID] {
+			invitedBotIDs[botID] = true
 			_ = client.AddUserToTeam(ctx, teamID, botID)
 			if err := client.AddUserToChannel(ctx, mmChan.ID, botID); err != nil {
-				log.Printf("[project-channel] failed to add bot %s (%s) to channel %s: %v", ic.ConnectionName, botID, mmChan.ID, err)
+				log.Printf("[project-channel] failed to add bound bot %s (%s) to channel %s: %v", agentConn.ConnectionName, botID, mmChan.ID, err)
 				failedBots = append(failedBots, botID)
 				failedBotIDs[botID] = err.Error()
 			}
 		}
 	}
 
-	// 6. Invite bound workspace members to the channel strictly scoped to IM instance
+	// 7. Invite bound workspace members to the channel strictly scoped to IM instance
 	memberUsernames := req.MemberUsernames
 	if len(memberUsernames) == 0 {
 		if memberships, err := s.controlDB.ListProjectMemberships(controldb.ProjectMembershipFilter{
@@ -405,7 +524,7 @@ func (s *Server) provisionProjectChannelCore(ctx context.Context, workspaceID, p
 		}
 	}
 
-	// 7. Persist first-class ProjectChannelLink in DB
+	// 8. Persist first-class ProjectChannelLink in DB
 	nowStr := time.Now().UTC().Format(time.RFC3339)
 	linkID := newChannelID("pcl")
 	if existingLink, found, _ := s.controlDB.GetProjectChannelLink(workspaceID, projectName, provider, imInstanceID); found {
@@ -432,99 +551,13 @@ func (s *Server) provisionProjectChannelCore(ctx context.Context, workspaceID, p
 		log.Printf("[project-channel] failed to upsert project channel link for %s: %v", projectName, err)
 	}
 
-	// 8. Resolve agents to bind
-	type agentEntry struct {
-		Name     string
-		WorkerID string
-	}
-	agentMap := make(map[string]agentEntry)
-
-	for _, workerID := range req.WorkerIDs {
-		workerID = strings.TrimSpace(workerID)
-		if workerID == "" {
-			continue
-		}
-		agentName := workerID
-		if w, found, err := s.controlDB.AgentWorkerByID(workspaceID, workerID); err == nil && found && strings.TrimSpace(w.Name) != "" {
-			agentName = strings.TrimSpace(w.Name)
-		}
-		agentMap[agentName] = agentEntry{Name: agentName, WorkerID: workerID}
-	}
-
-	if memberships, err := s.controlDB.ListProjectMemberships(controldb.ProjectMembershipFilter{
-		WorkspaceID: workspaceID,
-		ProjectID:   projectName,
-	}); err == nil {
-		for _, m := range memberships {
-			title := strings.TrimSpace(m.Title)
-			memberID := strings.TrimSpace(m.MemberID)
-			agentName := title
-			if agentName == "" {
-				agentName = memberID
-			}
-			if agentName != "" {
-				agentMap[agentName] = agentEntry{Name: agentName, WorkerID: memberID}
-			}
-		}
-	}
-
-	if len(agentMap) == 0 {
-		agentMap["Mira"] = agentEntry{Name: "Mira"}
-		agentMap["Lina"] = agentEntry{Name: "Lina"}
-	}
-
 	// 9. Persist AgentChannelBinding and AgentChannelTarget scoped strictly to THIS project
-	boundAgents := make([]string, 0, len(agentMap))
+	boundAgents := make([]string, 0, len(sortedAgentNames))
 	failedAgents := make([]string, 0)
 	skippedAgents := make([]string, 0)
 
-	// Pre-assign connections 1:1 to agents to prevent DEFECT-C3 duplicate bindings
-	assignedConnByAgent := make(map[string]controldb.Connection)
-	usedConnIDs := make(map[string]string) // connID -> agentName
-
-	// Pass 1: Named matches take highest priority
-	for agentName := range agentMap {
-		lowerAgent := strings.ToLower(agentName)
-		for _, ic := range activeConns {
-			if imInstanceID != "" && ic.IMInstanceID != imInstanceID {
-				continue
-			}
-			if _, used := usedConnIDs[ic.ID]; used {
-				continue
-			}
-			if strings.Contains(strings.ToLower(ic.ConnectionName), lowerAgent) || strings.Contains(strings.ToLower(ic.ProfileJSON), lowerAgent) {
-				assignedConnByAgent[agentName] = ic
-				usedConnIDs[ic.ID] = agentName
-				break
-			}
-		}
-	}
-
-	// Pass 2: For agents without named match, allocate targetConn or an unused activeConn (at most one per agent)
-	for agentName := range agentMap {
-		if _, has := assignedConnByAgent[agentName]; has {
-			continue
-		}
-		if targetConn.ID != "" {
-			if _, used := usedConnIDs[targetConn.ID]; !used {
-				assignedConnByAgent[agentName] = targetConn
-				usedConnIDs[targetConn.ID] = agentName
-				continue
-			}
-		}
-		for _, ic := range activeConns {
-			if imInstanceID != "" && ic.IMInstanceID != imInstanceID {
-				continue
-			}
-			if _, used := usedConnIDs[ic.ID]; !used {
-				assignedConnByAgent[agentName] = ic
-				usedConnIDs[ic.ID] = agentName
-				break
-			}
-		}
-	}
-
-	for agentName, entry := range agentMap {
+	for _, agentName := range sortedAgentNames {
+		entry := agentMap[agentName]
 		agentConn, ok := assignedConnByAgent[agentName]
 		if !ok || agentConn.ID == "" {
 			log.Printf("[project-channel] skipping channel binding for %s/%s: no dedicated bot connection available in %s; skipping to avoid DEFECT-C3 routing conflict", projectName, agentName, provider)
@@ -618,41 +651,39 @@ func (s *Server) provisionProjectChannelCore(ctx context.Context, workspaceID, p
 
 		if botFailed {
 			failedAgents = append(failedAgents, agentName)
-			// Do NOT create/update active AgentChannelTarget if bot failed to join channel!
-			continue
-		}
-
-		// Find target for this binding and channel
-		targets, _ := s.controlDB.ListAgentChannelTargets(controldb.AgentChannelTargetFilter{
-			WorkspaceID:      workspaceID,
-			ChannelBindingID: binding.ID,
-		})
-		targetID := newChannelID("cht")
-		for _, t := range targets {
-			if t.ExternalChatID == mmChan.ID {
-				targetID = t.ID
-				break
+		} else {
+			// Find target for this binding and channel
+			targets, _ := s.controlDB.ListAgentChannelTargets(controldb.AgentChannelTargetFilter{
+				WorkspaceID:      workspaceID,
+				ChannelBindingID: binding.ID,
+			})
+			targetID := newChannelID("cht")
+			for _, t := range targets {
+				if t.ExternalChatID == mmChan.ID {
+					targetID = t.ID
+					break
+				}
 			}
-		}
 
-		target := controldb.AgentChannelTarget{
-			ID:               targetID,
-			WorkspaceID:      workspaceID,
-			ChannelBindingID: binding.ID,
-			Provider:         provider,
-			TargetType:       "chat",
-			DisplayName:      mmChan.DisplayName,
-			ExternalChatID:   mmChan.ID,
-			CreatedBy:        actorUsername,
-			CreatedAt:        createdAt,
-			UpdatedAt:        nowStr,
-			LastActivityAt:   nowStr,
-		}
-		if err := s.controlDB.UpsertAgentChannelTarget(target); err != nil {
-			log.Printf("[project-channel] failed to upsert target for %s/%s: %v", projectName, agentName, err)
-		}
+			target := controldb.AgentChannelTarget{
+				ID:               targetID,
+				WorkspaceID:      workspaceID,
+				ChannelBindingID: binding.ID,
+				Provider:         provider,
+				TargetType:       "chat",
+				DisplayName:      mmChan.DisplayName,
+				ExternalChatID:   mmChan.ID,
+				CreatedBy:        actorUsername,
+				CreatedAt:        createdAt,
+				UpdatedAt:        nowStr,
+				LastActivityAt:   nowStr,
+			}
+			if err := s.controlDB.UpsertAgentChannelTarget(target); err != nil {
+				log.Printf("[project-channel] failed to upsert target for %s/%s: %v", projectName, agentName, err)
+			}
 
-		boundAgents = append(boundAgents, agentName)
+			boundAgents = append(boundAgents, agentName)
+		}
 	}
 
 	// 10. Notify bridges
@@ -674,7 +705,7 @@ func (s *Server) provisionProjectChannelCore(ctx context.Context, workspaceID, p
 		warnings = append(warnings, fmt.Sprintf("部分成员未绑定 %s 账号: %s", provider, strings.Join(unboundMembers, ", ")))
 	}
 	var warningMsg string
-	if len(failedMembers) > 0 || len(failedAgents) > 0 {
+	if len(failedMembers) > 0 || len(failedAgents) > 0 || len(skippedAgents) > 0 {
 		statusStr = "partial"
 	}
 	if len(warnings) > 0 {
@@ -693,6 +724,7 @@ func (s *Server) provisionProjectChannelCore(ctx context.Context, workspaceID, p
 		TeamID:         teamID,
 		BoundAgents:    boundAgents,
 		FailedAgents:   failedAgents,
+		SkippedAgents:  skippedAgents,
 		FailedBots:     failedBots,
 		InvitedMembers: invitedMembers,
 		FailedMembers:  failedMembers,

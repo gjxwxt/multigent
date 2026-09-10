@@ -957,3 +957,130 @@ func TestMattermostActionCallback_RejectsContextActionMismatchBeforeSession(t *t
 		t.Fatalf("mismatched action must not create a session, found=%v err=%v", found, err)
 	}
 }
+
+func TestMattermostActionCallback_RejectionScenarios(t *testing.T) {
+	s, workspaceID, _, _, _, hmacSecret := setupTestChatopsEnv(t)
+	task, preview := setupTestWorkflowTask(t, s, workspaceID)
+
+	// Create a viewer user bound to mm-user-viewer
+	if err := s.users.CreateUser("viewer-user", "pass123", RoleMember, "", "", "", "", ""); err != nil {
+		t.Fatalf("CreateUser viewer: %v", err)
+	}
+	_ = s.users.UpdateUser("viewer-user", nil, nil, nil, nil, nil, nil, nil, []projectAccess{{Project: "sample", Role: ProjectRoleViewer}}, nil, nil)
+	_ = s.controlDB.UpsertUserChannelIdentity(controldb.UserChannelIdentity{
+		ID:               "ucid-viewer",
+		WorkspaceID:      workspaceID,
+		UserID:           "viewer-user",
+		ChannelBindingID: "binding-chatops-1",
+		Provider:         "mattermost",
+		ExternalUserID:   "mm-user-viewer",
+	})
+
+	validToken, err := imbridge.SignActionToken(hmacSecret, imbridge.ActionTokenPayload{
+		WorkspaceID: workspaceID, ProjectID: "sample", TaskID: task.ID, StepID: preview.StepID,
+		Action: "approve", ChannelID: "chan-chatops-1", ConnectionID: "conn-mm-chatops-test",
+		ExpectedStateVersion: preview.ExpectedStateVersion, ReviewSnapshotHash: preview.ReviewSnapshotHash,
+		Nonce: imbridge.GenerateNonce(), ExpiresAt: time.Now().UTC().Add(time.Hour).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("SignActionToken: %v", err)
+	}
+
+	// Scenario 1: Unbound user clicks button
+	t.Run("unbound user receives error feedback and does not advance task", func(t *testing.T) {
+		body, _ := json.Marshal(map[string]any{
+			"user_id": "mm-user-unbound", "channel_id": "chan-chatops-1", "post_id": "mock-post-card-1",
+			"context": map[string]any{"action_token": validToken, "action": "approve"},
+		})
+		rec := httptest.NewRecorder()
+		s.handleMattermostActionCallback(rec, httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/actions", bytes.NewReader(body)))
+
+		var resp map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		errMap, _ := resp["error"].(map[string]any)
+		if errMap == nil || !strings.Contains(errMap["message"].(string), "未与 Multigent 平台关联") {
+			t.Fatalf("expected unbound identity error, got %v", resp)
+		}
+		if resp["ephemeral_text"] == "" || !strings.Contains(resp["ephemeral_text"].(string), "未与 Multigent 平台关联") {
+			t.Fatalf("expected ephemeral_text containing unbound notice, got %v", resp["ephemeral_text"])
+		}
+	})
+
+	// Scenario 2: Viewer user clicks button (insufficient permissions)
+	t.Run("viewer user receives permission error and does not advance task", func(t *testing.T) {
+		body, _ := json.Marshal(map[string]any{
+			"user_id": "mm-user-viewer", "channel_id": "chan-chatops-1", "post_id": "mock-post-card-1",
+			"context": map[string]any{"action_token": validToken, "action": "approve"},
+		})
+		rec := httptest.NewRecorder()
+		s.handleMattermostActionCallback(rec, httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/actions", bytes.NewReader(body)))
+
+		var resp map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		errMap, _ := resp["error"].(map[string]any)
+		if errMap == nil || !strings.Contains(errMap["message"].(string), "权限不足") {
+			t.Fatalf("expected reviewer permission error, got %v", resp)
+		}
+		if resp["ephemeral_text"] == "" || !strings.Contains(resp["ephemeral_text"].(string), "权限不足") {
+			t.Fatalf("expected ephemeral_text containing permission notice, got %v", resp["ephemeral_text"])
+		}
+	})
+
+	// Scenario 3: Expired token
+	t.Run("expired token receives error feedback", func(t *testing.T) {
+		expiredToken, _ := imbridge.SignActionToken(hmacSecret, imbridge.ActionTokenPayload{
+			WorkspaceID: workspaceID, ProjectID: "sample", TaskID: task.ID, StepID: preview.StepID,
+			Action: "approve", ChannelID: "chan-chatops-1", ConnectionID: "conn-mm-chatops-test",
+			ExpectedStateVersion: preview.ExpectedStateVersion, ReviewSnapshotHash: preview.ReviewSnapshotHash,
+			Nonce: imbridge.GenerateNonce(), ExpiresAt: time.Now().UTC().Add(-2 * time.Hour).Unix(),
+		})
+		body, _ := json.Marshal(map[string]any{
+			"user_id": "mm-user-admin", "channel_id": "chan-chatops-1", "post_id": "mock-post-card-1",
+			"context": map[string]any{"action_token": expiredToken, "action": "approve"},
+		})
+		rec := httptest.NewRecorder()
+		s.handleMattermostActionCallback(rec, httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/actions", bytes.NewReader(body)))
+
+		var resp map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		errMap, _ := resp["error"].(map[string]any)
+		if errMap == nil || !strings.Contains(errMap["message"].(string), "有效时限") {
+			t.Fatalf("expected token expired error, got %v", resp)
+		}
+	})
+
+	// Scenario 4: Stale CAS
+	t.Run("stale CAS conflict receives error feedback", func(t *testing.T) {
+		staleToken, _ := imbridge.SignActionToken(hmacSecret, imbridge.ActionTokenPayload{
+			WorkspaceID: workspaceID, ProjectID: "sample", TaskID: task.ID, StepID: preview.StepID,
+			Action: "approve", ChannelID: "chan-chatops-1", ConnectionID: "conn-mm-chatops-test",
+			ExpectedStateVersion: 999, ReviewSnapshotHash: "mismatched-hash",
+			Nonce: imbridge.GenerateNonce(), ExpiresAt: time.Now().UTC().Add(time.Hour).Unix(),
+		})
+		body, _ := json.Marshal(map[string]any{
+			"user_id": "mm-user-admin", "channel_id": "chan-chatops-1", "post_id": "mock-post-card-1",
+			"context": map[string]any{"action_token": staleToken, "action": "approve"},
+		})
+		rec := httptest.NewRecorder()
+		s.handleMattermostActionCallback(rec, httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/actions", bytes.NewReader(body)))
+
+		var resp map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		errMap, _ := resp["error"].(map[string]any)
+		if errMap == nil || !strings.Contains(errMap["message"].(string), "409 Conflict: Protected") {
+			t.Fatalf("expected CAS 409 conflict error, got %v", resp)
+		}
+	})
+
+	// Assert task workflow state was NOT modified
+	wfStore := workflow.NewStore(s.controlDB, workspaceID)
+	curPreview, err := wfStore.GetReviewResolutionPreview("sample", task, preview.StepID)
+	if err != nil {
+		t.Fatalf("GetReviewResolutionPreview: %v", err)
+	}
+	if curPreview.ExpectedStateVersion != preview.ExpectedStateVersion {
+		t.Fatalf("expected state version %d to remain unchanged after rejections, got %d",
+			preview.ExpectedStateVersion, curPreview.ExpectedStateVersion)
+	}
+}
+

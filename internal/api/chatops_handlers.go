@@ -49,7 +49,8 @@ type mattermostActionPayload struct {
 func writeMattermostActionError(w http.ResponseWriter, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"error": map[string]string{"message": message},
+		"error":          map[string]string{"message": message},
+		"ephemeral_text": message,
 		// Keep text during the transition from slash-command responses so older
 		// clients and existing integrations can still surface the same message.
 		"text": message,

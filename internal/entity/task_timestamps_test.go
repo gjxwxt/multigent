@@ -87,3 +87,34 @@ func TestParseTaskNotBefore(t *testing.T) {
 		t.Fatal("expected negative duration error")
 	}
 }
+
+func TestTaskElapsed_FreezesOnCompletion(t *testing.T) {
+	started := time.Date(2026, 7, 9, 10, 0, 0, 0, time.UTC)
+	finished := started.Add(45 * time.Minute)
+
+	task := &Task{
+		Status:     TaskStatusDoneSuccess,
+		StartedAt:  &started,
+		FinishedAt: &finished,
+	}
+
+	// Calculate at moment of finish
+	elapsedAtFinish := TaskElapsed(task, finished)
+	if elapsedAtFinish != 45*time.Minute {
+		t.Fatalf("expected 45m, got %v", elapsedAtFinish)
+	}
+
+	// Calculate 2 hours after task completion: duration MUST remain frozen at 45m, NOT 2h45m!
+	later := finished.Add(2 * time.Hour)
+	elapsedLater := TaskElapsed(task, later)
+	if elapsedLater != 45*time.Minute {
+		t.Fatalf("expected frozen duration 45m, got %v", elapsedLater)
+	}
+
+	// Unstarted task returns 0
+	unstarted := &Task{Status: TaskStatusPending}
+	if got := TaskElapsed(unstarted, later); got != 0 {
+		t.Fatalf("expected 0 for unstarted task, got %v", got)
+	}
+}
+

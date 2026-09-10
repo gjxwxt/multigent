@@ -110,13 +110,6 @@ func (s *Server) notifyTaskThreadStarted(workspaceID, project string, t *entity.
 									reviewer = strings.TrimSpace(b.ID)
 								}
 							}
-							if reviewer == "" && t != nil {
-								if strings.TrimSpace(t.CreatedBy) != "" && !strings.HasPrefix(t.CreatedBy, "heartbeat:") && t.CreatedBy != "system" {
-									reviewer = strings.TrimSpace(t.CreatedBy)
-								} else if strings.TrimSpace(t.Assignee) != "" && t.AssigneeType == "user" {
-									reviewer = strings.TrimSpace(t.Assignee)
-								}
-							}
 							_, postErr := s.threadProjections.PostHumanReviewCard(ctx, imbridge.HumanReviewPostRequest{
 								WorkspaceID:     workspaceID,
 								ProjectID:       project,
@@ -185,8 +178,8 @@ func (s *Server) notifyTaskThreadStepTransition(workspaceID, project string, t *
 		}
 
 		var elapsedSec int
-		if t != nil && !t.CreatedAt.IsZero() {
-			elapsedSec = int(time.Since(t.CreatedAt).Seconds())
+		if t != nil {
+			elapsedSec = int(entity.TaskElapsed(t, time.Now()).Seconds())
 		}
 
 		consoleURL := s.taskConsoleURL(project, t.ID)
@@ -281,14 +274,6 @@ func (s *Server) notifyTaskThreadStepTransition(workspaceID, project string, t *
 							} else if b, ok := run.ActorBindings[transition.Next.ActorRole]; ok && workflowReviewActorTypeIsHuman(b.Type) && strings.TrimSpace(b.ID) != "" {
 								reviewer = strings.TrimSpace(b.ID)
 							}
-						}
-					}
-					// Fallback to task creator/assignee if still empty
-					if reviewer == "" && t != nil {
-						if strings.TrimSpace(t.CreatedBy) != "" && !strings.HasPrefix(t.CreatedBy, "heartbeat:") && t.CreatedBy != "system" {
-							reviewer = strings.TrimSpace(t.CreatedBy)
-						} else if strings.TrimSpace(t.Assignee) != "" && t.AssigneeType == "user" {
-							reviewer = strings.TrimSpace(t.Assignee)
 						}
 					}
 					nextStepTitle := transition.Next.Title

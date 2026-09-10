@@ -480,7 +480,6 @@ func TestProjectCreate_MemberRolesAndDefaults(t *testing.T) {
 			{Username: "alice", Role: "viewer"},
 			{Username: "bob", Role: "manager"},
 		},
-		MemberUsernames: []string{"charlie"},
 	}
 
 	rec := httptest.NewRecorder()
@@ -503,9 +502,101 @@ func TestProjectCreate_MemberRolesAndDefaults(t *testing.T) {
 		t.Fatalf("expected bob to have manager role, got %#v", bob)
 	}
 
-	// Verify charlie role == operator (defaulted from memberUsernames, not degraded to viewer)
+	// Verify admin (creator) is guaranteed manager role
+	adminUser := s.users.GetUser("admin")
+	if adminUser == nil || len(adminUser.Projects) == 0 {
+		t.Fatalf("expected admin user to have projects, got %#v", adminUser)
+	}
+	foundAdminManager := false
+	for _, prj := range adminUser.Projects {
+		if prj.Project == "new-rbac-proj" && prj.Role == ProjectRoleManager {
+			foundAdminManager = true
+			break
+		}
+	}
+	if !foundAdminManager {
+		t.Fatalf("expected admin creator to be guaranteed manager role in new-rbac-proj, got %#v", adminUser.Projects)
+	}
+
+	// Backward compatibility: Project created with legacy memberUsernames defaults to operator
+	compatBody := createProjectBody{
+		Name:            "compat-rbac-proj",
+		Description:     "test legacy member usernames",
+		MemberUsernames: []string{"charlie"},
+	}
+	recCompat := httptest.NewRecorder()
+	reqCompat := providerTestRequest(http.MethodPost, "/api/v1/projects", "admin", compatBody)
+	s.handleCreateProject(recCompat, reqCompat)
+	if recCompat.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created for legacy memberUsernames, got %d body=%s", recCompat.Code, recCompat.Body.String())
+	}
+
 	charlie := s.users.GetUser("charlie")
 	if charlie == nil || len(charlie.Projects) == 0 || charlie.Projects[0].Role != ProjectRoleOperator {
 		t.Fatalf("expected charlie to have operator role, got %#v", charlie)
 	}
+
+	// Test: Invalid role returns 400 Bad Request
+	invalidBody := createProjectBody{
+		Name:        "invalid-role-proj",
+		Description: "test invalid role",
+		Members: []projectMemberInput{
+			{Username: "alice", Role: "adminish"},
+		},
+	}
+	recInvalid := httptest.NewRecorder()
+	reqInvalid := providerTestRequest(http.MethodPost, "/api/v1/projects", "admin", invalidBody)
+	s.handleCreateProject(recInvalid, reqInvalid)
+	if recInvalid.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for invalid role, got %d body=%s", recInvalid.Code, recInvalid.Body.String())
+	}
 }
+
+func TestProjectCreate_ChannelFailureRollsBackUserAssignments(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+
+	if err := s.users.CreateUser("dave", "pass123", RoleMember, "", "", "", "", ""); err != nil {
+		t.Fatalf("create user dave: %v", err)
+	}
+	if err := s.controlDB.UpsertWorkspaceMember(workspaceID, "dave", WorkspaceRoleMember); err != nil {
+		t.Fatalf("workspace member dave: %v", err)
+	}
+
+	// Submit project creation with a channel mode="link" referencing a nonexistent channel to trigger failure
+	body := createProjectBody{
+		Name:        "rollback-proj",
+		Description: "should be rolled back",
+		Members: []projectMemberInput{
+			{Username: "dave", Role: "operator"},
+		},
+		Channel: &projectChannelProvisionRequest{
+			Provider:    "mattermost",
+			Mode:        "link",
+			ChannelName: "nonexistent-channel-12345",
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	req := providerTestRequest(http.MethodPost, "/api/v1/projects", "admin", body)
+	s.handleCreateProject(rec, req)
+
+	if rec.Code == http.StatusCreated {
+		t.Fatalf("expected project creation to fail due to nonexistent channel link, but got 201 Created")
+	}
+
+	// Verify project was deleted from store
+	if _, err := s.st.Project("rollback-proj"); err == nil {
+		t.Fatalf("expected project rollback-proj to be deleted from store")
+	}
+
+	// Verify dave does NOT retain rollback-proj in projects
+	dave := s.users.GetUser("dave")
+	if dave != nil {
+		for _, prj := range dave.Projects {
+			if prj.Project == "rollback-proj" {
+				t.Fatalf("expected dave's projects to NOT contain rollback-proj, found: %#v", dave.Projects)
+			}
+		}
+	}
+}
+

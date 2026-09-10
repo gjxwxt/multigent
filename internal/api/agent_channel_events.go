@@ -483,34 +483,43 @@ func (s *Server) handleIMEvent(w http.ResponseWriter, r *http.Request) {
 			s.jsonError(w, http.StatusUnauthorized, "unauthorized: channel binding not found")
 			return
 		}
-		// DEFECT-C3 (Architectural Defect Tracking):
-		// When multiple channel bindings match the same AppID (e.g. across multiple workspaces or shared bots),
-		// blindly selecting matches[0] creates an ambiguity where the wrong connection secret is evaluated
-		// for HMAC verification, causing spurious 401s or cross-tenant routing errors.
-		// In P1b, this is mitigated by enforcing 1:1 bot-to-binding uniqueness in saveManualAgentIMChannel.
-		// The structural fix (workspace-aware routing & multi-secret candidate verification) is tracked for P3.
-		if len(matches) > 1 {
-			log.Printf("[im:%s] WARNING (DEFECT-C3): multiple (%d) channel bindings matched appId %q; selecting matches[0] (%s/%s, conn=%s)",
-				channelProvider.Info().ID, len(matches), parsed.AppID, matches[0].ProjectID, matches[0].AgentID, matches[0].ConnectionID)
+		// DEFECT-C3 Defense: Multi-secret candidate verification & fail-closed on ambiguity
+		var verifiedBinding *controldb.AgentChannelBinding
+		var lastVerifyErr error
+
+		for i := range matches {
+			secret, foundSecret, secretErr := s.controlDB.ConnectionSecret(matches[i].ConnectionID)
+			if secretErr != nil || !foundSecret {
+				continue
+			}
+			values, openErr := openConnectionSecret(secret)
+			if openErr != nil {
+				continue
+			}
+			if verifyErr := verifier.VerifyForwardedEvent(r, raw, values); verifyErr == nil {
+				if verifiedBinding == nil {
+					verifiedBinding = &matches[i]
+				} else if verifiedBinding.ConnectionID != matches[i].ConnectionID || verifiedBinding.ProjectID != matches[i].ProjectID {
+					// Ambiguous conflict: multiple distinct project/connection bindings verified the event! Fail-closed!
+					log.Printf("[im:%s] ERROR (DEFECT-C3): ambiguous bindings (%s/%s vs %s/%s) both verified for appId %q; failing closed",
+						channelProvider.Info().ID, verifiedBinding.ProjectID, verifiedBinding.AgentID, matches[i].ProjectID, matches[i].AgentID, parsed.AppID)
+					s.jsonError(w, http.StatusUnauthorized, "unauthorized: ambiguous channel binding conflict (DEFECT-C3)")
+					return
+				}
+			} else {
+				lastVerifyErr = verifyErr
+			}
 		}
-		secret, foundSecret, secretErr := s.controlDB.ConnectionSecret(matches[0].ConnectionID)
-		if secretErr != nil {
-			s.serverError(w, secretErr)
+
+		if verifiedBinding == nil {
+			if lastVerifyErr != nil {
+				s.jsonError(w, http.StatusUnauthorized, "unauthorized: "+lastVerifyErr.Error())
+			} else {
+				s.jsonError(w, http.StatusUnauthorized, "unauthorized: connection secret verification failed")
+			}
 			return
 		}
-		if !foundSecret {
-			s.jsonError(w, http.StatusUnauthorized, "unauthorized: connection secret missing")
-			return
-		}
-		values, openErr := openConnectionSecret(secret)
-		if openErr != nil {
-			s.serverError(w, openErr)
-			return
-		}
-		if verifyErr := verifier.VerifyForwardedEvent(r, raw, values); verifyErr != nil {
-			s.jsonError(w, http.StatusUnauthorized, "unauthorized: "+verifyErr.Error())
-			return
-		}
+		matches = []controldb.AgentChannelBinding{*verifiedBinding}
 	}
 	if parsed.IsURLVerification {
 		_ = json.NewEncoder(w).Encode(map[string]string{"challenge": parsed.Challenge})
@@ -3308,6 +3317,54 @@ func (s *Server) healAgentChannelBindingsAndIdentities() {
 							log.Printf("[heal] backfilled default attention policy for agent worker %s (%s)", w.Name, w.ID)
 						}
 					}
+				}
+			}
+		}
+	}
+
+	// 4. Heal duplicate bindings sharing the same (channel, bot) to eliminate historical DEFECT-C3 dirty data
+	activeBindings, err := s.controlDB.ListAgentChannelBindings(controldb.AgentChannelBindingFilter{
+		Status: "connected",
+	})
+	if err == nil {
+		type chanBotKey struct {
+			workspaceID string
+			provider    string
+			chatID      string
+			botID       string
+		}
+		grouped := make(map[chanBotKey][]controldb.AgentChannelBinding)
+		for _, b := range activeBindings {
+			if b.ExternalChatID != "" && b.ExternalBotID != "" {
+				k := chanBotKey{
+					workspaceID: b.WorkspaceID,
+					provider:    b.Provider,
+					chatID:      b.ExternalChatID,
+					botID:       b.ExternalBotID,
+				}
+				grouped[k] = append(grouped[k], b)
+			}
+		}
+		for k, list := range grouped {
+			if len(list) <= 1 {
+				continue
+			}
+			canonicalIdx := 0
+			for i, b := range list {
+				if conn, found, cErr := s.controlDB.ConnectionByID(b.ConnectionID); cErr == nil && found {
+					if connectionMatchesAgent(conn, b.AgentID) {
+						canonicalIdx = i
+						break
+					}
+				}
+			}
+			for i, b := range list {
+				if i != canonicalIdx {
+					b.Status = "unbound"
+					b.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+					_ = s.controlDB.UpsertAgentChannelBinding(b)
+					log.Printf("[heal] deactivated duplicate binding %s (%s/%s) on channel %s bot %s (DEFECT-C3)",
+						b.ID, b.ProjectID, b.AgentID, k.chatID, k.botID)
 				}
 			}
 		}

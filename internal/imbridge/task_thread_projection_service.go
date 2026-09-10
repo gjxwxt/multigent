@@ -272,7 +272,7 @@ func (s *TaskThreadProjectionService) PostHumanReviewCard(ctx context.Context, r
 func (s *TaskThreadProjectionService) humanReviewAssigneeLine(workspaceID, connectionID, platformUserID string) string {
 	platformUserID = strings.TrimSpace(platformUserID)
 	if platformUserID == "" {
-		return "指定审批人：当前步骤未绑定具体用户。"
+		return "审批处理：待项目管理员认领"
 	}
 	conn, found, err := s.store.ConnectionByID(strings.TrimSpace(connectionID))
 	if err != nil || !found || conn.WorkspaceID != workspaceID || conn.IMInstanceID == "" {

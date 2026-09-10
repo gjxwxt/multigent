@@ -341,7 +341,6 @@ export function CreateProjectDialog({
         name: projectName,
         description: description.trim(),
         workerIds: selectedWorkerIds,
-        memberUsernames: selectedUsernames,
         members: membersPayload,
         channel: channelPayload,
       }

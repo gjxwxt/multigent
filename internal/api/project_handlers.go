@@ -119,37 +119,53 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. Grant project access to selected workspace users
+	type memberAssignment struct {
+		username string
+		role     string
+	}
+	var assignments []memberAssignment
 	if s.users != nil {
-		type memberAssignment struct {
-			username string
-			role     string
-		}
-		var assignments []memberAssignment
 		seen := make(map[string]bool)
+		creator := requestUsername(r)
 
-		for _, m := range body.Members {
-			u := strings.TrimSpace(m.Username)
-			if u == "" || seen[u] {
-				continue
+		if len(body.Members) > 0 {
+			for _, m := range body.Members {
+				u := strings.TrimSpace(m.Username)
+				if u == "" || seen[u] {
+					continue
+				}
+				role := strings.TrimSpace(m.Role)
+				switch role {
+				case ProjectRoleViewer, ProjectRoleOperator, ProjectRoleManager:
+				default:
+					s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeValidationFailed, fmt.Sprintf("invalid member role %q, must be one of: viewer, operator, manager", m.Role))
+					return
+				}
+				seen[u] = true
+				if creator != "" && u == creator {
+					role = ProjectRoleManager
+				}
+				assignments = append(assignments, memberAssignment{username: u, role: role})
 			}
-			seen[u] = true
-			role := strings.TrimSpace(m.Role)
-			switch role {
-			case ProjectRoleViewer, ProjectRoleOperator, ProjectRoleManager:
-			default:
-				role = ProjectRoleOperator
+		} else {
+			// Backward compatibility: any memberUsernames default to operator
+			for _, u := range body.MemberUsernames {
+				u = strings.TrimSpace(u)
+				if u == "" || seen[u] {
+					continue
+				}
+				seen[u] = true
+				role := ProjectRoleOperator
+				if creator != "" && u == creator {
+					role = ProjectRoleManager
+				}
+				assignments = append(assignments, memberAssignment{username: u, role: role})
 			}
-			assignments = append(assignments, memberAssignment{username: u, role: role})
 		}
 
-		// Backward compatibility: any memberUsernames not yet covered
-		for _, u := range body.MemberUsernames {
-			u = strings.TrimSpace(u)
-			if u == "" || seen[u] {
-				continue
-			}
-			seen[u] = true
-			assignments = append(assignments, memberAssignment{username: u, role: ProjectRoleOperator})
+		// Ensure creator is ALWAYS granted manager role
+		if creator != "" && !seen[creator] {
+			assignments = append(assignments, memberAssignment{username: creator, role: ProjectRoleManager})
 		}
 
 		for _, assign := range assignments {
@@ -190,11 +206,26 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	if body.Channel != nil && s.controlDB != nil && workspaceID != "" {
 		cResp, pErr := s.provisionProjectChannelCore(r.Context(), workspaceID, name, *body.Channel, requestUsername(r))
 		if pErr != nil {
-			// Rollback newly created project on channel error so caller can correct input and retry cleanly
+			// Rollback newly created project and compensate user project assignments on channel error
 			_ = s.st.DeleteProject(name)
 			_ = s.controlDB.DeleteProjectMembershipsByProject(workspaceID, name)
 			_ = s.controlDB.DeleteProjectChannelLinks(workspaceID, name)
 			_ = s.controlDB.DeleteAgentChannelBindingsByProject(workspaceID, name)
+			if s.users != nil && len(assignments) > 0 {
+				for _, assign := range assignments {
+					targetUser := s.users.GetUser(assign.username)
+					if targetUser == nil {
+						continue
+					}
+					filteredProjects := make([]projectAccess, 0)
+					for _, prj := range targetUser.Projects {
+						if prj.Project != name {
+							filteredProjects = append(filteredProjects, prj)
+						}
+					}
+					_ = s.users.UpdateUser(assign.username, nil, nil, nil, nil, nil, nil, nil, filteredProjects, nil, nil, nil)
+				}
+			}
 			if pErr.Code != "" {
 				s.jsonErrorCode(w, pErr.StatusCode, pErr.Code, pErr.Message)
 			} else {
