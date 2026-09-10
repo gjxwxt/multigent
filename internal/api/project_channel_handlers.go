@@ -476,18 +476,74 @@ func (s *Server) provisionProjectChannelCore(ctx context.Context, workspaceID, p
 	// 9. Persist AgentChannelBinding and AgentChannelTarget scoped strictly to THIS project
 	boundAgents := make([]string, 0, len(agentMap))
 	failedAgents := make([]string, 0)
+	skippedAgents := make([]string, 0)
 
-	for agentName, entry := range agentMap {
-		agentConn := targetConn
+	// Pre-assign connections 1:1 to agents to prevent DEFECT-C3 duplicate bindings
+	assignedConnByAgent := make(map[string]controldb.Connection)
+	usedConnIDs := make(map[string]string) // connID -> agentName
+
+	// Pass 1: Named matches take highest priority
+	for agentName := range agentMap {
+		lowerAgent := strings.ToLower(agentName)
 		for _, ic := range activeConns {
 			if imInstanceID != "" && ic.IMInstanceID != imInstanceID {
 				continue
 			}
-			lowerAgent := strings.ToLower(agentName)
+			if _, used := usedConnIDs[ic.ID]; used {
+				continue
+			}
 			if strings.Contains(strings.ToLower(ic.ConnectionName), lowerAgent) || strings.Contains(strings.ToLower(ic.ProfileJSON), lowerAgent) {
-				agentConn = ic
+				assignedConnByAgent[agentName] = ic
+				usedConnIDs[ic.ID] = agentName
 				break
 			}
+		}
+	}
+
+	// Pass 2: For agents without named match, allocate targetConn or an unused activeConn (at most one per agent)
+	for agentName := range agentMap {
+		if _, has := assignedConnByAgent[agentName]; has {
+			continue
+		}
+		if targetConn.ID != "" {
+			if _, used := usedConnIDs[targetConn.ID]; !used {
+				assignedConnByAgent[agentName] = targetConn
+				usedConnIDs[targetConn.ID] = agentName
+				continue
+			}
+		}
+		for _, ic := range activeConns {
+			if imInstanceID != "" && ic.IMInstanceID != imInstanceID {
+				continue
+			}
+			if _, used := usedConnIDs[ic.ID]; !used {
+				assignedConnByAgent[agentName] = ic
+				usedConnIDs[ic.ID] = agentName
+				break
+			}
+		}
+	}
+
+	for agentName, entry := range agentMap {
+		agentConn, ok := assignedConnByAgent[agentName]
+		if !ok || agentConn.ID == "" {
+			log.Printf("[project-channel] skipping channel binding for %s/%s: no dedicated bot connection available in %s; skipping to avoid DEFECT-C3 routing conflict", projectName, agentName, provider)
+			skippedAgents = append(skippedAgents, agentName)
+			// If an existing binding exists with a duplicated connection in this project, mark it unbound
+			if oldBindings, _ := s.controlDB.ListAgentChannelBindings(controldb.AgentChannelBindingFilter{
+				WorkspaceID: workspaceID,
+				ProjectID:   projectName,
+				AgentID:     agentName,
+				Provider:    provider,
+			}); len(oldBindings) > 0 {
+				for _, ob := range oldBindings {
+					if ob.Status == "connected" {
+						ob.Status = "unbound"
+						_ = s.controlDB.UpsertAgentChannelBinding(ob)
+					}
+				}
+			}
+			continue
 		}
 
 		var agentBotID string
@@ -610,6 +666,9 @@ func (s *Server) provisionProjectChannelCore(ctx context.Context, workspaceID, p
 	}
 	if len(failedAgents) > 0 {
 		warnings = append(warnings, fmt.Sprintf("部分 Agent Bot 未能加入频道: %s", strings.Join(failedAgents, ", ")))
+	}
+	if len(skippedAgents) > 0 {
+		warnings = append(warnings, fmt.Sprintf("部分 Agent（%s）未配置独立的 %s Bot 连接已跳过绑定", strings.Join(skippedAgents, ", "), provider))
 	}
 	if len(unboundMembers) > 0 {
 		warnings = append(warnings, fmt.Sprintf("部分成员未绑定 %s 账号: %s", provider, strings.Join(unboundMembers, ", ")))

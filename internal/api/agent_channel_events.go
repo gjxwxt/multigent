@@ -587,12 +587,22 @@ func (s *Server) acceptBoundIMInteractionCallback(channelProvider imbridge.Provi
 		return nil, err
 	}
 	if len(identities) == 0 {
-		return map[string]any{"ok": true, "ignored": true, "reason": "unknown_identity"}, nil
+		return map[string]any{
+			"ok":             true,
+			"ignored":        true,
+			"reason":         "unknown_identity",
+			"ephemeral_text": "⚠️ 您的聊天账号尚未与 Multigent 账号绑定，无法执行审批操作。请前往控制台或通过私信绑定后再试。",
+		}, nil
 	}
 	identity := controldb.ExternalIdentity{WorkspaceID: binding.WorkspaceID, Provider: providerID, ExternalUserID: callback.SenderOpenID, UserID: identities[0].UserID}
 	userID := identity.UserID
 	if strings.TrimSpace(request.TargetUserID) != "" && request.TargetUserID != userID {
-		return map[string]any{"ok": true, "ignored": true, "reason": "actor_not_allowed"}, nil
+		return map[string]any{
+			"ok":             true,
+			"ignored":        true,
+			"reason":         "actor_not_allowed",
+			"ephemeral_text": fmt.Sprintf("⚠️ 当前审批节点已指定给特定负责人（%s），您暂无权代替其审批。", request.TargetUserID),
+		}, nil
 	}
 	if !s.userCanOperateAgentInWorkspace(userID, binding.WorkspaceID, binding.ProjectID, binding.AgentID) {
 		s.auditLog(auditLogInput{
@@ -610,7 +620,12 @@ func (s *Server) acceptBoundIMInteractionCallback(channelProvider imbridge.Provi
 				"actionId":      callback.ActionID,
 			},
 		})
-		return map[string]any{"ok": true, "ignored": true, "reason": "permission_denied"}, nil
+		return map[string]any{
+			"ok":             true,
+			"ignored":        true,
+			"reason":         "permission_denied",
+			"ephemeral_text": fmt.Sprintf("⚠️ 您在项目「%s」仅拥有只读权限（Viewer），无法执行此审批。如需操作，请联系项目负责人提升为执行者（Operator）。", binding.ProjectID),
+		}, nil
 	}
 	if strings.TrimSpace(request.Status) != "" && request.Status != "active" {
 		return map[string]any{"ok": true, "ignored": true, "reason": "interaction_not_active"}, nil
@@ -819,6 +834,8 @@ func (s *Server) acceptIMMessage(channelProvider imbridge.Provider, appID, verif
 				"messageId":      message.MessageID,
 			},
 		})
+		notice := fmt.Sprintf("⚠️ 您在项目「%s」仅拥有只读权限（Viewer），无法唤醒 Agent 或下发操作指令。如需协作，请联系项目负责人为您分配执行者（Operator）或管理者权限。", resolved.Binding.ProjectID)
+		_ = s.replyToIMEvent(context.Background(), channelProvider, resolved, message, notice)
 		return map[string]any{"ok": true, "ignored": true, "reason": "permission_denied"}, nil
 	}
 	if enricher, ok := channelProvider.(imbridge.IncomingMessageEnricher); ok {
@@ -1821,6 +1838,24 @@ func (s *Server) matchChannelEventBindings(provider, appID, chatID string) ([]co
 		}
 		if len(exact) > 0 {
 			out = exact
+		}
+	}
+
+	// DEFECT-C3 Defense: If multiple bindings still matched the same bot ID,
+	// disambiguate by preferring the binding whose AgentID matches the connection name or profile.
+	if len(out) > 1 {
+		filtered := make([]controldb.AgentChannelBinding, 0, len(out))
+		for _, b := range out {
+			conn, found, err := s.controlDB.ConnectionByID(b.ConnectionID)
+			if err == nil && found {
+				lowerAgent := strings.ToLower(b.AgentID)
+				if strings.Contains(strings.ToLower(conn.ConnectionName), lowerAgent) || strings.Contains(strings.ToLower(conn.ProfileJSON), lowerAgent) {
+					filtered = append(filtered, b)
+				}
+			}
+		}
+		if len(filtered) == 1 {
+			out = filtered
 		}
 	}
 	return out, nil

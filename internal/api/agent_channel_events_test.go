@@ -2676,3 +2676,218 @@ func TestHealAgentChannelBindingsAndIdentities(t *testing.T) {
 		t.Fatalf("expected worker AttentionPolicyJSON to contain im_mention, got %s", healedWorker.AttentionPolicyJSON)
 	}
 }
+
+func TestAcceptIMMessage_PermissionDenied_RepliesFriendlyNotice(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	seedSampleAgentsForTest(t, s, workspaceID)
+	grantProjectRoleForTest(t, s, workspaceID, "viewer-user", ProjectRoleViewer)
+
+	conn := controldb.Connection{
+		ID:             "conn-viewer-test",
+		WorkspaceID:    workspaceID,
+		Provider:       "mattermost",
+		ConnectionName: "bot-mira",
+		ProfileJSON:    `{"botId":"bot-mira-1"}`,
+		Status:         "active",
+	}
+	_ = s.controlDB.UpsertConnection(conn)
+	sec, _ := sealConnectionSecret(map[string]string{"baseUrl": "http://127.0.0.1:8065", "botToken": "token123", "appId": "bot-mira-1"})
+	sec.ConnectionID = conn.ID
+	_ = s.controlDB.UpsertConnectionSecret(sec)
+
+	binding := controldb.AgentChannelBinding{
+		ID:             "chan-viewer-test",
+		WorkspaceID:    workspaceID,
+		ProjectID:      "sample",
+		AgentID:        "pm",
+		Provider:       "mattermost",
+		ConnectionID:   conn.ID,
+		ExternalBotID:  "bot-mira-1",
+		ExternalChatID: "chan-123",
+		Status:         "connected",
+		MetadataJSON:   `{"appId":"bot-mira-1"}`,
+	}
+	_ = s.controlDB.UpsertAgentChannelBinding(binding)
+
+	if err := s.controlDB.UpsertExternalIdentity(controldb.ExternalIdentity{
+		WorkspaceID:    workspaceID,
+		Provider:       "mattermost",
+		ExternalUserID: "ext-viewer-456",
+		UserID:         "viewer-user",
+	}); err != nil {
+		t.Fatalf("upsert external identity: %v", err)
+	}
+
+	if err := s.controlDB.UpsertUserChannelIdentity(controldb.UserChannelIdentity{
+		ID:               "uci-viewer-test",
+		WorkspaceID:      workspaceID,
+		ChannelBindingID: binding.ID,
+		Provider:         "mattermost",
+		ExternalUserID:   "ext-viewer-456",
+		UserID:           "viewer-user",
+	}); err != nil {
+		t.Fatalf("upsert user channel identity: %v", err)
+	}
+
+	provider := &testIMProvider{id: "mattermost", label: "Mattermost"}
+	result, err := s.acceptIMMessage(provider, "bot-mira-1", "", imbridge.IncomingMessage{
+		MessageID:    "msg-viewer-1",
+		ChatID:       "chan-123",
+		ChatType:     "p2p",
+		SenderOpenID: "ext-viewer-456",
+		Text:         "do something",
+	}, "")
+	if err != nil {
+		t.Fatalf("acceptIMMessage: %v", err)
+	}
+	if result["reason"] != "permission_denied" {
+		t.Fatalf("expected permission_denied, got %#v", result)
+	}
+	if len(provider.replies) == 0 || !strings.Contains(provider.replies[0], "只读权限") {
+		t.Fatalf("expected polite permission notice in replies, got %#v", provider.replies)
+	}
+}
+
+func TestAcceptIMInteractionCallback_PermissionFeedback(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	seedSampleAgentsForTest(t, s, workspaceID)
+	grantProjectRoleForTest(t, s, workspaceID, "viewer-user", ProjectRoleViewer)
+
+	conn := controldb.Connection{
+		ID:             "conn-interaction-test",
+		WorkspaceID:    workspaceID,
+		Provider:       "mattermost",
+		ConnectionName: "bot-mira",
+		ProfileJSON:    `{"botId":"bot-mira-2"}`,
+		Status:         "active",
+	}
+	_ = s.controlDB.UpsertConnection(conn)
+	sec, _ := sealConnectionSecret(map[string]string{"baseUrl": "http://127.0.0.1:8065", "botToken": "token123", "appId": "bot-mira-2"})
+	sec.ConnectionID = conn.ID
+	_ = s.controlDB.UpsertConnectionSecret(sec)
+
+	binding := controldb.AgentChannelBinding{
+		ID:             "chan-interaction-test",
+		WorkspaceID:    workspaceID,
+		ProjectID:      "sample",
+		AgentID:        "pm",
+		Provider:       "mattermost",
+		ConnectionID:   conn.ID,
+		ExternalBotID:  "bot-mira-2",
+		ExternalChatID: "chan-123",
+		Status:         "connected",
+		MetadataJSON:   `{"appId":"bot-mira-2"}`,
+	}
+	_ = s.controlDB.UpsertAgentChannelBinding(binding)
+
+	// Interaction request
+	req := controldb.InteractionRequest{
+		ID:               "ir-test-1",
+		WorkspaceID:      workspaceID,
+		ProjectID:        "sample",
+		AgentID:          "pm",
+		ChannelBindingID: binding.ID,
+		Provider:         "mattermost",
+		Status:           "active",
+		Title:            "测试审核",
+	}
+	_ = s.controlDB.CreateInteractionRequest(req)
+
+	provider := &testIMProvider{id: "mattermost", label: "Mattermost"}
+
+	// 1. Unknown identity
+	res1, err := s.acceptIMInteractionCallback(provider, "bot-mira-2", "", imbridge.IncomingInteractionCallback{
+		InteractionID: "ir-test-1",
+		ChatID:        "chan-123",
+		SenderOpenID:  "unknown-user-id",
+		ActionID:      "approve",
+	}, "")
+	if err != nil {
+		t.Fatalf("interaction callback 1: %v", err)
+	}
+	if res1["reason"] != "unknown_identity" || !strings.Contains(res1["ephemeral_text"].(string), "尚未与 Multigent") {
+		t.Fatalf("expected unknown_identity with ephemeral_text, got %#v", res1)
+	}
+
+	// 2. Link as viewer-user -> Permission denied
+	if err := s.controlDB.UpsertUserChannelIdentity(controldb.UserChannelIdentity{
+		ID:               "uci-viewer-1",
+		WorkspaceID:      workspaceID,
+		ChannelBindingID: binding.ID,
+		Provider:         "mattermost",
+		ExternalUserID:   "ext-viewer-id",
+		UserID:           "viewer-user",
+	}); err != nil {
+		t.Fatalf("upsert user channel identity: %v", err)
+	}
+
+	res2, err := s.acceptIMInteractionCallback(provider, "bot-mira-2", "", imbridge.IncomingInteractionCallback{
+		InteractionID: "ir-test-1",
+		ChatID:        "chan-123",
+		SenderOpenID:  "ext-viewer-id",
+		ActionID:      "approve",
+	}, "")
+	if err != nil {
+		t.Fatalf("interaction callback 2: %v", err)
+	}
+	if res2["reason"] != "permission_denied" || !strings.Contains(res2["ephemeral_text"].(string), "只读权限") {
+		t.Fatalf("expected permission_denied with ephemeral_text, got %#v", res2)
+	}
+}
+
+func TestMatchChannelEventBindings_DisambiguatesDefectC3(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+
+	conn := controldb.Connection{
+		ID:             "conn-mira",
+		WorkspaceID:    workspaceID,
+		Provider:       "mattermost",
+		ConnectionName: "agent-1test-Mira",
+		ProfileJSON:    `{"botId":"mira-app-id"}`,
+		Status:         "active",
+	}
+	_ = s.controlDB.UpsertConnection(conn)
+
+	// Binding 1: Mira
+	binding1 := controldb.AgentChannelBinding{
+		ID:             "chan-mira",
+		WorkspaceID:    workspaceID,
+		ProjectID:      "my-proj",
+		AgentID:        "Mira",
+		Provider:       "mattermost",
+		ConnectionID:   conn.ID,
+		ExternalBotID:  "mira-app-id",
+		ExternalChatID: "chat-common",
+		Status:         "connected",
+		MetadataJSON:   `{"appId":"mira-app-id"}`,
+	}
+	_ = s.controlDB.UpsertAgentChannelBinding(binding1)
+
+	// Binding 2: Nora sharing the same connection (historical duplicate)
+	binding2 := controldb.AgentChannelBinding{
+		ID:             "chan-nora",
+		WorkspaceID:    workspaceID,
+		ProjectID:      "my-proj",
+		AgentID:        "Nora",
+		Provider:       "mattermost",
+		ConnectionID:   conn.ID,
+		ExternalBotID:  "mira-app-id",
+		ExternalChatID: "chat-common",
+		Status:         "connected",
+		MetadataJSON:   `{"appId":"mira-app-id"}`,
+	}
+	_ = s.controlDB.UpsertAgentChannelBinding(binding2)
+
+	matches, err := s.matchChannelEventBindings("mattermost", "mira-app-id", "chat-common")
+	if err != nil {
+		t.Fatalf("match error: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly 1 disambiguated match, got %d: %#v", len(matches), matches)
+	}
+	if matches[0].AgentID != "Mira" {
+		t.Fatalf("expected Mira to be selected based on connection name, got %s", matches[0].AgentID)
+	}
+}
+
+
