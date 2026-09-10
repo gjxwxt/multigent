@@ -1,10 +1,31 @@
 package workflow
 
 import (
+	"encoding/json"
+	"os"
 	"testing"
 
 	"github.com/multigent/multigent/internal/entity"
 )
+
+func TestExportGreenfieldJSON(t *testing.T) {
+	exportPath := os.Getenv("WORKFLOW_EXPORT")
+	if exportPath == "" {
+		return
+	}
+	def, ok := DefinitionFromTemplate("greenfield-delivery-pipeline", "zh-CN", "新项目交付流水线（设计确认闸门）")
+	if !ok {
+		t.Fatal("definition not found")
+	}
+	def.ID = "wf-x97mgd2q"
+	data, err := json.Marshal(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(exportPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestGreenfieldTemplateShape(t *testing.T) {
 	tmpl, ok := Template("greenfield-delivery-pipeline", "zh-CN")
