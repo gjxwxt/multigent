@@ -319,7 +319,7 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 	reissueDialogCard := false
 	if nonce := strings.TrimSpace(tokenData.Nonce); nonce != "" {
 		if existing, found, err := s.controlDB.ChatopsActionSessionByNonce(tokenData.WorkspaceID, nonce); err == nil && found && existing != nil {
-			isDialogAction := tokenData.Action == "edit" || tokenData.Action == "review_approve"
+			isDialogAction := tokenData.Action == "edit" || tokenData.Action == "review_approve" || tokenData.Action == "reject"
 			switch {
 			case existing.State == "failed" && isDialogAction:
 				// A failed dialog cannot be retried with the same nonce because the
@@ -859,9 +859,9 @@ func (s *Server) handleMattermostDialogSubmit(w http.ResponseWriter, r *http.Req
 
 	var decision string
 	if tokenData.Action == "reject" {
-		decision = "rejected"
+		decision = "request_changes"
 	} else {
-		decision = "approved"
+		decision = "approve"
 	}
 
 	snap, err := workflow.ResolveApprovalOutputs(preview, decision, payload.Submission, platformUserID)
@@ -874,7 +874,7 @@ func (s *Server) handleMattermostDialogSubmit(w http.ResponseWriter, r *http.Req
 	// persisted workflow definitions do not expose it in their output preview,
 	// but the ChatOps dialog still needs to be able to submit the explicit
 	// fail-closed waiver. Accept it only for a design confirmation preview.
-	if decision == "approved" && imbridge.IsDesignConfirmationPreview(preview) {
+	if (decision == "approve" || decision == "approved") && imbridge.IsDesignConfirmationPreview(preview) {
 		if waiver := strings.TrimSpace(payload.Submission["design_waiver_reason"]); waiver != "" {
 			if len(waiver) > 4000 {
 				writeMattermostDialogError(w, "design_waiver_reason", "设计豁免理由不能超过 4000 个字符。")
@@ -908,7 +908,7 @@ func (s *Server) handleMattermostDialogSubmit(w http.ResponseWriter, r *http.Req
 	// Update card in Mattermost: remove action buttons and mark approved/rejected
 	if s.threadProjections != nil && tokenData.PostID != "" && payload.ChannelID != "" {
 		var statusText string
-		if decision == "approved" {
+		if decision == "approve" || decision == "approved" {
 			statusText = fmt.Sprintf("由 @%s 于 %s 审核通过 (v%d)", payload.UserID, time.Now().Format("15:04"), preview.ExpectedStateVersion)
 		} else {
 			statusText = fmt.Sprintf("由 @%s 于 %s 打回修改 (v%d)", payload.UserID, time.Now().Format("15:04"), preview.ExpectedStateVersion)

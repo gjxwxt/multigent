@@ -491,6 +491,68 @@ func TestMattermostActionCallback_FailedDialogReissuesCurrentCard(t *testing.T) 
 	}
 }
 
+func TestMattermostActionCallback_FailedRejectDialogReissuesCurrentCard(t *testing.T) {
+	s, workspaceID, _, postCount, _, hmacSecret := setupTestChatopsEnv(t)
+	task, preview := setupTestWorkflowTask(t, s, workspaceID)
+
+	nonce := imbridge.GenerateNonce()
+	if err := s.controlDB.CreateChatopsActionSession(&controldb.ChatopsActionSession{
+		ID:                   "session-failed-reject",
+		WorkspaceID:          workspaceID,
+		Project:              "sample",
+		TaskID:               task.ID,
+		StepID:               preview.StepID,
+		ExpectedStateVersion: preview.ExpectedStateVersion,
+		ReviewSnapshotHash:   preview.ReviewSnapshotHash,
+		ActionType:           "reject",
+		ActorMMUserID:        "mm-user-admin",
+		ActorPlatformUserID:  "admin",
+		State:                "failed",
+		ActionNonce:          nonce,
+		TokenHash:            "failed-reject-dialog-token",
+		ExpiresAt:            time.Now().UTC().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("CreateChatopsActionSession: %v", err)
+	}
+
+	tok, err := imbridge.SignActionToken(hmacSecret, imbridge.ActionTokenPayload{
+		WorkspaceID:          workspaceID,
+		ProjectID:            "sample",
+		TaskID:               task.ID,
+		StepID:               preview.StepID,
+		Action:               "reject",
+		ChannelID:            "chan-chatops-1",
+		ConnectionID:         "conn-mm-chatops-test",
+		ExpectedStateVersion: preview.ExpectedStateVersion,
+		ReviewSnapshotHash:   preview.ReviewSnapshotHash,
+		Nonce:                nonce,
+		ExpiresAt:            time.Now().UTC().Add(time.Hour).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("SignActionToken: %v", err)
+	}
+
+	bodyBytes, _ := json.Marshal(mattermostActionPayload{
+		UserID:    "mm-user-admin",
+		UserName:  "admin",
+		ChannelID: "chan-chatops-1",
+		PostID:    "mock-post-card-1",
+		Context:   mattermostActionContext{ActionToken: tok, Action: "reject"},
+	})
+	rec := httptest.NewRecorder()
+	s.handleMattermostActionCallback(rec, httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/actions", bytes.NewReader(bodyBytes)))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "补发当前版本审批卡片") {
+		t.Fatalf("expected failed reject dialog recovery, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if postCount.Load() != 1 {
+		t.Fatalf("expected one fresh review card post, got %d", postCount.Load())
+	}
+	session, found, err := s.controlDB.ChatopsActionSessionByNonce(workspaceID, nonce)
+	if err != nil || !found || session.State != "stale" {
+		t.Fatalf("expected old failed dialog session marked stale, found=%v state=%q err=%v", found, session.State, err)
+	}
+}
+
 func TestMattermostActionCallback_OpenDialog_Reject(t *testing.T) {
 	s, workspaceID, _, postCount, receivedPosts, hmacSecret := setupTestChatopsEnv(t)
 	task, preview := setupTestWorkflowTask(t, s, workspaceID)
@@ -640,6 +702,115 @@ func TestMattermostDialogSubmit_SuccessAndDoubleSubmitPrevention(t *testing.T) {
 	errorsMap, _ := errResp["errors"].(map[string]any)
 	if errorsMap == nil || errorsMap["comments"] == nil {
 		t.Fatalf("expected atomic claim duplicate submission error, got %v", errResp)
+	}
+}
+
+func TestMattermostDialogSubmit_RejectRework(t *testing.T) {
+	s, workspaceID, _, _, receivedPosts, hmacSecret := setupTestChatopsEnv(t)
+	task, preview := setupTestWorkflowTask(t, s, workspaceID)
+
+	sessionID := "cas-test-reject-1"
+	nonce := imbridge.GenerateNonce()
+	err := s.controlDB.CreateChatopsActionSession(&controldb.ChatopsActionSession{
+		ID:                   sessionID,
+		WorkspaceID:          workspaceID,
+		Project:              "sample",
+		TaskID:               task.ID,
+		StepID:               preview.StepID,
+		ExpectedStateVersion: preview.ExpectedStateVersion,
+		ReviewSnapshotHash:   preview.ReviewSnapshotHash,
+		ActionType:           "reject",
+		ActorMMUserID:        "mm-user-admin",
+		ActorPlatformUserID:  "admin",
+		State:                "dialog_opened",
+		ActionNonce:          nonce,
+		TokenHash:            "fake-tok-hash-reject-1",
+		ExpiresAt:            time.Now().UTC().Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateChatopsActionSession: %v", err)
+	}
+
+	dialogTok, err := imbridge.SignDialogToken(hmacSecret, imbridge.DialogTokenPayload{
+		WorkspaceID:          workspaceID,
+		ProjectID:            "sample",
+		TaskID:               task.ID,
+		StepID:               preview.StepID,
+		Action:               "reject",
+		ChannelID:            "chan-chatops-1",
+		ConnectionID:         "conn-mm-chatops-test",
+		ExpectedStateVersion: preview.ExpectedStateVersion,
+		ReviewSnapshotHash:   preview.ReviewSnapshotHash,
+		ActorMMUserID:        "mm-user-admin",
+		SessionID:            sessionID,
+		PostID:               "mock-post-card-1",
+		Nonce:                imbridge.GenerateNonce(),
+		ExpiresAt:            time.Now().UTC().Add(10 * time.Minute).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("SignDialogToken: %v", err)
+	}
+
+	submitBodyBytes, _ := json.Marshal(mattermostDialogPayload{
+		Type:       "dialog_submission",
+		CallbackID: "chatops-dialog-" + sessionID,
+		State:      dialogTok,
+		UserID:     "mm-user-admin",
+		ChannelID:  "chan-chatops-1",
+		Submission: map[string]string{
+			"comments": "打回修改：请补充鉴权与动态指标接口需求",
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/dialog-submit", bytes.NewReader(submitBodyBytes))
+	rec := httptest.NewRecorder()
+
+	s.handleMattermostDialogSubmit(rec, req)
+	t.Logf("Reject DialogSubmit response: %s", rec.Body.String())
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on reject dialog submission, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify session marked completed with resolved outputs
+	sess, found, err := s.controlDB.ChatopsActionSessionByID(workspaceID, sessionID)
+	if err != nil || !found {
+		t.Fatalf("ChatopsActionSessionByID: found=%v, err=%v", found, err)
+	}
+	if sess.State != "completed" {
+		t.Fatalf("expected session state completed, got %s", sess.State)
+	}
+	var outputs map[string]string
+	if err := json.Unmarshal([]byte(sess.ResolvedOutputsJSON), &outputs); err != nil {
+		t.Fatalf("unmarshal resolved outputs: %v", err)
+	}
+	if outputs["decision"] != "request_changes" {
+		t.Fatalf("expected outputs.decision == 'request_changes', got %q", outputs["decision"])
+	}
+	if outputs["comments"] != "打回修改：请补充鉴权与动态指标接口需求" {
+		t.Fatalf("expected outputs.comments preserved, got %q", outputs["comments"])
+	}
+
+	// Verify thread projection updated the card post with "打回修改"
+	foundUpdate := false
+	for _, p := range *receivedPosts {
+		if msg, ok := p["message"].(string); ok && strings.Contains(msg, "打回修改") {
+			foundUpdate = true
+			break
+		}
+		if props, ok := p["props"].(map[string]any); ok {
+			if atts, ok := props["attachments"].([]any); ok && len(atts) > 0 {
+				if att, ok := atts[0].(map[string]any); ok {
+					if text, ok := att["text"].(string); ok && strings.Contains(text, "打回修改") {
+						foundUpdate = true
+						break
+					}
+				}
+			}
+		}
+	}
+	if !foundUpdate {
+		t.Fatalf("expected updated card post containing '打回修改', posts: %+v", *receivedPosts)
 	}
 }
 
