@@ -252,6 +252,35 @@ Key status & deliverables:
   - **验证证据**:
     - 单测覆盖：`TestMattermostDialogSubmit_RejectRework` 与 `TestMattermostActionCallback_FailedRejectDialogReissuesCurrentCard` 全部 PASS。
     - 全量单测：`go test ./internal/...` 40+ 个包 100% PASS。
-    - 生产部署与自愈：Linux amd64 二进制热部署至 VM 并重启 `multigent.service`；清理旧失败会话锁，解冻卡片操作。
-
+- **Agent 通用通知 (`mga notify send`) 智能收归任务 Thread 策略与实现交付 (2026-09-10)**:
+  - **核心痛点与目标**: 消除 Agent 执行任务向频道通报时独立发顶级消息引起的群聊刷屏与看板割裂问题。支持 `--thread auto | task | channel` 三模式，确保任务通知智能归入任务根看板 Thread。
+  - **关键安全红线与设计决议 (Decisions & Architecture)**:
+    1. **Wakeup 任务与业务目标任务身份脱节修正 (P0)**:
+       - 调度器（`cmd/multigent/scheduler.go` 与 `internal/api/scheduler_attention.go`）在生成 wakeup 任务时向任务 Vars 注入 `MULTIGENT_WAKEUP_TARGET_TASK_ID` 与 `MULTIGENT_WAKEUP_PROJECT`。
+       - 服务端通知端点直接读取该任务变量获取可信业务目标任务，彻底解决 RunID 指向 wakeup 任务导致的任务身份脱节。
+    2. **同项目跨任务防串线**:
+       - 客户端传 `--task` 时，必须与服务端解析出的当前目标任务一致；传同项目其他任务直接返回 400 阻断，杜绝污染其他任务 Thread。
+    3. **已知任务冲突禁止降级**:
+       - 一旦识别出当前任务，若目标频道与看板频道不一致，`auto` 与 `task` 均返回 400 拦截，防止任务小结误发到无关群组。
+    4. **IM 实例链式强校验**:
+       - 沿 `binding.ConnectionID -> connection.IMInstanceID -> GetProjectChannelLink -> link.ChannelID == target.ChatID == projection.ChannelID` 严格校验，跨 IM 实例严格拒绝。
+    5. **参数冲突与私聊保护**:
+       - `--to source --thread task` 互斥参数直接返回 400。
+       - 私聊 DM 目标在 `auto` 模式下保持直发，在 `task` 模式下返回 400 拦截。
+    6. **去冗余前缀**:
+       - 入 Thread 成功的回复消息，服务端自动省略 `[Workspace] [project]` 前缀，保持 Thread 内对话自然流畅；顶级消息保留前缀。
+  - **验证证据 (Verification Evidence)**:
+    - `internal/api/runtime_notify_handlers_test.go`: 15 项全量单测矩阵通过（覆盖非法枚举、参数冲突、wakeup 目标任务推导、fail-closed 零发帖、同项目跨任务拦截、频道不匹配拦截、跨实例拦截、无上下文 auto 降级、closed 投影降级、显式 channel 顶级发送、私聊直发保护、去前缀、跨 Agent 回复同一 Thread、防伪造 TaskID 拦截、跨项目 Worker 渠道自动优先匹配）。
+    - 调度器多信号隔离单测：`internal/api/scheduler_attention_worktree_test.go` 验证批次含多个不同任务时 fail-closed 不注入单一任务且不挂错 worktree。
+    - 任务保留变量防御单测：`internal/api/task_vars_reserved_test.go` 验证 API 禁止客户端注入 `MULTIGENT_WAKEUP_TARGET_TASK_ID`。
+    - 仓库级全量回归：`make test`（全仓库 40+ 包）100% PASS。
+    - 代码质量检查：`git diff --check` 退出码 0，零代码与格式缺陷。
+    - 生产部署与真实环境验证 (Live VM Verification)：
+      - 编译带 commit 戳 Linux amd64 二进制热部署至 VM，重启 `multigent.service` 与 `multigent-mattermost-bridge.service`，健康检查返回 `{"ok":true,"version":"0071f74a-dirty"}`。
+      - 真实任务 `t-20260910-pu8mhs`（频道 `#proj-api-key-hub` `en7zkc7s1b8nmxeqaf49yyy5fy`，Root Post `xgz3fhzbrbntjgno5h57pner8a`）实测验证通过：
+        1. `mga notify send --thread task`: 精确挂入任务看板 Thread (`root_id: xgz3fhzbrbntjgno5h57pner8a`, `externalReply: true`, `externalSent: true`)。
+        2. `mga notify send` (默认 auto 模式): 自动识别当前任务上下文并智能挂入看板 Thread。
+        3. `mga notify send --thread channel`: 显式作为频道顶级消息广播发送。
+        4. 防伪造 task ID 测试：传递伪造 task ID 严格返回 HTTP 400 Bad Request 拦截。
+        5. 无任务上下文时：`--thread task` 严格 400 拦截；`--thread auto` 安全降级为顶级消息 (`threadFallback: true`)。
 

@@ -26,6 +26,21 @@ func (s *Server) ensurePendingAttentionWakeupTask(workspaceID, project, agent st
 	if err != nil || strings.TrimSpace(section) == "" {
 		return nil, nil, err
 	}
+	applyWakeupWorktreeVars := func(task *entity.Task) {
+		if task == nil || vars == nil {
+			return
+		}
+		// Mirror the scheduler-resolved worktree onto the entity fields so the
+		// local CLI run path (RunTaskWithContext) mounts it without having to
+		// know about scheduler vars. The runtime-node path consumes the vars
+		// directly via RuntimeControlEnv.
+		if dir := strings.TrimSpace(vars["MULTIGENT_WAKEUP_WORKTREE_DIR"]); dir != "" && strings.TrimSpace(task.WorktreeDir) == "" {
+			task.WorktreeDir = dir
+		}
+		if branch := strings.TrimSpace(vars["MULTIGENT_WAKEUP_BRANCH"]); branch != "" && strings.TrimSpace(task.BranchName) == "" {
+			task.BranchName = branch
+		}
+	}
 	existing, err := s.ts.ListTasks(project, agent, entity.TaskStatusPending)
 	if err != nil {
 		return nil, nil, err
@@ -39,6 +54,7 @@ func (s *Server) ensurePendingAttentionWakeupTask(workspaceID, project, agent st
 				task.Prompt = section + s.attentionWakeupTaskPromptSuffix()
 			}
 			task.Vars = mergeTaskVars(task.Vars, vars)
+			applyWakeupWorktreeVars(task)
 			task.UpdatedAt = time.Now().UTC()
 			_ = s.ts.UpdateTask(project, agent, task)
 			return task, ids, nil
@@ -57,6 +73,7 @@ func (s *Server) ensurePendingAttentionWakeupTask(workspaceID, project, agent st
 		UpdatedAt: now,
 		Vars:      vars,
 	}
+	applyWakeupWorktreeVars(task)
 	if err := s.ts.AddTask(project, agent, task); err != nil {
 		return nil, nil, err
 	}
@@ -171,6 +188,24 @@ func (s *Server) pendingAttentionWakeupSectionAndVars(workspaceID, project, agen
 		return "", nil, nil, nil
 	}
 	vars := s.attentionWakeupTaskVars(workspaceID, signals)
+	if wtDir, branch := s.attentionWakeupWorktreeTarget(workspaceID, project, signals); wtDir != "" {
+		if vars == nil {
+			vars = map[string]string{}
+		}
+		vars["MULTIGENT_WAKEUP_WORKTREE_DIR"] = wtDir
+		if branch != "" {
+			vars["MULTIGENT_WAKEUP_BRANCH"] = branch
+		}
+	}
+	if targetTaskID, targetProj := s.attentionWakeupTargetTask(workspaceID, project, signals); targetTaskID != "" {
+		if vars == nil {
+			vars = map[string]string{}
+		}
+		vars["MULTIGENT_WAKEUP_TARGET_TASK_ID"] = targetTaskID
+		if targetProj != "" {
+			vars["MULTIGENT_WAKEUP_PROJECT"] = targetProj
+		}
+	}
 	if len(signals) > 0 {
 		ids := make([]string, 0, len(signals))
 		for _, signal := range signals {
@@ -248,6 +283,80 @@ func (s *Server) pendingAttentionWakeupSectionAndVars(workspaceID, project, agen
 	b.WriteString(i18n.AttentionHint)
 	b.WriteString("\nIf an IM signal payload contains an image/file/media/audio attachment with a non-empty ID, download the binary before analyzing it: `mga attention attachment download <signal-id> --index <n>`. For `link` or `document` entries, use the displayed URL or the appropriate document/network tool instead of binary attachment download. Use the returned local path in your analysis; do not ask the user to re-upload unless a real binary download fails.\n")
 	return b.String(), ids, vars, nil
+}
+
+// attentionWakeupWorktreeTarget resolves the code worktree a wakeup cycle must
+// operate on when the pending signals carry a workflow-step assignment for a
+// task that owns a real worktree. Signals without such context (pure reminders,
+// IM chatter, card actions) yield an empty result and keep the wakeup on the
+// agent home directory.
+func (s *Server) attentionWakeupWorktreeTarget(workspaceID, project string, signals []controldb.AttentionSignal) (worktreeDir, branch string) {
+	if s == nil || s.ts == nil {
+		return "", ""
+	}
+	targetTaskID, targetProject := s.attentionWakeupTargetTask(workspaceID, project, signals)
+	if targetTaskID == "" {
+		return "", ""
+	}
+	for _, signal := range signals {
+		agent := agentForSignal(signal)
+		if assigned, err := s.ts.GetTask(targetProject, agent, targetTaskID); err == nil && assigned != nil {
+			if wt := strings.TrimSpace(assigned.WorktreeDir); wt != "" {
+				return wt, strings.TrimSpace(assigned.BranchName)
+			}
+		}
+	}
+	return "", ""
+}
+
+// attentionWakeupTargetTask resolves the unique target workflow task when pending signals
+// carry workflow_step_assigned for a task. If multiple different tasks are assigned in the
+// same batch, it returns empty (fail-closed) to prevent ambiguous target assignment.
+func (s *Server) attentionWakeupTargetTask(workspaceID, project string, signals []controldb.AttentionSignal) (targetTaskID, targetProject string) {
+	if s == nil || s.ts == nil {
+		return "", ""
+	}
+	distinctTasks := map[string]string{}
+	for _, signal := range signals {
+		if !strings.EqualFold(strings.TrimSpace(signal.SourceKind), "task") {
+			continue
+		}
+		var refs struct {
+			Project string `json:"project"`
+			TaskID  string `json:"taskId"`
+		}
+		_ = json.Unmarshal([]byte(signal.RefsJSON), &refs)
+		taskID := strings.TrimSpace(refs.TaskID)
+		if taskID == "" && strings.EqualFold(strings.TrimSpace(signal.Reason), string(entity.TriggerOnWorkflowStepAssigned)) {
+			taskID = strings.TrimSpace(signal.SourceID)
+		}
+		if taskID == "" {
+			continue
+		}
+		signalProject := strings.TrimSpace(refs.Project)
+		if signalProject == "" {
+			signalProject = project
+		}
+		assigned, err := s.ts.GetTask(signalProject, agentForSignal(signal), taskID)
+		if err != nil || assigned == nil {
+			continue
+		}
+		distinctTasks[taskID] = signalProject
+	}
+	if len(distinctTasks) == 1 {
+		for tid, proj := range distinctTasks {
+			return tid, proj
+		}
+	}
+	return "", ""
+}
+
+func agentForSignal(signal controldb.AttentionSignal) string {
+	var refs struct {
+		Agent string `json:"agent"`
+	}
+	_ = json.Unmarshal([]byte(signal.RefsJSON), &refs)
+	return strings.TrimSpace(refs.Agent)
 }
 
 func (s *Server) attentionWakeupTaskVars(workspaceID string, signals []controldb.AttentionSignal) map[string]string {

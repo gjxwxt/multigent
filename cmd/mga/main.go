@@ -933,7 +933,7 @@ func newNotifyCmd() *cobra.Command {
 }
 
 func newNotifySendCmd() *cobra.Command {
-	var to, channel, subject, body, taskID, urgency, messageFormat, format string
+	var to, channel, subject, body, taskID, urgency, messageFormat, format, thread string
 	cmd := &cobra.Command{
 		Use:   "send",
 		Short: "Send a human notification from the current runtime agent",
@@ -947,6 +947,7 @@ func newNotifySendCmd() *cobra.Command {
 			raw, _ := json.Marshal(map[string]any{
 				"to": to, "channel": channel, "subject": subject,
 				"body": body, "taskId": taskID, "urgency": urgency, "messageFormat": messageFormat,
+				"thread": thread,
 			})
 			resp, err := requestJSON(http.MethodPost, "/api/v1/runtime/notify", nil, raw)
 			if err != nil {
@@ -963,6 +964,7 @@ func newNotifySendCmd() *cobra.Command {
 	cmd.Flags().StringVar(&subject, "subject", "", "notification subject")
 	cmd.Flags().StringVar(&body, "body", "", "notification body")
 	cmd.Flags().StringVar(&taskID, "task", "", "related task id")
+	cmd.Flags().StringVar(&thread, "thread", "auto", "thread delivery mode: auto (default), task, or channel")
 	cmd.Flags().StringVar(&urgency, "urgency", "", "urgency label: normal, review, blocking")
 	cmd.Flags().StringVar(&messageFormat, "message-format", "auto", "message content format: auto, text, or markdown")
 	cmd.Flags().StringVar(&format, "format", "json", "output format: json or table")
@@ -1063,7 +1065,7 @@ func newNotifyFileSendCmd(defaultKind string) *cobra.Command {
 }
 
 func newNotifyCardSendCmd() *cobra.Command {
-	var to, channel, title, body, taskID, handlerType, contextJSON, format, cardJSON, cardJSONFile string
+	var to, channel, title, body, taskID, handlerType, contextJSON, format, cardJSON, cardJSONFile, thread string
 	var actions, fields, links, values []string
 	var expiresIn int
 	cmd := &cobra.Command{
@@ -1118,6 +1120,7 @@ func newNotifyCardSendCmd() *cobra.Command {
 			}
 			raw, _ := json.Marshal(map[string]any{
 				"to": to, "channel": channel, "subject": title, "body": body, "taskId": taskID,
+				"thread": thread,
 				"messageFormat": "card", "expiresInSec": expiresIn, "context": contextMap,
 				"card": cardMap,
 			})
@@ -1142,6 +1145,7 @@ func newNotifyCardSendCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&fields, "field", nil, "card field as label=value, repeatable")
 	cmd.Flags().StringArrayVar(&links, "link", nil, "card link as label=url, repeatable")
 	cmd.Flags().StringVar(&taskID, "task", "", "related task id")
+	cmd.Flags().StringVar(&thread, "thread", "auto", "thread delivery mode: auto (default), task, or channel")
 	cmd.Flags().StringVar(&handlerType, "handler", "agent_event", "interaction handler type; default is agent_event")
 	cmd.Flags().StringVar(&contextJSON, "context-json", "", "additional card context as a JSON object")
 	cmd.Flags().IntVar(&expiresIn, "expires-in", 3600, "interaction expiration in seconds")

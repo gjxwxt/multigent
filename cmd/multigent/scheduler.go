@@ -999,7 +999,7 @@ func runAllPendingTasks(ctx context.Context, root, project, agentName string,
 				// Prepend attention signals and unread messages to the wakeup prompt.
 				recipient := project + "/" + agentName
 				unread, _ := ts.ListUnreadMessages(recipient)
-				attentionSection, attentionIDs, _ := pendingAttentionSection(root, project, agentName, i18n)
+				attentionSection, attentionIDs, attentionWtDir, attentionWtBranch, attentionTargetTaskID, attentionTargetProj, _ := pendingAttentionSection(root, project, agentName, i18n)
 				if attentionSection != "" {
 					prompt = attentionSection + prompt
 				}
@@ -1048,6 +1048,29 @@ func runAllPendingTasks(ctx context.Context, root, project, agentName string,
 				if len(attentionIDs) > 0 {
 					rawIDs, _ := json.Marshal(attentionIDs)
 					wakeupTask.Vars = map[string]string{"MULTIGENT_ATTENTION_SIGNAL_IDS_JSON": string(rawIDs)}
+				}
+				if attentionWtDir != "" {
+					// A workflow step delivered through an attention signal must
+					// run in the task's own worktree, not the agent home; mirror
+					// the control-plane wakeup scheduler here.
+					wakeupTask.WorktreeDir = attentionWtDir
+					wakeupTask.BranchName = attentionWtBranch
+					if wakeupTask.Vars == nil {
+						wakeupTask.Vars = map[string]string{}
+					}
+					wakeupTask.Vars["MULTIGENT_WAKEUP_WORKTREE_DIR"] = attentionWtDir
+					if attentionWtBranch != "" {
+						wakeupTask.Vars["MULTIGENT_WAKEUP_BRANCH"] = attentionWtBranch
+					}
+				}
+				if attentionTargetTaskID != "" {
+					if wakeupTask.Vars == nil {
+						wakeupTask.Vars = map[string]string{}
+					}
+					wakeupTask.Vars["MULTIGENT_WAKEUP_TARGET_TASK_ID"] = attentionTargetTaskID
+					if attentionTargetProj != "" {
+						wakeupTask.Vars["MULTIGENT_WAKEUP_PROJECT"] = attentionTargetProj
+					}
 				}
 				// Persist before running so `task confirm-request --id $TASK_ID` works.
 				if addErr := ts.AddTask(project, agentName, wakeupTask); addErr != nil {
@@ -1478,19 +1501,19 @@ func schedulerWakeupTimeSection(now time.Time, i18n wakeupI18n) string {
 	return b.String()
 }
 
-func pendingAttentionSection(root, project, agentName string, i18n wakeupI18n) (string, []string, error) {
+func pendingAttentionSection(root, project, agentName string, i18n wakeupI18n) (string, []string, string, string, string, string, error) {
 	db, err := openControlDBForRoot(root)
 	if err != nil {
-		return "", nil, err
+		return "", nil, "", "", "", "", err
 	}
 	defer db.Close()
 	workspaceID, err := schedulerWorkspaceID(root, db)
 	if err != nil || strings.TrimSpace(workspaceID) == "" {
-		return "", nil, err
+		return "", nil, "", "", "", "", err
 	}
 	resolved, ok, err := agentdir.New(db).ResolveProjectMailbox(workspaceID, project+"/"+agentName)
 	if err != nil || !ok {
-		return "", nil, err
+		return "", nil, "", "", "", "", err
 	}
 	signals, err := db.ListAttentionSignals(controldb.AttentionSignalFilter{
 		WorkspaceID:   workspaceID,
@@ -1499,7 +1522,7 @@ func pendingAttentionSection(root, project, agentName string, i18n wakeupI18n) (
 		Limit:         20,
 	})
 	if err != nil || len(signals) == 0 {
-		return "", nil, err
+		return "", nil, "", "", "", "", err
 	}
 	var b strings.Builder
 	b.WriteString(i18n.AttentionHeader)
@@ -1565,7 +1588,76 @@ func pendingAttentionSection(root, project, agentName string, i18n wakeupI18n) (
 	}
 	b.WriteString("---\n\n")
 	b.WriteString(i18n.AttentionHint)
-	return b.String(), ids, nil
+	wtDir, wtBranch := schedulerAttentionWorktreeTarget(root, project, agentName, signals)
+	targetTaskID, targetProject := schedulerAttentionTargetTask(root, project, agentName, signals)
+	return b.String(), ids, wtDir, wtBranch, targetTaskID, targetProject, nil
+}
+
+// schedulerAttentionWorktreeTarget resolves the code worktree the pending
+// signals point at, mirroring the control-plane scheduler (scheduler_attention.go).
+// A workflow_step_assigned signal whose source task owns a real worktree makes
+// the wakeup run inside that worktree instead of the agent home; pure
+// reminders and IM signals leave both values empty.
+func schedulerAttentionWorktreeTarget(root, project, agentName string, signals []controldb.AttentionSignal) (worktreeDir, branch string) {
+	if len(signals) == 0 {
+		return "", ""
+	}
+	targetTaskID, targetProject := schedulerAttentionTargetTask(root, project, agentName, signals)
+	if targetTaskID == "" {
+		return "", ""
+	}
+	ts := taskstore.New(root)
+	assigned, err := ts.GetTask(targetProject, agentName, targetTaskID)
+	if err != nil || assigned == nil {
+		return "", ""
+	}
+	if wt := strings.TrimSpace(assigned.WorktreeDir); wt != "" {
+		return wt, strings.TrimSpace(assigned.BranchName)
+	}
+	return "", ""
+}
+
+// schedulerAttentionTargetTask resolves the unique target workflow task when pending signals
+// carry workflow_step_assigned for a task. If multiple different tasks are assigned in the
+// same batch, it returns empty (fail-closed) to prevent ambiguous target assignment.
+func schedulerAttentionTargetTask(root, project, agentName string, signals []controldb.AttentionSignal) (targetTaskID, targetProject string) {
+	if len(signals) == 0 {
+		return "", ""
+	}
+	ts := taskstore.New(root)
+	distinctTasks := map[string]string{}
+	for _, signal := range signals {
+		if !strings.EqualFold(strings.TrimSpace(signal.SourceKind), "task") {
+			continue
+		}
+		var refs struct {
+			Project string `json:"project"`
+			TaskID  string `json:"taskId"`
+		}
+		_ = json.Unmarshal([]byte(signal.RefsJSON), &refs)
+		taskID := strings.TrimSpace(refs.TaskID)
+		if taskID == "" && strings.EqualFold(strings.TrimSpace(signal.Reason), string(entity.TriggerOnWorkflowStepAssigned)) {
+			taskID = strings.TrimSpace(signal.SourceID)
+		}
+		if taskID == "" {
+			continue
+		}
+		signalProject := strings.TrimSpace(refs.Project)
+		if signalProject == "" {
+			signalProject = project
+		}
+		assigned, err := ts.GetTask(signalProject, agentName, taskID)
+		if err != nil || assigned == nil {
+			continue
+		}
+		distinctTasks[taskID] = signalProject
+	}
+	if len(distinctTasks) == 1 {
+		for tid, proj := range distinctTasks {
+			return tid, proj
+		}
+	}
+	return "", ""
 }
 
 func parseSchedulerTime(value string) (time.Time, bool) {

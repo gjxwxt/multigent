@@ -46,6 +46,7 @@ type runtimeNotifyBody struct {
 	Subject       string                 `json:"subject"`
 	Body          string                 `json:"body"`
 	TaskID        string                 `json:"taskId"`
+	Thread        string                 `json:"thread,omitempty"`
 	Urgency       string                 `json:"urgency"`
 	MessageFormat string                 `json:"messageFormat"`
 	Card          *runtimeNotifyCardBody `json:"card,omitempty"`
@@ -167,6 +168,19 @@ func (s *Server) handleRuntimeNotify(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	threadMode := strings.ToLower(strings.TrimSpace(body.Thread))
+	if threadMode == "" {
+		threadMode = "auto"
+	}
+	if threadMode != "auto" && threadMode != "task" && threadMode != "channel" {
+		s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeBadRequest, fmt.Sprintf("invalid thread mode %q: must be auto, task, or channel", body.Thread))
+		return
+	}
+	isSourceRecipient := recipient == "source" || strings.HasPrefix(recipient, "source:")
+	if isSourceRecipient && (threadMode == "task" || threadMode == "channel") {
+		s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeBadRequest, fmt.Sprintf("conflicting parameters: --to source cannot be combined with --thread %s", threadMode))
+		return
+	}
 	subject := strings.TrimSpace(body.Subject)
 	from := runtimeAgentAddress(principal)
 	msg := &entity.Message{
@@ -249,6 +263,19 @@ func (s *Server) handleRuntimeNotify(w http.ResponseWriter, r *http.Request) {
 			target = sourceTarget
 		}
 	}
+	newTarget, threadMeta, threadErr := s.resolveTaskThreadTarget(principal, binding, recipient, body, target)
+	if threadErr != nil {
+		if reqErr, ok := threadErr.(*runtimeNotifyRequestError); ok {
+			s.jsonErrorCode(w, reqErr.StatusCode, reqErr.Code, reqErr.Message)
+			return
+		}
+		s.serverError(w, threadErr)
+		return
+	}
+	target = newTarget
+	for k, v := range threadMeta {
+		result[k] = v
+	}
 	channelProvider, ok := imbridge.LookupProvider(binding.Provider)
 	if !ok {
 		result["externalError"] = "unsupported IM provider: " + binding.Provider
@@ -302,7 +329,7 @@ func (s *Server) handleRuntimeNotify(w http.ResponseWriter, r *http.Request) {
 	} else if principal.Project != "" {
 		prefix = fmt.Sprintf("[%s] ", principal.Project)
 	}
-	if prefix != "" && !strings.HasPrefix(notifyMessage.Text, prefix) {
+	if target.ReplyToMessageID == "" && prefix != "" && !strings.HasPrefix(notifyMessage.Text, prefix) {
 		notifyMessage.Text = prefix + notifyMessage.Text
 	}
 	notifyMessage.Text = trimForIM(notifyMessage.Text, 3500)
@@ -346,6 +373,9 @@ func (s *Server) handleRuntimeNotify(w http.ResponseWriter, r *http.Request) {
 	result["provider"] = binding.Provider
 	result["channelId"] = binding.ID
 	result["externalSent"] = true
+	if target.ReplyToMessageID != "" {
+		result["externalReply"] = true
+	}
 	s.auditRuntimeNotify(r, principal, msg.ID, binding.Provider, subject, true, "", runtimeNotifyAuditExtra(result))
 	_ = json.NewEncoder(w).Encode(result)
 }
@@ -985,6 +1015,15 @@ func (s *Server) selectRuntimeNotifyChannel(principal runtimeAgentPrincipal, req
 	if requested == "" {
 		requested = "auto"
 	}
+	if principal.Project != "" {
+		for _, binding := range bindings {
+			if strings.EqualFold(binding.ProjectID, principal.Project) {
+				if requested == "auto" || requested == strings.ToLower(strings.TrimSpace(binding.Provider)) || requested == strings.ToLower(strings.TrimSpace(binding.ID)) {
+					return binding, true, nil
+				}
+			}
+		}
+	}
 	for _, binding := range bindings {
 		if requested == "auto" || requested == strings.ToLower(strings.TrimSpace(binding.Provider)) || requested == strings.ToLower(strings.TrimSpace(binding.ID)) {
 			return binding, true, nil
@@ -1161,6 +1200,282 @@ func (s *Server) userCanAccessAgentChannelBinding(workspaceID, userID string, bi
 		}
 	}
 	return false, nil
+}
+
+type runtimeNotifyRequestError struct {
+	StatusCode int
+	Code       string
+	Message    string
+}
+
+func (e *runtimeNotifyRequestError) Error() string {
+	return e.Message
+}
+
+func (s *Server) verifyProjectChannelIMInstance(workspaceID, project, provider, connectionID, channelID string) (bool, error) {
+	if s == nil || s.controlDB == nil {
+		return true, nil
+	}
+	workspaceID = strings.TrimSpace(workspaceID)
+	project = strings.TrimSpace(project)
+	provider = strings.TrimSpace(provider)
+	connectionID = strings.TrimSpace(connectionID)
+	channelID = strings.TrimSpace(channelID)
+	if connectionID == "" || channelID == "" {
+		return false, nil
+	}
+
+	conn, found, err := s.controlDB.ConnectionByID(connectionID)
+	if err != nil || !found {
+		return false, err
+	}
+	instID := strings.TrimSpace(conn.IMInstanceID)
+
+	links, err := s.controlDB.ListProjectChannelLinks(workspaceID, project)
+	if err != nil {
+		return false, err
+	}
+
+	if len(links) > 0 {
+		for _, link := range links {
+			if !strings.EqualFold(strings.TrimSpace(link.Provider), provider) {
+				continue
+			}
+			if strings.TrimSpace(link.ChannelID) != channelID {
+				continue
+			}
+			linkInstID := strings.TrimSpace(link.IMInstanceID)
+			if instID == "" && linkInstID == "" {
+				return true, nil
+			}
+			if instID != "" && linkInstID != "" && instID == linkInstID {
+				return true, nil
+			}
+			return false, nil
+		}
+		return false, nil
+	}
+
+	// Fallback when no project_channel_link records are configured (e.g. test environments)
+	bindings, err := s.controlDB.ListAgentChannelBindings(controldb.AgentChannelBindingFilter{
+		WorkspaceID:  workspaceID,
+		ConnectionID: connectionID,
+		Provider:     provider,
+	})
+	if err != nil {
+		return false, err
+	}
+	for _, b := range bindings {
+		if strings.TrimSpace(b.ExternalChatID) == channelID {
+			return true, nil
+		}
+		targets, _ := s.controlDB.ListAgentChannelTargets(controldb.AgentChannelTargetFilter{
+			WorkspaceID:      workspaceID,
+			ChannelBindingID: b.ID,
+			Provider:         provider,
+			TargetType:       "chat",
+		})
+		for _, t := range targets {
+			if strings.TrimSpace(t.ExternalChatID) == channelID {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func (s *Server) resolveTaskThreadTarget(
+	principal runtimeAgentPrincipal,
+	binding controldb.AgentChannelBinding,
+	recipient string,
+	body runtimeNotifyBody,
+	target imbridge.OutgoingTarget,
+) (imbridge.OutgoingTarget, map[string]any, error) {
+	threadMode := strings.ToLower(strings.TrimSpace(body.Thread))
+	if threadMode == "" {
+		threadMode = "auto"
+	}
+	if threadMode != "auto" && threadMode != "task" && threadMode != "channel" {
+		return target, nil, &runtimeNotifyRequestError{
+			StatusCode: http.StatusBadRequest,
+			Code:       ErrCodeBadRequest,
+			Message:    fmt.Sprintf("invalid thread mode %q: must be auto, task, or channel", body.Thread),
+		}
+	}
+
+	// 1. Check for --to source parameter conflicts
+	isSourceRecipient := recipient == "source" || strings.HasPrefix(recipient, "source:")
+	if isSourceRecipient && (threadMode == "task" || threadMode == "channel") {
+		return target, nil, &runtimeNotifyRequestError{
+			StatusCode: http.StatusBadRequest,
+			Code:       ErrCodeBadRequest,
+			Message:    fmt.Sprintf("conflicting parameters: --to source cannot be combined with --thread %s", threadMode),
+		}
+	}
+	if target.ReplyToMessageID != "" {
+		// Already targeted to a specific reply (e.g. source message)
+		return target, map[string]any{"threadMode": "reply"}, nil
+	}
+
+	// 2. Direct message (Private chat) protection
+	isDM := target.ReceiveIDType == "open_id" || strings.HasPrefix(body.To, "user:") || (!strings.HasPrefix(recipient, "chat:") && !strings.HasPrefix(recipient, "group:") && recipient != "human")
+	if isDM {
+		if threadMode == "task" {
+			return target, nil, &runtimeNotifyRequestError{
+				StatusCode: http.StatusBadRequest,
+				Code:       ErrCodeBadRequest,
+				Message:    "cannot use --thread task with a direct user message",
+			}
+		}
+		return target, map[string]any{"threadMode": threadMode}, nil
+	}
+
+	// 3. Explicit top-level channel message
+	if threadMode == "channel" {
+		return target, map[string]any{"threadMode": "channel"}, nil
+	}
+
+	// 4. Resolve trusted target task from server-side task store
+	var trustedTaskID string
+	var trustedProject string
+	if runID := strings.TrimSpace(principal.RunID); runID != "" && s.controlDB != nil {
+		if run, found, err := s.controlDB.RuntimeRunByID(principal.WorkspaceID, runID); err == nil && found {
+			runTaskID := strings.TrimSpace(run.TaskID)
+			runProj := strings.TrimSpace(run.ProjectID)
+			if runProj == "" {
+				runProj = principal.Project
+			}
+			if runTaskID != "" && s.ts != nil {
+				if t, err := s.ts.GetTask(runProj, run.AgentID, runTaskID); err == nil && t != nil {
+					if t.Type == "wakeup" {
+						if targetID := strings.TrimSpace(t.Vars["MULTIGENT_WAKEUP_TARGET_TASK_ID"]); targetID != "" {
+							trustedTaskID = targetID
+							trustedProject = strings.TrimSpace(t.Vars["MULTIGENT_WAKEUP_PROJECT"])
+							if trustedProject == "" {
+								trustedProject = runProj
+							}
+						}
+					} else {
+						trustedTaskID = t.ID
+						trustedProject = runProj
+					}
+				}
+			}
+		}
+	}
+	// In local runner execution mode, resolveRuntimeControlEnv sets MULTIGENT_RUN_ID to task.ID.
+	// We fall back to looking up a task whose ID matches principal.RunID.
+	if trustedTaskID == "" && s.ts != nil {
+		if t, err := s.ts.GetTask(principal.Project, principal.Agent, principal.RunID); err == nil && t != nil {
+			if t.Type == "wakeup" {
+				if targetID := strings.TrimSpace(t.Vars["MULTIGENT_WAKEUP_TARGET_TASK_ID"]); targetID != "" {
+					trustedTaskID = targetID
+					trustedProject = strings.TrimSpace(t.Vars["MULTIGENT_WAKEUP_PROJECT"])
+					if trustedProject == "" {
+						trustedProject = principal.Project
+					}
+				}
+			} else {
+				trustedTaskID = t.ID
+				trustedProject = principal.Project
+			}
+		}
+	}
+
+	// 5. Compare client-provided taskId with trustedTaskID
+	// Client taskId is only valid when verified against the trusted task context;
+	// an agent without trusted task context cannot specify an arbitrary taskId to inject into a thread.
+	clientTaskID := strings.TrimSpace(body.TaskID)
+	var effectiveTaskID string
+	if trustedTaskID != "" {
+		if clientTaskID != "" && clientTaskID != trustedTaskID {
+			return target, nil, &runtimeNotifyRequestError{
+				StatusCode: http.StatusBadRequest,
+				Code:       ErrCodeBadRequest,
+				Message:    fmt.Sprintf("mismatched taskId: client taskId %q does not match active task %q", clientTaskID, trustedTaskID),
+			}
+		}
+		effectiveTaskID = trustedTaskID
+	}
+
+	// 6. Handle cases where no effectiveTaskID was found
+	if effectiveTaskID == "" {
+		if threadMode == "task" {
+			return target, nil, &runtimeNotifyRequestError{
+				StatusCode: http.StatusBadRequest,
+				Code:       ErrCodeBadRequest,
+				Message:    "task thread delivery required (--thread task), but no active task context found",
+			}
+		}
+		return target, map[string]any{"threadMode": "channel", "threadFallback": true}, nil
+	}
+
+	// 7. Check Mattermost provider support
+	if !strings.EqualFold(binding.Provider, "mattermost") {
+		if threadMode == "task" {
+			return target, nil, &runtimeNotifyRequestError{
+				StatusCode: http.StatusBadRequest,
+				Code:       ErrCodeBadRequest,
+				Message:    fmt.Sprintf("task thread delivery not supported for provider %q", binding.Provider),
+			}
+		}
+		return target, map[string]any{"threadMode": "channel", "threadFallback": true}, nil
+	}
+
+	// 8. Query ActiveTaskThreadProjection
+	proj, found, err := s.controlDB.ActiveTaskThreadProjection(principal.WorkspaceID, effectiveTaskID, binding.Provider)
+	if err != nil {
+		return target, nil, err
+	}
+	if !found || proj.Status != "active" || strings.TrimSpace(proj.RootPostID) == "" {
+		if threadMode == "task" {
+			return target, nil, &runtimeNotifyRequestError{
+				StatusCode: http.StatusBadRequest,
+				Code:       ErrCodeBadRequest,
+				Message:    fmt.Sprintf("task thread delivery required (--thread task), but no active task thread projection found for task %q", effectiveTaskID),
+			}
+		}
+		return target, map[string]any{"threadMode": "channel", "threadFallback": true}, nil
+	}
+
+	// 9. Invariant: Projection must belong to principal.Project
+	if !strings.EqualFold(strings.TrimSpace(proj.ProjectID), strings.TrimSpace(principal.Project)) {
+		return target, nil, &runtimeNotifyRequestError{
+			StatusCode: http.StatusBadRequest,
+			Code:       ErrCodeForbidden,
+			Message:    fmt.Sprintf("task projection belongs to project %q, not %q", proj.ProjectID, principal.Project),
+		}
+	}
+
+	// 10. Channel match check: target.ChatID must match proj.ChannelID
+	if strings.TrimSpace(target.ChatID) != strings.TrimSpace(proj.ChannelID) {
+		return target, nil, &runtimeNotifyRequestError{
+			StatusCode: http.StatusBadRequest,
+			Code:       ErrCodeBadRequest,
+			Message:    fmt.Sprintf("target channel %q does not match active task thread channel %q; use --thread channel to broadcast to another channel", target.ChatID, proj.ChannelID),
+		}
+	}
+
+	// 11. IM Instance match check
+	instanceMatch, err := s.verifyProjectChannelIMInstance(principal.WorkspaceID, principal.Project, binding.Provider, binding.ConnectionID, target.ChatID)
+	if err != nil {
+		return target, nil, err
+	}
+	if !instanceMatch {
+		return target, nil, &runtimeNotifyRequestError{
+			StatusCode: http.StatusBadRequest,
+			Code:       ErrCodeForbidden,
+			Message:    "target channel and agent connection belong to different IM instances",
+		}
+	}
+
+	// 12. Success: Attach to Root Post
+	target.ReplyToMessageID = strings.TrimSpace(proj.RootPostID)
+	return target, map[string]any{
+		"threadMode": "task",
+		"threadId":   target.ReplyToMessageID,
+		"taskId":     effectiveTaskID,
+	}, nil
 }
 
 func (s *Server) resolveRuntimeNotifyRecipient(principal runtimeAgentPrincipal, input string) (string, error) {
@@ -1744,7 +2059,7 @@ func runtimeNotifyTargetsShareConversation(target, source imbridge.OutgoingTarge
 
 func runtimeNotifyAuditExtra(result map[string]any) map[string]any {
 	extra := map[string]any{}
-	for _, key := range []string{"messageFormat", "formatHint", "channelId", "interactionId", "externalReply"} {
+	for _, key := range []string{"messageFormat", "formatHint", "channelId", "interactionId", "externalReply", "threadMode", "threadId", "threadFallback"} {
 		if value, ok := result[key]; ok {
 			extra[key] = value
 		}

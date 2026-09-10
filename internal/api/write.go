@@ -38,6 +38,17 @@ func validTaskStatus(s string) bool {
 	return entity.ValidTaskStatus(s)
 }
 
+// reservedTaskVars are scheduler-internal vars the API must never accept from
+// user input. MULTIGENT_WAKEUP_WORKTREE_DIR remounts the run sandbox onto an
+// arbitrary host directory, so accepting it from task creation would hand
+// every project member a mount primitive.
+var reservedTaskVars = map[string]bool{
+	"MULTIGENT_WAKEUP_WORKTREE_DIR":   true,
+	"MULTIGENT_WAKEUP_BRANCH":         true,
+	"MULTIGENT_WAKEUP_TARGET_TASK_ID": true,
+	"MULTIGENT_WAKEUP_PROJECT":        true,
+}
+
 func sanitizeTaskVars(vars map[string]string) map[string]string {
 	if len(vars) == 0 {
 		return nil
@@ -46,7 +57,7 @@ func sanitizeTaskVars(vars map[string]string) map[string]string {
 	for key, value := range vars {
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
-		if key == "" || value == "" {
+		if key == "" || value == "" || reservedTaskVars[key] {
 			continue
 		}
 		out[key] = value

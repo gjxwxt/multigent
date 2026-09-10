@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -1170,5 +1171,1255 @@ func TestRuntimeNotifyUnboundRecipientAndWorkspacePrefix(t *testing.T) {
 	expectedPrefix := "[Test Workspace] [sample] Please review the PR"
 	if receivedPost["message"] != expectedPrefix {
 		t.Fatalf("expected message %q, got %q", expectedPrefix, receivedPost["message"])
+	}
+}
+
+func setupNotifyMattermostTestServer(t *testing.T, s *Server, binding controldb.AgentChannelBinding) (*httptest.Server, *[]map[string]any) {
+	t.Helper()
+	var posts []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v4/posts" {
+			var post map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&post); err != nil {
+				t.Fatalf("decode mock post: %v", err)
+			}
+			posts = append(posts, post)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": fmt.Sprintf("post-out-%d", len(posts))})
+			return
+		}
+		t.Fatalf("unexpected mock mattermost path: %s", r.URL.Path)
+	}))
+	sec, err := sealConnectionSecret(map[string]string{
+		"baseUrl":      server.URL,
+		"botToken":     "test-bot-token",
+		"commandToken": "cmd-tok",
+	})
+	if err != nil {
+		t.Fatalf("seal secret: %v", err)
+	}
+	sec.ConnectionID = binding.ConnectionID
+	if err := s.controlDB.UpsertConnectionSecret(sec); err != nil {
+		t.Fatalf("upsert secret: %v", err)
+	}
+	return server, &posts
+}
+
+func TestRuntimeNotifySend_InvalidThreadMode_Rejected(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	binding, _ := setupMattermostTestBinding(t, s, workspaceID, "sample", "pm", "cmd-tok")
+	server, _ := setupNotifyMattermostTestServer(t, s, binding)
+	defer server.Close()
+
+	principal := runtimeAgentPrincipal{
+		WorkspaceID:  workspaceID,
+		Project:      "sample",
+		Agent:        "pm",
+		Capabilities: []string{"runtime.notify", "message.use"},
+	}
+
+	body := runtimeNotifyBody{
+		To:      "chat:ch-proj",
+		Body:    "test",
+		Thread:  "invalid-mode",
+		Channel: binding.ID,
+	}
+	bodyRaw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/notify", bytes.NewReader(bodyRaw))
+	req = req.WithContext(context.WithValue(req.Context(), ctxRuntimeAgentKey, principal))
+	rr := httptest.NewRecorder()
+
+	s.handleRuntimeNotify(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "invalid thread mode") {
+		t.Fatalf("expected error mentioning invalid thread mode, got: %s", rr.Body.String())
+	}
+}
+
+func TestRuntimeNotifySend_SourceWithThreadTask_ConflictRejected(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	binding, _ := setupMattermostTestBinding(t, s, workspaceID, "sample", "pm", "cmd-tok")
+	server, _ := setupNotifyMattermostTestServer(t, s, binding)
+	defer server.Close()
+
+	principal := runtimeAgentPrincipal{
+		WorkspaceID:  workspaceID,
+		Project:      "sample",
+		Agent:        "pm",
+		Capabilities: []string{"runtime.notify", "message.use"},
+	}
+
+	// 1. --to source --thread task -> rejected
+	body := runtimeNotifyBody{
+		To:      "source",
+		Body:    "test",
+		Thread:  "task",
+		Channel: binding.ID,
+	}
+	bodyRaw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/notify", bytes.NewReader(bodyRaw))
+	req = req.WithContext(context.WithValue(req.Context(), ctxRuntimeAgentKey, principal))
+	rr := httptest.NewRecorder()
+
+	s.handleRuntimeNotify(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "conflicting parameters: --to source cannot be combined with --thread task") {
+		t.Fatalf("expected conflict error, got: %s", rr.Body.String())
+	}
+
+	// 2. --to source --thread channel -> also rejected
+	bodyChan := runtimeNotifyBody{
+		To:      "source",
+		Body:    "test",
+		Thread:  "channel",
+		Channel: binding.ID,
+	}
+	rawChan, _ := json.Marshal(bodyChan)
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/notify", bytes.NewReader(rawChan))
+	req2 = req2.WithContext(context.WithValue(req2.Context(), ctxRuntimeAgentKey, principal))
+	rr2 := httptest.NewRecorder()
+
+	s.handleRuntimeNotify(rr2, req2)
+	if rr2.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rr2.Code, rr2.Body.String())
+	}
+	if !strings.Contains(rr2.Body.String(), "conflicting parameters: --to source cannot be combined with --thread channel") {
+		t.Fatalf("expected conflict error, got: %s", rr2.Body.String())
+	}
+}
+
+func TestRuntimeNotifySend_WakeupRunResolvesWorkflowTargetTask(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	binding, _ := setupMattermostTestBinding(t, s, workspaceID, "sample", "pm", "cmd-tok")
+	server, posts := setupNotifyMattermostTestServer(t, s, binding)
+	defer server.Close()
+
+	_ = s.controlDB.UpsertAgentChannelTarget(controldb.AgentChannelTarget{
+		ID:               "tgt-ch-task-1",
+		WorkspaceID:      workspaceID,
+		ChannelBindingID: binding.ID,
+		Provider:         "mattermost",
+		TargetType:       "chat",
+		DisplayName:      "ch-task-1",
+		ExternalChatID:   "ch-task-1",
+	})
+
+	targetTask := &entity.Task{
+		ID:        "t-target-1",
+		Title:     "Target Workflow Task",
+		Status:    entity.TaskStatusInProgress,
+		Assignee:  "pm",
+		CreatedBy: "owner",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := s.ts.AddTask("sample", "pm", targetTask); err != nil {
+		t.Fatalf("add target task: %v", err)
+	}
+
+	wakeupTask := &entity.Task{
+		ID:        "t-wakeup-1",
+		Title:     "Wakeup Agent Task",
+		Type:      "wakeup",
+		Status:    entity.TaskStatusInProgress,
+		Assignee:  "pm",
+		CreatedBy: "system",
+		Vars: map[string]string{
+			"MULTIGENT_WAKEUP_TARGET_TASK_ID": "t-target-1",
+			"MULTIGENT_WAKEUP_PROJECT":        "sample",
+		},
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := s.ts.AddTask("sample", "pm", wakeupTask); err != nil {
+		t.Fatalf("add wakeup task: %v", err)
+	}
+
+	if err := s.controlDB.UpsertRuntimeRun(controldb.RuntimeRun{
+		ID:          "run-wakeup-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		AgentID:     "pm",
+		TaskID:      wakeupTask.ID,
+		Status:      "running",
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	if err := s.controlDB.UpsertTaskThreadProjection(controldb.TaskThreadProjection{
+		ID:          "ttp-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		TaskID:      "t-target-1",
+		Provider:    "mattermost",
+		ChannelID:   "ch-task-1",
+		RootPostID:  "root-post-target-1",
+		Status:      "active",
+	}); err != nil {
+		t.Fatalf("upsert projection: %v", err)
+	}
+
+	principal := runtimeAgentPrincipal{
+		WorkspaceID:  workspaceID,
+		Project:      "sample",
+		Agent:        "pm",
+		RunID:        "run-wakeup-1",
+		Capabilities: []string{"runtime.notify", "message.use"},
+	}
+
+	body := runtimeNotifyBody{
+		To:      "chat:ch-task-1",
+		Body:    "Workflow step in progress",
+		Thread:  "auto",
+		Channel: binding.ID,
+	}
+	bodyRaw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/notify", bytes.NewReader(bodyRaw))
+	req = req.WithContext(context.WithValue(req.Context(), ctxRuntimeAgentKey, principal))
+	rr := httptest.NewRecorder()
+
+	s.handleRuntimeNotify(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var res map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&res); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if res["threadMode"] != "task" || res["threadId"] != "root-post-target-1" || res["taskId"] != "t-target-1" {
+		t.Fatalf("unexpected thread metadata: %#v", res)
+	}
+	if res["externalSent"] != true || res["externalReply"] != true {
+		t.Fatalf("expected externalSent=true externalReply=true, got %#v", res)
+	}
+	if len(*posts) != 1 {
+		t.Fatalf("expected 1 post sent to Mattermost, got %d", len(*posts))
+	}
+	if (*posts)[0]["root_id"] != "root-post-target-1" {
+		t.Fatalf("expected root_id root-post-target-1, got %v", (*posts)[0]["root_id"])
+	}
+}
+
+func TestRuntimeNotifySend_ThreadTask_FailsClosedWithoutSending(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	binding, _ := setupMattermostTestBinding(t, s, workspaceID, "sample", "pm", "cmd-tok")
+	server, posts := setupNotifyMattermostTestServer(t, s, binding)
+	defer server.Close()
+
+	_ = s.controlDB.UpsertAgentChannelTarget(controldb.AgentChannelTarget{
+		ID:               "tgt-ch-task-1",
+		WorkspaceID:      workspaceID,
+		ChannelBindingID: binding.ID,
+		Provider:         "mattermost",
+		TargetType:       "chat",
+		DisplayName:      "ch-task-1",
+		ExternalChatID:   "ch-task-1",
+	})
+
+	task := &entity.Task{
+		ID:        "t-normal-1",
+		Title:     "Normal Task",
+		Status:    entity.TaskStatusInProgress,
+		Assignee:  "pm",
+		CreatedBy: "owner",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := s.ts.AddTask("sample", "pm", task); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
+	if err := s.controlDB.UpsertRuntimeRun(controldb.RuntimeRun{
+		ID:          "run-normal-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		AgentID:     "pm",
+		TaskID:      task.ID,
+		Status:      "running",
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	principal := runtimeAgentPrincipal{
+		WorkspaceID:  workspaceID,
+		Project:      "sample",
+		Agent:        "pm",
+		RunID:        "run-normal-1",
+		Capabilities: []string{"runtime.notify", "message.use"},
+	}
+
+	body := runtimeNotifyBody{
+		To:      "chat:ch-task-1",
+		Body:    "Must be threaded",
+		Thread:  "task",
+		Channel: binding.ID,
+	}
+	bodyRaw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/notify", bytes.NewReader(bodyRaw))
+	req = req.WithContext(context.WithValue(req.Context(), ctxRuntimeAgentKey, principal))
+	rr := httptest.NewRecorder()
+
+	s.handleRuntimeNotify(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "no active task thread projection found") {
+		t.Fatalf("expected projection not found error, got: %s", rr.Body.String())
+	}
+	if len(*posts) != 0 {
+		t.Fatalf("expected 0 posts sent to Mattermost (fail-closed), got %d", len(*posts))
+	}
+}
+
+func TestRuntimeNotifySend_MismatchedTaskIDInSameProject_Rejected(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	binding, _ := setupMattermostTestBinding(t, s, workspaceID, "sample", "pm", "cmd-tok")
+	server, posts := setupNotifyMattermostTestServer(t, s, binding)
+	defer server.Close()
+
+	_ = s.controlDB.UpsertAgentChannelTarget(controldb.AgentChannelTarget{
+		ID:               "tgt-ch-task-1",
+		WorkspaceID:      workspaceID,
+		ChannelBindingID: binding.ID,
+		Provider:         "mattermost",
+		TargetType:       "chat",
+		DisplayName:      "ch-task-1",
+		ExternalChatID:   "ch-task-1",
+	})
+
+	task1 := &entity.Task{
+		ID:        "t-target-1",
+		Title:     "Target Task",
+		Status:    entity.TaskStatusInProgress,
+		Assignee:  "pm",
+		CreatedBy: "owner",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	task2 := &entity.Task{
+		ID:        "t-other-same-project",
+		Title:     "Other Task In Same Project",
+		Status:    entity.TaskStatusInProgress,
+		Assignee:  "pm",
+		CreatedBy: "owner",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	_ = s.ts.AddTask("sample", "pm", task1)
+	_ = s.ts.AddTask("sample", "pm", task2)
+
+	_ = s.controlDB.UpsertRuntimeRun(controldb.RuntimeRun{
+		ID:          "run-target-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		AgentID:     "pm",
+		TaskID:      task1.ID,
+		Status:      "running",
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+	})
+
+	_ = s.controlDB.UpsertTaskThreadProjection(controldb.TaskThreadProjection{
+		ID:          "ttp-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		TaskID:      "t-target-1",
+		Provider:    "mattermost",
+		ChannelID:   "ch-task-1",
+		RootPostID:  "root-post-1",
+		Status:      "active",
+	})
+
+	principal := runtimeAgentPrincipal{
+		WorkspaceID:  workspaceID,
+		Project:      "sample",
+		Agent:        "pm",
+		RunID:        "run-target-1",
+		Capabilities: []string{"runtime.notify", "message.use"},
+	}
+
+	body := runtimeNotifyBody{
+		To:      "chat:ch-task-1",
+		Body:    "Report for wrong task",
+		Thread:  "auto",
+		TaskID:  "t-other-same-project",
+		Channel: binding.ID,
+	}
+	bodyRaw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/notify", bytes.NewReader(bodyRaw))
+	req = req.WithContext(context.WithValue(req.Context(), ctxRuntimeAgentKey, principal))
+	rr := httptest.NewRecorder()
+
+	s.handleRuntimeNotify(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "mismatched taskId") {
+		t.Fatalf("expected mismatched taskId error, got: %s", rr.Body.String())
+	}
+	if len(*posts) != 0 {
+		t.Fatalf("expected 0 posts sent to Mattermost, got %d", len(*posts))
+	}
+}
+
+func TestRuntimeNotifySend_MismatchedChannelForKnownTask_Rejected(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	binding, _ := setupMattermostTestBinding(t, s, workspaceID, "sample", "pm", "cmd-tok")
+	server, posts := setupNotifyMattermostTestServer(t, s, binding)
+	defer server.Close()
+
+	_ = s.controlDB.UpsertAgentChannelTarget(controldb.AgentChannelTarget{
+		ID:               "tgt-ch-task-1",
+		WorkspaceID:      workspaceID,
+		ChannelBindingID: binding.ID,
+		Provider:         "mattermost",
+		TargetType:       "chat",
+		DisplayName:      "ch-task-1",
+		ExternalChatID:   "ch-task-1",
+	})
+	_ = s.controlDB.UpsertAgentChannelTarget(controldb.AgentChannelTarget{
+		ID:               "tgt-ch-other-2",
+		WorkspaceID:      workspaceID,
+		ChannelBindingID: binding.ID,
+		Provider:         "mattermost",
+		TargetType:       "chat",
+		DisplayName:      "ch-other-2",
+		ExternalChatID:   "ch-other-2",
+	})
+
+	task := &entity.Task{
+		ID:        "t-target-1",
+		Title:     "Target Task",
+		Status:    entity.TaskStatusInProgress,
+		Assignee:  "pm",
+		CreatedBy: "owner",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	_ = s.ts.AddTask("sample", "pm", task)
+
+	_ = s.controlDB.UpsertRuntimeRun(controldb.RuntimeRun{
+		ID:          "run-target-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		AgentID:     "pm",
+		TaskID:      task.ID,
+		Status:      "running",
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+	})
+
+	_ = s.controlDB.UpsertTaskThreadProjection(controldb.TaskThreadProjection{
+		ID:          "ttp-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		TaskID:      task.ID,
+		Provider:    "mattermost",
+		ChannelID:   "ch-task-1",
+		RootPostID:  "root-post-1",
+		Status:      "active",
+	})
+
+	principal := runtimeAgentPrincipal{
+		WorkspaceID:  workspaceID,
+		Project:      "sample",
+		Agent:        "pm",
+		RunID:        "run-target-1",
+		Capabilities: []string{"runtime.notify", "message.use"},
+	}
+
+	body := runtimeNotifyBody{
+		To:      "chat:ch-other-2",
+		Body:    "Sending to wrong channel",
+		Thread:  "auto",
+		Channel: binding.ID,
+	}
+	bodyRaw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/notify", bytes.NewReader(bodyRaw))
+	req = req.WithContext(context.WithValue(req.Context(), ctxRuntimeAgentKey, principal))
+	rr := httptest.NewRecorder()
+
+	s.handleRuntimeNotify(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "does not match active task thread channel") {
+		t.Fatalf("expected channel mismatch error, got: %s", rr.Body.String())
+	}
+	if len(*posts) != 0 {
+		t.Fatalf("expected 0 posts sent to Mattermost, got %d", len(*posts))
+	}
+}
+
+func TestRuntimeNotifySend_DifferentIMInstance_Rejected(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	binding, connID := setupMattermostTestBinding(t, s, workspaceID, "sample", "pm", "cmd-tok")
+	server, posts := setupNotifyMattermostTestServer(t, s, binding)
+	defer server.Close()
+
+	conn, _, _ := s.controlDB.ConnectionByID(connID)
+	conn.IMInstanceID = "inst-A"
+	_ = s.controlDB.UpsertConnection(conn)
+
+	_ = s.controlDB.UpsertProjectChannelLink(controldb.ProjectChannelLink{
+		ID:           "pcl-1",
+		WorkspaceID:  workspaceID,
+		ProjectID:    "sample",
+		Provider:     "mattermost",
+		ChannelID:    "ch-task-1",
+		IMInstanceID: "inst-B",
+	})
+
+	_ = s.controlDB.UpsertAgentChannelTarget(controldb.AgentChannelTarget{
+		ID:               "tgt-ch-task-1",
+		WorkspaceID:      workspaceID,
+		ChannelBindingID: binding.ID,
+		Provider:         "mattermost",
+		TargetType:       "chat",
+		DisplayName:      "ch-task-1",
+		ExternalChatID:   "ch-task-1",
+	})
+
+	task := &entity.Task{
+		ID:        "t-target-1",
+		Title:     "Target Task",
+		Status:    entity.TaskStatusInProgress,
+		Assignee:  "pm",
+		CreatedBy: "owner",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	_ = s.ts.AddTask("sample", "pm", task)
+
+	_ = s.controlDB.UpsertRuntimeRun(controldb.RuntimeRun{
+		ID:          "run-target-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		AgentID:     "pm",
+		TaskID:      task.ID,
+		Status:      "running",
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+	})
+
+	_ = s.controlDB.UpsertTaskThreadProjection(controldb.TaskThreadProjection{
+		ID:          "ttp-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		TaskID:      task.ID,
+		Provider:    "mattermost",
+		ChannelID:   "ch-task-1",
+		RootPostID:  "root-post-1",
+		Status:      "active",
+	})
+
+	principal := runtimeAgentPrincipal{
+		WorkspaceID:  workspaceID,
+		Project:      "sample",
+		Agent:        "pm",
+		RunID:        "run-target-1",
+		Capabilities: []string{"runtime.notify", "message.use"},
+	}
+
+	body := runtimeNotifyBody{
+		To:      "chat:ch-task-1",
+		Body:    "Message across instances",
+		Thread:  "auto",
+		Channel: binding.ID,
+	}
+	bodyRaw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/notify", bytes.NewReader(bodyRaw))
+	req = req.WithContext(context.WithValue(req.Context(), ctxRuntimeAgentKey, principal))
+	rr := httptest.NewRecorder()
+
+	s.handleRuntimeNotify(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "different IM instances") {
+		t.Fatalf("expected different IM instances error, got: %s", rr.Body.String())
+	}
+	if len(*posts) != 0 {
+		t.Fatalf("expected 0 posts sent to Mattermost, got %d", len(*posts))
+	}
+}
+
+func TestRuntimeNotifySend_ThreadAuto_FallbackWithoutTaskContext(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	binding, _ := setupMattermostTestBinding(t, s, workspaceID, "sample", "pm", "cmd-tok")
+	server, posts := setupNotifyMattermostTestServer(t, s, binding)
+	defer server.Close()
+
+	_ = s.controlDB.UpsertAgentChannelTarget(controldb.AgentChannelTarget{
+		ID:               "tgt-ch-general",
+		WorkspaceID:      workspaceID,
+		ChannelBindingID: binding.ID,
+		Provider:         "mattermost",
+		TargetType:       "chat",
+		DisplayName:      "ch-general",
+		ExternalChatID:   "ch-general",
+	})
+
+	principal := runtimeAgentPrincipal{
+		WorkspaceID:  workspaceID,
+		Project:      "sample",
+		Agent:        "pm",
+		Capabilities: []string{"runtime.notify", "message.use"},
+	}
+
+	body := runtimeNotifyBody{
+		To:      "chat:ch-general",
+		Body:    "Broadcasting general status",
+		Thread:  "auto",
+		Channel: binding.ID,
+	}
+	bodyRaw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/notify", bytes.NewReader(bodyRaw))
+	req = req.WithContext(context.WithValue(req.Context(), ctxRuntimeAgentKey, principal))
+	rr := httptest.NewRecorder()
+
+	s.handleRuntimeNotify(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var res map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&res); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if res["threadMode"] != "channel" || res["threadFallback"] != true {
+		t.Fatalf("expected threadFallback=true and threadMode=channel, got %#v", res)
+	}
+	if len(*posts) != 1 {
+		t.Fatalf("expected 1 post, got %d", len(*posts))
+	}
+	if rootID, _ := (*posts)[0]["root_id"].(string); rootID != "" {
+		t.Fatalf("expected root_id to be empty, got %q", rootID)
+	}
+}
+
+func TestRuntimeNotifySend_ClosedProjection_Fallback(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	binding, _ := setupMattermostTestBinding(t, s, workspaceID, "sample", "pm", "cmd-tok")
+	server, posts := setupNotifyMattermostTestServer(t, s, binding)
+	defer server.Close()
+
+	_ = s.controlDB.UpsertAgentChannelTarget(controldb.AgentChannelTarget{
+		ID:               "tgt-ch-task-1",
+		WorkspaceID:      workspaceID,
+		ChannelBindingID: binding.ID,
+		Provider:         "mattermost",
+		TargetType:       "chat",
+		DisplayName:      "ch-task-1",
+		ExternalChatID:   "ch-task-1",
+	})
+
+	task := &entity.Task{
+		ID:        "t-target-1",
+		Title:     "Target Task",
+		Status:    entity.TaskStatusDoneSuccess,
+		Assignee:  "pm",
+		CreatedBy: "owner",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	_ = s.ts.AddTask("sample", "pm", task)
+
+	_ = s.controlDB.UpsertRuntimeRun(controldb.RuntimeRun{
+		ID:          "run-target-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		AgentID:     "pm",
+		TaskID:      task.ID,
+		Status:      "running",
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+	})
+
+	_ = s.controlDB.UpsertTaskThreadProjection(controldb.TaskThreadProjection{
+		ID:          "ttp-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		TaskID:      task.ID,
+		Provider:    "mattermost",
+		ChannelID:   "ch-task-1",
+		RootPostID:  "root-post-1",
+		Status:      "closed",
+	})
+
+	principal := runtimeAgentPrincipal{
+		WorkspaceID:  workspaceID,
+		Project:      "sample",
+		Agent:        "pm",
+		RunID:        "run-target-1",
+		Capabilities: []string{"runtime.notify", "message.use"},
+	}
+
+	body := runtimeNotifyBody{
+		To:      "chat:ch-task-1",
+		Body:    "Closed task update",
+		Thread:  "auto",
+		Channel: binding.ID,
+	}
+	bodyRaw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/notify", bytes.NewReader(bodyRaw))
+	req = req.WithContext(context.WithValue(req.Context(), ctxRuntimeAgentKey, principal))
+	rr := httptest.NewRecorder()
+
+	s.handleRuntimeNotify(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var res map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&res); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if res["threadFallback"] != true || res["threadMode"] != "channel" {
+		t.Fatalf("expected threadFallback=true and threadMode=channel, got %#v", res)
+	}
+	if len(*posts) != 1 {
+		t.Fatalf("expected 1 post, got %d", len(*posts))
+	}
+	if rootID, _ := (*posts)[0]["root_id"].(string); rootID != "" {
+		t.Fatalf("expected root_id to be empty, got %q", rootID)
+	}
+}
+
+func TestRuntimeNotifySend_ThreadChannel_ForcesTopLevelMessage(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	binding, _ := setupMattermostTestBinding(t, s, workspaceID, "sample", "pm", "cmd-tok")
+	server, posts := setupNotifyMattermostTestServer(t, s, binding)
+	defer server.Close()
+
+	_ = s.controlDB.UpsertAgentChannelTarget(controldb.AgentChannelTarget{
+		ID:               "tgt-ch-task-1",
+		WorkspaceID:      workspaceID,
+		ChannelBindingID: binding.ID,
+		Provider:         "mattermost",
+		TargetType:       "chat",
+		DisplayName:      "ch-task-1",
+		ExternalChatID:   "ch-task-1",
+	})
+
+	task := &entity.Task{
+		ID:        "t-target-1",
+		Title:     "Target Task",
+		Status:    entity.TaskStatusInProgress,
+		Assignee:  "pm",
+		CreatedBy: "owner",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	_ = s.ts.AddTask("sample", "pm", task)
+
+	_ = s.controlDB.UpsertRuntimeRun(controldb.RuntimeRun{
+		ID:          "run-target-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		AgentID:     "pm",
+		TaskID:      task.ID,
+		Status:      "running",
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+	})
+
+	_ = s.controlDB.UpsertTaskThreadProjection(controldb.TaskThreadProjection{
+		ID:          "ttp-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		TaskID:      task.ID,
+		Provider:    "mattermost",
+		ChannelID:   "ch-task-1",
+		RootPostID:  "root-post-1",
+		Status:      "active",
+	})
+
+	principal := runtimeAgentPrincipal{
+		WorkspaceID:  workspaceID,
+		Project:      "sample",
+		Agent:        "pm",
+		RunID:        "run-target-1",
+		Capabilities: []string{"runtime.notify", "message.use"},
+	}
+
+	body := runtimeNotifyBody{
+		To:      "chat:ch-task-1",
+		Body:    "Explicit top level broadcast",
+		Thread:  "channel",
+		Channel: binding.ID,
+	}
+	bodyRaw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/notify", bytes.NewReader(bodyRaw))
+	req = req.WithContext(context.WithValue(req.Context(), ctxRuntimeAgentKey, principal))
+	rr := httptest.NewRecorder()
+
+	s.handleRuntimeNotify(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var res map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&res); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if res["threadMode"] != "channel" || res["threadFallback"] == true {
+		t.Fatalf("expected threadMode=channel and no fallback, got %#v", res)
+	}
+	if len(*posts) != 1 {
+		t.Fatalf("expected 1 post, got %d", len(*posts))
+	}
+	if rootID, _ := (*posts)[0]["root_id"].(string); rootID != "" {
+		t.Fatalf("expected root_id to be empty, got %q", rootID)
+	}
+}
+
+func TestRuntimeNotifySend_DirectMessage_DoesNotAttachToThread(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	binding, _ := setupMattermostTestBinding(t, s, workspaceID, "sample", "pm", "cmd-tok")
+	server, posts := setupNotifyMattermostTestServer(t, s, binding)
+	defer server.Close()
+
+	_ = s.users.CreateUser("devuser", "pass", RoleMember, "", "", "", "", "")
+	_ = s.controlDB.UpsertWorkspaceMember(workspaceID, "devuser", WorkspaceRoleMember)
+	_ = s.users.UpdateUser("devuser", nil, nil, nil, nil, nil, nil, nil,
+		[]projectAccess{{Project: "sample", Role: ProjectRoleViewer}}, nil, nil)
+	_ = s.controlDB.UpsertUserChannelIdentity(controldb.UserChannelIdentity{
+		ID:               "uch-dm-devuser",
+		WorkspaceID:      workspaceID,
+		UserID:           "devuser",
+		ChannelBindingID: binding.ID,
+		Provider:         "mattermost",
+		ExternalUserID:   "mm-usr-devuser",
+		ExternalChatID:   "ch-dm-devuser",
+		CreatedBy:        "devuser",
+		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
+		UpdatedAt:        time.Now().UTC().Format(time.RFC3339),
+	})
+
+	task := &entity.Task{
+		ID:        "t-target-1",
+		Title:     "Target Task",
+		Status:    entity.TaskStatusInProgress,
+		Assignee:  "pm",
+		CreatedBy: "owner",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	_ = s.ts.AddTask("sample", "pm", task)
+	_ = s.controlDB.UpsertRuntimeRun(controldb.RuntimeRun{
+		ID:          "run-target-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		AgentID:     "pm",
+		TaskID:      task.ID,
+		Status:      "running",
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+	})
+	_ = s.controlDB.UpsertTaskThreadProjection(controldb.TaskThreadProjection{
+		ID:          "ttp-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		TaskID:      task.ID,
+		Provider:    "mattermost",
+		ChannelID:   "ch-dm-devuser",
+		RootPostID:  "root-post-1",
+		Status:      "active",
+	})
+
+	principal := runtimeAgentPrincipal{
+		WorkspaceID:  workspaceID,
+		Project:      "sample",
+		Agent:        "pm",
+		RunID:        "run-target-1",
+		Capabilities: []string{"runtime.notify", "message.use"},
+	}
+
+	// 1. Thread mode "auto" with DM target -> stays direct message, does not attach to thread
+	bodyAuto := runtimeNotifyBody{
+		To:      "devuser",
+		Body:    "Direct message for your eyes only",
+		Thread:  "auto",
+		Channel: binding.ID,
+	}
+	rawAuto, _ := json.Marshal(bodyAuto)
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/notify", bytes.NewReader(rawAuto))
+	req1 = req1.WithContext(context.WithValue(req1.Context(), ctxRuntimeAgentKey, principal))
+	rr1 := httptest.NewRecorder()
+	s.handleRuntimeNotify(rr1, req1)
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr1.Code, rr1.Body.String())
+	}
+	if len(*posts) != 1 {
+		t.Fatalf("expected 1 post, got %d", len(*posts))
+	}
+	if rootID, _ := (*posts)[0]["root_id"].(string); rootID != "" {
+		t.Fatalf("expected root_id to be empty for DM, got %q", rootID)
+	}
+
+	// 2. Thread mode "task" with DM target -> rejected
+	bodyTask := runtimeNotifyBody{
+		To:      "devuser",
+		Body:    "Invalid task thread on DM",
+		Thread:  "task",
+		Channel: binding.ID,
+	}
+	rawTask, _ := json.Marshal(bodyTask)
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/notify", bytes.NewReader(rawTask))
+	req2 = req2.WithContext(context.WithValue(req2.Context(), ctxRuntimeAgentKey, principal))
+	rr2 := httptest.NewRecorder()
+	s.handleRuntimeNotify(rr2, req2)
+	if rr2.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rr2.Code, rr2.Body.String())
+	}
+	if !strings.Contains(rr2.Body.String(), "cannot use --thread task with a direct user message") {
+		t.Fatalf("expected DM task rejection message, got: %s", rr2.Body.String())
+	}
+}
+
+func TestRuntimeNotifySend_ThreadReply_OmitsWorkspacePrefix(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	binding, _ := setupMattermostTestBinding(t, s, workspaceID, "sample", "pm", "cmd-tok")
+	server, posts := setupNotifyMattermostTestServer(t, s, binding)
+	defer server.Close()
+
+	_ = s.controlDB.UpsertAgentChannelTarget(controldb.AgentChannelTarget{
+		ID:               "tgt-ch-task-1",
+		WorkspaceID:      workspaceID,
+		ChannelBindingID: binding.ID,
+		Provider:         "mattermost",
+		TargetType:       "chat",
+		DisplayName:      "ch-task-1",
+		ExternalChatID:   "ch-task-1",
+	})
+
+	task := &entity.Task{
+		ID:        "t-target-1",
+		Title:     "Target Task",
+		Status:    entity.TaskStatusInProgress,
+		Assignee:  "pm",
+		CreatedBy: "owner",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	_ = s.ts.AddTask("sample", "pm", task)
+	_ = s.controlDB.UpsertRuntimeRun(controldb.RuntimeRun{
+		ID:          "run-target-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		AgentID:     "pm",
+		TaskID:      task.ID,
+		Status:      "running",
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+	})
+	_ = s.controlDB.UpsertTaskThreadProjection(controldb.TaskThreadProjection{
+		ID:          "ttp-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		TaskID:      task.ID,
+		Provider:    "mattermost",
+		ChannelID:   "ch-task-1",
+		RootPostID:  "root-post-prefix-test",
+		Status:      "active",
+	})
+
+	principal := runtimeAgentPrincipal{
+		WorkspaceID:  workspaceID,
+		Project:      "sample",
+		Agent:        "pm",
+		RunID:        "run-target-1",
+		Capabilities: []string{"runtime.notify", "message.use"},
+	}
+
+	// Case 1: Threaded reply -> prefix omitted
+	bodyThread := runtimeNotifyBody{
+		To:      "chat:ch-task-1",
+		Body:    "Thread reply without prefix",
+		Thread:  "auto",
+		Channel: binding.ID,
+	}
+	rawThread, _ := json.Marshal(bodyThread)
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/notify", bytes.NewReader(rawThread))
+	req1 = req1.WithContext(context.WithValue(req1.Context(), ctxRuntimeAgentKey, principal))
+	rr1 := httptest.NewRecorder()
+	s.handleRuntimeNotify(rr1, req1)
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr1.Code, rr1.Body.String())
+	}
+	if len(*posts) != 1 {
+		t.Fatalf("expected 1 post, got %d", len(*posts))
+	}
+	if (*posts)[0]["message"] != "Thread reply without prefix" {
+		t.Fatalf("expected clean message without prefix, got %q", (*posts)[0]["message"])
+	}
+
+	// Case 2: Top-level message -> prefix included
+	bodyTop := runtimeNotifyBody{
+		To:      "chat:ch-task-1",
+		Body:    "Top-level message with prefix",
+		Thread:  "channel",
+		Channel: binding.ID,
+	}
+	rawTop, _ := json.Marshal(bodyTop)
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/notify", bytes.NewReader(rawTop))
+	req2 = req2.WithContext(context.WithValue(req2.Context(), ctxRuntimeAgentKey, principal))
+	rr2 := httptest.NewRecorder()
+	s.handleRuntimeNotify(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr2.Code, rr2.Body.String())
+	}
+	if len(*posts) != 2 {
+		t.Fatalf("expected 2 posts, got %d", len(*posts))
+	}
+	expectedPrefix := "[Test Workspace] [sample] Top-level message with prefix"
+	if (*posts)[1]["message"] != expectedPrefix {
+		t.Fatalf("expected prefixed message %q, got %q", expectedPrefix, (*posts)[1]["message"])
+	}
+}
+
+func TestRuntimeNotifySend_CrossBotThreadReply(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	// Mira created the task and task thread projection
+	task := &entity.Task{
+		ID:        "t-cross-task",
+		Title:     "Shared Task",
+		Status:    entity.TaskStatusInProgress,
+		Assignee:  "lina",
+		CreatedBy: "mira",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	_ = s.ts.AddTask("sample", "lina", task)
+
+	_ = s.controlDB.UpsertTaskThreadProjection(controldb.TaskThreadProjection{
+		ID:          "ttp-mira-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		TaskID:      task.ID,
+		Provider:    "mattermost",
+		ChannelID:   "ch-shared",
+		RootPostID:  "root-mira-card-post",
+		Status:      "active",
+	})
+
+	// Now Lina runs and sends a progress report
+	bindingLina, _ := setupMattermostTestBinding(t, s, workspaceID, "sample", "lina", "cmd-tok-lina")
+	server, posts := setupNotifyMattermostTestServer(t, s, bindingLina)
+	defer server.Close()
+
+	_ = s.controlDB.UpsertAgentChannelTarget(controldb.AgentChannelTarget{
+		ID:               "tgt-ch-shared-lina",
+		WorkspaceID:      workspaceID,
+		ChannelBindingID: bindingLina.ID,
+		Provider:         "mattermost",
+		TargetType:       "chat",
+		DisplayName:      "ch-shared",
+		ExternalChatID:   "ch-shared",
+	})
+
+	_ = s.controlDB.UpsertRuntimeRun(controldb.RuntimeRun{
+		ID:          "run-lina-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		AgentID:     "lina",
+		TaskID:      task.ID,
+		Status:      "running",
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+	})
+
+	principalLina := runtimeAgentPrincipal{
+		WorkspaceID:  workspaceID,
+		Project:      "sample",
+		Agent:        "lina",
+		RunID:        "run-lina-1",
+		Capabilities: []string{"runtime.notify", "message.use"},
+	}
+
+	body := runtimeNotifyBody{
+		To:      "chat:ch-shared",
+		Body:    "Lina progress update on Mira's task",
+		Thread:  "auto",
+		Channel: bindingLina.ID,
+	}
+	bodyRaw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/notify", bytes.NewReader(bodyRaw))
+	req = req.WithContext(context.WithValue(req.Context(), ctxRuntimeAgentKey, principalLina))
+	rr := httptest.NewRecorder()
+
+	s.handleRuntimeNotify(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var res map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&res); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if res["threadMode"] != "task" || res["threadId"] != "root-mira-card-post" || res["taskId"] != "t-cross-task" {
+		t.Fatalf("unexpected thread metadata: %#v", res)
+	}
+	if len(*posts) != 1 {
+		t.Fatalf("expected 1 post, got %d", len(*posts))
+	}
+	if (*posts)[0]["root_id"] != "root-mira-card-post" {
+		t.Fatalf("expected root_id root-mira-card-post, got %v", (*posts)[0]["root_id"])
+	}
+}
+
+func TestRuntimeNotifySend_NoTaskContext_ClientTaskIDSpoofingRejected(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	binding, _ := setupMattermostTestBinding(t, s, workspaceID, "sample", "pm", "cmd-tok")
+	server, posts := setupNotifyMattermostTestServer(t, s, binding)
+	defer server.Close()
+
+	_ = s.controlDB.UpsertAgentChannelTarget(controldb.AgentChannelTarget{
+		ID:               "tgt-ch-task-1",
+		WorkspaceID:      workspaceID,
+		ChannelBindingID: binding.ID,
+		Provider:         "mattermost",
+		TargetType:       "chat",
+		DisplayName:      "ch-task-1",
+		ExternalChatID:   "ch-task-1",
+	})
+
+	task := &entity.Task{
+		ID:        "t-target-1",
+		Title:     "Target Task",
+		Status:    entity.TaskStatusInProgress,
+		Assignee:  "pm",
+		CreatedBy: "owner",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	_ = s.ts.AddTask("sample", "pm", task)
+	_ = s.controlDB.UpsertTaskThreadProjection(controldb.TaskThreadProjection{
+		ID:          "ttp-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		TaskID:      task.ID,
+		Provider:    "mattermost",
+		ChannelID:   "ch-task-1",
+		RootPostID:  "root-post-1",
+		Status:      "active",
+	})
+
+	// Principal has NO RunID / No task execution context
+	principal := runtimeAgentPrincipal{
+		WorkspaceID:  workspaceID,
+		Project:      "sample",
+		Agent:        "pm",
+		Capabilities: []string{"runtime.notify", "message.use"},
+	}
+
+	// 1. Thread mode "task" with client taskId but no trusted task context -> 400 rejected
+	bodyTask := runtimeNotifyBody{
+		To:      "chat:ch-task-1",
+		Body:    "Spoofed task thread message",
+		Thread:  "task",
+		TaskID:  "t-target-1",
+		Channel: binding.ID,
+	}
+	rawTask, _ := json.Marshal(bodyTask)
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/notify", bytes.NewReader(rawTask))
+	req1 = req1.WithContext(context.WithValue(req1.Context(), ctxRuntimeAgentKey, principal))
+	rr1 := httptest.NewRecorder()
+	s.handleRuntimeNotify(rr1, req1)
+	if rr1.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for thread task without trusted context, got %d: %s", rr1.Code, rr1.Body.String())
+	}
+	if !strings.Contains(rr1.Body.String(), "no active task context found") {
+		t.Fatalf("expected no active task context error, got: %s", rr1.Body.String())
+	}
+
+	// 2. Thread mode "auto" with client taskId but no trusted task context -> fallbacks to top-level, NOT attached to task thread
+	bodyAuto := runtimeNotifyBody{
+		To:      "chat:ch-task-1",
+		Body:    "Auto fallback without trusted context",
+		Thread:  "auto",
+		TaskID:  "t-target-1",
+		Channel: binding.ID,
+	}
+	rawAuto, _ := json.Marshal(bodyAuto)
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/notify", bytes.NewReader(rawAuto))
+	req2 = req2.WithContext(context.WithValue(req2.Context(), ctxRuntimeAgentKey, principal))
+	rr2 := httptest.NewRecorder()
+	s.handleRuntimeNotify(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("expected 200 for thread auto fallback, got %d: %s", rr2.Code, rr2.Body.String())
+	}
+	var res map[string]any
+	_ = json.NewDecoder(rr2.Body).Decode(&res)
+	if res["threadFallback"] != true || res["threadMode"] != "channel" {
+		t.Fatalf("expected threadFallback=true and threadMode=channel, got %#v", res)
+	}
+	if len(*posts) != 1 {
+		t.Fatalf("expected 1 post sent to Mattermost, got %d", len(*posts))
+	}
+	if rootID, _ := (*posts)[0]["root_id"].(string); rootID != "" {
+		t.Fatalf("expected root_id to be empty, got %q", rootID)
+	}
+}
+
+func TestRuntimeNotifySend_MultiProjectWorker_PrefersCurrentProjectChannel(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	workerID := "worker-multi-proj"
+
+	// Binding 1 in Project "project-a"
+	bA, _ := setupMattermostTestBinding(t, s, workspaceID, "project-a", "pm", "tok-a")
+	bA.AgentWorkerID = workerID
+	_ = s.controlDB.UpsertAgentChannelBinding(bA)
+	_ = s.controlDB.UpsertAgentChannelTarget(controldb.AgentChannelTarget{
+		ID:               "tgt-ch-a",
+		WorkspaceID:      workspaceID,
+		ChannelBindingID: bA.ID,
+		Provider:         "mattermost",
+		TargetType:       "chat",
+		DisplayName:      "ch-a",
+		ExternalChatID:   "ch-a",
+	})
+
+	// Binding 2 in Project "project-b"
+	bB, _ := setupMattermostTestBinding(t, s, workspaceID, "project-b", "pm", "tok-b")
+	bB.AgentWorkerID = workerID
+	_ = s.controlDB.UpsertAgentChannelBinding(bB)
+	_ = s.controlDB.UpsertAgentChannelTarget(controldb.AgentChannelTarget{
+		ID:               "tgt-ch-b",
+		WorkspaceID:      workspaceID,
+		ChannelBindingID: bB.ID,
+		Provider:         "mattermost",
+		TargetType:       "chat",
+		DisplayName:      "ch-b",
+		ExternalChatID:   "ch-b",
+	})
+
+	serverB, postsB := setupNotifyMattermostTestServer(t, s, bB)
+	defer serverB.Close()
+
+	// Principal is running in project-b with workerID set
+	principal := runtimeAgentPrincipal{
+		WorkspaceID:   workspaceID,
+		Project:       "project-b",
+		Agent:         "pm",
+		AgentWorkerID: workerID,
+		Capabilities:  []string{"runtime.notify", "message.use"},
+	}
+
+	// Send notification without specifying channel (--channel auto)
+	body := runtimeNotifyBody{
+		To:     "chat:ch-b",
+		Body:   "Hello from project-b",
+		Thread: "auto",
+	}
+	raw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/notify", bytes.NewReader(raw))
+	req = req.WithContext(context.WithValue(req.Context(), ctxRuntimeAgentKey, principal))
+	rr := httptest.NewRecorder()
+	s.handleRuntimeNotify(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var res map[string]any
+	_ = json.NewDecoder(rr.Body).Decode(&res)
+	if res["channelId"] != bB.ID {
+		t.Fatalf("expected channelId=%q from project-b, got %q", bB.ID, res["channelId"])
+	}
+	if len(*postsB) != 1 {
+		t.Fatalf("expected message to be posted via project-b server, got %d posts", len(*postsB))
 	}
 }

@@ -83,9 +83,12 @@ func TestPendingAttentionSectionAndSeenMark(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	section, ids, err := pendingAttentionSection(root, "sample", "pm", wakeupStrings("zh"))
+	section, ids, wtDir, wtBranch, targetTaskID, targetProj, err := pendingAttentionSection(root, "sample", "pm", wakeupStrings("zh"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if wtDir != "" || wtBranch != "" || targetTaskID != "" || targetProj != "" {
+		t.Fatalf("IM signal should not resolve a worktree or target task, got dir=%q branch=%q task=%q proj=%q", wtDir, wtBranch, targetTaskID, targetProj)
 	}
 	if len(ids) != 1 || ids[0] != "sig-one" {
 		t.Fatalf("unexpected ids: %#v", ids)
