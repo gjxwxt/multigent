@@ -27,7 +27,7 @@ import (
 
 const (
 	odAgentID          = "byok-opencode"
-	odDefaultModel     = "qwen3.8-27b"
+	odDefaultModel     = "glm-5.3-flash"
 	odHTTPTimeout      = 20 * time.Second
 	odProviderProvider = "opendesign"
 )
