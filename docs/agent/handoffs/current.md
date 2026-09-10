@@ -58,6 +58,17 @@ Key status & deliverables:
    - 原子化完成项目脚手架建立、Agent Team 成员绑定（`project_memberships`）、工作区成员权限同步及 ChatOps 频道接入；若频道创建遭遇冲突或异常，自动回滚已建项目与本地关系，杜绝僵尸项目并支持原地修正重试；
    - 前端新建项目弹窗（`CreateProjectDialog`）交互重构：将项目标识 `Key`（严格要求 `[a-zA-Z0-9-_.]`）与业务名称 `Description`（支持中文业务描述并在卡片展现）清晰区分，并配齐实时正则校验反馈；
    - API 异常透传（`web/src/lib/api.ts`）：`localizedAPIErrorMessage` 优先展示服务端具体的校验与业务原因，彻底消除因通用 `validation_failed` 掩盖真实输入错误的问题。
+7. **设计确认闸门执行治理与模型适配 (Design Gate Execution Governance & Model Alignment)**:
+   - **需求对齐与角色边界**: `designPendingPrompt` 强制读取同任务前置节点产出的 `approved_requirement` / `requirement_draft` 全文，替代 v0 原始粗糙 Prompt；明确框定为 UI 原型专家，限制在 OD 沙箱内产出单页 HTML/Mock 数据，严禁越界修改业务代码或写生产后端。
+   - **项目唯一约束自愈**: `handleDesignStart` 增加自动清理机制；若 OD 容器内存在同名孤儿空项目（`proj_mg_{taskID}`），先执行删除自愈再创建，杜绝 `UNIQUE constraint failed: projects.id`（502）冲突。
+   - **容器只读与 16k Token 硬封顶治理**:
+     - OpenDesign 运行于 `--read-only` 根只读容器内，内置 BYOK 适配层（`byok-opencode.js`）硬编码 `DEFAULT_OUTPUT_TOKEN_LIMIT = 16_384`。
+     - 深度思考模型（如 `qwen3.8-27b`）在面对 5 万字系统规范与需求时，思考链输出可达 5.4 万字（耗尽 16,384 tokens），在完成思考调用 `bash` 写文件前被上游推理服务以 `reason: length` 截断，导致 `no_artifact` 失败。
+     - 全量实测内网网关（CCR）可用模型，明确选型策略：
+       - **默认模型：`glm-5.3-flash`**：思考链极克制（~90 tokens），单次仅消耗 2,891 tokens 即可通过 `bash` 成功落盘完整动效/双模态原型，耗时 15 秒，Anthropic 协议与工具调用 100% 兼容。
+       - **备用模型：`qwen3.6-35b`**：消耗 1,167 tokens，耗时 9 秒，但版式丰富度略逊。
+       - **禁用模型：`deepseek-v4-flash`**（网关未对齐工具调用，`tool_calls: null`）与 **`qwen3.8-27b`**（未受控思考链耗尽 16k tokens 截断）。
+     - `internal/api/od_client.go:odDefaultModel` 已正式切换为 `glm-5.3-flash`。
 
 ## Non-negotiable boundaries
 
@@ -68,6 +79,7 @@ Key status & deliverables:
 - `gradlew` 必须保持 `0755` 权限且必须内置 `gradle-wrapper.jar`。
 - 项目标识 `Project.Name` 严格受 `validateWorkspaceObjectName` 约束，只能包含英文、数字、`-`、`_` 与 `.`，严禁包含中文与空格；若包含频道开通配置，开通失败必须原子回滚项目。
 - **工作流人机角色严格解耦**：`agent_task`（自动化步骤）与 `human_review`（人工审核闸门）严禁复用相同的 `actorRole`（如禁止同时使用 `owner-engineer`）。自动化步骤统一使用 agent 后缀角色（`developer-agent`、`reviewer-agent`、`release-agent`、`qa-agent`、`pm-agent`），人工审核闸门统一使用责任人角色（`owner-engineer`、`product-owner`、`qa-owner`）。
+- **设计门模型选型与 Token 边界**：OpenDesign 容器内单次输出被 `byok-opencode.js` 硬限制为 16,384 tokens（容器 `--read-only` 无法动态修改）。设计门严禁接入思考链未调校或会无界膨胀消耗超过 10,000 tokens 的纯思考模型；选型模型必须在 CCR 下实测具备完整的 Anthropic Messages 格式 Function/Tool Calling 能力（首选 `glm-5.3-flash`）。
 
 ## Evidence
 
@@ -92,6 +104,12 @@ Key status & deliverables:
 - `internal/projecttemplate/template_test.go`: 全部 9 个单元与集成测试通过：
   - `TestReactSpringBootControlledCIIntegration`: PASS (实测 `make install` -> `make verify` 全链路全绿)
   - `TestReactSpringBootMakeInstallFailsWithoutLockfile`: PASS (实测拦截无锁安装)
+- `internal/api/od_client.go`: `odDefaultModel = "glm-5.3-flash"` (commit `0b8363b4`)
+- `docs/agent/decisions/2026-09-10-design-gate-model-and-token-limits.md`: ADR 完整记录选型与截断排查
+- CCR 网关实测证据：
+  - `glm-5.3-flash`: output_tokens 2891, stop_reason tool_use, duration 15s (PASS, 完整生成富交互动画原型)
+  - `qwen3.6-35b`: output_tokens 1167, stop_reason tool_use, duration 9s (PASS, 完整生成 HTML 模板)
+  - `qwen3.8-27b`: output_tokens 16384, stop_reason length, reasoning 54101 chars, artifactCount 0 (FAIL, 思考链耗尽上限截断)
 - `make build`: 产出 `dist/multigent` 与 `dist/mga`；前端 `web` 目录 `npm run build` 0 报错。
 - `git diff --check`: 退出码 0，零代码与格式缺陷。
 - **运行环境实测验证**:

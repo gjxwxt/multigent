@@ -70,3 +70,16 @@ Verified locally on 2026-09-10:
 - `git diff --check`
 
 Deployment and the live callback's actual rejection stage remain unverified. A live click after deployment is required to distinguish an unreachable callback from one of the now-logged fail-closed stages; no task, database, or external approval was changed during this work.
+
+## Completed: OpenDesign 设计门执行治理与模型适配 (commit `0b8363b4`)
+
+1. **输入契约与角色边界**: `designPendingPrompt` 强制使用已澄清的 `approved_requirement` / `requirement_draft` 全文，替换原始粗糙 Prompt；强制注入 UI 原型专家角色边界，限制在 OD 沙箱内产出单页 HTML/Mock 原型，严禁越界修改生产代码。
+2. **唯一约束自愈**: `handleDesignStart` 增加自动清理机制，若 OD 容器内存在无产物的同名孤儿空项目（`proj_mg_{taskID}`），先执行删除自愈再创建，杜绝 `UNIQUE constraint failed: projects.id`（502）。
+3. **16k Token 截断根因定位与模型切换**:
+   - OpenDesign 容器采用 `--read-only` 根只读模式运行，内置 BYOK 适配层（`byok-opencode.js`）硬编码 `DEFAULT_OUTPUT_TOKEN_LIMIT = 16_384`。
+   - `qwen3.8-27b` 面对全量规范时思考链输出高达 5.4 万字（耗尽 16k tokens），在写文件前被上游推理服务截断（`reason: length`），触发 `no_artifact`。
+   - 全量实测内网网关模型后，将设计门默认模型切换为 `glm-5.3-flash`（思考链极克制 ~90 tokens，单次消耗 2,891 tokens 即可落盘完整高保真原型，耗时 15 秒，工具调用 100% 稳定）。
+4. **验证证据**:
+   - `internal/api/od_client.go`: `odDefaultModel = "glm-5.3-flash"`
+   - `go test -v ./internal/api -run TestDesign` 全绿 (PASS)
+   - 交叉编译 `dist/multigent-linux-amd64` 并热部署到 VM，服务状态 healthy。
