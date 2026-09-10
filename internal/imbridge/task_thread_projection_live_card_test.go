@@ -209,8 +209,11 @@ func TestTaskThreadProjectionService_LiveCardPatchE2E(t *testing.T) {
 		t.Errorf("expected patched message to contain progress bar, got: %s", lastPatchedMessage)
 	}
 
-	// Close task thread and verify final green stamp patch
-	err = svc.CloseTaskThread(ctx, wsID, projID, "task-live-1", "交付完成", 10, "")
+	// Close task thread and verify final green stamp patch with elapsed time and title
+	err = svc.CloseTaskThread(ctx, wsID, projID, "task-live-1", "交付完成", 10, "", CloseTaskOptions{
+		ElapsedSeconds: 125,
+		TaskTitle:      "测试实时工单任务",
+	})
 	if err != nil {
 		t.Fatalf("CloseTaskThread failed: %v", err)
 	}
@@ -219,6 +222,12 @@ func TestTaskThreadProjectionService_LiveCardPatchE2E(t *testing.T) {
 	}
 	if !strings.Contains(lastPatchedMessage, "已完成 (Completed)") {
 		t.Errorf("expected final message to show completed badge, got: %s", lastPatchedMessage)
+	}
+	if !strings.Contains(lastPatchedMessage, "2m 05s") {
+		t.Errorf("expected final message to show 2m 05s elapsed time, got: %s", lastPatchedMessage)
+	}
+	if !strings.Contains(lastPatchedMessage, "测试实时工单任务") {
+		t.Errorf("expected final message to show task title, got: %s", lastPatchedMessage)
 	}
 }
 

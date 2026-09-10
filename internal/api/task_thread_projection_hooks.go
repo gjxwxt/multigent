@@ -103,6 +103,20 @@ func (s *Server) notifyTaskThreadStarted(workspaceID, project string, t *entity.
 									}
 								}
 							}
+							if reviewer == "" && run.ActorBindings != nil {
+								if b, ok := run.ActorBindings[firstStep.ID]; ok && workflowReviewActorTypeIsHuman(b.Type) && strings.TrimSpace(b.ID) != "" {
+									reviewer = strings.TrimSpace(b.ID)
+								} else if b, ok := run.ActorBindings[firstStep.ActorRole]; ok && workflowReviewActorTypeIsHuman(b.Type) && strings.TrimSpace(b.ID) != "" {
+									reviewer = strings.TrimSpace(b.ID)
+								}
+							}
+							if reviewer == "" && t != nil {
+								if strings.TrimSpace(t.CreatedBy) != "" && !strings.HasPrefix(t.CreatedBy, "heartbeat:") && t.CreatedBy != "system" {
+									reviewer = strings.TrimSpace(t.CreatedBy)
+								} else if strings.TrimSpace(t.Assignee) != "" && t.AssigneeType == "user" {
+									reviewer = strings.TrimSpace(t.Assignee)
+								}
+							}
 							_, postErr := s.threadProjections.PostHumanReviewCard(ctx, imbridge.HumanReviewPostRequest{
 								WorkspaceID:     workspaceID,
 								ProjectID:       project,
@@ -236,7 +250,14 @@ func (s *Server) notifyTaskThreadStepTransition(workspaceID, project string, t *
 			if t != nil && strings.TrimSpace(t.Summary) != "" {
 				finalSummary = t.Summary
 			}
-			_ = s.threadProjections.CloseTaskThread(ctx, workspaceID, project, t.ID, finalSummary, totalSteps, consoleURL)
+			taskTitle := ""
+			if t != nil {
+				taskTitle = t.Title
+			}
+			_ = s.threadProjections.CloseTaskThread(ctx, workspaceID, project, t.ID, finalSummary, totalSteps, consoleURL, imbridge.CloseTaskOptions{
+				ElapsedSeconds: elapsedSec,
+				TaskTitle:      taskTitle,
+			})
 		} else if transition.Next != nil && strings.TrimSpace(transition.Next.Type) == "human_review" {
 			// S3: Human review gate reached! Dispatch interactive review card to thread.
 			if s.controlDB != nil {
@@ -253,13 +274,33 @@ func (s *Server) notifyTaskThreadStepTransition(workspaceID, project string, t *
 								}
 							}
 						}
+						// Fallback: check run actor bindings for this step or its actor role
+						if reviewer == "" && run.ActorBindings != nil {
+							if b, ok := run.ActorBindings[transition.Next.ID]; ok && workflowReviewActorTypeIsHuman(b.Type) && strings.TrimSpace(b.ID) != "" {
+								reviewer = strings.TrimSpace(b.ID)
+							} else if b, ok := run.ActorBindings[transition.Next.ActorRole]; ok && workflowReviewActorTypeIsHuman(b.Type) && strings.TrimSpace(b.ID) != "" {
+								reviewer = strings.TrimSpace(b.ID)
+							}
+						}
+					}
+					// Fallback to task creator/assignee if still empty
+					if reviewer == "" && t != nil {
+						if strings.TrimSpace(t.CreatedBy) != "" && !strings.HasPrefix(t.CreatedBy, "heartbeat:") && t.CreatedBy != "system" {
+							reviewer = strings.TrimSpace(t.CreatedBy)
+						} else if strings.TrimSpace(t.Assignee) != "" && t.AssigneeType == "user" {
+							reviewer = strings.TrimSpace(t.Assignee)
+						}
+					}
+					nextStepTitle := transition.Next.Title
+					if nextStepTitle == "" {
+						nextStepTitle = transition.Next.ID
 					}
 					_, postErr := s.threadProjections.PostHumanReviewCard(ctx, imbridge.HumanReviewPostRequest{
 						WorkspaceID:     workspaceID,
 						ProjectID:       project,
 						TaskID:          t.ID,
 						StepID:          transition.Next.ID,
-						StepTitle:       transition.Next.Title,
+						StepTitle:       nextStepTitle,
 						Assignee:        reviewer,
 						Preview:         preview,
 						CallbackBaseURL: s.consoleBaseURL(),

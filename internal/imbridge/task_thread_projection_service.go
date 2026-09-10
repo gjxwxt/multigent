@@ -593,8 +593,14 @@ func (s *TaskThreadProjectionService) patchLiveCardDirect(ctx context.Context, r
 	return nil
 }
 
+// CloseTaskOptions specifies optional parameters for CloseTaskThread.
+type CloseTaskOptions struct {
+	ElapsedSeconds int
+	TaskTitle      string
+}
+
 // CloseTaskThread posts a completion message and marks the thread projection as closed.
-func (s *TaskThreadProjectionService) CloseTaskThread(ctx context.Context, workspaceID, projectID, taskID, finalSummary string, totalSteps int, consoleURL string) error {
+func (s *TaskThreadProjectionService) CloseTaskThread(ctx context.Context, workspaceID, projectID, taskID, finalSummary string, totalSteps int, consoleURL string, opts ...CloseTaskOptions) error {
 	active, found, err := s.store.ActiveTaskThreadProjection(workspaceID, taskID, "mattermost")
 	if err != nil || !found || active.RootPostID == "" {
 		return nil
@@ -604,11 +610,17 @@ func (s *TaskThreadProjectionService) CloseTaskThread(ctx context.Context, works
 		totalSteps = 1
 	}
 
+	var opt CloseTaskOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+
 	// Update Live Task Card to final completed state immediately
 	_ = s.patchLiveCardDirect(ctx, LiveCardUpdateRequest{
 		WorkspaceID:    workspaceID,
 		ProjectID:      projectID,
 		TaskID:         taskID,
+		TaskTitle:      opt.TaskTitle,
 		StepStatus:     "completed",
 		CurrentStep:    "全部交付阶段完成",
 		CurrentStepID:  "done",
@@ -616,6 +628,7 @@ func (s *TaskThreadProjectionService) CloseTaskThread(ctx context.Context, works
 		TotalSteps:     totalSteps,
 		QualitySummary: "✓ 全流程顺利完结 | 已归档",
 		ConsoleURL:     consoleURL,
+		ElapsedSeconds: opt.ElapsedSeconds,
 		ForceImmediate: true,
 	})
 
