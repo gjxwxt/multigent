@@ -68,6 +68,36 @@ func TestGreenfieldTemplateShape(t *testing.T) {
 				t.Fatalf("qa_signoff step mismatch: type=%s role=%s", s.Type, s.ActorRole)
 			}
 		}
+		if s.ID == "implementation" {
+			if s.Type != "agent_task" || s.ActorRole != "developer-agent" {
+				t.Fatalf("implementation step mismatch: type=%s role=%s", s.Type, s.ActorRole)
+			}
+		}
+		if s.ID == "self_review" {
+			if s.Type != "agent_task" || s.ActorRole != "reviewer-agent" {
+				t.Fatalf("self_review step mismatch: type=%s role=%s", s.Type, s.ActorRole)
+			}
+		}
+		if s.ID == "code_review" {
+			if s.Type != "human_review" || s.ActorRole != "owner-engineer" {
+				t.Fatalf("code_review step mismatch: type=%s role=%s", s.Type, s.ActorRole)
+			}
+		}
+		if s.ID == "pr_open_and_merge" {
+			if s.Type != "agent_task" || s.ActorRole != "developer-agent" {
+				t.Fatalf("pr_open_and_merge step mismatch: type=%s role=%s", s.Type, s.ActorRole)
+			}
+		}
+		if s.ID == "release" {
+			if s.Type != "agent_task" || s.ActorRole != "release-agent" {
+				t.Fatalf("release step mismatch: type=%s role=%s", s.Type, s.ActorRole)
+			}
+		}
+		if s.ID == "go_live_confirm" {
+			if s.Type != "human_review" || s.ActorRole != "product-owner" {
+				t.Fatalf("go_live_confirm step mismatch: type=%s role=%s", s.Type, s.ActorRole)
+			}
+		}
 	}
 	if !foundDesign {
 		t.Fatal("design_review step missing")

@@ -67,6 +67,7 @@ Key status & deliverables:
 - `approved_design_snapshot_path` 和 `approved_design_html` 严禁信任客户端请求输入，必须由服务端抓取生成。
 - `gradlew` 必须保持 `0755` 权限且必须内置 `gradle-wrapper.jar`。
 - 项目标识 `Project.Name` 严格受 `validateWorkspaceObjectName` 约束，只能包含英文、数字、`-`、`_` 与 `.`，严禁包含中文与空格；若包含频道开通配置，开通失败必须原子回滚项目。
+- **工作流人机角色严格解耦**：`agent_task`（自动化步骤）与 `human_review`（人工审核闸门）严禁复用相同的 `actorRole`（如禁止同时使用 `owner-engineer`）。自动化步骤统一使用 agent 后缀角色（`developer-agent`、`reviewer-agent`、`release-agent`、`qa-agent`、`pm-agent`），人工审核闸门统一使用责任人角色（`owner-engineer`、`product-owner`、`qa-owner`）。
 
 ## Evidence
 
@@ -111,6 +112,37 @@ Key status & deliverables:
 - **真实 order MVP 结果**：任务 `t-20260909-879ipa` / 工作流 `wfr-p2ubljke` 已 `done_success` / `completed`，9/9 步骤完成。`pr_open_and_merge` 合并 SHA 为 `4d2a358e7710f45d455fdd8bb615482de4bb4db1`，release 产出 `v0.1.0`，GitLab Pipeline `#1041` 的部署作业通过健康检查并验证 `/api/tickets/export.csv`。
 - **恢复性证据**：release Agent 曾因等待 Tag 流水线时结束会话、未提交结构化 `step done` 而失败；创建数据库备份后定向恢复任务，启动自愈成功接管 release，未重跑前置实现和审批节点。
 - **当前部署**：VM 服务已更新至提交 `a0b3cef3`，health 返回正常；本地工作区 clean，全量 `go test ./...` 与 `git diff --check` 通过。
+
+### Workflow ActorRole Configuration Matrix (新项目交付模板角色标准矩阵)
+
+为彻底杜绝人机角色混淆导致的“未绑定具体用户”及审批阻断（403 `reviewer_authorization_failed`），全系统工作流模板严格执行以下职责解耦标准（以 `greenfield-delivery-pipeline` 为基准）：
+
+| 步骤标识 (Step ID) | 步骤性质 (Type) | 标准角色 (ActorRole) | 绑定对象类型 | 默认指派参考 | 说明 |
+|---|---|---|---|---|---|
+| `requirement_draft` | `agent_task` | `pm-agent` | Agent | Mira / Lina | 澄清业务诉求与范围 |
+| `requirement_review` | `human_review` | `product-owner` | Human | admin / alex | 人工快审需求方向 |
+| `design_review` | `human_review` | `product-owner` | Human | alex | OpenDesign 原型设计确认闸门 |
+| `implementation` | `agent_task` | `developer-agent` | Agent | Mira | 核心编码与本地验证 (原混用 `owner-engineer` 已修正) |
+| `self_review` | `agent_task` | `reviewer-agent` | Agent | Lina | 独立初审 (原混用 `owner-engineer` 已修正) |
+| `code_review` | `human_review` | `owner-engineer` | Human | admin | 人工代码审核与风险核验 |
+| `qa` | `agent_task` | `qa-agent` | Agent | Lina | 风险-覆盖矩阵与测试用例执行 |
+| `qa_signoff` | `human_review` | `qa-owner` | Human | alex | 人工准出签核 (含特批豁免) |
+| `pr_open_and_merge` | `agent_task` | `developer-agent` | Agent | Mira | 开 MR 并在 CI 通过后合并 (原混用 `owner-engineer` 已修正) |
+| `release` | `agent_task` | `release-agent` | Agent | Mira | 打 Tag、部署与健康探测 (原混用 `owner-engineer` 已修正) |
+| `go_live_confirm` | `human_review` | `product-owner` | Human | admin | 验收线上部署并正式归档交付 |
+
+### 关键工程经验沉淀 (Key Operational Behaviors & Patterns)
+
+1. **审批卡片多重安全拦截与 CAS 乐观锁防重放**：
+   - 按钮点击先经 CAS（校验 `token_version` 与 `token_hash`），旧卡片被 `review_cas_stale` 拦截并重发最新卡片；
+   - 步骤必须处于 open 状态且步骤绑定必须为 `human`（`workflowReviewActorTypeIsHuman`），非人类直接判定为越权；
+   - 审批人必须是指定 ActorID 或具备该项目管理权限的平台用户（如 admin），否则严格返回 403。
+2. **任务持久化与可选时间字段容错机制**：
+   - 历史任务记录中可选时间（`FinishedAt`、`ArchivedAt` 等）存为 `""` 空字符串曾导致 Go 反序列化崩溃、误报 `task_missing`；
+   - `entity.Task.UnmarshalJSON` 现自动规整为 `nil`，此模式应贯彻于所有含可选时间字段的模型。
+3. **分层消息投递与看板防抖（ChatOps Tiered Notification）**：
+   - 常规 Agent 步骤（S0）：仅原地 Patch 更新 Live Card 根帖（1.5s 防抖），不发 Thread 消息；
+   - 里程碑（S1）、错误告警（S2）与人工审核（S3）：主动向 Thread 推送卡片，完成后原子就地更新为已归档只读态。
 
 ### Follow-up observations
 
