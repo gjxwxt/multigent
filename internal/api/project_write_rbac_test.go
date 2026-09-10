@@ -459,3 +459,53 @@ func TestUpdateTaskAssigneeMovesAgentQueue(t *testing.T) {
 func containsAll(s string, substr string) bool {
 	return strings.Contains(s, substr)
 }
+
+func TestProjectCreate_MemberRolesAndDefaults(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+
+	// Create test users
+	for _, u := range []string{"alice", "bob", "charlie"} {
+		if err := s.users.CreateUser(u, "pass123", RoleMember, "", "", "", "", ""); err != nil {
+			t.Fatalf("create user %s: %v", u, err)
+		}
+		if err := s.controlDB.UpsertWorkspaceMember(workspaceID, u, WorkspaceRoleMember); err != nil {
+			t.Fatalf("workspace member %s: %v", u, err)
+		}
+	}
+
+	createBody := createProjectBody{
+		Name:        "new-rbac-proj",
+		Description: "test project",
+		Members: []projectMemberInput{
+			{Username: "alice", Role: "viewer"},
+			{Username: "bob", Role: "manager"},
+		},
+		MemberUsernames: []string{"charlie"},
+	}
+
+	rec := httptest.NewRecorder()
+	req := providerTestRequest(http.MethodPost, "/api/v1/projects", "admin", createBody)
+	s.handleCreateProject(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create project status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Verify alice role == viewer
+	alice := s.users.GetUser("alice")
+	if alice == nil || len(alice.Projects) == 0 || alice.Projects[0].Role != ProjectRoleViewer {
+		t.Fatalf("expected alice to have viewer role, got %#v", alice)
+	}
+
+	// Verify bob role == manager
+	bob := s.users.GetUser("bob")
+	if bob == nil || len(bob.Projects) == 0 || bob.Projects[0].Role != ProjectRoleManager {
+		t.Fatalf("expected bob to have manager role, got %#v", bob)
+	}
+
+	// Verify charlie role == operator (defaulted from memberUsernames, not degraded to viewer)
+	charlie := s.users.GetUser("charlie")
+	if charlie == nil || len(charlie.Projects) == 0 || charlie.Projects[0].Role != ProjectRoleOperator {
+		t.Fatalf("expected charlie to have operator role, got %#v", charlie)
+	}
+}

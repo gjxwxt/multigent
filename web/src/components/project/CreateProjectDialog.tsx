@@ -59,6 +59,8 @@ type UserIMConnection = {
   externalUserId?: string
 }
 
+type ProjectMemberRole = 'viewer' | 'operator' | 'manager'
+
 export function CreateProjectDialog({
   onClose,
   onCreated,
@@ -86,6 +88,9 @@ export function CreateProjectDialog({
   const [membersExpanded, setMembersExpanded] = useState(false)
   const [users, setUsers] = useState<WorkspaceUser[]>([])
   const [selectedUsernames, setSelectedUsernames] = useState<string[]>([currentUsername])
+  const [memberRoles, setMemberRoles] = useState<Record<string, ProjectMemberRole>>({
+    [currentUsername]: 'manager',
+  })
 
   // ChatOps Channel state
   const [chatopsEnabled, setChatopsEnabled] = useState(true)
@@ -276,9 +281,20 @@ export function CreateProjectDialog({
   // Toggle user selection
   function toggleUser(username: string) {
     if (username === currentUsername) return // creator always included
-    setSelectedUsernames((prev) =>
-      prev.includes(username) ? prev.filter((u) => u !== username) : [...prev, username]
-    )
+    setSelectedUsernames((prev) => {
+      if (prev.includes(username)) {
+        return prev.filter((u) => u !== username)
+      } else {
+        if (!memberRoles[username]) {
+          setMemberRoles((roles) => ({ ...roles, [username]: 'operator' }))
+        }
+        return [...prev, username]
+      }
+    })
+  }
+
+  function changeMemberRole(username: string, role: ProjectMemberRole) {
+    setMemberRoles((prev) => ({ ...prev, [username]: role }))
   }
 
   // Create Project Workflow
@@ -316,11 +332,17 @@ export function CreateProjectDialog({
         memberUsernames: selectedUsernames,
       } : undefined
 
+      const membersPayload = selectedUsernames.map((u) => ({
+        username: u,
+        role: u === currentUsername ? 'manager' : (memberRoles[u] || 'operator'),
+      }))
+
       const payload = {
         name: projectName,
         description: description.trim(),
         workerIds: selectedWorkerIds,
         memberUsernames: selectedUsernames,
+        members: membersPayload,
         channel: channelPayload,
       }
 
@@ -591,26 +613,42 @@ export function CreateProjectDialog({
                             : 'border-neutral-200 bg-neutral-50/50 hover:bg-white dark:border-zinc-800 dark:bg-zinc-800/40 dark:hover:bg-zinc-800'
                         } ${isCreator ? 'cursor-default opacity-85' : 'cursor-pointer'}`}
                       >
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
                           <input
                             type="checkbox"
                             checked={isSelected}
                             disabled={isCreator}
                             onChange={() => toggleUser(u.username)}
-                            className="size-3.5 rounded border-neutral-300 text-emerald-600 focus:ring-emerald-500/20"
+                            className="size-3.5 rounded border-neutral-300 text-emerald-600 focus:ring-emerald-500/20 shrink-0"
                           />
-                          <span className="font-medium text-neutral-900 dark:text-zinc-100">
+                          <span className="font-medium text-neutral-900 dark:text-zinc-100 truncate">
                             {u.displayName || u.username}
                           </span>
-                          <span className="text-[11px] text-neutral-400 dark:text-zinc-500">
+                          <span className="text-[11px] text-neutral-400 dark:text-zinc-500 shrink-0">
                             @{u.username}
                           </span>
                         </div>
-                        <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] text-neutral-500 dark:bg-zinc-800 dark:text-zinc-400">
-                          {isCreator
-                            ? t('projects.roleCreator', { defaultValue: '创建者 · 管理员' })
-                            : t('projects.roleMember', { defaultValue: '成员' })}
-                        </span>
+                        {isCreator ? (
+                          <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] text-neutral-500 dark:bg-zinc-800 dark:text-zinc-400 shrink-0">
+                            {t('projects.roleCreator', { defaultValue: '创建者 · 管理员' })}
+                          </span>
+                        ) : isSelected ? (
+                          <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                            <select
+                              value={memberRoles[u.username] || 'operator'}
+                              onChange={(e) => changeMemberRole(u.username, e.target.value as ProjectMemberRole)}
+                              className="rounded border border-neutral-300 bg-white px-2 py-0.5 text-[11px] font-medium text-neutral-700 shadow-sm outline-none transition focus:border-emerald-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                            >
+                              <option value="operator">{t('users.prole_operator', { defaultValue: '执行者' })}</option>
+                              <option value="viewer">{t('users.prole_viewer', { defaultValue: '查看者' })}</option>
+                              <option value="manager">{t('users.prole_manager', { defaultValue: '项目管理者' })}</option>
+                            </select>
+                          </div>
+                        ) : (
+                          <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] text-neutral-400 dark:bg-zinc-800/60 dark:text-zinc-500 shrink-0">
+                            {t('users.prole_operator', { defaultValue: '执行者' })}
+                          </span>
+                        )}
                       </div>
                     )
                   })}

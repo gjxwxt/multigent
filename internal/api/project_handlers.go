@@ -12,6 +12,11 @@ import (
 	"github.com/multigent/multigent/internal/scaffold"
 )
 
+type projectMemberInput struct {
+	Username string `json:"username"`
+	Role     string `json:"role,omitempty"`
+}
+
 type createProjectBody struct {
 	Name            string                          `json:"name"`
 	Description     string                          `json:"description"`
@@ -19,6 +24,7 @@ type createProjectBody struct {
 	Owners          []string                        `json:"owners"`
 	WorkerIDs       []string                        `json:"workerIds,omitempty"`
 	MemberUsernames []string                        `json:"memberUsernames,omitempty"`
+	Members         []projectMemberInput            `json:"members,omitempty"`
 	Channel         *projectChannelProvisionRequest `json:"channel,omitempty"`
 }
 
@@ -113,27 +119,69 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. Grant project access to selected workspace users
-	if s.users != nil && len(body.MemberUsernames) > 0 {
-		for _, username := range body.MemberUsernames {
-			username = strings.TrimSpace(username)
-			if username == "" {
+	if s.users != nil {
+		type memberAssignment struct {
+			username string
+			role     string
+		}
+		var assignments []memberAssignment
+		seen := make(map[string]bool)
+
+		for _, m := range body.Members {
+			u := strings.TrimSpace(m.Username)
+			if u == "" || seen[u] {
 				continue
 			}
-			targetUser := s.users.GetUser(username)
+			seen[u] = true
+			role := strings.TrimSpace(m.Role)
+			switch role {
+			case ProjectRoleViewer, ProjectRoleOperator, ProjectRoleManager:
+			default:
+				role = ProjectRoleOperator
+			}
+			assignments = append(assignments, memberAssignment{username: u, role: role})
+		}
+
+		// Backward compatibility: any memberUsernames not yet covered
+		for _, u := range body.MemberUsernames {
+			u = strings.TrimSpace(u)
+			if u == "" || seen[u] {
+				continue
+			}
+			seen[u] = true
+			assignments = append(assignments, memberAssignment{username: u, role: ProjectRoleOperator})
+		}
+
+		for _, assign := range assignments {
+			targetUser := s.users.GetUser(assign.username)
 			if targetUser == nil {
 				continue
 			}
 			hasAccess := false
-			for _, prj := range targetUser.Projects {
+			updatedProjects := make([]projectAccess, len(targetUser.Projects))
+			copy(updatedProjects, targetUser.Projects)
+			for i, prj := range updatedProjects {
 				if prj.Project == name {
 					hasAccess = true
+					if prj.Role != assign.role {
+						updatedProjects[i].Role = assign.role
+						_ = s.users.UpdateUser(assign.username, nil, nil, nil, nil, nil, nil, nil, updatedProjects, nil, nil, nil)
+					}
 					break
 				}
 			}
 			if !hasAccess {
-				newProjects := append(targetUser.Projects, projectAccess{Project: name, Role: "member"})
-				_ = s.users.UpdateUser(username, nil, nil, nil, nil, nil, nil, nil, newProjects, nil, nil, nil)
+				newProjects := append(updatedProjects, projectAccess{Project: name, Role: assign.role})
+				_ = s.users.UpdateUser(assign.username, nil, nil, nil, nil, nil, nil, nil, newProjects, nil, nil, nil)
 			}
+		}
+
+		if body.Channel != nil && len(body.Channel.MemberUsernames) == 0 && len(assignments) > 0 {
+			var chanMembers []string
+			for _, assign := range assignments {
+				chanMembers = append(chanMembers, assign.username)
+			}
+			body.Channel.MemberUsernames = chanMembers
 		}
 	}
 
