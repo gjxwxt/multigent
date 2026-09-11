@@ -3,20 +3,23 @@ package appconfig
 import (
 	"bufio"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 )
 
 type Config struct {
-	Workspace WorkspaceConfig
-	Server    ServerConfig
-	Auth      AuthConfig
-	SMTP      SMTPConfig
-	Logging   LoggingConfig
-	Runtime   RuntimeConfig
-	Sandbox   SandboxConfig
-	Playbooks PlaybooksConfig
+	Workspace  WorkspaceConfig
+	Server     ServerConfig
+	Auth       AuthConfig
+	SMTP       SMTPConfig
+	Logging    LoggingConfig
+	Runtime    RuntimeConfig
+	Sandbox    SandboxConfig
+	Playbooks  PlaybooksConfig
+	Registries RegistriesConfig
+	Network    NetworkConfig
 }
 
 type WorkspaceConfig struct {
@@ -68,6 +71,29 @@ type E2BConfig struct {
 	APIURL string
 }
 
+type RegistriesConfig struct {
+	NPM       string
+	PIP       string
+	Go        string
+	GoSumDB   string
+	GoPrivate string
+}
+
+type NetworkConfig struct {
+	HTTPSProxy string
+	HTTPProxy  string
+	NoProxy    string
+}
+
+func isValidSection(section string) bool {
+	switch section {
+	case "workspace", "server", "auth", "smtp", "logging", "runtime", "sandbox", "sandbox.e2b", "playbooks", "registries", "network":
+		return true
+	default:
+		return false
+	}
+}
+
 func Load(path string) (*Config, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -88,7 +114,11 @@ func Load(path string) (*Config, error) {
 			continue
 		}
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			section = strings.TrimSpace(strings.Trim(line, "[]"))
+			sec := strings.TrimSpace(strings.Trim(line, "[]"))
+			if !isValidSection(sec) {
+				return nil, fmt.Errorf("%s:%d: unknown section [%s]", path, lineNo, sec)
+			}
+			section = sec
 			continue
 		}
 		key, raw, ok := strings.Cut(line, "=")
@@ -105,6 +135,9 @@ func Load(path string) (*Config, error) {
 	}
 	if err := sc.Err(); err != nil {
 		return nil, err
+	}
+	if err := validateConfig(cfg); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return cfg, nil
 }
@@ -132,15 +165,21 @@ func setValue(cfg *Config, section, key, raw string) error {
 	case "workspace":
 		if key == "dir" {
 			cfg.Workspace.Dir = stringValue(raw)
+			return nil
 		}
+		return fmt.Errorf("unknown key %q in section [%s]", key, section)
 	case "server":
 		if key == "addr" {
 			cfg.Server.Addr = stringValue(raw)
+			return nil
 		}
+		return fmt.Errorf("unknown key %q in section [%s]", key, section)
 	case "auth":
 		if key == "api_key" {
 			cfg.Auth.APIKey = stringValue(raw)
+			return nil
 		}
+		return fmt.Errorf("unknown key %q in section [%s]", key, section)
 	case "smtp":
 		switch key {
 		case "host":
@@ -157,7 +196,10 @@ func setValue(cfg *Config, section, key, raw string) error {
 			cfg.SMTP.FromName = stringValue(raw)
 		case "tls":
 			cfg.SMTP.TLS = stringValue(raw)
+		default:
+			return fmt.Errorf("unknown key %q in section [%s]", key, section)
 		}
+		return nil
 	case "logging":
 		switch key {
 		case "file":
@@ -171,7 +213,10 @@ func setValue(cfg *Config, section, key, raw string) error {
 		case "stderr":
 			v := boolValue(raw)
 			cfg.Logging.Stderr = &v
+		default:
+			return fmt.Errorf("unknown key %q in section [%s]", key, section)
 		}
+		return nil
 	case "runtime":
 		switch key {
 		case "image":
@@ -180,20 +225,146 @@ func setValue(cfg *Config, section, key, raw string) error {
 			cfg.Runtime.Region = stringValue(raw)
 		case "npm_registry":
 			cfg.Runtime.NPMRegistry = stringValue(raw)
+		default:
+			return fmt.Errorf("unknown key %q in section [%s]", key, section)
 		}
+		return nil
 	case "sandbox":
 		if key == "allow_direct_host" {
 			v := boolValue(raw)
 			cfg.Sandbox.AllowDirectHost = &v
+			return nil
 		}
+		return fmt.Errorf("unknown key %q in section [%s]", key, section)
 	case "sandbox.e2b":
 		if key == "api_url" {
 			cfg.Sandbox.E2B.APIURL = stringValue(raw)
+			return nil
 		}
+		return fmt.Errorf("unknown key %q in section [%s]", key, section)
 	case "playbooks":
 		if key == "registry_urls" {
 			cfg.Playbooks.RegistryURLs = stringSliceValue(raw)
+			return nil
 		}
+		return fmt.Errorf("unknown key %q in section [%s]", key, section)
+	case "registries":
+		switch key {
+		case "npm":
+			cfg.Registries.NPM = stringValue(raw)
+		case "pip":
+			cfg.Registries.PIP = stringValue(raw)
+		case "go":
+			cfg.Registries.Go = stringValue(raw)
+		case "go_sumdb":
+			cfg.Registries.GoSumDB = stringValue(raw)
+		case "go_private":
+			cfg.Registries.GoPrivate = stringValue(raw)
+		default:
+			return fmt.Errorf("unknown key %q in section [%s]", key, section)
+		}
+		return nil
+	case "network":
+		switch key {
+		case "https_proxy":
+			cfg.Network.HTTPSProxy = stringValue(raw)
+		case "http_proxy":
+			cfg.Network.HTTPProxy = stringValue(raw)
+		case "no_proxy":
+			cfg.Network.NoProxy = stringValue(raw)
+		default:
+			return fmt.Errorf("unknown key %q in section [%s]", key, section)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown section [%s]", section)
+	}
+}
+
+func validateConfig(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	if err := validateRegistryURL("registries.npm", cfg.Registries.NPM); err != nil {
+		return err
+	}
+	if err := validateRegistryURL("registries.pip", cfg.Registries.PIP); err != nil {
+		return err
+	}
+	if cfg.Registries.Go != "" {
+		tokens := strings.FieldsFunc(cfg.Registries.Go, func(r rune) bool {
+			return r == ',' || r == '|'
+		})
+		if len(tokens) == 0 {
+			return fmt.Errorf("invalid registries.go: empty proxy configuration")
+		}
+		for _, token := range tokens {
+			t := strings.TrimSpace(token)
+			if t == "" {
+				return fmt.Errorf("invalid registries.go: contains empty proxy token")
+			}
+			if strings.EqualFold(t, "direct") {
+				return fmt.Errorf("invalid registries.go: enterprise proxy must not specify direct fallback")
+			}
+			if strings.EqualFold(t, "off") {
+				return fmt.Errorf("invalid registries.go: enterprise proxy must not be off")
+			}
+			if err := validateRegistryURL("registries.go", t); err != nil {
+				return err
+			}
+		}
+		sumdb := strings.TrimSpace(cfg.Registries.GoSumDB)
+		if sumdb == "" {
+			return fmt.Errorf("registries.go_sumdb is required when registries.go is set")
+		}
+	}
+	if cfg.Registries.GoSumDB != "" {
+		sumdb := strings.TrimSpace(cfg.Registries.GoSumDB)
+		if strings.EqualFold(sumdb, "off") {
+			return fmt.Errorf("registries.go_sumdb must not be off")
+		}
+		if strings.ContainsAny(sumdb, "\r\n\t") {
+			return fmt.Errorf("invalid registries.go_sumdb: contains invalid whitespace")
+		}
+	}
+	if err := validateProxyURL("network.https_proxy", cfg.Network.HTTPSProxy); err != nil {
+		return err
+	}
+	if err := validateProxyURL("network.http_proxy", cfg.Network.HTTPProxy); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateRegistryURL(field, raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || !u.IsAbs() || u.Scheme != "https" || strings.TrimSpace(u.Host) == "" {
+		return fmt.Errorf("invalid %s: must be an absolute https:// URL with host", field)
+	}
+	if u.User != nil {
+		return fmt.Errorf("invalid %s: must not contain userinfo", field)
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("invalid %s: must not contain query or fragment", field)
+	}
+	return nil
+}
+
+func validateProxyURL(field, raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5") || strings.TrimSpace(u.Host) == "" {
+		return fmt.Errorf("invalid %s: must be an absolute URL (http, https, or socks5) with host", field)
+	}
+	if u.User != nil {
+		return fmt.Errorf("invalid %s: must not contain userinfo", field)
 	}
 	return nil
 }

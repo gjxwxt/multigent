@@ -834,6 +834,11 @@ func runAsHostUser(cfg *entity.DockerSandboxConfig) bool {
 	return true
 }
 
+// RunAsHostUser reports whether the container should run under the server's own uid/gid.
+func RunAsHostUser(cfg *entity.DockerSandboxConfig) bool {
+	return runAsHostUser(cfg)
+}
+
 // hostUserContainerPath remaps a container path pinned under /root to the
 // writable host-user HOME.
 func hostUserContainerPath(p string) string {
@@ -1014,13 +1019,34 @@ func DockerReachableProxyEnvValue(envKey, value string) string {
 	return u.String()
 }
 
-func wellKnownEnvKeys(model entity.AgentModel) []string {
-	// Keys common to all models.
-	common := []string{
+// TransportEnvKeys returns the whitelist of environment keys for registry and proxy transport.
+func TransportEnvKeys() []string {
+	return []string{
 		"HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY",
 		"https_proxy", "http_proxy", "all_proxy", "no_proxy", // honour container-reachable proxy settings
-		"NPM_CONFIG_REGISTRY", // allow regional npm mirrors for agent CLI installs
+		"NPM_CONFIG_REGISTRY",
+		"PIP_INDEX_URL",
+		"GOPROXY",
+		"GOSUMDB",
+		"GOPRIVATE",
 	}
+}
+
+// TransportDockerArgs returns the "-e KEY" flag pairs for all transport env vars
+// currently set in the host environment.
+func TransportDockerArgs() []string {
+	var args []string
+	for _, key := range TransportEnvKeys() {
+		if forwardHostEnvIntoDocker(key) {
+			args = append(args, "-e", key)
+		}
+	}
+	return args
+}
+
+func wellKnownEnvKeys(model entity.AgentModel) []string {
+	// Keys common to all models.
+	common := TransportEnvKeys()
 	var modelKeys []string
 	switch entity.NormaliseModel(model) {
 	case entity.ModelClaudeCode:

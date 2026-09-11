@@ -57,3 +57,22 @@ api_url = ""
 # the official GitHub + Gitee registry mirrors.
 # Environment variable MULTIGENT_PLAYBOOK_REGISTRY_URLS takes precedence.
 registry_urls = []
+
+# [registries]
+# Optional private/intranet package and module registries.
+# Registry URLs must be absolute https:// URLs without userinfo, query, or fragment.
+# npm = "https://nexus.corp.example/repository/npm-group/"
+# pip = "https://nexus.corp.example/repository/pypi/simple/"
+# go = "https://nexus.corp.example/repository/go/"
+# When go is configured, go_sumdb is required for integrity verification (must not be "off").
+# go_sumdb = "sum.corp.example"
+# Comma-separated private module prefix patterns (falls back to GOPRIVATE).
+# go_private = "git.corp.example/*"
+
+# [network]
+# Optional container-reachable proxy configuration.
+# Proxy URLs must be valid URLs without userinfo (credentials must not be passed here).
+# Under Docker bridge network, host services can be reached via host.docker.internal.
+# https_proxy = "http://proxy.corp.example:3128"
+# http_proxy = "http://proxy.corp.example:3128"
+# no_proxy = "localhost,127.0.0.1,.corp.example"

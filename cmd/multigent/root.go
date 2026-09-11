@@ -220,7 +220,28 @@ func applyConfigEnv(cfg *appconfig.Config) {
 	setEnvIfEmpty("MULTIGENT_SMTP_TLS", cfg.SMTP.TLS)
 	setEnvIfEmpty(sandbox.EnvRuntimeImage, cfg.Runtime.Image)
 	setEnvIfEmpty(sandbox.EnvRuntimeRegion, cfg.Runtime.Region)
-	setEnvIfEmpty("NPM_CONFIG_REGISTRY", cfg.Runtime.NPMRegistry)
+	npmRegistry := cfg.Registries.NPM
+	if npmRegistry == "" {
+		npmRegistry = cfg.Runtime.NPMRegistry
+	}
+	setEnvIfEmpty("NPM_CONFIG_REGISTRY", npmRegistry)
+	setEnvIfEmpty("PIP_INDEX_URL", cfg.Registries.PIP)
+	setEnvIfEmpty("GOPROXY", cfg.Registries.Go)
+	setEnvIfEmpty("GOSUMDB", cfg.Registries.GoSumDB)
+	setEnvIfEmpty("GOPRIVATE", cfg.Registries.GoPrivate)
+
+	if cfg.Network.HTTPSProxy != "" {
+		setEnvIfEmpty("HTTPS_PROXY", cfg.Network.HTTPSProxy)
+		setEnvIfEmpty("https_proxy", cfg.Network.HTTPSProxy)
+	}
+	if cfg.Network.HTTPProxy != "" {
+		setEnvIfEmpty("HTTP_PROXY", cfg.Network.HTTPProxy)
+		setEnvIfEmpty("http_proxy", cfg.Network.HTTPProxy)
+	}
+	if cfg.Network.NoProxy != "" {
+		setEnvIfEmpty("NO_PROXY", cfg.Network.NoProxy)
+		setEnvIfEmpty("no_proxy", cfg.Network.NoProxy)
+	}
 	if cfg.Sandbox.AllowDirectHost != nil {
 		setEnvIfEmpty("MULTIGENT_ALLOW_DIRECT_HOST", fmt.Sprintf("%t", *cfg.Sandbox.AllowDirectHost))
 	}
@@ -262,7 +283,16 @@ func main() {
 //	2   usage / bad arguments
 //	3   resource not found
 //	5   conflict / already exists
+//
+// ProbeExitError is matched explicitly (not via a generic ExitCode()
+// interface) so that unrelated error types carrying an ExitCode method —
+// notably *exec.ExitError through ProcessState — cannot leak child-process
+// exit codes into the CLI's own documented code space.
 func exitCodeFor(err error) int {
+	var probeErr *ProbeExitError
+	if errors.As(err, &probeErr) {
+		return probeErr.Code
+	}
 	var notFound *errs.NotFoundError
 	if errors.As(err, &notFound) {
 		return 3

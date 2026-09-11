@@ -391,3 +391,84 @@ func TestContainerPATHForHostUser(t *testing.T) {
 		t.Fatalf("disabled host user must keep PATH: %q", got)
 	}
 }
+
+func TestTransportEnvKeysAndDockerArgs(t *testing.T) {
+	keys := TransportEnvKeys()
+	required := []string{
+		"NPM_CONFIG_REGISTRY", "PIP_INDEX_URL", "GOPROXY", "GOSUMDB", "GOPRIVATE",
+		"HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY",
+		"https_proxy", "http_proxy", "all_proxy", "no_proxy",
+	}
+	for _, req := range required {
+		found := false
+		for _, k := range keys {
+			if k == req {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("TransportEnvKeys missing %q", req)
+		}
+	}
+
+	// Test TransportDockerArgs forwards only set keys
+	t.Setenv("PIP_INDEX_URL", "https://nexus.example/pypi/")
+	t.Setenv("GOPROXY", "https://nexus.example/go/")
+	t.Setenv("GOSUMDB", "")
+	args := TransportDockerArgs()
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-e PIP_INDEX_URL") {
+		t.Errorf("TransportDockerArgs missing -e PIP_INDEX_URL: %v", args)
+	}
+	if !strings.Contains(joined, "-e GOPROXY") {
+		t.Errorf("TransportDockerArgs missing -e GOPROXY: %v", args)
+	}
+	if strings.Contains(joined, "-e GOSUMDB") {
+		t.Errorf("TransportDockerArgs should not forward empty GOSUMDB: %v", args)
+	}
+}
+
+func TestBuildArgsTransportEnvForwarding(t *testing.T) {
+	agentDir := t.TempDir()
+
+	// 1. Without env vars, they should not appear in BuildArgs
+	t.Setenv("PIP_INDEX_URL", "")
+	t.Setenv("GOPROXY", "")
+	t.Setenv("GOSUMDB", "")
+	t.Setenv("GOPRIVATE", "")
+	argsEmpty, err := BuildArgs(agentDir, entity.ModelClaudeCode, nil, []string{"claude", "-p"})
+	if err != nil {
+		t.Fatalf("BuildArgs: %v", err)
+	}
+	for _, k := range []string{"PIP_INDEX_URL", "GOPROXY", "GOSUMDB", "GOPRIVATE"} {
+		for i := 0; i < len(argsEmpty)-1; i++ {
+			if argsEmpty[i] == "-e" && argsEmpty[i+1] == k {
+				t.Fatalf("BuildArgs unexpectedly forwarded empty key %q: %v", k, argsEmpty)
+			}
+		}
+	}
+
+	// 2. With env vars, they should be forwarded as -e KEY
+	t.Setenv("PIP_INDEX_URL", "https://nexus.example/pypi/simple/")
+	t.Setenv("GOPROXY", "https://nexus.example/go/")
+	t.Setenv("GOSUMDB", "sum.example.corp")
+	t.Setenv("GOPRIVATE", "git.example.corp/*")
+
+	argsSet, err := BuildArgs(agentDir, entity.ModelClaudeCode, nil, []string{"claude", "-p"})
+	if err != nil {
+		t.Fatalf("BuildArgs with env: %v", err)
+	}
+	for _, k := range []string{"PIP_INDEX_URL", "GOPROXY", "GOSUMDB", "GOPRIVATE"} {
+		found := false
+		for i := 0; i < len(argsSet)-1; i++ {
+			if argsSet[i] == "-e" && argsSet[i+1] == k {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("BuildArgs missing forwarded key -e %s in %v", k, argsSet)
+		}
+	}
+}

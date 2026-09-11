@@ -61,3 +61,56 @@ func TestNormalizeRewritesRemovedCodexPresetToLatest(t *testing.T) {
 		t.Fatalf("Version = %q, want latest", cfg.Version)
 	}
 }
+
+func TestInstallerUsesFlockInToolchainHome(t *testing.T) {
+	t.Run("npmInstaller", func(t *testing.T) {
+		cfg := &entity.AgentCLIConfig{
+			Vendor:         "codex",
+			Version:        "1.2.3",
+			Binary:         "codex",
+			PackageManager: "npm",
+			Package:        "@openai/codex",
+		}
+		script := npmInstaller(cfg)
+		expectedLock := markerLockPath(cfg)
+		if !strings.HasPrefix(expectedLock, ToolchainHome+"/markers/locks/") {
+			t.Fatalf("expected lock path to be under %s/markers/locks/, got %q", ToolchainHome, expectedLock)
+		}
+		if !strings.Contains(script, "flock -w") {
+			t.Fatalf("npmInstaller script does not contain flock -w:\n%s", script)
+		}
+		if !strings.Contains(script, expectedLock) {
+			t.Fatalf("npmInstaller script missing expected lock path %q:\n%s", expectedLock, script)
+		}
+		if !strings.Contains(script, "command -v flock") {
+			t.Fatalf("npmInstaller script missing flock pre-check:\n%s", script)
+		}
+		if !strings.Contains(script, "mkdir -p \"$NPM_CONFIG_PREFIX\" \"$MULTIGENT_TOOLCHAIN_HOME/markers\" \"$MULTIGENT_TOOLCHAIN_HOME/markers/locks\"") {
+			t.Fatalf("npmInstaller script missing locks dir creation:\n%s", script)
+		}
+	})
+
+	t.Run("scriptInstaller", func(t *testing.T) {
+		cfg := &entity.AgentCLIConfig{
+			Vendor:  "custom",
+			Version: "2.0.0",
+			Binary:  "mytool",
+			Install: []string{"echo installing"},
+			Check:   []string{"mytool --version"},
+		}
+		script := scriptInstaller(cfg)
+		expectedLock := markerLockPath(cfg)
+		if !strings.HasPrefix(expectedLock, ToolchainHome+"/markers/locks/") {
+			t.Fatalf("expected lock path to be under %s/markers/locks/, got %q", ToolchainHome, expectedLock)
+		}
+		if !strings.Contains(script, "flock -w") {
+			t.Fatalf("scriptInstaller script does not contain flock -w:\n%s", script)
+		}
+		if !strings.Contains(script, expectedLock) {
+			t.Fatalf("scriptInstaller script missing expected lock path %q:\n%s", expectedLock, script)
+		}
+		if !strings.Contains(script, "mkdir -p \"$MULTIGENT_TOOLCHAIN_HOME/markers\" \"$MULTIGENT_TOOLCHAIN_HOME/markers/locks\"") {
+			t.Fatalf("scriptInstaller script missing locks dir creation:\n%s", script)
+		}
+	})
+}
