@@ -168,7 +168,9 @@ func (m *Manager) EnsureSnapshotWorktree(projectRoot, taskID, commit string) (st
 		if revErr != nil || current != commit {
 			return "", fmt.Errorf("snapshot worktree already exists at a different revision")
 		}
-		preserveRuntimeContract(projectRoot, targetDir)
+		if err := preserveRuntimeContract(projectRoot, targetDir); err != nil {
+			log.Printf("[worktree] preserve runtime contract warning for %s: %v", targetDir, err)
+		}
 		return targetDir, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(targetDir), 0755); err != nil {
@@ -181,7 +183,9 @@ func (m *Manager) EnsureSnapshotWorktree(projectRoot, taskID, commit string) (st
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("git snapshot worktree add failed: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
 	}
-	preserveRuntimeContract(projectRoot, targetDir)
+	if err := preserveRuntimeContract(projectRoot, targetDir); err != nil {
+		log.Printf("[worktree] preserve runtime contract warning for %s: %v", targetDir, err)
+	}
 	return targetDir, nil
 }
 
@@ -343,7 +347,9 @@ func (m *Manager) ensureWorktree(projectRoot, taskID, baseBranch, baseCommit, fe
 		if err != nil {
 			return "", "", fmt.Errorf("read existing worktree branch: %w", err)
 		}
-		preserveRuntimeContract(projectRoot, targetDir)
+		if err := preserveRuntimeContract(projectRoot, targetDir); err != nil {
+			log.Printf("[worktree] preserve runtime contract warning for %s: %v", targetDir, err)
+		}
 		return targetDir, branch, nil
 	}
 
@@ -397,7 +403,9 @@ func (m *Manager) ensureWorktree(projectRoot, taskID, baseBranch, baseCommit, fe
 	if err != nil {
 		return "", "", fmt.Errorf("read created worktree branch: %w", err)
 	}
-	preserveRuntimeContract(projectRoot, targetDir)
+	if err := preserveRuntimeContract(projectRoot, targetDir); err != nil {
+		log.Printf("[worktree] preserve runtime contract warning for %s: %v", targetDir, err)
+	}
 	return targetDir, branch, nil
 }
 
@@ -1117,38 +1125,48 @@ func (m *Manager) SyncMain(projectRoot, defaultBranch string) error {
 	return nil
 }
 
-func preserveRuntimeContract(projectRoot, targetDir string) {
+func preserveRuntimeContract(projectRoot, targetDir string) error {
 	projectRoot = strings.TrimSpace(projectRoot)
 	targetDir = strings.TrimSpace(targetDir)
 	if projectRoot == "" || targetDir == "" {
-		return
+		return nil
 	}
 	rootContract := filepath.Join(projectRoot, ".multigent", "runtime.json")
 	targetContract := filepath.Join(targetDir, ".multigent", "runtime.json")
 
 	rootRaw, err := os.ReadFile(rootContract)
 	if err != nil {
-		return
+		return nil
 	}
 	var rootSpec struct {
 		Version int `json:"version"`
 	}
 	if err := json.Unmarshal(rootRaw, &rootSpec); err != nil || rootSpec.Version != 1 {
-		return
+		return nil
 	}
 
 	targetRaw, err := os.ReadFile(targetContract)
 	if os.IsNotExist(err) {
-		_ = os.MkdirAll(filepath.Dir(targetContract), 0755)
-		_ = os.WriteFile(targetContract, rootRaw, 0644)
-		return
+		if err := os.MkdirAll(filepath.Dir(targetContract), 0755); err != nil {
+			log.Printf("[worktree] failed to create runtime contract directory %s: %v", filepath.Dir(targetContract), err)
+			return fmt.Errorf("create runtime contract directory: %w", err)
+		}
+		if err := os.WriteFile(targetContract, rootRaw, 0644); err != nil {
+			log.Printf("[worktree] failed to copy runtime contract to %s: %v", targetContract, err)
+			return fmt.Errorf("write runtime contract: %w", err)
+		}
+		return nil
 	}
 	if err == nil {
 		var targetSpec struct {
 			Version int `json:"version"`
 		}
 		if json.Unmarshal(targetRaw, &targetSpec) != nil || targetSpec.Version != 1 {
-			_ = os.WriteFile(targetContract, rootRaw, 0644)
+			if err := os.WriteFile(targetContract, rootRaw, 0644); err != nil {
+				log.Printf("[worktree] failed to heal invalid runtime contract in %s: %v", targetContract, err)
+				return fmt.Errorf("heal runtime contract: %w", err)
+			}
 		}
 	}
+	return nil
 }

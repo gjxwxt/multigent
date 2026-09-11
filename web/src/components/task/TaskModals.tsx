@@ -436,7 +436,7 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
     const missingField = (activeWorkflowStep?.outputFields ?? [])
       .filter((field) => field.name && !field.optional)
       .map((field) => field.name)
-      .find((name) => !(name === 'decision' && decisionOptional) && !String(outputs[name] ?? '').trim())
+      .find((name) => !(name === 'decision' && decisionOptional) && !(name === 'comments' && normalizedDecision === 'request_changes') && !String(outputs[name] ?? '').trim())
     if (missingField) {
       setMissingReviewField(missingField)
       setReviewErr(`${t('forms.fillRequired')} ${missingField}`)
@@ -1647,6 +1647,25 @@ function RiskCoverageMatrixTable({ json }: { json: string }) {
   )
 }
 
+function isGatePassed(g: any): boolean {
+  if (typeof g.passed === 'boolean') return g.passed
+  if (typeof g.success === 'boolean') return g.success
+  const status = String(g.status || g.verdict || '').toLowerCase().trim()
+  if (['passed', 'pass', 'success', 'ok', 'green'].includes(status)) return true
+  if (['failed', 'fail', 'error', 'red'].includes(status)) return false
+
+  const text = `${g.detail || ''} ${g.result || ''}`
+  const sanitized = text
+    .replace(/\b0\s*(failures?|failed|errors?|faults?|skipped)\b/gi, '')
+    .replace(/\bno\s+(failures?|failed|errors?|faults?)\b/gi, '')
+    .toLowerCase()
+
+  if (sanitized.includes('fail') || sanitized.includes('error') || sanitized.includes('fatal')) {
+    return false
+  }
+  return true
+}
+
 function QATestReportViewer({ json }: { json: string }) {
   const { t } = useTranslation()
   const report = useMemo(() => {
@@ -1671,6 +1690,8 @@ function QATestReportViewer({ json }: { json: string }) {
   const independentVerifications = Array.isArray(report.independent_verifications) ? report.independent_verifications : []
   const risksAccepted = Array.isArray(report.risks_accepted) ? report.risks_accepted : []
   const envNote = report.environment_note ? String(report.environment_note).trim() : ''
+  const passedCount = gates.filter((g: any) => isGatePassed(g)).length
+  const allPassed = gates.length > 0 && passedCount === gates.length
 
   return (
     <div className="space-y-2.5 text-xs">
@@ -1688,13 +1709,15 @@ function QATestReportViewer({ json }: { json: string }) {
         <div className="overflow-hidden rounded-lg border border-neutral-200 dark:border-zinc-800">
           <div className="flex items-center justify-between border-b border-neutral-200 bg-neutral-50 px-3 py-1.5 font-semibold text-neutral-700 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300">
             <span>{t('workflows.qa.gatesSummary', { defaultValue: '自动化质量门禁' })} ({gates.length})</span>
-            <span className="text-[11px] font-normal text-neutral-500 dark:text-zinc-400">已全部通过</span>
+            <span className={cn('text-[11px] font-normal', allPassed ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400')}>
+              {allPassed ? t('workflows.qa.allPassed', { defaultValue: '已全部通过' }) : `${passedCount}/${gates.length} 通过`}
+            </span>
           </div>
           <div className="divide-y divide-neutral-100 bg-white dark:divide-zinc-800/60 dark:bg-zinc-950">
             {gates.map((g: any, idx: number) => {
               const name = g.gate || `门禁 #${idx + 1}`
               const detail = g.detail || g.result || '通过'
-              const passed = !String(detail).toLowerCase().includes('fail') && !String(g.result || '').toLowerCase().includes('fail')
+              const passed = isGatePassed(g)
               return (
                 <div key={idx} className="px-3 py-2">
                   <div className="flex items-center justify-between gap-2">

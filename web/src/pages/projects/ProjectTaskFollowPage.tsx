@@ -380,7 +380,7 @@ export default function ProjectTaskFollowPage() {
     const missingField = (activeStep.outputFields ?? [])
       .filter((field) => field.name && !field.optional)
       .map((field) => field.name)
-      .find((name) => !(name === 'decision' && decisionOptional) && !String(outputs[name] ?? '').trim())
+      .find((name) => !(name === 'decision' && decisionOptional) && !(name === 'comments' && normalizedDecision === 'request_changes') && !String(outputs[name] ?? '').trim())
     if (missingField) {
       setMissingReviewField(missingField)
       const msg = `${t('forms.fillRequired')} ${missingField}`

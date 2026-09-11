@@ -633,6 +633,9 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 			}
 			if currentStep.Type == "human_review" {
 				backfillOptionalReviewOutputs(workflowStore, run, def, currentStep, t, outputs)
+				if isQASignoffStep(currentStep) && isRejectionDecision(outputs["decision"]) {
+					enrichQARejectionComments(outputs, currentStep, run, workflowStore)
+				}
 			}
 		}
 	}
@@ -961,6 +964,75 @@ func isApprovalDecision(decision string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func isRejectionDecision(decision string) bool {
+	switch strings.ToLower(strings.TrimSpace(decision)) {
+	case "reject", "rejected", "request_changes", "needs_revision", "needs_changes", "rework", "changes_requested":
+		return true
+	default:
+		return false
+	}
+}
+
+func enrichQARejectionComments(outputs map[string]string, currentStep entity.WorkflowStep, run entity.WorkflowRun, wfStore *workflowstore.Store) {
+	matrixRaw := strings.TrimSpace(outputs["risk_coverage_matrix"])
+	if matrixRaw == "" {
+		instances, err := wfStore.ListStepInstances(run.ID)
+		if err == nil {
+			if inst, ok := workflowStepInstanceByStepID(instances, currentStep.ID); ok {
+				matrixRaw = strings.TrimSpace(inst.InputValues["risk_coverage_matrix"])
+				if matrixRaw == "" {
+					matrixRaw = strings.TrimSpace(inst.InputValues["test_report"])
+				}
+			}
+		}
+	}
+
+	var items []qaRiskItem
+	if matrixRaw != "" {
+		if err := json.Unmarshal([]byte(matrixRaw), &items); err != nil {
+			var wrapper struct {
+				Items  []qaRiskItem `json:"items"`
+				Matrix []qaRiskItem `json:"matrix"`
+			}
+			if err2 := json.Unmarshal([]byte(matrixRaw), &wrapper); err2 == nil {
+				if len(wrapper.Items) > 0 {
+					items = wrapper.Items
+				} else {
+					items = wrapper.Matrix
+				}
+			}
+		}
+	}
+
+	var failedLines []string
+	for _, item := range items {
+		st := strings.ToLower(strings.TrimSpace(item.Status))
+		if st != "passed" && st != "covered" && st != "ok" && st != "waived" {
+			desc := item.AcceptanceCriteria
+			if desc == "" {
+				desc = item.ItemID
+			}
+			line := fmt.Sprintf("- [%s] %s: %s (状态: %s)", strings.ToUpper(item.RiskLevel), item.ItemID, desc, item.Status)
+			if item.Evidence != "" {
+				line += fmt.Sprintf(" | 证据: %s", item.Evidence)
+			}
+			failedLines = append(failedLines, line)
+		}
+	}
+
+	existing := strings.TrimSpace(outputs["comments"])
+	if len(failedLines) > 0 {
+		block := "【QA 准出未通过/阻断项清单】:\n" + strings.Join(failedLines, "\n")
+		if existing == "" {
+			outputs["comments"] = block
+		} else if !strings.Contains(existing, "【QA 准出未通过/阻断项清单】") {
+			outputs["comments"] = existing + "\n\n" + block
+		}
+	} else if existing == "" {
+		outputs["comments"] = "QA 准出审核未通过，请研发根据测试报告排查修复并重新提交。"
 	}
 }
 
