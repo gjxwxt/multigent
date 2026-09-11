@@ -647,19 +647,21 @@ func (e *Engine) previewImage(runtime RuntimeSelection) string {
 	return sandbox.DefaultBaseImage()
 }
 
-// profilePreviewEnv returns profile-dependent env for the preview container.
-// Only variables the image itself cannot supply are set here. For base images
-// PATH is NOT overridden — the image ENV PATH is already correct, and a docker
-// -e PATH would clobber profile-specific image PATHs. The jvm21 profile
-// (declared by the project, carried in the runtime selection — never inferred
-// from the image name) prepends the npm toolchain bin so user-installed CLIs
-// keep precedence, keeping parity with the historical layout.
+// profilePreviewEnv returns profile-dependent "-e KEY=VALUE" docker args for
+// the preview container. Only variables the image itself cannot supply are set
+// here. For base images PATH is NOT overridden — the image ENV PATH is already
+// correct, and a docker -e PATH would clobber profile-specific image PATHs.
+// The jvm21 profile (declared by the project, carried in the runtime selection
+// — never inferred from the image name) prepends the npm toolchain bin so
+// user-installed CLIs keep precedence, keeping parity with the historical
+// layout. Every entry MUST carry its own "-e" flag: docker treats the first
+// bare KEY=VALUE argument as the image reference (invalid reference format).
 func (e *Engine) profilePreviewEnv(runtime RuntimeSelection) []string {
-	env := []string{"MULTIGENT_TOOLCHAIN_HOME=" + agentcli.ToolchainHome}
+	env := []string{"-e", "MULTIGENT_TOOLCHAIN_HOME=" + agentcli.ToolchainHome}
 	if runtime.Profile == sandbox.ProfileJVM21 {
 		env = append(env,
-			"JAVA_HOME=/opt/multigent/jdk",
-			"PATH=/opt/multigent/toolchains/npm/bin:/opt/multigent/jdk/bin:/usr/local/go/bin:/root/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+			"-e", "JAVA_HOME=/opt/multigent/jdk",
+			"-e", "PATH=/opt/multigent/toolchains/npm/bin:/opt/multigent/jdk/bin:/usr/local/go/bin:/root/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		)
 	}
 	return env

@@ -231,4 +231,18 @@ func TestProfilePreviewEnv(t *testing.T) {
 			t.Errorf("renamed jvm image without declared profile must not get JAVA_HOME, got %v", renamed)
 		}
 	}
+
+	// Regression (docker "invalid reference format"): every env entry must be
+	// preceded by its own "-e" flag. Docker treats the first bare KEY=VALUE
+	// argument as the image reference, so a flagless env value silently shifts
+	// the whole command tail and breaks every preview start.
+	for name, args := range map[string][]string{"base": baseEnv, "jvm21": env, "renamed": renamed} {
+		for i, arg := range args {
+			if strings.Contains(arg, "=") && !strings.HasPrefix(arg, "-") {
+				if i == 0 || args[i-1] != "-e" {
+					t.Errorf("%s: env value %q at %d must be preceded by -e, got %v", name, arg, i, args)
+				}
+			}
+		}
+	}
 }
