@@ -809,6 +809,7 @@ func (s *Server) handlePutAgentSandbox(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Provider   string                 `json:"provider"`
 		Image      string                 `json:"image"`
+		Profile    string                 `json:"profile"`
 		Template   string                 `json:"template"`
 		Network    string                 `json:"network"`
 		MemoryMB   int                    `json:"memoryMb"`
@@ -860,9 +861,14 @@ func (s *Server) handlePutAgentSandbox(w http.ResponseWriter, r *http.Request) {
 			meta.Sandbox.AgentCLI = agentcli.Normalize(meta.Sandbox.AgentCLI)
 		}
 		if provider == entity.SandboxDocker {
+			if _, err := sandbox.NormalizeProfile(body.Profile); err != nil {
+				s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeValidationFailed, err.Error())
+				return
+			}
 			dc := &entity.DockerSandboxConfig{
 				Image:       body.Image,
 				NetworkMode: body.Network,
+				Profile:     body.Profile,
 				MemoryMB:    body.MemoryMB,
 				CPUs:        body.CPUs,
 			}
@@ -928,6 +934,7 @@ func (s *Server) handlePutAgentWorkerSandbox(w http.ResponseWriter, r *http.Requ
 	var body struct {
 		Provider   string                 `json:"provider"`
 		Image      string                 `json:"image"`
+		Profile    string                 `json:"profile"`
 		Template   string                 `json:"template"`
 		Network    string                 `json:"network"`
 		MemoryMB   int                    `json:"memoryMb"`
@@ -978,9 +985,14 @@ func (s *Server) handlePutAgentWorkerSandbox(w http.ResponseWriter, r *http.Requ
 			meta.Sandbox.AgentCLI = agentcli.Normalize(meta.Sandbox.AgentCLI)
 		}
 		if provider == entity.SandboxDocker {
+			if _, err := sandbox.NormalizeProfile(body.Profile); err != nil {
+				s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeValidationFailed, err.Error())
+				return
+			}
 			meta.Sandbox.Docker = &entity.DockerSandboxConfig{
 				Image:       body.Image,
 				NetworkMode: body.Network,
+				Profile:     body.Profile,
 				MemoryMB:    body.MemoryMB,
 				CPUs:        body.CPUs,
 			}
@@ -1171,8 +1183,14 @@ func buildRuntimeReadinessWithOptions(meta *entity.AgentMeta, opts runtimeReadin
 	cliName, installCmd := cliInfoForModel(model)
 	if cliName != "" && opts.ProbeRuntime {
 		if isDocker {
-			image := sandbox.EffectiveImage(model, dockerSandboxConfig(meta))
-			if opts.DockerCache.imageAvailable(image) {
+			image, err := sandbox.EffectiveImage(model, dockerSandboxConfig(meta))
+			if err != nil {
+				checks = append(checks, setupCheck{
+					Key: "sandbox_profile", Label: "Runtime profile", Status: "error", Blocking: true,
+					Detail: err.Error(),
+					Action: "Set a supported runtime profile (base or jvm21) on this agent or its project.",
+				})
+			} else if opts.DockerCache.imageAvailable(image) {
 				checks = append(checks, setupCheck{
 					Key: "cli", Label: cliName + " CLI", Status: "warning",
 					Detail: "Agent CLI toolchain is installed on first use unless prepared in advance. First run may spend several minutes installing it.",
@@ -1200,7 +1218,15 @@ func buildRuntimeReadinessWithOptions(meta *entity.AgentMeta, opts runtimeReadin
 	// 2. Docker check (if using docker sandbox)
 	if isDocker && opts.ProbeRuntime {
 		if err := opts.DockerCache.checkDocker(); err == nil {
-			image := sandbox.EffectiveImage(model, dockerSandboxConfig(meta))
+			image, imageErr := sandbox.EffectiveImage(model, dockerSandboxConfig(meta))
+			if imageErr != nil {
+				checks = append(checks, setupCheck{
+					Key: "sandbox_profile", Label: "Runtime profile", Status: "error", Blocking: true,
+					Detail: imageErr.Error(),
+					Action: "Set a supported runtime profile (base or jvm21) on this agent or its project.",
+				})
+				return runtimeReadinessResponse{Ready: false, Blocking: true, Checks: checks}
+			}
 			checks = append(checks, setupCheck{
 				Key: "docker", Label: "Docker", Status: "ok",
 				Detail: "Docker CLI: " + sandbox.DockerExecutable(),

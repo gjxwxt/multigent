@@ -55,6 +55,7 @@ type LoggingConfig struct {
 type RuntimeConfig struct {
 	Image       string
 	Region      string
+	Profile     string
 	NPMRegistry string
 }
 
@@ -223,6 +224,8 @@ func setValue(cfg *Config, section, key, raw string) error {
 			cfg.Runtime.Image = stringValue(raw)
 		case "region":
 			cfg.Runtime.Region = stringValue(raw)
+		case "profile":
+			cfg.Runtime.Profile = stringValue(raw)
 		case "npm_registry":
 			cfg.Runtime.NPMRegistry = stringValue(raw)
 		default:
@@ -284,6 +287,13 @@ func setValue(cfg *Config, section, key, raw string) error {
 func validateConfig(cfg *Config) error {
 	if cfg == nil {
 		return nil
+	}
+	if cfg.Runtime.Profile != "" {
+		switch strings.ToLower(strings.TrimSpace(cfg.Runtime.Profile)) {
+		case "base", "jvm21", "jdk21", "java21":
+		default:
+			return fmt.Errorf("invalid runtime.profile %q (supported: base, jvm21)", cfg.Runtime.Profile)
+		}
 	}
 	if err := validateRegistryURL("registries.npm", cfg.Registries.NPM); err != nil {
 		return err

@@ -24,6 +24,7 @@ import (
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/gitworktree"
 	"github.com/multigent/multigent/internal/preview"
+	"github.com/multigent/multigent/internal/sandbox"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
 
@@ -359,10 +360,20 @@ func (s *Server) handlePostTaskPreviewStart(w http.ResponseWriter, r *http.Reque
 	}
 	var inst *preview.PreviewInstance
 	var err error
+	// Resolve the runtime per project at start time so the preview container
+	// matches what this project's agent sandboxes run on (jvm21 projects get a
+	// JDK-capable preview without any server-wide override). The task's
+	// executing agent is passed along so agent-level profile preferences apply
+	// on the same terms as the runner applies them — agent and preview agree.
+	runtime, rtErr := s.resolveTaskPreviewRuntime(project, taskID)
+	if rtErr != nil {
+		s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeValidationFailed, rtErr.Error())
+		return
+	}
 	if readOnly {
-		inst, err = s.previewEngine.StartSnapshotPreview(r.Context(), taskID, project, worktreeDir)
+		inst, err = s.previewEngine.StartSnapshotPreviewWithRuntime(r.Context(), taskID, project, worktreeDir, runtime)
 	} else {
-		inst, err = s.previewEngine.StartEphemeralPreview(r.Context(), taskID, project, worktreeDir)
+		inst, err = s.previewEngine.StartEphemeralPreviewWithRuntime(r.Context(), taskID, project, worktreeDir, runtime)
 	}
 	if err != nil {
 		s.jsonError(w, http.StatusInternalServerError, fmt.Sprintf("start preview failed: %v", err))
@@ -1088,4 +1099,69 @@ func (s *Server) isTaskAtHumanReviewStep(workspaceID, project, taskID string) bo
 		}
 	}
 	return false
+}
+
+// resolveTaskPreviewRuntime resolves the managed runtime (profile + image) for
+// a task's preview through sandbox.ResolveRuntime — the same authority chain
+// the runner applies to agent sandboxes: an explicitly pinned agent image
+// wins; otherwise the project-declared runtime profile is authoritative
+// (templates/admins write it); an agent-level profile preference only applies
+// in projects that declare none. Previews and agent sandboxes therefore
+// always run the same image family for the same work.
+func (s *Server) resolveTaskPreviewRuntime(project, taskID string) (preview.RuntimeSelection, error) {
+	selection := preview.RuntimeSelection{}
+	projectProfile := ""
+	if s != nil && s.st != nil && strings.TrimSpace(project) != "" {
+		if p, err := s.st.Project(project); err == nil && p != nil {
+			projectProfile = p.RuntimeProfile
+		}
+		// A missing project here must not block preview startup with a confusing
+		// error: resolution proceeds on the server default and the task-level
+		// access checks already guard project existence.
+	}
+	agentProfile, agentImage := s.taskExecutingAgentRuntime(project, taskID)
+	sel, err := sandbox.ResolveRuntime(sandbox.RuntimeRequest{
+		ExplicitImage:  agentImage,
+		AgentProfile:   agentProfile,
+		ProjectProfile: projectProfile,
+	})
+	if err != nil {
+		return selection, err
+	}
+	return preview.RuntimeSelection{Profile: sel.Profile, ImageRef: sel.ImageRef}, nil
+}
+
+// taskExecutingAgentRuntime extracts the executing agent's runtime preferences
+// (its sandbox profile and explicit image, if any) so preview resolution can
+// mirror the runner's decision for the same task. Best-effort: tasks without
+// an agent assignee (or unloadable metas) resolve on project defaults.
+func (s *Server) taskExecutingAgentRuntime(project, taskID string) (agentProfile, agentImage string) {
+	task, _, err := s.findTaskInProject(project, taskID)
+	if err != nil || task == nil {
+		return "", ""
+	}
+	if strings.TrimSpace(task.AssigneeType) != "" && task.AssigneeType != "agent_worker" {
+		return "", ""
+	}
+	assignee := strings.TrimSpace(task.Assignee) // "<project>/<agent>"
+	_, agent, ok := strings.Cut(assignee, "/")
+	if !ok || strings.TrimSpace(agent) == "" {
+		return "", ""
+	}
+	workspaceID, err := s.currentWorkspaceID()
+	if err != nil {
+		return "", ""
+	}
+	meta, err := s.agentMetaForProjectMember(workspaceID, project, strings.TrimSpace(agent))
+	if err != nil || meta == nil || meta.Sandbox == nil {
+		return "", ""
+	}
+	if meta.Sandbox.Docker != nil {
+		agentProfile = meta.Sandbox.Docker.Profile
+	}
+	agentImage = strings.TrimSpace(meta.Sandbox.Image)
+	if agentImage == "" && meta.Sandbox.Docker != nil {
+		agentImage = strings.TrimSpace(meta.Sandbox.Docker.Image)
+	}
+	return agentProfile, agentImage
 }

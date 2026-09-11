@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/multigent/multigent/internal/agentcli"
 	"github.com/multigent/multigent/internal/sandbox"
 )
 
@@ -160,17 +161,36 @@ func (e *Engine) GetInstance(taskID string) (*PreviewInstance, bool) {
 
 // StartEphemeralPreview launches a preview container for the given task worktree.
 func (e *Engine) StartEphemeralPreview(ctx context.Context, taskID, projectName, worktreeDir string) (*PreviewInstance, error) {
-	return e.startPreview(ctx, taskID, projectName, worktreeDir, false)
+	return e.StartEphemeralPreviewWithRuntime(ctx, taskID, projectName, worktreeDir, RuntimeSelection{})
 }
 
 // StartSnapshotPreview starts a preview that is pinned to a completed task's
 // detached worktree. The API can use this mode to keep completed artifacts
 // viewable without allowing the preview assistant to mutate them.
 func (e *Engine) StartSnapshotPreview(ctx context.Context, taskID, projectName, worktreeDir string) (*PreviewInstance, error) {
-	return e.startPreview(ctx, taskID, projectName, worktreeDir, true)
+	return e.StartSnapshotPreviewWithRuntime(ctx, taskID, projectName, worktreeDir, RuntimeSelection{})
 }
 
-func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktreeDir string, readOnly bool) (*PreviewInstance, error) {
+// RuntimeSelection carries the per-project resolved runtime for a preview
+// container (profile + image reference), resolved by the API layer through
+// sandbox.ResolveRuntime so previews and agent sandboxes of the same project
+// always agree.
+type RuntimeSelection = sandbox.RuntimeSelection
+
+// StartEphemeralPreviewWithRuntime is StartEphemeralPreview with the
+// project-resolved runtime. A zero RuntimeSelection falls back to the managed
+// default base image (used by tests and callers without project context).
+func (e *Engine) StartEphemeralPreviewWithRuntime(ctx context.Context, taskID, projectName, worktreeDir string, runtime RuntimeSelection) (*PreviewInstance, error) {
+	return e.startPreview(ctx, taskID, projectName, worktreeDir, false, runtime)
+}
+
+// StartSnapshotPreviewWithRuntime is StartSnapshotPreview with the
+// project-resolved runtime.
+func (e *Engine) StartSnapshotPreviewWithRuntime(ctx context.Context, taskID, projectName, worktreeDir string, runtime RuntimeSelection) (*PreviewInstance, error) {
+	return e.startPreview(ctx, taskID, projectName, worktreeDir, true, runtime)
+}
+
+func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktreeDir string, readOnly bool, runtime RuntimeSelection) (*PreviewInstance, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -316,12 +336,17 @@ func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktree
 		"-v", "multigent-npm-cache:/root/.npm",
 		"-v", "multigent-go-cache:/root/go/pkg/mod",
 		"-v", "multigent-go-build-cache:/root/.cache/go-build",
+		// Note: a shared gradle cache volume is intentionally NOT mounted here
+		// yet (experimental P2): the agent side runs as the host user while
+		// previews run as root, so one shared volume would fight over
+		// ownership. See docs/intranet-runtime-plan.md.
 		"-w", "/workspace",
 		"-e", fmt.Sprintf("PORT=%d", port),
 		"-e", "GOFLAGS=-buildvcs=false",
 		"-e", "NPM_CONFIG_PREFIX=/opt/multigent/toolchains/npm",
-		"-e", "PATH=/opt/multigent/toolchains/npm/bin:/usr/local/go/bin:/root/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 	}
+	dockerArgs = append(dockerArgs, e.profilePreviewEnv(runtime)...)
+	dockerArgs = append(dockerArgs, sandbox.TransportDockerArgs()...)
 	// Linked worktrees record their parent gitdir as an absolute host path;
 	// mount the parent repo at the same path so git inside the preview
 	// container can resolve it (otherwise every git command fails with
@@ -332,7 +357,7 @@ func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktree
 	if backendHostPort > 0 {
 		dockerArgs = append(dockerArgs, "-p", fmt.Sprintf("127.0.0.1:%d:%d", backendHostPort, backendContainerPort))
 	}
-	dockerArgs = append(dockerArgs, "ghcr.io/multigent/multigent/runtime-base:latest")
+	dockerArgs = append(dockerArgs, e.previewImage(runtime))
 	dockerArgs = append(dockerArgs, runCmd...)
 
 	cmd := exec.CommandContext(ctx, "docker", dockerArgs...)
@@ -611,4 +636,31 @@ func (e *Engine) SeedInstanceForTest(inst *PreviewInstance) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.instances[inst.TaskID] = inst
+}
+
+// previewImage resolves the preview container image: the per-project runtime
+// selection when present, otherwise the managed default base image.
+func (e *Engine) previewImage(runtime RuntimeSelection) string {
+	if image := strings.TrimSpace(runtime.ImageRef); image != "" {
+		return image
+	}
+	return sandbox.DefaultBaseImage()
+}
+
+// profilePreviewEnv returns profile-dependent env for the preview container.
+// Only variables the image itself cannot supply are set here. For base images
+// PATH is NOT overridden — the image ENV PATH is already correct, and a docker
+// -e PATH would clobber profile-specific image PATHs. The jvm21 profile
+// (declared by the project, carried in the runtime selection — never inferred
+// from the image name) prepends the npm toolchain bin so user-installed CLIs
+// keep precedence, keeping parity with the historical layout.
+func (e *Engine) profilePreviewEnv(runtime RuntimeSelection) []string {
+	env := []string{"MULTIGENT_TOOLCHAIN_HOME=" + agentcli.ToolchainHome}
+	if runtime.Profile == sandbox.ProfileJVM21 {
+		env = append(env,
+			"JAVA_HOME=/opt/multigent/jdk",
+			"PATH=/opt/multigent/toolchains/npm/bin:/opt/multigent/jdk/bin:/usr/local/go/bin:/root/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		)
+	}
+	return env
 }

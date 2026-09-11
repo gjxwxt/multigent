@@ -162,6 +162,16 @@ type Project struct {
 	TemplateVersion string `yaml:"template_version,omitempty" json:"templateVersion,omitempty"`
 	TemplateDigest  string `yaml:"template_digest,omitempty" json:"templateDigest,omitempty"`
 
+	// RuntimeProfile declares the project's managed runtime capability
+	// ("base", "jvm21"). Set by project templates at initialization time and
+	// by administrators; it is the project-level authority for image
+	// selection across agent sandboxes and previews: an agent-level profile
+	// preference only applies in projects that declare none, while an
+	// explicitly pinned agent image still wins. Both are validated. Projects
+	// that never declared a profile resolve through agent/server defaults
+	// until explicitly configured or backfilled.
+	RuntimeProfile string `yaml:"runtime_profile,omitempty" json:"runtimeProfile,omitempty"`
+
 	// DeployPort is the host port reserved for CI deployments of this
 	// project (mirrored into the GitLab CI/CD variable APP_PORT). Assigned
 	// once from the platform port pool and never auto-recycled; see
@@ -449,6 +459,11 @@ type DockerSandboxConfig struct {
 	// Agent CLI versions are installed into a persistent toolchain cache at
 	// sandbox initialization time.
 	Image string `yaml:"image,omitempty" json:"image,omitempty"`
+
+	// Profile selects a managed runtime image family explicitly ("base",
+	// "jvm21") instead of pinning a raw image reference. Ignored when Image
+	// is set. Profiles are declared, never sniffed from project files.
+	Profile string `yaml:"profile,omitempty" json:"profile,omitempty"`
 
 	// NetworkMode controls Docker networking.
 	// "bridge" (default) — internet access, agent can reach GitHub/APIs.

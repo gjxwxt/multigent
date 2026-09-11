@@ -279,6 +279,7 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 			return nil, err
 		}
 		runtimeCfg := cloneRuntimeCfg(meta.Sandbox)
+		r.applyProjectRuntimeProfile(project, runtimeCfg)
 		agentCLI := agentcli.Effective(model, runtimeCfg.AgentCLI)
 		processRuntimeEnv := runtimeControlEnvForProvider(runtimeEnv, meta.Sandbox.Provider, execAgentDir)
 		effectiveEnv = mergeEnv(effectiveEnv, processRuntimeEnv)
@@ -615,6 +616,7 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 		}
 
 		runtimeCfg := cloneRuntimeCfg(meta.Sandbox)
+		r.applyProjectRuntimeProfile(project, runtimeCfg)
 		agentCLI := agentcli.Effective(model, runtimeCfg.AgentCLI)
 		processRuntimeEnv := runtimeControlEnvForProvider(runtimeEnv, meta.Sandbox.Provider, execAgentDir)
 		effectiveEnv = mergeEnv(effectiveEnv, processRuntimeEnv)
@@ -1677,6 +1679,25 @@ func (r *Runner) addRuntimeDockerSystemMounts(runtimeCfg *entity.SandboxConfig) 
 	// mounting a native macOS/Windows binary would shadow it.
 	if binMount := runtimecli.ResolveAvailableBinaryMount(r.root); binMount != "" {
 		runtimeCfg.Docker.ExtraVolumes = append(runtimeCfg.Docker.ExtraVolumes, binMount)
+	}
+}
+
+// applyProjectRuntimeProfile enforces the project's runtime authority: when
+// the project declares a runtime profile, it wins over the agent's own
+// sandbox profile so agent sandboxes and preview containers of the project
+// always run the same image family. An explicitly pinned agent image still
+// outranks everything (deliberate operator choice). Agent-level profile
+// preferences only apply in projects that declare none.
+func (r *Runner) applyProjectRuntimeProfile(project string, runtimeCfg *entity.SandboxConfig) {
+	if runtimeCfg == nil || runtimeCfg.Docker == nil {
+		return
+	}
+	if strings.TrimSpace(runtimeCfg.Image) != "" || strings.TrimSpace(runtimeCfg.Docker.Image) != "" {
+		return
+	}
+	projectCfg, err := r.agentStore.Project(project)
+	if err == nil && projectCfg != nil && strings.TrimSpace(projectCfg.RuntimeProfile) != "" {
+		runtimeCfg.Docker.Profile = projectCfg.RuntimeProfile
 	}
 }
 

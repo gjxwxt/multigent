@@ -41,11 +41,11 @@ func (f *fakePreviewEngine) GetInstance(taskID string) (*preview.PreviewInstance
 	return inst, ok
 }
 
-func (f *fakePreviewEngine) StartEphemeralPreview(_ context.Context, taskID, projectName, worktreeDir string) (*preview.PreviewInstance, error) {
+func (f *fakePreviewEngine) StartEphemeralPreviewWithRuntime(_ context.Context, taskID, projectName, worktreeDir string, _ preview.RuntimeSelection) (*preview.PreviewInstance, error) {
 	return nil, nil
 }
 
-func (f *fakePreviewEngine) StartSnapshotPreview(_ context.Context, taskID, projectName, worktreeDir string) (*preview.PreviewInstance, error) {
+func (f *fakePreviewEngine) StartSnapshotPreviewWithRuntime(_ context.Context, taskID, projectName, worktreeDir string, _ preview.RuntimeSelection) (*preview.PreviewInstance, error) {
 	return nil, nil
 }
 

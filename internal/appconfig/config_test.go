@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -247,5 +248,64 @@ go_sumdb = "sum.corp.example"
 	}
 	if cfg.Registries.Go != "https://nexus.corp.example/repository/go-direct-proxy/,https://mirror.corp.example/go/" {
 		t.Fatalf("unexpected go registry value: %s", cfg.Registries.Go)
+	}
+}
+
+func TestLoadConfigRuntimeProfile(t *testing.T) {
+	cases := []struct {
+		name      string
+		toml      string
+		want      string
+		wantError bool
+	}{
+		{
+			name: "jvm21 accepted",
+			toml: "[runtime]\nprofile = \"jvm21\"\n",
+			want: "jvm21",
+		},
+		{
+			name: "alias jdk21 accepted case-insensitively",
+			toml: "[runtime]\nprofile = \"JDK21\"\n",
+			want: "JDK21",
+		},
+		{
+			name: "base accepted",
+			toml: "[runtime]\nprofile = \"base\"\n",
+			want: "base",
+		},
+		{
+			name:      "unknown profile rejected at load",
+			toml:      "[runtime]\nprofile = \"jvm\"\n",
+			wantError: true,
+		},
+		{
+			name:      "node22 rejected at load",
+			toml:      "[runtime]\nprofile = \"node22\"\n",
+			wantError: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config_profile.toml")
+			if err := os.WriteFile(path, []byte(tc.toml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if tc.wantError {
+				if err == nil {
+					t.Fatalf("expected load error, got cfg.Runtime.Profile=%q", cfg.Runtime.Profile)
+				}
+				if !strings.Contains(err.Error(), "invalid runtime.profile") {
+					t.Fatalf("error should name the offending field, got: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected load error: %v", err)
+			}
+			if cfg.Runtime.Profile != tc.want {
+				t.Fatalf("Runtime.Profile = %q, want %q", cfg.Runtime.Profile, tc.want)
+			}
+		})
 	}
 }

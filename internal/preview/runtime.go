@@ -158,6 +158,9 @@ func renderServiceCommand(service *RuntimeServiceSpec, port int, backend bool) s
 	directory := strings.TrimSpace(service.Directory)
 	command := strings.ReplaceAll(service.Command, "${PORT}", strconv.Itoa(port))
 	command = strings.ReplaceAll(command, "$PORT", strconv.Itoa(port))
+	if backend && strings.Contains(command, "gradle") && strings.Contains(command, "bootRun") {
+		command = "sh -c 'if ls build/libs/*.jar 1>/dev/null 2>&1; then exec java -jar build/libs/*.jar; else exec " + command + "; fi'"
+	}
 	env := "PORT=" + strconv.Itoa(port)
 	if backend {
 		env += " BACKEND_PORT=" + strconv.Itoa(port)

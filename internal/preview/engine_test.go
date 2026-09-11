@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/multigent/multigent/internal/sandbox"
 )
 
 func TestDetectProjectType(t *testing.T) {
@@ -172,5 +174,61 @@ func TestFrontendInstallCommandOnlyForColdWorktrees(t *testing.T) {
 	}
 	if cmd := frontendInstallCommand(root, &RuntimeServiceSpec{Directory: "apps", Command: "npm run dev"}); cmd != "" {
 		t.Fatalf("missing package.json must produce no install, got %q", cmd)
+	}
+}
+
+func TestRuntimeContractBuildsGradleBootRunOptimization(t *testing.T) {
+	spec := &RuntimeServiceSpec{
+		Directory: "server",
+		Command:   "./gradlew bootRun",
+		Port:      8080,
+	}
+	cmd := renderServiceCommand(spec, 8080, true)
+	if !strings.Contains(cmd, "build/libs/*.jar") || !strings.Contains(cmd, "java -jar") {
+		t.Fatalf("expected bootRun command to include prebuilt jar fast-path, got: %q", cmd)
+	}
+}
+
+func TestPreviewImageResolution(t *testing.T) {
+	e := &Engine{}
+	if got := e.previewImage(RuntimeSelection{}); got != sandbox.DefaultBaseImage() {
+		t.Errorf("empty selection should resolve default base image, got %q", got)
+	}
+	if got := e.previewImage(RuntimeSelection{ImageRef: "harbor.corp/multigent/runtime-jvm21:2026.10.1"}); got != "harbor.corp/multigent/runtime-jvm21:2026.10.1" {
+		t.Errorf("per-project image should win, got %q", got)
+	}
+}
+
+func TestProfilePreviewEnv(t *testing.T) {
+	base := &Engine{}
+	baseEnv := base.profilePreviewEnv(RuntimeSelection{})
+	for _, kv := range baseEnv {
+		if strings.HasPrefix(kv, "JAVA_HOME=") || strings.HasPrefix(kv, "PATH=") {
+			t.Errorf("base profile must not set JAVA_HOME/PATH overrides: %v", baseEnv)
+		}
+	}
+
+	jvm := &Engine{}
+	env := jvm.profilePreviewEnv(RuntimeSelection{Profile: sandbox.ProfileJVM21, ImageRef: "ghcr.io/multigent/multigent/runtime-jvm21:latest"})
+	var hasJavaHome, hasPath bool
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "JAVA_HOME=/opt/multigent/jdk") {
+			hasJavaHome = true
+		}
+		if strings.HasPrefix(kv, "PATH=") && strings.Contains(kv, "/opt/multigent/jdk/bin") {
+			hasPath = true
+		}
+	}
+	if !hasJavaHome || !hasPath {
+		t.Errorf("jvm21 profile should set JAVA_HOME and jdk PATH, got %v", env)
+	}
+
+	// An image that LOOKS like jvm21 but carries no declared profile must NOT
+	// trigger the JVM env: capability comes from the profile, never the name.
+	renamed := (&Engine{}).profilePreviewEnv(RuntimeSelection{Profile: sandbox.ProfileBase, ImageRef: "harbor.corp/enterprise/jdk-stack:2026.9.1"})
+	for _, kv := range renamed {
+		if strings.HasPrefix(kv, "JAVA_HOME=") {
+			t.Errorf("renamed jvm image without declared profile must not get JAVA_HOME, got %v", renamed)
+		}
 	}
 }

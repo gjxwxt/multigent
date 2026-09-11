@@ -220,6 +220,7 @@ func applyConfigEnv(cfg *appconfig.Config) {
 	setEnvIfEmpty("MULTIGENT_SMTP_TLS", cfg.SMTP.TLS)
 	setEnvIfEmpty(sandbox.EnvRuntimeImage, cfg.Runtime.Image)
 	setEnvIfEmpty(sandbox.EnvRuntimeRegion, cfg.Runtime.Region)
+	setEnvIfEmpty(sandbox.EnvRuntimeProfile, cfg.Runtime.Profile)
 	npmRegistry := cfg.Registries.NPM
 	if npmRegistry == "" {
 		npmRegistry = cfg.Runtime.NPMRegistry

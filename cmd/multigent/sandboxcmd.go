@@ -81,7 +81,10 @@ func newSandboxShowCmd() *cobra.Command {
 
 			dockerCfg := meta.Sandbox.Docker
 
-			image := sandbox.EffectiveImage(meta.Model, dockerCfg)
+			image, err := sandbox.EffectiveImage(meta.Model, dockerCfg)
+			if err != nil {
+				return err
+			}
 			network := "bridge"
 			if dockerCfg != nil && dockerCfg.NetworkMode != "" {
 				network = dockerCfg.NetworkMode
@@ -169,6 +172,7 @@ func newSandboxPrepareCmd() *cobra.Command {
 	var (
 		image      string
 		region     string
+		profile    string
 		toolchain  []string
 		skipPull   bool
 		skipCLIs   bool
@@ -182,6 +186,7 @@ func newSandboxPrepareCmd() *cobra.Command {
 		Short: "Pre-pull the runtime image and warm common agent CLI toolchains",
 		Example: `  multigent sandbox prepare
   multigent sandbox prepare --region cn
+  multigent sandbox prepare --profile jvm21
   multigent sandbox prepare --toolchain codex
   multigent sandbox prepare --toolchain codex --toolchain claudecode`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -204,6 +209,16 @@ func newSandboxPrepareCmd() *cobra.Command {
 					return fmt.Errorf("unsupported --region %q (supported: cn)", region)
 				}
 			}
+			profileName, err := sandbox.NormalizeProfile(profile)
+			if err != nil {
+				return err
+			}
+			if image == "" && profileName != sandbox.ProfileBase {
+				// Explicit profile selects its managed image family unless an
+				// image was pinned; base stays on DefaultBaseImage so existing
+				// prepare behavior is untouched.
+				image = sandbox.ImageForProfile(profileName)
+			}
 			if image == "" {
 				image = sandbox.DefaultBaseImage()
 			}
@@ -223,11 +238,29 @@ func newSandboxPrepareCmd() *cobra.Command {
 			fmt.Printf("Docker: %s\n", sandbox.DockerExecutable())
 			fmt.Printf("Runtime image: %s\n", image)
 
+			// Fail closed BEFORE any pull: a locally present but unrunnable
+			// image (arm64 build on an amd64 host) must surface as a platform
+			// mismatch with rebuild instructions — not as a confusing registry
+			// pull failure in no-egress intranets, nor as an exec format error
+			// on the first task launch.
+			if err := sandbox.CheckImageArchitecture(image); err != nil {
+				return err
+			}
 			if !skipPull {
 				fmt.Println("\nPulling runtime image. This can take a few minutes on the first install...")
 				if err := sandbox.PullImage(image); err != nil {
 					return fmt.Errorf("pull runtime image: %w", err)
 				}
+				// Re-check after pull: the registry copy may itself be for a
+				// different platform than this host.
+				if err := sandbox.CheckImageArchitecture(image); err != nil {
+					return err
+				}
+			}
+			// Record the exact content that prepare validated (plan §3 P1:
+			// the pinned tag alone does not prove what ran).
+			if digest := sandbox.ImageDigest(image); digest != "" {
+				fmt.Printf("Image digest: %s\n", digest)
 			}
 			if err := sandbox.EnsureVolumeOwnership(image); err != nil {
 				fmt.Printf("warning: cache volume ownership normalization skipped: %v\n", err)
@@ -263,6 +296,7 @@ func newSandboxPrepareCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&image, "image", sandbox.BaseImage, "runtime image to pull and use")
 	cmd.Flags().StringVar(&region, "region", "", "runtime mirror region (supported: cn)")
+	cmd.Flags().StringVar(&profile, "profile", "", "managed runtime profile (base, jvm21); ignored when --image is explicit")
 	cmd.Flags().StringSliceVar(&toolchain, "toolchain", nil, "agent CLI toolchain to warm (repeatable: codex, claudecode, gemini)")
 	cmd.Flags().BoolVar(&skipPull, "skip-pull", false, "skip pulling the runtime image")
 	cmd.Flags().BoolVar(&skipCLIs, "skip-clis", false, "skip warming agent CLI toolchains")
@@ -365,7 +399,10 @@ func newSandboxTestCmd() *cobra.Command {
 			agentDir := cliProjectAgentDir(root, project, agentName)
 			dockerCfg := meta.Sandbox.Docker
 
-			image := sandbox.EffectiveImage(meta.Model, dockerCfg)
+			image, err := sandbox.EffectiveImage(meta.Model, dockerCfg)
+			if err != nil {
+				return err
+			}
 
 			fmt.Printf("Testing sandbox for %s/%s ...\n", project, agentName)
 			fmt.Printf("Image: %s\n\n", image)

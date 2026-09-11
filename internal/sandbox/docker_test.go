@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -140,8 +141,8 @@ func TestEffectiveImagePrefersLocalRuntimeBaseWhenPresent(t *testing.T) {
 	dockerImageExists = func(image string) bool { return image == LocalBaseImage }
 	t.Cleanup(func() { dockerImageExists = restore })
 	cfg := &entity.DockerSandboxConfig{Image: BaseImage}
-	if got := EffectiveImage(entity.ModelCodex, cfg); got != LocalBaseImage {
-		t.Fatalf("EffectiveImage() = %q, want %q", got, LocalBaseImage)
+	if got, err := EffectiveImage(entity.ModelCodex, cfg); err != nil || got != LocalBaseImage {
+		t.Fatalf("EffectiveImage() = %q, err=%v, want %q", got, err, LocalBaseImage)
 	}
 }
 
@@ -152,8 +153,8 @@ func TestEffectiveImageUsesPublishedRuntimeBaseWhenLocalMissing(t *testing.T) {
 	dockerImageExists = func(string) bool { return false }
 	t.Cleanup(func() { dockerImageExists = restore })
 	cfg := &entity.DockerSandboxConfig{Image: LocalBaseImage}
-	if got := EffectiveImage(entity.ModelCodex, cfg); got != BaseImage {
-		t.Fatalf("EffectiveImage() = %q, want %q", got, BaseImage)
+	if got, err := EffectiveImage(entity.ModelCodex, cfg); err != nil || got != BaseImage {
+		t.Fatalf("EffectiveImage() = %q, err=%v, want %q", got, err, BaseImage)
 	}
 }
 
@@ -164,8 +165,8 @@ func TestEffectiveImageNormalizesManagedLegacySandboxImages(t *testing.T) {
 	dockerImageExists = func(string) bool { return false }
 	t.Cleanup(func() { dockerImageExists = restore })
 	cfg := &entity.DockerSandboxConfig{Image: "ghcr.io/multigent/multigent/sandbox-claudecode:latest"}
-	if got := EffectiveImage(entity.ModelCursor, cfg); got != BaseImage {
-		t.Fatalf("EffectiveImage() = %q, want %q", got, BaseImage)
+	if got, err := EffectiveImage(entity.ModelCursor, cfg); err != nil || got != BaseImage {
+		t.Fatalf("EffectiveImage() = %q, err=%v, want %q", got, err, BaseImage)
 	}
 }
 
@@ -470,5 +471,58 @@ func TestBuildArgsTransportEnvForwarding(t *testing.T) {
 		if !found {
 			t.Errorf("BuildArgs missing forwarded key -e %s in %v", k, argsSet)
 		}
+	}
+}
+
+func TestCheckImageArchitectureMismatchFailsClosed(t *testing.T) {
+	restoreImg, restoreHost := imagePlatformOf, hostPlatformOf
+	t.Cleanup(func() { imagePlatformOf, hostPlatformOf = restoreImg, restoreHost })
+
+	// arm64 image on an amd64 host: must fail closed with actionable text.
+	imagePlatformOf = func(string) (string, bool) { return "linux/arm64", true }
+	hostPlatformOf = func() (string, bool) { return "linux/amd64", true }
+	err := CheckImageArchitecture("multigent/runtime-jvm21:2026.9.1")
+	if err == nil {
+		t.Fatal("arm64 image on amd64 host must fail closed")
+	}
+	var mismatch *ImageArchitectureMismatch
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("expected *ImageArchitectureMismatch, got %T: %v", err, err)
+	}
+	if mismatch.ImagePlatform != "linux/arm64" || mismatch.HostPlatform != "linux/amd64" {
+		t.Fatalf("mismatch should record both platforms, got %+v", mismatch)
+	}
+	if !strings.Contains(err.Error(), "--platform linux/amd64") {
+		t.Fatalf("error should suggest rebuild command, got %v", err)
+	}
+}
+
+func TestCheckImageArchitectureMissingImageIsFine(t *testing.T) {
+	restoreImg, restoreHost := imagePlatformOf, hostPlatformOf
+	t.Cleanup(func() { imagePlatformOf, hostPlatformOf = restoreImg, restoreHost })
+
+	// Missing image: the caller will pull; not an error.
+	imagePlatformOf = func(string) (string, bool) { return "", false }
+	hostPlatformOf = func() (string, bool) { return "linux/amd64", true }
+	if err := CheckImageArchitecture("some/registry/image:v1"); err != nil {
+		t.Fatalf("missing image should not error, got %v", err)
+	}
+
+	// Matching platform: fine.
+	imagePlatformOf = func(string) (string, bool) { return "linux/amd64", true }
+	if err := CheckImageArchitecture("some/registry/image:v1"); err != nil {
+		t.Fatalf("matching image should not error, got %v", err)
+	}
+
+	// Unreachable docker info: do not invent a failure.
+	imagePlatformOf = func(string) (string, bool) { return "linux/arm64", true }
+	hostPlatformOf = func() (string, bool) { return "", false }
+	if err := CheckImageArchitecture("some/registry/image:v1"); err != nil {
+		t.Fatalf("undeterminable host should not error, got %v", err)
+	}
+
+	// Empty reference: no-op.
+	if err := CheckImageArchitecture(""); err != nil {
+		t.Fatalf("empty image should not error, got %v", err)
 	}
 }

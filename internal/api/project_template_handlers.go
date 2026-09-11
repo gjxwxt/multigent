@@ -10,6 +10,7 @@ import (
 
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/projecttemplate"
+	"github.com/multigent/multigent/internal/sandbox"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
 
@@ -197,6 +198,14 @@ func (s *Server) handleInitializeProjectTemplate(w http.ResponseWriter, r *http.
 	project.TemplateID = report.ID
 	project.TemplateVersion = report.Version
 	project.TemplateDigest = report.Digest
+	// Templates declare their runtime capability on the PROJECT, not on shared
+	// agent workers: the Spring Boot template pins the jvm21 profile so every
+	// agent and preview in this project gets a JDK-capable runtime, while the
+	// same worker reused in other projects keeps its own project's profile.
+	// Explicit declaration, never build-file sniffing.
+	if templateID == projecttemplate.ReactSpringBootID {
+		project.RuntimeProfile = sandbox.ProfileJVM21
+	}
 	// Reserve a stable deploy port from the platform pool. The port only
 	// persists with the SaveProject below, so a failed initialization
 	// leaks nothing back into the pool.

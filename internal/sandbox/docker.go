@@ -100,7 +100,10 @@ func BuildArgs(agentDir string, model entity.AgentModel, cfg *entity.DockerSandb
 	}
 
 	// ── Image ────────────────────────────────────────────────────────────────
-	image := resolveImage(model, cfg)
+	image, err := resolveImage(model, cfg)
+	if err != nil {
+		return nil, err
+	}
 
 	// ── Memory / CPU limits ──────────────────────────────────────────────────
 	memMB := DefaultMemoryMB
@@ -413,11 +416,125 @@ func PullImage(image string) error {
 	return cmd.Run()
 }
 
+// ImageDigest returns the repo digest of a locally present image
+// (RepoDigests, the registry-pinned @sha256:... reference), or the image config
+// digest when no repo digest exists (locally built, never-pushed images).
+// Empty when the image is absent or docker is unreachable. Callers record this
+// in logs for traceability — the pinned tag alone does not prove what ran.
+func ImageDigest(image string) string {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return ""
+	}
+	out, err := DockerCommand("image", "inspect", image,
+		"--format", "{{range .RepoDigests}}{{.}} {{end}}{{.ID}}").Output()
+	if err != nil {
+		return ""
+	}
+	fields := strings.Fields(strings.TrimSpace(string(out)))
+	for _, f := range fields {
+		if strings.Contains(f, "@sha256:") {
+			return f
+		}
+	}
+	if len(fields) > 0 {
+		return fields[len(fields)-1] // locally built: config ID
+	}
+	return ""
+}
+
 // ImageAvailable reports whether a compatible local image is already present.
 // It never pulls from the registry; callers can use this for fast readiness
 // checks before deciding whether to run sandbox prepare.
 func ImageAvailable(image string) bool {
 	return imageExists(image)
+}
+
+// ImageArchitectureMismatch describes a locally present image whose platform
+// does not match the host. Surfacing it at prepare time converts a confusing
+// "exec format error" at task launch into an actionable rebuild instruction.
+type ImageArchitectureMismatch struct {
+	Image         string
+	ImagePlatform string
+	HostPlatform  string
+}
+
+func (e *ImageArchitectureMismatch) Error() string {
+	return fmt.Sprintf(
+		"image %q exists locally but its platform is %s while this host is %s; rebuild with --platform linux/%s (e.g. `docker buildx build --platform linux/%s ...`) or pull a %s image — running it would fail with exec format error",
+		e.Image, e.ImagePlatform, e.HostPlatform,
+		archAlias(hostArch(e.HostPlatform)), archAlias(hostArch(e.HostPlatform)), archAlias(hostArch(e.HostPlatform)),
+	)
+}
+
+func hostArch(platform string) string {
+	parts := strings.Split(strings.TrimSpace(platform), "/")
+	if len(parts) >= 2 {
+		return parts[1]
+	}
+	return ""
+}
+
+func archAlias(arch string) string {
+	switch strings.ToLower(strings.TrimSpace(arch)) {
+	case "x86_64":
+		return "amd64"
+	case "aarch64":
+		return "arm64"
+	default:
+		return arch
+	}
+}
+
+// imagePlatformOf reports the platform (os/arch) of a locally present image,
+// or ok=false when the image does not exist locally. Package vars so tests
+// can simulate platform mismatches without docker.
+var (
+	imagePlatformOf = func(image string) (string, bool) {
+		inspect, err := DockerCommand("image", "inspect", image, "--format", "{{.Os}}/{{.Architecture}}").Output()
+		if err != nil {
+			return "", false
+		}
+		platform := strings.TrimSpace(string(inspect))
+		return platform, platform != ""
+	}
+	hostPlatformOf = func() (string, bool) {
+		info, err := DockerCommand("info", "--format", "{{.OSType}}/{{.Architecture}}").Output()
+		if err != nil {
+			return "", false
+		}
+		platform := strings.TrimSpace(string(info))
+		return platform, platform != ""
+	}
+)
+
+// CheckImageArchitecture verifies that a locally present image matches the
+// host platform. A missing image is fine (the caller will pull); an image
+// that exists but cannot run here is an error — this is the fail-closed
+// counterpart of localImageExists' deliberate platform blindness.
+func CheckImageArchitecture(image string) error {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return nil
+	}
+	imagePlatform, ok := imagePlatformOf(image)
+	if !ok {
+		// Image not present locally: pulling is the caller's business.
+		return nil
+	}
+	hostPlatform, ok := hostPlatformOf()
+	if !ok {
+		// Cannot determine host platform: do not invent a failure.
+		return nil
+	}
+	if platformCompatible(imagePlatform, hostPlatform) {
+		return nil
+	}
+	return &ImageArchitectureMismatch{
+		Image:         image,
+		ImagePlatform: imagePlatform,
+		HostPlatform:  hostPlatform,
+	}
 }
 
 // RuntimeContainerAvailable verifies that Docker can start a container from the
@@ -558,7 +675,12 @@ func ToolchainBinaryAvailable(image, binary string, timeout time.Duration) (bool
 
 // ImageForModel returns the default Docker image name for an agent model.
 func ImageForModel(model entity.AgentModel) string {
-	return resolveImage(model, nil)
+	image, err := resolveImage(model, nil)
+	if err != nil {
+		// nil cfg cannot carry a profile, so resolution cannot fail here.
+		return DefaultBaseImage()
+	}
+	return image
 }
 
 // DefaultBaseImage returns the managed runtime image selected by environment.
@@ -578,23 +700,50 @@ func DefaultBaseImage() string {
 
 // EffectiveImage returns the Docker image after applying model defaults,
 // docker-specific overrides, and compatibility normalization for older configs.
-func EffectiveImage(model entity.AgentModel, cfg *entity.DockerSandboxConfig) string {
+// Declared profiles are validated: an unknown profile is an error, not a
+// silent fall back to the base image.
+func EffectiveImage(model entity.AgentModel, cfg *entity.DockerSandboxConfig) (string, error) {
 	return resolveImage(model, cfg)
 }
 
 // ── internal helpers ──────────────────────────────────────────────────────────
 
-func resolveImage(model entity.AgentModel, cfg *entity.DockerSandboxConfig) string {
-	if cfg != nil && cfg.Image != "" {
-		return normalizeDefaultImage(cfg.Image)
+func resolveImage(model entity.AgentModel, cfg *entity.DockerSandboxConfig) (string, error) {
+	if cfg != nil && strings.TrimSpace(cfg.Image) != "" {
+		return normalizeDefaultImage(cfg.Image), nil
 	}
+	req := RuntimeRequest{}
+	if cfg != nil {
+		req.AgentProfile = cfg.Profile
+	}
+	sel, err := ResolveRuntime(req)
+	if err != nil {
+		return "", err
+	}
+	if sel.Profile != ProfileBase {
+		return sel.ImageRef, nil
+	}
+	// Historical base-image behavior: known CLI models prefer a locally built
+	// managed base image; anything else takes the environment default as-is.
 	model = entity.NormaliseModel(model)
 	switch model {
 	case entity.ModelClaudeCode, entity.ModelCodex, entity.ModelGemini, entity.ModelOpenCode, entity.ModelCursor, entity.ModelQoder:
-		return normalizeDefaultImage(DefaultBaseImage())
+		return normalizeDefaultImage(DefaultBaseImage()), nil
 	default:
-		return DefaultBaseImage()
+		return DefaultBaseImage(), nil
 	}
+}
+
+// normalizeProfileImage mirrors normalizeDefaultImage for non-base profiles:
+// prefer a locally built image when one exists so dev/self-hosted installs do
+// not depend on registry availability.
+func normalizeProfileImage(image string) string {
+	if image == JVM21ImageBase || image == ChinaJVM21Image {
+		if dockerImageExists(LocalJVM21Image) {
+			return LocalJVM21Image
+		}
+	}
+	return image
 }
 
 func normalizeDefaultImage(image string) string {

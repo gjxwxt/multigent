@@ -163,6 +163,8 @@ func NewServer(root, apiKey string) *Server {
 		previewSessions:        make(map[string]*previewChatSession),
 		threadProjections:      imbridge.NewTaskThreadProjectionService(controlDB, nil),
 	}
+	// Preview image selection happens per-project at preview start time
+	// (resolved from the project's runtime profile), not server-wide here.
 	// Scheduler restore is intentionally absent: upstream v2.0.10 made the
 	// workspace scheduler service-managed (StartWorkspaceScheduler in
 	// cmd/multigent), so per-agent restore at construction would double-schedule.

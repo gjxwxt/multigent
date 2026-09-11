@@ -22,8 +22,8 @@ import (
 // SeedInstanceForTest is part of the engine's public test surface.
 type previewEngineAPI interface {
 	GetInstance(taskID string) (*preview.PreviewInstance, bool)
-	StartEphemeralPreview(ctx context.Context, taskID, projectName, worktreeDir string) (*preview.PreviewInstance, error)
-	StartSnapshotPreview(ctx context.Context, taskID, projectName, worktreeDir string) (*preview.PreviewInstance, error)
+	StartEphemeralPreviewWithRuntime(ctx context.Context, taskID, projectName, worktreeDir string, runtime preview.RuntimeSelection) (*preview.PreviewInstance, error)
+	StartSnapshotPreviewWithRuntime(ctx context.Context, taskID, projectName, worktreeDir string, runtime preview.RuntimeSelection) (*preview.PreviewInstance, error)
 	StopEphemeralPreview(taskID string) error
 	Reconcile(ctx context.Context) error
 	SeedInstanceForTest(inst *preview.PreviewInstance)

@@ -86,6 +86,29 @@ func TestApplyConfigEnvNPMFallback(t *testing.T) {
 	}
 }
 
+func TestApplyConfigEnvRuntimeProfileBridge(t *testing.T) {
+	t.Run("empty environment bridges config profile", func(t *testing.T) {
+		t.Setenv("MULTIGENT_RUNTIME_PROFILE", "")
+		cfg := &appconfig.Config{
+			Runtime: appconfig.RuntimeConfig{Profile: "jvm21"},
+		}
+		applyConfigEnv(cfg)
+		if got := os.Getenv("MULTIGENT_RUNTIME_PROFILE"); got != "jvm21" {
+			t.Errorf("MULTIGENT_RUNTIME_PROFILE = %q, want bridged %q", got, "jvm21")
+		}
+	})
+	t.Run("existing environment value wins", func(t *testing.T) {
+		t.Setenv("MULTIGENT_RUNTIME_PROFILE", "base")
+		cfg := &appconfig.Config{
+			Runtime: appconfig.RuntimeConfig{Profile: "jvm21"},
+		}
+		applyConfigEnv(cfg)
+		if got := os.Getenv("MULTIGENT_RUNTIME_PROFILE"); got != "base" {
+			t.Errorf("MULTIGENT_RUNTIME_PROFILE = %q, want preset %q to win (setEnvIfEmpty semantics)", got, "base")
+		}
+	})
+}
+
 func TestExitCodeForProbeExitError(t *testing.T) {
 	cases := []struct {
 		err  error
