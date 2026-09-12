@@ -66,6 +66,8 @@
 ### 2.5 GitLab / CI
 `MULTIGENT_GITLAB_RUNNER_ID`（默认 runner 自动绑定；8.4 缺陷修复的配置前提，当前经 systemd drop-in 注入）。
 
+`MULTIGENT_CI_REMOTE_PIPELINE_REQUIRED`：ci_ready 闸门的工作区级**默认值**（非强制下限）——未显式声明 `remote_pipeline_required` 的项目在置 `1`/`true`/`yes`/`required` 后走严格闸门（未绑远端 = pipeline_evidence FAIL）。项目级声明（`required`/`local`）优先于该默认值；如未来需要组织级强制策略（项目级 `local` 不得覆盖），应另立独立设置而非复用此变量。另：远端自动认领授权可用 `MULTIGENT_GITLAB_ADOPT_NAMESPACE_ALLOWLIST`（逗号分隔命名空间，段精确前缀匹配）放开平台未建仓场景，默认关闭。
+
 ### 2.6 嵌入式/子进程内部（迁移时**勿带**）
 `MULTIGENT_WORKER_*`（node 自注册）、`MULTIGENT_WORKTREE_DIR`/`MULTIGENT_WAKEUP_*`（attention 派发）、`MULTIGENT_RUNTIME_NODE_DAEMON_CHILD`、`MULTIGENT_RUN_ID`——这些是进程间契约，出现在迁移清单里会造成噪音。
 

@@ -23,15 +23,23 @@ var (
 	errRemoteRequired   = errors.New("remote pipeline required but the project is not bound to a GitLab remote")
 )
 
-// ciRemotePipelineRequiredEnv is the server-level default for projects that
+// ciRemotePipelineRequiredEnv is the server-level DEFAULT for projects that
 // do not declare RemotePipelineRequired themselves. Any of "1", "true",
 // "yes", "required" (case-insensitive) turns the gate strict workspace-wide.
+// It is a default, not a floor: a project may still declare "local" to opt
+// out, because there is no organization-enforcement deployment today — the
+// name deliberately keeps "REQUIRED" (not "DEFAULT") since the value it
+// selects is the strict gate, and if an org-enforced floor is ever needed it
+// should be a separate setting that ignores project-level "local".
 const ciRemotePipelineRequiredEnv = "MULTIGENT_CI_REMOTE_PIPELINE_REQUIRED"
 
 // ciRemotePipelineRequired resolves the effective gate semantics: explicit
-// project declaration first, then the server env, then local-only (the
-// historical behavior). The declared- vs-bound-inference ambiguity flagged in
-// review 2026-09-14 is resolved by making both sides explicit.
+// project declaration first, then the server env default, then local-only
+// (the historical behavior). The declared- vs-bound-inference ambiguity
+// flagged in review 2026-09-14 is resolved by making both sides explicit.
+// Precedence (review round 3, C): project declaration > env default >
+// fallback local. The env is a default only — "local" at project level
+// always wins until an explicit org-floor setting exists.
 func ciRemotePipelineRequired(p *entity.Project) bool {
 	if p != nil {
 		switch strings.ToLower(strings.TrimSpace(p.RemotePipelineRequired)) {
