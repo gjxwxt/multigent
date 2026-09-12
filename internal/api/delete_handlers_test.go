@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	controldb "github.com/multigent/multigent/internal/db"
@@ -176,15 +177,30 @@ func TestDeleteProjectRemovesPhysicalDirectory(t *testing.T) {
 	}
 }
 
-// A deletion whose physical teardown fails must keep the project record and
-// report the failure — never 200 with orphaned bytes on disk. The production
-// failure mode is root-owned files left by sandbox containers; in-process we
-// simulate with the macOS immutable flag (the only portable-enough unlink
-// blocker that also defeats the store's chmod walk). On Linux CI this skips —
-// the gate itself is exercised on the VM acceptance pass.
+// A deletion whose physical teardown fails must keep the project record —
+// verbatim, every field — and report the failure. destroyProjectArtifacts is
+// purely physical, so a failed teardown must not have touched the DB at all:
+// no record drop, no empty-shell restore. The production failure mode is
+// root-owned files left by sandbox containers; in-process we simulate with
+// the macOS immutable flag (the only portable-enough unlink blocker that also
+// defeats the chmod walk). On Linux CI this skips — the gate itself is
+// exercised on the VM acceptance pass.
 func TestDeleteProjectKeepsRecordsWhenTeardownFails(t *testing.T) {
 	s, _ := newConnectionGrantPolicyServer(t)
-	if err := s.st.SaveProject("sample", &entity.Project{Name: "sample"}); err != nil {
+	seeded := &entity.Project{
+		Name:             "sample",
+		Description:      "field preservation probe",
+		Repo:             "/tmp/sample-repo",
+		RemoteProvider:   "gitlab",
+		RemoteConnection: "conn-gitlab",
+		RemoteProjectID:  "58",
+		RemoteURL:        "https://gitlab.example/gao/sample",
+		CloneURL:         "https://gitlab.example/gao/sample.git",
+		DefaultBranch:    "main",
+		RuntimeProfile:   "jvm21",
+		DeployPort:       30123,
+	}
+	if err := s.st.SaveProject("sample", seeded); err != nil {
 		t.Fatalf("reseed project: %v", err)
 	}
 	// dbStore.SaveProject persists to the control DB only; the physical dir
@@ -209,8 +225,16 @@ func TestDeleteProjectKeepsRecordsWhenTeardownFails(t *testing.T) {
 	if rec.Code == http.StatusOK {
 		t.Fatalf("delete must not succeed while the physical directory survives")
 	}
-	if _, err := s.st.Project("sample"); err != nil {
+	p, err := s.st.Project("sample")
+	if err != nil {
 		t.Fatalf("project record must survive failed teardown: %v", err)
+	}
+	if p.Description != seeded.Description || p.Repo != seeded.Repo ||
+		p.RemoteProvider != seeded.RemoteProvider || p.RemoteConnection != seeded.RemoteConnection ||
+		p.RemoteProjectID != seeded.RemoteProjectID || p.RemoteURL != seeded.RemoteURL ||
+		p.CloneURL != seeded.CloneURL || p.DefaultBranch != seeded.DefaultBranch ||
+		p.RuntimeProfile != seeded.RuntimeProfile || p.DeployPort != seeded.DeployPort {
+		t.Fatalf("failed teardown must preserve the project record verbatim, got %+v", p)
 	}
 }
 
@@ -277,5 +301,38 @@ func TestProjectOrphansScanAndDelete(t *testing.T) {
 	}
 	if _, err := os.Stat(orphanDir); !os.IsNotExist(err) {
 		t.Fatalf("orphan dir survived: %v", err)
+	}
+}
+
+// Orphan endpoint hardening: names are validated (no traversal, no absolute
+// paths), the scan never leaks absolute host paths, and malformed names are
+// rejected before any filesystem work.
+func TestProjectOrphansRejectsUnsafeNamesAndPaths(t *testing.T) {
+	s, _ := newConnectionGrantPolicyServer(t)
+
+	for _, name := range []string{"..", "a/b", ".hidden"} {
+		req := providerTestRequest(http.MethodDelete, "/api/v1/projects/orphans/"+name, "admin", nil)
+		req.SetPathValue("name", name)
+		rec := httptest.NewRecorder()
+		s.handleProjectOrphansDelete(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("orphan delete name %q: status %d, want 400", name, rec.Code)
+		}
+	}
+
+	orphanDir := filepath.Join(s.st.ProjectDir("."), "legacy-orphan")
+	if err := os.MkdirAll(orphanDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(orphanDir) })
+
+	scanRec := httptest.NewRecorder()
+	scanReq := providerTestRequest(http.MethodGet, "/api/v1/projects/orphans", "admin", nil)
+	s.handleProjectOrphans(scanRec, scanReq)
+	if scanRec.Code != http.StatusOK {
+		t.Fatalf("scan status=%d body=%s", scanRec.Code, scanRec.Body.String())
+	}
+	if strings.Contains(scanRec.Body.String(), s.st.ProjectDir(".")) {
+		t.Fatalf("scan response must not leak absolute host paths: %s", scanRec.Body.String())
 	}
 }

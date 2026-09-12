@@ -9,8 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-
-	"github.com/multigent/multigent/internal/entity"
 )
 
 func (s *Server) handleDeleteTeam(w http.ResponseWriter, r *http.Request) {
@@ -93,25 +91,16 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, err)
 		return
 	}
-	// Destroy physical artifacts BEFORE dropping control-plane records: a
+	// Destroy physical artifacts BEFORE touching any control-plane record: a
 	// deletion that reports success must not leave project code, worktrees, or
 	// preview containers on disk (the p16 soak found ~200MB of worktrees plus
-	// historical orphans surviving a 200 response). If the physical teardown
-	// cannot complete, the API fails and the project record survives — the
-	// caller can retry or inspect, instead of losing the only pointer to
-	// orphaned data. destroyProjectArtifacts deletes the project's physical
-	// tree via the store; the store-level DB record it drops on the way is
-	// restored below when the tree survives, so "records kept" is literal.
+	// historical orphans surviving a 200 response). destroyProjectArtifacts is
+	// purely physical — it never mutates the DB — so when it fails the project
+	// record and all agent metadata survive intact with no restore dance, and
+	// the caller can retry or inspect instead of losing the only pointer to
+	// orphaned data.
 	if err := s.destroyProjectArtifacts(project); err != nil {
 		log.Printf("[project:delete] %s: physical teardown failed, keeping records: %v", project, err)
-		// st.DeleteProject removed the kv record before failing on the
-		// directory; restore it so the record outlives the failed delete and
-		// the orphaned data stays reachable/retryable.
-		if p, pErr := s.st.Project(project); pErr != nil || p == nil {
-			if saveErr := s.st.SaveProject(project, &entity.Project{Name: project}); saveErr != nil {
-				log.Printf("[project:delete] %s: could not restore project record after failed teardown: %v", project, saveErr)
-			}
-		}
 		s.jsonErrorCode(w, http.StatusInternalServerError, ErrCodeConflict, fmt.Sprintf("project teardown failed, records kept: %v", err))
 		return
 	}
@@ -151,13 +140,16 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 }
 
 // destroyProjectArtifacts tears down everything the project put on disk or in
-// Docker before its records disappear: preview containers (via label, so
-// stopped/renamed containers are caught too), per-task worktrees, and finally
-// the project directory itself. Best-effort per task, strict on the final
-// directory: the caller must not drop the DB record while any project bytes
-// remain on disk.
+// Docker before any control-plane record disappears: preview containers (via
+// label, so stopped/renamed containers are caught too), per-task worktrees,
+// then the project directory itself. Purely physical — it must never touch
+// the DB, so a failure here leaves the project record and all agent metadata
+// exactly as they were. Preview container removal is strict: a container that
+// survives means the caller must not drop the records that name it.
 func (s *Server) destroyProjectArtifacts(project string) error {
-	s.stopProjectPreviewContainers(project)
+	if err := s.stopProjectPreviewContainers(project); err != nil {
+		return err
+	}
 	s.cleanupProjectWorktrees(project)
 
 	projectDir := s.st.ProjectDir(project)
@@ -165,10 +157,12 @@ func (s *Server) destroyProjectArtifacts(project string) error {
 		cmd := exec.Command("chmod", "-R", "u+rwX", projectDir)
 		_ = cmd.Run()
 	}
-	// st.DeleteProject also drops the DB records the store manages; the
-	// physical outcome is what gates the API response, so verify afterwards.
-	if err := s.st.DeleteProject(project); err != nil {
-		return fmt.Errorf("remove project directory %s: %w", projectDir, err)
+	// Physical removal only: the store-level DeleteProject also drops the kv
+	// record (and agent records) before deleting files, which would lose the
+	// record before the outcome is known. Physical deletion goes through
+	// fsStore.DeleteProject semantics here without any record mutation.
+	if err := s.deleteProjectFiles(projectDir); err != nil {
+		return err
 	}
 	if dirExists(projectDir) {
 		return fmt.Errorf("project directory %s still exists after deletion (root-owned files?); records kept", projectDir)
@@ -176,20 +170,54 @@ func (s *Server) destroyProjectArtifacts(project string) error {
 	return nil
 }
 
-// stopProjectPreviewContainers removes every preview container labelled for
-// this project. Label-based so containers survive even when the in-memory
-// engine map lost them (restart, reaper already dropped the entry).
-func (s *Server) stopProjectPreviewContainers(project string) {
-	out, err := exec.Command("docker", "ps", "-aq", "--filter", "label=com.multigent.preview.project="+project).Output()
-	if err != nil {
-		log.Printf("[project:delete] %s: list preview containers failed: %v", project, err)
-		return
+// deleteProjectFiles removes the project directory with the store's removal
+// semantics (chmod walk, RemoveAll, rm -rf fallback) without touching any
+// record.
+func (s *Server) deleteProjectFiles(projectDir string) error {
+	if _, err := os.Stat(projectDir); os.IsNotExist(err) {
+		return nil
 	}
-	for _, id := range strings.Fields(string(out)) {
-		if out, err := exec.Command("docker", "rm", "-f", id).CombinedOutput(); err != nil {
-			log.Printf("[project:delete] %s: remove preview container %s failed: %v (%s)", project, id, err, strings.TrimSpace(string(out)))
+	if err := os.RemoveAll(projectDir); err != nil && !os.IsNotExist(err) {
+		cmd := exec.Command("rm", "-rf", projectDir)
+		_ = cmd.Run()
+		if _, statErr := os.Stat(projectDir); statErr == nil {
+			// Root-owned files from sandbox containers are the production
+			// failure mode; escalate instead of reporting a clean delete with
+			// project bytes still on disk (p16 soak orphan evidence).
+			return fmt.Errorf("remove project dir %q failed after rm -rf fallback (root-owned files?)", projectDir)
 		}
 	}
+	return nil
+}
+
+// stopProjectPreviewContainers removes every preview container labelled for
+// this project. Label-based so containers survive even when the in-memory
+// engine map lost them (restart, reaper already dropped the entry). Returns
+// an error when a container could not be removed — the caller must then keep
+// all records.
+func (s *Server) stopProjectPreviewContainers(project string) error {
+	out, err := exec.Command("docker", "ps", "-aq", "--filter", "label=com.multigent.preview.project="+project).Output()
+	if err != nil {
+		// Listing requires docker; without it nothing is known about
+		// leftover containers, so fail rather than silently proceed.
+		return fmt.Errorf("list preview containers: %w", err)
+	}
+	ids := strings.Fields(string(out))
+	for _, id := range ids {
+		if out, err := exec.Command("docker", "rm", "-f", id).CombinedOutput(); err != nil {
+			return fmt.Errorf("remove preview container %s: %w (%s)", id, err, strings.TrimSpace(string(out)))
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	// Re-check: zero surviving containers is the gate for proceeding.
+	if out, err := exec.Command("docker", "ps", "-aq", "--filter", "label=com.multigent.preview.project="+project).Output(); err != nil {
+		return fmt.Errorf("re-check preview containers: %w", err)
+	} else if strings.TrimSpace(string(out)) != "" {
+		return fmt.Errorf("preview containers survived removal for project %s; records kept", project)
+	}
+	return nil
 }
 
 // cleanupProjectWorktrees removes each task worktree through the manager (so
@@ -249,6 +277,10 @@ func (s *Server) handleProjectOrphansDelete(w http.ResponseWriter, r *http.Reque
 		s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeValidationFailed, "missing project name")
 		return
 	}
+	if err := validateWorkspaceObjectName("project", name); err != nil {
+		s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeValidationFailed, err.Error())
+		return
+	}
 	if _, err := s.st.Project(name); err == nil {
 		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "project record exists; use project deletion instead")
 		return
@@ -269,7 +301,12 @@ func (s *Server) handleProjectOrphansDelete(w http.ResponseWriter, r *http.Reque
 		_ = exec.Command("rm", "-rf", dir).Run()
 	}
 	if dirExists(dir) {
-		s.serverError(w, fmt.Errorf("orphan %s could not be fully removed (root-owned files?); remove manually with elevated permissions", dir))
+		// Truthful failure mode: files written by root inside the sandbox
+		// survive RemoveAll and rm -rf for a non-privileged service process.
+		// Removing them needs elevated permissions on the host — say so
+		// instead of claiming the service can fix ownership. Name only: no
+		// absolute host paths in API responses.
+		s.serverError(w, fmt.Errorf("orphan %s could not be fully removed (root-owned files?); remove manually with elevated permissions on the host", name))
 		return
 	}
 	s.auditLog(auditLogInput{
@@ -310,8 +347,8 @@ func (s *Server) scanOrphanProjectDirs() ([]map[string]any, error) {
 			continue
 		}
 		orphans = append(orphans, map[string]any{
+			// Name/size/state only — never absolute host paths in API responses.
 			"name": name,
-			"path": dir,
 			"hasProjectYaml": func() bool {
 				_, err := os.Stat(filepath.Join(dir, "project.yaml"))
 				return err == nil
