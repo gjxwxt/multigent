@@ -122,12 +122,18 @@ func JVMToolchainProxyEnv() string {
 
 // ProfileDockerArgs returns profile-dependent "-e KEY=VALUE" docker args for
 // agent sandbox containers. It mirrors the preview engine's profilePreviewEnv:
-// the jvm21 profile receives JVM proxy properties via JAVA_TOOL_OPTIONS so
-// Gradle wrapper downloads and dependency resolution inherit the platform's
-// typed network configuration. Every entry carries its own "-e" flag — docker
-// parses the first bare KEY=VALUE argument as the image reference.
+// the jvm21 profile (canonical or declared via a supported alias — normalized
+// here so jdk21/java21 behave identically; unknown profiles fail closed)
+// receives JVM proxy properties via JAVA_TOOL_OPTIONS so Gradle wrapper
+// downloads and dependency resolution inherit the platform's typed network
+// configuration. Every entry carries its own "-e" flag — docker parses the
+// first bare KEY=VALUE argument as the image reference.
 func ProfileDockerArgs(cfg *entity.DockerSandboxConfig) []string {
-	if cfg == nil || cfg.Profile != ProfileJVM21 {
+	if cfg == nil {
+		return nil
+	}
+	profile, err := NormalizeProfile(cfg.Profile)
+	if err != nil || profile != ProfileJVM21 {
 		return nil
 	}
 	if value := JVMToolchainProxyEnv(); value != "" {

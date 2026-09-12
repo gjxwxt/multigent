@@ -121,3 +121,53 @@ func setEnvForTest(key, value string) {
 	}
 	_ = os.Setenv(key, value)
 }
+
+// jdk21/java21 aliases must behave exactly like jvm21: the JVM proxy
+// properties key off the normalized profile, not a string comparison.
+func TestProfileDockerArgsNormalizesAliases(t *testing.T) {
+	origHTTPS := os.Getenv("HTTPS_PROXY")
+	defer setEnvForTest("HTTPS_PROXY", origHTTPS)
+	t.Setenv("HTTPS_PROXY", "http://proxy.internal:17890")
+
+	for _, alias := range []string{"jvm21", "jdk21", "java21", "JVM21", " jvm21 "} {
+		args := ProfileDockerArgs(&entity.DockerSandboxConfig{Profile: alias})
+		if !containsEnvPair(args, "JAVA_TOOL_OPTIONS") {
+			t.Fatalf("alias %q must receive JAVA_TOOL_OPTIONS, got %v", alias, args)
+		}
+	}
+	// Unknown profiles fail closed: no JVM properties for an undeclared value.
+	if args := ProfileDockerArgs(&entity.DockerSandboxConfig{Profile: "node22"}); len(args) != 0 {
+		t.Fatalf("unknown profile must produce no JVM args, got %v", args)
+	}
+}
+
+// Project jvm21 + agent-pinned explicit image: the recorded project profile
+// must still deliver JVM network properties to the AGENT sandbox path
+// (BuildArgs), symmetric with the preview path, while the image selection
+// itself stays the pinned reference.
+func TestBuildArgsPinnedImageKeepsProjectProfileJVMArgs(t *testing.T) {
+	origHTTPS := os.Getenv("HTTPS_PROXY")
+	defer setEnvForTest("HTTPS_PROXY", origHTTPS)
+	t.Setenv("HTTPS_PROXY", "http://proxy.internal:17890")
+
+	cfg := &entity.DockerSandboxConfig{
+		Profile: ProfileJVM21,
+		Image:   "registry.example/team/jdk-stack:21",
+	}
+	args, err := BuildArgs("/tmp/agent-dir-nonexistent", "codex", cfg, []string{"echo", "hi"})
+	if err != nil {
+		t.Fatalf("BuildArgs: %v", err)
+	}
+	if !containsEnvPair(args, "JAVA_TOOL_OPTIONS") {
+		t.Fatalf("pinned-image sandbox with project jvm21 must still get JVM proxy args, args=%v", args)
+	}
+	found := false
+	for _, a := range args {
+		if a == "registry.example/team/jdk-stack:21" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("pinned image must be the executed image, args=%v", args)
+	}
+}

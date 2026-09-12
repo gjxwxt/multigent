@@ -4,11 +4,30 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
 )
+
+func setWorkerRuntimeConfig(t *testing.T, s *Server, workspaceID, workerID, cfg string) {
+	t.Helper()
+	w, ok, err := s.controlDB.AgentWorkerByID(workspaceID, workerID)
+	if err != nil || !ok {
+		t.Fatalf("load worker %s: ok=%v err=%v", workerID, ok, err)
+	}
+	w.RuntimeConfigJSON = cfg
+	if err := s.controlDB.UpsertAgentWorker(w); err != nil {
+		t.Fatalf("update worker %s: %v", workerID, err)
+	}
+}
+
+type inventoryWorker struct {
+	Worker string `json:"worker"`
+	Source string `json:"source"`
+	Value  string `json:"value"`
+}
 
 func TestProjectRuntimeInventoryListsUndeclaredAsUnknown(t *testing.T) {
 	s, workspaceID := newConnectionGrantPolicyServer(t)
@@ -115,20 +134,16 @@ func TestProjectRuntimeInventoryAgentWithoutPreferenceIsServerDefault(t *testing
 	t.Fatalf("plain missing from inventory: %s", rec.Body.String())
 }
 
-func TestProjectRuntimeInventoryAgentExplicitImageMarkedPinned(t *testing.T) {
+// A worker with a pinned image does not excuse an undeclared project:
+// the pin is that worker's own choice, the project-level declaration is
+// still missing, so the row stays up for review.
+func TestProjectRuntimeInventoryUndeclaredWithPinnedImageStillReview(t *testing.T) {
 	s, workspaceID := newConnectionGrantPolicyServer(t)
 	if err := s.st.SaveProject("pinned", &entity.Project{Name: "pinned"}); err != nil {
 		t.Fatalf("seed pinned: %v", err)
 	}
 	seedAgentWorkerWithIDForTest(t, s, workspaceID, "pinned", "frozen", "aw-frozen", "pm-pinned-frozen")
-	frozen, ok, err := s.controlDB.AgentWorkerByID(workspaceID, "aw-frozen")
-	if err != nil || !ok {
-		t.Fatalf("load worker: ok=%v err=%v", ok, err)
-	}
-	frozen.RuntimeConfigJSON = `{"sandbox":{"provider":"docker","image":"registry.example/team/jdk-stack:21"}}`
-	if err := s.controlDB.UpsertAgentWorker(frozen); err != nil {
-		t.Fatalf("update worker: %v", err)
-	}
+	setWorkerRuntimeConfig(t, s, workspaceID, "aw-frozen", `{"sandbox":{"provider":"docker","image":"registry.example/team/jdk-stack:21"}}`)
 
 	rec := httptest.NewRecorder()
 	req := providerTestRequest(http.MethodGet, "/api/v1/projects/runtime-inventory", "admin", nil)
@@ -145,15 +160,115 @@ func TestProjectRuntimeInventoryAgentExplicitImageMarkedPinned(t *testing.T) {
 			if row["effectiveSource"] != "agent_image" {
 				t.Fatalf("pinned effective source = %v, want agent_image", row["effectiveSource"])
 			}
-			// A pinned image wins anyway: backfill suggestion must not claim
-			// the profile would change runtime behavior for this worker.
-			if row["suggestedAction"] != "none" {
-				t.Fatalf("pinned-image project should suggest none, got %v", row["suggestedAction"])
+			if row["suggestedAction"] != "review" {
+				t.Fatalf("undeclared project with pinned worker must still suggest review, got %v", row["suggestedAction"])
 			}
 			return
 		}
 	}
 	t.Fatalf("pinned missing from inventory: %s", rec.Body.String())
+}
+
+// Projects with several members report every member's runtime observation;
+// disagreement surfaces as mixed instead of an arbitrary single source.
+// Output is stably sorted by worker name.
+func TestProjectRuntimeInventoryMultiWorkerObservationsAndMixed(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	if err := s.st.SaveProject("mixed", &entity.Project{Name: "mixed"}); err != nil {
+		t.Fatalf("seed mixed: %v", err)
+	}
+	if err := s.st.SaveProject("agree", &entity.Project{Name: "agree", RuntimeProfile: "jvm21"}); err != nil {
+		t.Fatalf("seed agree: %v", err)
+	}
+	seedAgentWorkerWithIDForTest(t, s, workspaceID, "mixed", "wB", "aw-mb", "pm-mixed-b")
+	seedAgentWorkerWithIDForTest(t, s, workspaceID, "mixed", "wA", "aw-ma", "pm-mixed-a")
+	setWorkerRuntimeConfig(t, s, workspaceID, "aw-ma", `{"sandbox":{"provider":"docker","docker":{"profile":"jvm21"}}}`)
+	setWorkerRuntimeConfig(t, s, workspaceID, "aw-mb", `{"sandbox":{"provider":"docker","image":"registry.example/team/base:9"}}`)
+	seedAgentWorkerWithIDForTest(t, s, workspaceID, "agree", "wC", "aw-wc", "pm-agree-c")
+	setWorkerRuntimeConfig(t, s, workspaceID, "aw-wc", `{"sandbox":{"provider":"docker","docker":{"profile":"jvm21"}}}`)
+
+	rec := httptest.NewRecorder()
+	req := providerTestRequest(http.MethodGet, "/api/v1/projects/runtime-inventory", "admin", nil)
+	s.handleProjectRuntimeInventory(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("inventory status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var rows []struct {
+		Project         string            `json:"project"`
+		EffectiveSource string            `json:"effectiveSource"`
+		EffectiveValue  string            `json:"effectiveValue"`
+		Workers         []inventoryWorker `json:"workers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var mixed, agree *struct {
+		Project         string            `json:"project"`
+		EffectiveSource string            `json:"effectiveSource"`
+		EffectiveValue  string            `json:"effectiveValue"`
+		Workers         []inventoryWorker `json:"workers"`
+	}
+	for i := range rows {
+		switch rows[i].Project {
+		case "mixed":
+			mixed = &rows[i]
+		case "agree":
+			agree = &rows[i]
+		}
+	}
+	if mixed == nil || agree == nil {
+		t.Fatalf("expected both projects in inventory: %s", rec.Body.String())
+	}
+	if mixed.EffectiveSource != "mixed" {
+		t.Fatalf("disagreeing workers must yield mixed, got %q (workers=%+v)", mixed.EffectiveSource, mixed.Workers)
+	}
+	if len(mixed.Workers) != 2 {
+		t.Fatalf("mixed project must report both workers, got %d", len(mixed.Workers))
+	}
+	if !sort.SliceIsSorted(mixed.Workers, func(i, j int) bool { return mixed.Workers[i].Worker < mixed.Workers[j].Worker }) {
+		t.Fatalf("worker observations must be sorted by worker name: %+v", mixed.Workers)
+	}
+	if mixed.Workers[0].Worker != "wA" || mixed.Workers[1].Worker != "wB" {
+		t.Fatalf("unexpected worker order: %+v", mixed.Workers)
+	}
+	if agree.EffectiveSource != "project" {
+		t.Fatalf("declared project stays authoritative, got %q", agree.EffectiveSource)
+	}
+	if len(agree.Workers) != 1 {
+		t.Fatalf("agree project must report its one worker, got %d", len(agree.Workers))
+	}
+}
+
+// A project with no worker members reports the server default, not an
+// arbitrary observation attributed to nobody.
+func TestProjectRuntimeInventoryNoWorkers(t *testing.T) {
+	s, _ := newConnectionGrantPolicyServer(t)
+	if err := s.st.SaveProject("empty", &entity.Project{Name: "empty"}); err != nil {
+		t.Fatalf("seed empty: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := providerTestRequest(http.MethodGet, "/api/v1/projects/runtime-inventory", "admin", nil)
+	s.handleProjectRuntimeInventory(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("inventory status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, row := range rows {
+		if row["project"] == "empty" {
+			if row["effectiveSource"] != "server_default" {
+				t.Fatalf("workerless effective source = %v, want server_default", row["effectiveSource"])
+			}
+			if row["suggestedAction"] != "review" {
+				t.Fatalf("workerless undeclared project must suggest review, got %v", row["suggestedAction"])
+			}
+			return
+		}
+	}
+	t.Fatalf("empty missing from inventory: %s", rec.Body.String())
 }
 
 func TestPutProjectProfileChangeWritesAuditEvent(t *testing.T) {

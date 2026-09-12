@@ -938,8 +938,8 @@
     "installedAdapter": "Adapter",
     "installedCodeHostNote": "Code-host connection: the remote repo, Git push, and CI pipelines run through the workspace-level connection and are unaffected by uninstalling.",
     "runtimeProfile": "Runtime Profile",
-    "runtimeProfileAuto": "Auto (follow agent / server default)",
-    "runtimeProfileBase": "base — Node.js / Go toolchains",
+    "runtimeProfileAuto": "Auto — inherit agent preference / server default",
+    "runtimeProfileBase": "base — explicit project-level base (wins over agent preference)",
     "runtimeProfileJvm21": "jvm21 — JDK 21 (Java / Gradle)",
     "runtimeProfileHint": "Declares the managed runtime for every agent sandbox and preview in this project. Resolution order: a pinned agent image wins, then this project profile, then the agent's own preference, then the server default."
   },

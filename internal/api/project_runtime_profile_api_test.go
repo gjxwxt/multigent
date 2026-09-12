@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/multigent/multigent/internal/entity"
+	"github.com/multigent/multigent/internal/sandbox"
 )
 
 func newRuntimeProfileServer(t *testing.T) (*Server, string) {
@@ -194,34 +195,103 @@ func TestPutProjectRuntimeProfileRequiresManager(t *testing.T) {
 	}
 }
 
-func TestPutProjectRuntimeProfileClearsViaBaseAlias(t *testing.T) {
+// Three-state semantics: "" = auto/undeclared (inherits agent preference or
+// server default), "base" = explicit project-level base (must WIN over an
+// agent jvm21 preference and the server default), "jvm21" = explicit
+// project-level jvm21. Auto and explicit base are distinct requests with
+// distinct persisted values.
+func TestPutProjectRuntimeProfileThreeStates(t *testing.T) {
 	s, _ := newRuntimeProfileServer(t)
+	put := func(project, profile string) *httptest.ResponseRecorder {
+		body := map[string]any{"description": "d"}
+		if profile != "<omit>" {
+			body["runtimeProfile"] = profile
+		}
+		rec := httptest.NewRecorder()
+		req := providerTestRequest(http.MethodPut, "/api/v1/projects/"+project, "admin", body)
+		req.SetPathValue("name", project)
+		s.handlePutProject(rec, req)
+		return rec
+	}
+	stored := func(project string) string {
+		p, err := s.st.Project(project)
+		if err != nil {
+			t.Fatalf("reload %s: %v", project, err)
+		}
+		return p.RuntimeProfile
+	}
 
-	rec := httptest.NewRecorder()
-	req := providerTestRequest(http.MethodPut, "/api/v1/projects/jvmproj", "admin", map[string]any{
-		"runtimeProfile": "base",
-	})
-	req.SetPathValue("name", "jvmproj")
-	s.handlePutProject(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("put base status=%d body=%s", rec.Code, rec.Body.String())
+	// auto (field omitted) never overwrites a declared value; explicit values
+	// persist verbatim — base is NOT folded to "".
+	if rec := put("jvmproj", "<omit>"); rec.Code != http.StatusOK || stored("jvmproj") != "jvm21" {
+		t.Fatalf("omit must keep jvm21, status=%d stored=%q", rec.Code, stored("jvmproj"))
 	}
-	// Explicit "base" normalizes to "" on disk (legacy-undistinguishable is
-	// acceptable: base is the resolved default either way) and GET must
-	// return "base" semantics as empty.
-	p, err := s.st.Project("jvmproj")
-	if err != nil {
-		t.Fatalf("reload project: %v", err)
+	if rec := put("jvmproj", "base"); rec.Code != http.StatusOK || stored("jvmproj") != "base" {
+		t.Fatalf("explicit base must persist as base, status=%d stored=%q", rec.Code, stored("jvmproj"))
 	}
-	if p.RuntimeProfile != "" {
-		t.Fatalf("explicit base must clear the declared profile, got %q", p.RuntimeProfile)
+	if rec := put("jvmproj", "jvm21"); rec.Code != http.StatusOK || stored("jvmproj") != "jvm21" {
+		t.Fatalf("explicit jvm21 must persist, status=%d stored=%q", rec.Code, stored("jvmproj"))
 	}
-	getRec := httptest.NewRecorder()
-	getReq := providerTestRequest(http.MethodGet, "/api/v1/projects/jvmproj", "admin", nil)
-	getReq.SetPathValue("name", "jvmproj")
-	s.handleProject(getRec, getReq)
-	got, _ := projectProfileFromResponse(t, getRec.Body.Bytes())
-	if got != "" {
-		t.Fatalf("GET after explicit base returned %q, want empty", got)
+	if rec := put("legacy", "base"); rec.Code != http.StatusOK || stored("legacy") != "base" {
+		t.Fatalf("undeclared project can declare explicit base, status=%d stored=%q", rec.Code, stored("legacy"))
+	}
+
+	// GET round-trips all three states.
+	getProfile := func(project string) string {
+		rec := httptest.NewRecorder()
+		req := providerTestRequest(http.MethodGet, "/api/v1/projects/"+project, "admin", nil)
+		req.SetPathValue("name", project)
+		s.handleProject(rec, req)
+		got, _ := projectProfileFromResponse(t, rec.Body.Bytes())
+		return got
+	}
+	if got := getProfile("jvmproj"); got != "jvm21" {
+		t.Fatalf("GET after explicit jvm21 = %q", got)
+	}
+	if got := getProfile("legacy"); got != "base" {
+		t.Fatalf("GET after explicit base = %q, want base (not folded)", got)
+	}
+}
+
+// An agent worker with a jvm21 preference joined to a project that explicitly
+// declared base: the project declaration wins and the effective runtime is
+// base. A project that never declared (auto) inherits the agent preference.
+func TestRuntimeProfileExplicitBaseOverridesAgentPreference(t *testing.T) {
+	s, workspaceID := newRuntimeProfileServer(t)
+	if err := s.st.SaveProject("explicitbase", &entity.Project{Name: "explicitbase", RuntimeProfile: "base"}); err != nil {
+		t.Fatalf("seed explicitbase: %v", err)
+	}
+	seedAgentWorkerWithIDForTest(t, s, workspaceID, "explicitbase", "picky", "aw-picky2", "pm-explicitbase-picky")
+	seedAgentWorkerWithIDForTest(t, s, workspaceID, "legacy", "picky2", "aw-picky3", "pm-legacy-picky2")
+	for id := range map[string]string{
+		"aw-picky2": "jvm21",
+		"aw-picky3": "jvm21",
+	} {
+		w, ok, err := s.controlDB.AgentWorkerByID(workspaceID, id)
+		if err != nil || !ok {
+			t.Fatalf("load %s: ok=%v err=%v", id, ok, err)
+		}
+		w.RuntimeConfigJSON = `{"sandbox":{"provider":"docker","docker":{"profile":"jvm21"}}}`
+		if err := s.controlDB.UpsertAgentWorker(w); err != nil {
+			t.Fatalf("update %s: %v", id, err)
+		}
+	}
+
+	for _, project := range []string{"explicitbase", "legacy"} {
+		p, err := s.st.Project(project)
+		if err != nil {
+			t.Fatalf("load %s: %v", project, err)
+		}
+		// Resolve through the same authority chain the runner and previews use.
+		sel, err := sandbox.ResolveRuntime(sandbox.RuntimeRequest{ProjectProfile: p.RuntimeProfile, AgentProfile: "jvm21"})
+		if err != nil {
+			t.Fatalf("resolve %s: %v", project, err)
+		}
+		if project == "explicitbase" && sel.Profile != "base" {
+			t.Fatalf("explicit base project resolved profile=%q, want base (agent jvm21 preference must lose)", sel.Profile)
+		}
+		if project == "legacy" && sel.Profile != "jvm21" {
+			t.Fatalf("auto project must inherit agent jvm21 preference, got %q", sel.Profile)
+		}
 	}
 }

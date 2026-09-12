@@ -7,11 +7,19 @@ import (
 	"strings"
 )
 
+// inventoryWorkerObservation reports one project member's own runtime
+// configuration as configured — observations, not decisions.
+type inventoryWorkerObservation struct {
+	Worker string `json:"worker"`
+	Source string `json:"source"`
+	Value  string `json:"value"`
+}
+
 // handleProjectRuntimeInventory is a read-only migration aid: for every
 // project it reports the declared runtime profile ("" stays "" — reported to
-// the caller as unknown, never inferred from build files), the effective
-// runtime source for a worker joined to the project, and a suggested action.
-// It only observes; backfill happens per project through the audited PUT.
+// the caller as unknown, never inferred from build files), the runtime
+// observations of ALL project members, and a suggested action. It only
+// observes; backfill happens per project through the audited PUT.
 func (s *Server) handleProjectRuntimeInventory(w http.ResponseWriter, r *http.Request) {
 	if !s.canAdminCurrentWorkspace(r) {
 		s.jsonErrorCode(w, http.StatusForbidden, ErrCodeAdminRequired, "workspace admin access required")
@@ -31,12 +39,17 @@ func (s *Server) handleProjectRuntimeInventory(w http.ResponseWriter, r *http.Re
 			continue
 		}
 		declared := strings.TrimSpace(p.RuntimeProfile)
-		source, value := s.effectiveRuntimeSource(declared, workers[p.Name])
+		observations := workers[p.Name]
 
-		// Suggested action is conservative: declared projects need nothing;
-		// undeclared ones are flagged for human review (never auto-backfilled).
+		// Effective source: a declared project is authoritative; undeclared
+		// ones are summarized from their members — "mixed" when members
+		// disagree, the single source otherwise, server_default with none.
+		source, value := summarizeObservations(declared, observations)
+
+		// Undeclared projects always stay up for review: no member's pin or
+		// preference substitutes for a project-level declaration.
 		action := "none"
-		if declared == "" && source != "agent_image" {
+		if declared == "" {
 			action = "review"
 		}
 		out = append(out, map[string]any{
@@ -45,6 +58,7 @@ func (s *Server) handleProjectRuntimeInventory(w http.ResponseWriter, r *http.Re
 			"declaredKnown":   declared != "",
 			"effectiveSource": source,
 			"effectiveValue":  value,
+			"workers":         observations,
 			"suggestedAction": action,
 			"templateId":      p.TemplateID,
 		})
@@ -52,10 +66,10 @@ func (s *Server) handleProjectRuntimeInventory(w http.ResponseWriter, r *http.Re
 	_ = json.NewEncoder(w).Encode(out)
 }
 
-// projectRuntimeWorkers maps project name -> one representative worker
-// runtime config for members joined to that project.
-func (s *Server) projectRuntimeWorkers() map[string]*agentWorkerRuntimeConfig {
-	out := map[string]*agentWorkerRuntimeConfig{}
+// projectRuntimeWorkers maps project name -> sorted member runtime
+// observations for all agent workers joined to that project.
+func (s *Server) projectRuntimeWorkers() map[string][]inventoryWorkerObservation {
+	out := map[string][]inventoryWorkerObservation{}
 	if s == nil || s.agentDirectory == nil {
 		return out
 	}
@@ -64,31 +78,40 @@ func (s *Server) projectRuntimeWorkers() map[string]*agentWorkerRuntimeConfig {
 		return out
 	}
 	list, err := s.agentDirectory.ProjectWorkers(workspaceID, "")
-	if err != nil || list == nil {
-		// Fall through: projects without resolvable members report
-		// server_default, which is the truthful answer.
+	if err != nil {
+		// Projects without resolvable members report the server default,
+		// which is the truthful answer.
 		return out
 	}
 	for _, pw := range list {
 		project := strings.TrimSpace(pw.Membership.ProjectID)
-		if project == "" || out[project] != nil {
+		if project == "" {
 			continue
 		}
-		cfg := decodeAgentWorkerRuntimeConfig(pw.Worker)
-		out[project] = &cfg
+		source, value := workerObservation(decodeAgentWorkerRuntimeConfig(pw.Worker))
+		name := strings.TrimSpace(pw.Membership.Title)
+		if name == "" {
+			name = strings.TrimSpace(pw.Worker.Name)
+		}
+		out[project] = append(out[project], inventoryWorkerObservation{
+			Worker: name,
+			Source: source,
+			Value:  value,
+		})
+	}
+	for project := range out {
+		obs := out[project]
+		sort.Slice(obs, func(i, j int) bool { return obs[i].Worker < obs[j].Worker })
+		out[project] = obs
 	}
 	return out
 }
 
-// effectiveRuntimeSource resolves which authority governs a project's
-// runtime today, mirroring taskExecutingAgentRuntime + sandbox.ResolveRuntime
-// order but without validating: the inventory reports observations, not
-// decisions.
-func (s *Server) effectiveRuntimeSource(declared string, cfg *agentWorkerRuntimeConfig) (source, value string) {
-	if declared != "" {
-		return "project", declared
-	}
-	if cfg == nil || cfg.Sandbox == nil {
+// workerObservation resolves one worker's configured runtime source, mirroring
+// taskExecutingAgentRuntime's lookup order without validating: the inventory
+// reports observations, not decisions.
+func workerObservation(cfg agentWorkerRuntimeConfig) (source, value string) {
+	if cfg.Sandbox == nil {
 		return "server_default", ""
 	}
 	// A pinned image wins regardless of profiles. The reference may live at
@@ -106,4 +129,22 @@ func (s *Server) effectiveRuntimeSource(declared string, cfg *agentWorkerRuntime
 		}
 	}
 	return "server_default", ""
+}
+
+// summarizeObservations derives the row-level effective source from the
+// project declaration and its members' observations.
+func summarizeObservations(declared string, observations []inventoryWorkerObservation) (source, value string) {
+	if declared != "" {
+		return "project", declared
+	}
+	if len(observations) == 0 {
+		return "server_default", ""
+	}
+	firstSource, firstValue := observations[0].Source, observations[0].Value
+	for _, obs := range observations[1:] {
+		if obs.Source != firstSource || obs.Value != firstValue {
+			return "mixed", ""
+		}
+	}
+	return firstSource, firstValue
 }

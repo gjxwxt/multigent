@@ -795,14 +795,18 @@ function BasicInfoEditor({
     setSaving(true)
     setSaved(false)
     try {
-      // runtimeProfile is always sent explicitly so the chosen "auto" (base)
-      // is a deliberate clear, never an accidental one: the API keeps a
-      // declared profile when the field is omitted.
-      await apiPut(`/api/v1/projects/${encodeURIComponent(projectId)}`, {
-        description,
-        repo,
-        runtimeProfile: runtimeProfile === '' ? 'base' : runtimeProfile,
-      })
+      // Three-state semantics: "auto" (empty) and "base" are DIFFERENT
+      // declarations — auto inherits the agent preference or server default,
+      // explicit base pins the project to base and wins over agent
+      // preferences. The field is always sent explicitly so switching to auto
+      // is a deliberate clear, while the selected value persists verbatim.
+      const payload: Record<string, unknown> = { description, repo }
+      if (runtimeProfile === '') {
+        payload.runtimeProfile = ''
+      } else {
+        payload.runtimeProfile = runtimeProfile
+      }
+      await apiPut(`/api/v1/projects/${encodeURIComponent(projectId)}`, payload)
       setDirty(false)
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)

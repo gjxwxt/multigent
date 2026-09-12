@@ -1324,12 +1324,13 @@ func (s *Server) handlePutProject(w http.ResponseWriter, r *http.Request) {
 			s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeValidationFailed, err.Error())
 			return
 		}
-		// "" normalizes to "base": only a declared non-base value is stored,
-		// keeping legacy projects distinguishable from explicitly-cleared ones.
-		p.RuntimeProfile = strings.TrimSpace(normalized)
-		if p.RuntimeProfile == sandbox.ProfileBase {
-			p.RuntimeProfile = ""
-		}
+		// Three-state semantics: "" = auto/undeclared (inherits agent
+		// preference or server default), "base" = explicit project-level base
+		// that WINS over agent preferences and the server default, "jvm21" =
+		// explicit project-level jvm21. An explicit base must persist verbatim
+		// — folding it to "" would make auto and base indistinguishable and
+		// let agent preferences override a deliberate declaration.
+		p.RuntimeProfile = normalized
 		profileChanged = p.RuntimeProfile != profileBefore
 	}
 	if body.RemoteProvider != "" {
