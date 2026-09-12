@@ -375,6 +375,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/teams/{teamPath...}", s.handleDeleteTeam)
 	mux.HandleFunc("GET /api/v1/teams/{teamPath...}", s.handleTeamDetail)
 	mux.HandleFunc("GET /api/v1/projects", s.handleProjects)
+	mux.HandleFunc("GET /api/v1/projects/runtime-inventory", s.handleProjectRuntimeInventory)
 	mux.HandleFunc("POST /api/v1/projects", s.handleCreateProject)
 	mux.HandleFunc("DELETE /api/v1/projects/{name}", s.handleDeleteProject)
 	mux.HandleFunc("GET /api/v1/agents", s.handleAgentWorkers)
@@ -1315,6 +1316,8 @@ func (s *Server) handlePutProject(w http.ResponseWriter, r *http.Request) {
 	}
 	p.Description = body.Description
 	p.Repo = body.Repo
+	profileBefore := p.RuntimeProfile
+	profileChanged := false
 	if body.RuntimeProfile != nil {
 		normalized, err := sandbox.NormalizeProfile(*body.RuntimeProfile)
 		if err != nil {
@@ -1327,6 +1330,7 @@ func (s *Server) handlePutProject(w http.ResponseWriter, r *http.Request) {
 		if p.RuntimeProfile == sandbox.ProfileBase {
 			p.RuntimeProfile = ""
 		}
+		profileChanged = p.RuntimeProfile != profileBefore
 	}
 	if body.RemoteProvider != "" {
 		p.RemoteProvider = body.RemoteProvider
@@ -1359,11 +1363,45 @@ func (s *Server) handlePutProject(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, err)
 		return
 	}
+	// Backfills and explicit profile changes are the auditable trail the
+	// inventory flow relies on; best-effort like other audit writes.
+	if profileChanged {
+		s.recordRuntimeProfileAudit(r, name, profileBefore, p.RuntimeProfile)
+	}
 	// Re-push APP_PORT so a freshly bound (or rebound) GitLab remote picks
 	// up the reserved port. Best-effort, no-op without port+remote.
 	s.pushDeployPortVariable(r.Context(), name, p)
 	s.bindDefaultRunner(r.Context(), name, p)
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+// recordRuntimeProfileAudit writes an AuditEvent for a project runtime
+// profile change, storing the declared values ("" means undeclared/unknown,
+// not "base") so the migration history stays truthful.
+func (s *Server) recordRuntimeProfileAudit(r *http.Request, project, before, after string) {
+	actor := "system"
+	if username, _ := r.Context().Value(ctxUserKey).(string); username != "" {
+		actor = username
+	}
+	workspaceID, err := s.currentWorkspaceID()
+	if err != nil {
+		return
+	}
+	_ = s.controlDB.CreateAuditEvent(controldb.AuditEvent{
+		ID:           newAuditID(),
+		WorkspaceID:  workspaceID,
+		ActorType:    "user",
+		ActorID:      actor,
+		Action:       "project.runtime_profile.update",
+		ResourceType: "project",
+		ResourceID:   project,
+		Summary:      "runtime profile changed",
+		BeforeJSON:   auditJSON(map[string]string{"runtimeProfile": before}),
+		AfterJSON:    auditJSON(map[string]string{"runtimeProfile": after}),
+		IP:           requestIP(r),
+		UserAgent:    r.UserAgent(),
+		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+	})
 }
 
 func (s *Server) handleProjectAgents(w http.ResponseWriter, r *http.Request) {
