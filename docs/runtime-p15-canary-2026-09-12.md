@@ -86,7 +86,7 @@ GPT 收口要求：api-key-hub 的 Agent runtime 合约此前为手工播种，�
 - 任务 `t-20260912-5ivqnv`（feature，branchName=feat/p15-standard-init-acceptance）自动创建 git worktree：`workspace/.multigent/worktrees/t-20260912-5ivqnv`，基于 baseCommit 11aaf3f。
 - Agent 沙箱（standard path 物化，非手工）：镜像 `multigent/runtime-jvm21:2026.9.1`，env 含完整 `JAVA_TOOL_OPTIONS` 代理属性，`MULTIGENT_RUN_ID=t-20260912-5ivqnv`。
 - Agent 在 `/workspace` 内看到模板代码，修改 3 个文件（HealthController 注入 ItemRepository、HealthResponse 增 items 字段、HealthControllerTest 补断言），`./gradlew test` → **BUILD SUCCESSFUL**。任务 `done_success`。
-- 缺陷记录（当时归因为环境差异，后定位为平台缺陷并已修复）：agent 的 `HOME=/tmp/multigent-home` 由 root 属主——docker 为 bind mount 自动创建目标路径（含缺失父目录）时一律 `root:root 0755`，而 run-as-host-user 的 precreate 脚本以非 root 运行，`mkdir -p $HOME/.gradle` 静默失败（rc=1），gradle wrapper 无法建 lock file。修复：缓存卷挂载点与环境变量（GOPATH/GOMODCACHE/GOCACHE/npm_config_cache）整体迁出 HOME 至独立的 `/tmp/multigent-cache`（`sandbox.HostUserCacheHome`），HOME 本身不再被任何 mount 目标污染，由 precreate 以容器用户创建。agent 当时自行 `GRADLE_USER_HOME=/tmp/gradle-cache` 绕过属于正确的自救，但根因在平台。
+- 缺陷记录（当时归因为环境差异，后定位为平台缺陷并已修复）：agent 的 `HOME=/tmp/multigent-home` 由 root 属主——docker 为 bind mount 自动创建目标路径（含缺失父目录）时一律 `root:root 0755`，而 run-as-host-user 的 precreate 脚本以非 root 运行，`mkdir -p $HOME/.gradle` 静默失败（rc=1），gradle wrapper 无法建 lock file。修复：缓存卷挂载点与环境变量（GOPATH/GOMODCACHE/GOCACHE/npm_config_cache）整体迁出 HOME 至独立的 `/tmp/multigent-cache`（`sandbox.HostUserCacheHome`），HOME 本身不再被任何 mount 目标污染——不挂载则 docker 不会替 HOME 预创建，目录留给 precreate 以容器用户创建（已实测：干净环境下 `/tmp/multigent-home` 不再被自动创建，cache 挂载顶层与嵌套目录对容器用户可写）。agent 当时自行 `GRADLE_USER_HOME=/tmp/gradle-cache` 绕过属于正确的自救，但根因在平台。
 
 ### 7.4 Preview（gradle 冷启动下限 + jvm21 链路复验）
 
