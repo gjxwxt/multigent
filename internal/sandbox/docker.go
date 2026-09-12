@@ -960,7 +960,8 @@ var runtimeGOOS = runtime.GOOS
 
 // HostUserHome is the container HOME used when the sandbox runs under the
 // host server's uid instead of root. /tmp is world-writable, so the
-// non-root user can create it, and credential mounts are remapped here.
+// non-root user can create it, and no bind mount targets it (credential
+// sessions live under HostUserSessionHome, caches under HostUserCacheHome).
 const HostUserHome = "/tmp/multigent-home"
 
 // HostUserCacheHome holds the named cache-volume mounts for host-user
@@ -971,6 +972,14 @@ const HostUserHome = "/tmp/multigent-home"
 // "Could not create parent directory for lock file". Keeping mounts on a
 // separate top-level /tmp tree leaves HOME owned by the container user.
 const HostUserCacheHome = "/tmp/multigent-cache"
+
+// HostUserSessionHome holds the agent credential/session bind mounts
+// (~/.claude, ~/.codex, ...). Same constraint as HostUserCacheHome: any mount
+// destination under HOME makes Docker pre-create HOME root-owned before the
+// non-root precreate script runs. Tools locate their credentials via
+// remapped env vars; a gradle-style "$HOME/.gradle" then lands in a HOME the
+// container user actually owns.
+const HostUserSessionHome = "/tmp/multigent-session"
 
 // NamedCacheVolumes are the persistent Docker volumes holding the agent CLI
 // toolchain and build caches. Docker initializes them with root-owned
@@ -1005,20 +1014,24 @@ func RunAsHostUser(cfg *entity.DockerSandboxConfig) bool {
 }
 
 // hostUserContainerPath remaps a container path pinned under /root to the
-// writable host-user HOME.
+// host-user session tree. HOME itself stays mount-free (see
+// HostUserSessionHome): only tool-specific subpaths move, and they move OUT of
+// HOME so no mount destination can force a root-owned HOME.
 func hostUserContainerPath(p string) string {
 	if p == "/root" {
-		return HostUserHome
+		return HostUserSessionHome
 	}
 	if strings.HasPrefix(p, "/root/") {
-		return HostUserHome + strings.TrimPrefix(p, "/root")
+		return HostUserSessionHome + strings.TrimPrefix(p, "/root")
 	}
 	return p
 }
 
 // remapHostUserMount rewrites the container side of a "host:container[:mode]"
 // mount when the sandbox runs as the host user: credential sessions and
-// caches default to /root paths the non-root user cannot traverse.
+// caches default to /root paths the non-root user cannot traverse. Destinations
+// land under HostUserSessionHome — never under HOME, so Docker's destination
+// auto-creation cannot pre-create a root-owned HOME.
 func remapHostUserMount(vol string, hostUser bool) string {
 	if !hostUser {
 		return vol
@@ -1059,10 +1072,12 @@ func hostUserEnvOverrides() []string {
 }
 
 // hostUserPrecreateScript returns the shell snippet that creates the
-// host-user HOME and cache directories before the wrapped command runs.
+// host-user HOME, session tree, and cache directories before the wrapped
+// command runs.
 func hostUserPrecreateScript() string {
 	return "mkdir -p " + shellQuoteJoin([]string{
 		HostUserHome,
+		HostUserSessionHome,
 		HostUserCacheHome + "/go/pkg/mod",
 		HostUserCacheHome + "/go-build",
 		HostUserCacheHome + "/npm",

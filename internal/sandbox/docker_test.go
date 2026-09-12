@@ -357,8 +357,13 @@ func TestBuildArgsRunAsHostUser(t *testing.T) {
 		if strings.Contains(joined, ":/root/.claude") {
 			t.Fatalf("credential mount not remapped away from /root: %s", joined)
 		}
-		if !strings.Contains(joined, HostUserHome+"/.claude") {
-			t.Fatalf("expected remapped credential mount under %s: %s", HostUserHome, joined)
+		// Credential mounts must land in the session tree, NOT under HOME: any
+		// mount destination below HOME makes docker pre-create HOME root-owned.
+		if strings.Contains(joined, HostUserHome+"/.") {
+			t.Fatalf("credential mount must not target HOME (%s): %s", HostUserHome, joined)
+		}
+		if !strings.Contains(joined, HostUserSessionHome+"/.claude") {
+			t.Fatalf("expected remapped credential mount under %s: %s", HostUserSessionHome, joined)
 		}
 	})
 	t.Run("explicit disable", func(t *testing.T) {
@@ -379,10 +384,10 @@ func TestBuildArgsRunAsHostUser(t *testing.T) {
 }
 
 func TestRemapHostUserMount(t *testing.T) {
-	if got := remapHostUserMount("/host/.codex:/root/.codex", true); got != "/host/.codex:"+HostUserHome+"/.codex" {
+	if got := remapHostUserMount("/host/.codex:/root/.codex", true); got != "/host/.codex:"+HostUserSessionHome+"/.codex" {
 		t.Fatalf("codex mount = %q", got)
 	}
-	if got := remapHostUserMount("/host/x:/root/.claude:ro", true); got != "/host/x:"+HostUserHome+"/.claude:ro" {
+	if got := remapHostUserMount("/host/x:/root/.claude:ro", true); got != "/host/x:"+HostUserSessionHome+"/.claude:ro" {
 		t.Fatalf("mode-preserving remap = %q", got)
 	}
 	if got := remapHostUserMount("/host/x:/notroot", true); got != "/host/x:/notroot" {

@@ -275,18 +275,45 @@ func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktree
 			backendHealthPath = runtimeSpec.Backend.HealthPath
 		}
 		installCmd := frontendInstallCommand(worktreeDir, runtimeSpec.Frontend)
-		if installCmd != "" {
-			// A cold worktree has no node_modules (gitignored), so the dev
-			// server would die instantly and take the whole container down.
-			// The install must complete BEFORE any service starts: the service
-			// chain backgrounded with "&" would otherwise race the install
-			// ("install && A & B" backgrounds {install && A} and runs B
-			// immediately, so vite can be missing when the dev server starts).
-			// Braces keep install in the foreground of the whole chain.
-			command = "{ " + strings.TrimSuffix(strings.TrimSuffix(installCmd, " "), "&&") + " ; } && { " + command + " ; }"
+		if readOnly {
+			// Snapshot worktrees mount :ro, so nothing may write under
+			// /workspace: vite's ESM config loader writes a timestamped .mjs
+			// beside vite.config.ts and dies with EROFS long before any
+			// service could start (p15 canary §9). Copy each declared service
+			// directory into writable staging and run the staged spec instead.
+			stagingPrefix := stageReadOnlyServicesPrefix(runtimeSpec)
+			runtimeSpec = readOnlyStagedRuntimeSpec(runtimeSpec)
+			command, contractHealthPath, contractTimeout, contractErr = runtimeSpec.StartupCommand(projType, port)
+			if contractErr != nil {
+				instance.Status = "error"
+				instance.Error = contractErr.Error()
+				return instance, contractErr
+			}
+			// Compose AFTER the staged StartupCommand: assigning command here
+			// replaces the contract's command entirely, so a prefix attached
+			// earlier would be silently discarded (first live run shipped the
+			// staged cd targets without the staging copies and died on cd).
+			if stagingPrefix != "" {
+				command = "{ " + strings.TrimSuffix(strings.TrimSuffix(stagingPrefix, " "), "&&") + " ; } && { " + command + " ; }"
+			}
+			healthPath = contractHealthPath
+			startupTimeout = resolvePreviewStartupTimeout(runtimeSpec, contractTimeout, installCmd != "")
+			runCmd = []string{"sh", "-c", setupEnv + command}
+		} else {
+			if installCmd != "" {
+				// A cold worktree has no node_modules (gitignored), so the dev
+				// server would die instantly and take the whole container
+				// down. The install must complete BEFORE any service starts:
+				// the service chain backgrounded with "&" would otherwise race
+				// the install ("install && A & B" backgrounds {install && A}
+				// and runs B immediately, so vite can be missing when the dev
+				// server starts). Braces keep install in the foreground of the
+				// whole chain.
+				command = "{ " + strings.TrimSuffix(strings.TrimSuffix(installCmd, " "), "&&") + " ; } && { " + command + " ; }"
+			}
+			startupTimeout = resolvePreviewStartupTimeout(runtimeSpec, contractTimeout, installCmd != "")
+			runCmd = []string{"sh", "-c", setupEnv + command}
 		}
-		startupTimeout = resolvePreviewStartupTimeout(runtimeSpec, contractTimeout, installCmd != "")
-		runCmd = []string{"sh", "-c", setupEnv + command}
 	} else {
 		switch projType {
 		case ProjectTypeFullstack:
@@ -318,36 +345,17 @@ func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktree
 		}
 	}
 
-	dockerArgs := []string{
-		"run", "-d",
-		"--name", containerName,
-		"-p", fmt.Sprintf("127.0.0.1:%d:%d", port, port),
-		"--label", "com.multigent.preview=true",
-		"--label", "com.multigent.preview.project=" + projectName,
-		"--label", "com.multigent.preview.task=" + taskID,
-		"--label", "com.multigent.preview.type=" + string(projType),
-		"--label", "com.multigent.preview.worktree=" + worktreeDir,
-		"--label", "com.multigent.preview.port=" + strconv.Itoa(port),
-		"--label", "com.multigent.preview.started_at=" + instance.StartedAt.Format(time.RFC3339),
-		"--label", "com.multigent.preview.expires_at=" + instance.ExpiresAt.Format(time.RFC3339),
-		"--label", "com.multigent.preview.read_only=" + strconv.FormatBool(readOnly),
-		"-v", previewWorktreeMount(worktreeDir, readOnly),
-		"-v", "multigent-toolchains:/opt/multigent/toolchains",
-		// Cache volumes live under /tmp/multigent-cache, matching the agent
-		// sandbox destinations so both paths share one warm cache (previews
-		// run as root here, so ownership is not a concern on this side).
-		"-v", "multigent-npm-cache:" + sandbox.HostUserCacheHome + "/npm",
-		"-v", "multigent-go-cache:" + sandbox.HostUserCacheHome + "/go/pkg/mod",
-		"-v", "multigent-go-build-cache:" + sandbox.HostUserCacheHome + "/go-build",
-		// Note: a shared gradle cache volume is intentionally NOT mounted here
-		// yet (experimental P2): the agent side runs as the host user while
-		// previews run as root, so one shared volume would fight over
-		// ownership. See docs/intranet-runtime-plan.md.
-		"-w", "/workspace",
-		"-e", fmt.Sprintf("PORT=%d", port),
-		"-e", "GOFLAGS=-buildvcs=false",
-		"-e", "NPM_CONFIG_PREFIX=/opt/multigent/toolchains/npm",
-	}
+	dockerArgs := previewDockerBaseArgs(previewDockerBaseArgsInput{
+		ContainerName: containerName,
+		Port:          port,
+		ProjectName:   projectName,
+		TaskID:        taskID,
+		ProjectType:   string(projType),
+		WorktreeDir:   worktreeDir,
+		StartedAt:     instance.StartedAt,
+		ExpiresAt:     instance.ExpiresAt,
+		ReadOnly:      readOnly,
+	})
 	dockerArgs = append(dockerArgs, e.profilePreviewEnv(runtime)...)
 	dockerArgs = append(dockerArgs, sandbox.TransportDockerArgs()...)
 	// Linked worktrees record their parent gitdir as an absolute host path;
@@ -412,6 +420,83 @@ func frontendInstallCommand(worktreeDir string, frontend *RuntimeServiceSpec) st
 		return ""
 	}
 	return "(cd " + shellQuote(dir) + " && npm install --no-audit --no-fund) && "
+}
+
+const previewStagingRoot = "/tmp/multigent-preview-stage"
+
+// stagedServicePath maps one service role+directory to its writable staging
+// copy under /tmp. Nested directories flatten ("apps/web" ->
+// "frontend-apps-web") so every service stays inside the staging root even
+// before contract validation would reject an escape.
+func stagedServicePath(role, directory string) string {
+	dir := strings.TrimSpace(directory)
+	if dir == "" || dir == "." {
+		dir = role
+	}
+	dir = strings.Trim(filepath.ToSlash(filepath.Clean("/"+dir)), "/")
+	flat := strings.ReplaceAll(dir, "/", "-")
+	return filepath.Join(previewStagingRoot, role+"-"+flat)
+}
+
+// readOnlyStagedRuntimeSpec returns a copy of the contract whose service
+// directories point at writable staging copies instead of the :ro /workspace
+// mount. Health paths and ports are untouched — only the filesystem location
+// the commands run from changes. Pure function: testable against the exact
+// spec instance startPreview hands to StartupCommand.
+func readOnlyStagedRuntimeSpec(spec *RuntimeSpec) *RuntimeSpec {
+	if spec == nil {
+		return nil
+	}
+	staged := *spec
+	if spec.Backend != nil {
+		backend := *spec.Backend
+		backend.Directory = stagedServicePath("backend", spec.Backend.Directory)
+		staged.Backend = &backend
+	}
+	if spec.Frontend != nil {
+		frontend := *spec.Frontend
+		frontend.Directory = stagedServicePath("frontend", spec.Frontend.Directory)
+		staged.Frontend = &frontend
+	}
+	return &staged
+}
+
+// stageReadOnlyServicesPrefix returns a shell prefix (same "… && " contract as
+// frontendInstallCommand) that copies each declared service directory from the
+// read-only mount into its writable staging copy, then installs frontend
+// dependencies there. rm+mkdir+cp -a so reruns start clean and dotfiles
+// survive the copy. Returns "" for nil specs — every declared service is
+// staged, so a spec with no services never needs a prefix.
+func stageReadOnlyServicesPrefix(spec *RuntimeSpec) string {
+	if spec == nil {
+		return ""
+	}
+	var steps []string
+	stage := func(role string, service *RuntimeServiceSpec) {
+		if service == nil {
+			return
+		}
+		src := filepath.ToSlash(filepath.Join("/workspace", service.Directory))
+		dst := stagedServicePath(role, service.Directory)
+		steps = append(steps,
+			"rm -rf "+shellQuote(dst)+" && mkdir -p "+shellQuote(dst)+
+				" && cp -a "+shellQuote(src+"/.")+" "+shellQuote(dst+"/"),
+		)
+	}
+	stage("backend", spec.Backend)
+	stage("frontend", spec.Frontend)
+	if len(steps) == 0 {
+		return ""
+	}
+	// The staged copy never carries node_modules (gitignored, absent from
+	// snapshots), so the frontend must reinstall there before any service
+	// starts — same foreground-install reasoning as the writable path.
+	if spec.Frontend != nil {
+		steps = append(steps,
+			"(cd "+shellQuote(stagedServicePath("frontend", spec.Frontend.Directory))+
+				" && npm install --no-audit --no-fund)")
+	}
+	return strings.Join(steps, " && ") + " && "
 }
 
 // resolvePreviewStartupTimeout computes the readiness-wait budget for one
@@ -703,4 +788,59 @@ func (e *Engine) profilePreviewEnv(runtime RuntimeSelection) []string {
 		env = append(env, sandbox.ProfileDockerArgs(&entity.DockerSandboxConfig{Profile: runtime.Profile})...)
 	}
 	return env
+}
+
+// previewDockerBaseArgsInput carries the variable parts of a preview
+// container's docker arguments so the arg construction stays a pure,
+// unit-testable function.
+type previewDockerBaseArgsInput struct {
+	ContainerName string
+	Port          int
+	ProjectName   string
+	TaskID        string
+	ProjectType   string
+	WorktreeDir   string
+	StartedAt     time.Time
+	ExpiresAt     time.Time
+	ReadOnly      bool
+}
+
+// previewDockerBaseArgs builds the base docker arguments for a preview
+// container. Cache volumes live under /tmp/multigent-cache, matching the
+// agent sandbox destinations so both paths share one warm cache. The env vars
+// alongside them point the toolchains at those destinations — without them
+// the mounted volumes would sit unused (p15 canary §9). Previews run as
+// root, so ownership is not a concern on this side.
+func previewDockerBaseArgs(in previewDockerBaseArgsInput) []string {
+	return []string{
+		"run", "-d",
+		"--name", in.ContainerName,
+		"-p", fmt.Sprintf("127.0.0.1:%d:%d", in.Port, in.Port),
+		"--label", "com.multigent.preview=true",
+		"--label", "com.multigent.preview.project=" + in.ProjectName,
+		"--label", "com.multigent.preview.task=" + in.TaskID,
+		"--label", "com.multigent.preview.type=" + in.ProjectType,
+		"--label", "com.multigent.preview.worktree=" + in.WorktreeDir,
+		"--label", "com.multigent.preview.port=" + strconv.Itoa(in.Port),
+		"--label", "com.multigent.preview.started_at=" + in.StartedAt.Format(time.RFC3339),
+		"--label", "com.multigent.preview.expires_at=" + in.ExpiresAt.Format(time.RFC3339),
+		"--label", "com.multigent.preview.read_only=" + strconv.FormatBool(in.ReadOnly),
+		"-v", previewWorktreeMount(in.WorktreeDir, in.ReadOnly),
+		"-v", "multigent-toolchains:/opt/multigent/toolchains",
+		"-v", "multigent-npm-cache:" + sandbox.HostUserCacheHome + "/npm",
+		"-v", "multigent-go-cache:" + sandbox.HostUserCacheHome + "/go/pkg/mod",
+		"-v", "multigent-go-build-cache:" + sandbox.HostUserCacheHome + "/go-build",
+		"-e", "npm_config_cache=" + sandbox.HostUserCacheHome + "/npm",
+		"-e", "GOPATH=" + sandbox.HostUserCacheHome + "/go",
+		"-e", "GOMODCACHE=" + sandbox.HostUserCacheHome + "/go/pkg/mod",
+		"-e", "GOCACHE=" + sandbox.HostUserCacheHome + "/go-build",
+		// Note: a shared gradle cache volume is intentionally NOT mounted here
+		// yet (experimental P2): the agent side runs as the host user while
+		// previews run as root, so one shared volume would fight over
+		// ownership. See docs/intranet-runtime-plan.md.
+		"-w", "/workspace",
+		"-e", fmt.Sprintf("PORT=%d", in.Port),
+		"-e", "GOFLAGS=-buildvcs=false",
+		"-e", "NPM_CONFIG_PREFIX=/opt/multigent/toolchains/npm",
+	}
 }
