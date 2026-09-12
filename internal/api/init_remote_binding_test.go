@@ -106,8 +106,9 @@ func TestAdoptRemoteAfterSyncBindsRunner(t *testing.T) {
 	repoDir := filepath.Join(t.TempDir(), "workspace")
 	seedOriginRepo(t, repoDir, gitlab.URL+"/root/p15-init-spring-v2.git")
 	if err := s.st.SaveProject("p15-init-spring-v2", &entity.Project{
-		Name: "p15-init-spring-v2",
-		Repo: repoDir,
+		Name:     "p15-init-spring-v2",
+		Repo:     repoDir,
+		CloneURL: gitlab.URL + "/root/p15-init-spring-v2.git", // platform create-repo record
 	}); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
@@ -151,7 +152,11 @@ func TestAdoptRemoteIfNeededAfterStepFiresForPendingTask(t *testing.T) {
 
 	repoDir := filepath.Join(t.TempDir(), "workspace")
 	seedOriginRepo(t, repoDir, gitlab.URL+"/root/mid-step.git")
-	if err := s.st.SaveProject("proj", &entity.Project{Name: "proj", Repo: repoDir}); err != nil {
+	if err := s.st.SaveProject("proj", &entity.Project{
+		Name:     "proj",
+		Repo:     repoDir,
+		CloneURL: gitlab.URL + "/root/mid-step.git", // platform create-repo record
+	}); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
 
@@ -249,6 +254,134 @@ func TestAdoptRemoteAfterSyncIgnoresForeignOrigin(t *testing.T) {
 	p, _ := s.st.Project("proj")
 	if p.RemoteProjectID != "" {
 		t.Fatalf("foreign origin must not be adopted, got %q", p.RemoteProjectID)
+	}
+	if len(runnerBinds) != 0 {
+		t.Fatalf("unexpected runner binds: %v", runnerBinds)
+	}
+}
+
+// Regression (P0, review 2026-09-14): the worktree origin is agent-writable.
+// An origin pointing at ANOTHER repository on the SAME pinned GitLab must not
+// be adopted — otherwise the agent could steer RemoteProjectID (and with it
+// the default runner binding) at a repo it does not own. Adoption requires a
+// platform-recorded remote identity (CloneURL), not just same-host.
+func TestAdoptRemoteAfterSyncRejectsSameHostForeignRepo(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+
+	var runnerBinds []string
+	gitlab := fakeGitLabProjectServer(t, "victims/secret-repo", &runnerBinds)
+	defer gitlab.Close()
+	seedGitLabConnection(t, s, workspaceID, "conn-gitlab", gitlab.URL)
+
+	repoDir := filepath.Join(t.TempDir(), "workspace")
+	seedOriginRepo(t, repoDir, gitlab.URL+"/victims/secret-repo.git")
+	if err := s.st.SaveProject("proj", &entity.Project{Name: "proj", Repo: repoDir}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+
+	task := &entity.Task{ID: "t-init", Status: entity.TaskStatusDoneSuccess, WorktreeDir: repoDir}
+	s.adoptRemoteAfterSync(context.Background(), "proj", task)
+
+	p, _ := s.st.Project("proj")
+	if p.RemoteProjectID != "" {
+		t.Fatalf("same-host foreign repo must not be adopted, got %q", p.RemoteProjectID)
+	}
+	if len(runnerBinds) != 0 {
+		t.Fatalf("runner must not bind to agent-chosen repo, got %v", runnerBinds)
+	}
+}
+
+// A stale agent-controlled RemoteURL must not authorize either: the standard
+// init PUT carries remote metadata from the client, so a value merely echoing
+// the agent's chosen origin would make the agent its own adoption authority.
+// Only CloneURL — the platform create-repo flow's API-response record —
+// authorizes.
+func TestAdoptRemoteAfterSyncCloneURLAuthorizes(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+
+	var runnerBinds []string
+	gitlab := fakeGitLabProjectServer(t, "gao/my-repo", &runnerBinds)
+	defer gitlab.Close()
+	seedGitLabConnection(t, s, workspaceID, "conn-gitlab", gitlab.URL)
+
+	repoDir := filepath.Join(t.TempDir(), "workspace")
+	seedOriginRepo(t, repoDir, gitlab.URL+"/gao/my-repo.git")
+	if err := s.st.SaveProject("proj", &entity.Project{
+		Name:      "proj",
+		Repo:      repoDir,
+		CloneURL:  gitlab.URL + "/gao/my-repo.git",
+		RemoteURL: gitlab.URL + "/gao/other-repo", // stale/echoed value must NOT authorize
+	}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+
+	task := &entity.Task{ID: "t-init", Status: entity.TaskStatusDoneSuccess, WorktreeDir: repoDir}
+	t.Setenv("MULTIGENT_GITLAB_RUNNER_ID", "7")
+	s.adoptRemoteAfterSync(context.Background(), "proj", task)
+
+	p, err := s.st.Project("proj")
+	if err != nil {
+		t.Fatalf("reload project: %v", err)
+	}
+	if p.RemoteProjectID != "58" {
+		t.Fatalf("platform-recorded CloneURL must authorize adoption, got RemoteProjectID=%q", p.RemoteProjectID)
+	}
+	if len(runnerBinds) != 1 {
+		t.Fatalf("runner binds = %v, want 1", runnerBinds)
+	}
+}
+
+// The operator allowlist env is the second authorized path: origins inside an
+// explicitly trusted namespace may be adopted even without a CloneURL record.
+func TestAdoptRemoteAfterSyncAllowlistedNamespaceAuthorizes(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	t.Setenv(originAdoptAuthorizedNamespaceEnv, "platform/sandbox,others")
+
+	var runnerBinds []string
+	gitlab := fakeGitLabProjectServer(t, "platform/sandbox/init-repo", &runnerBinds)
+	defer gitlab.Close()
+	seedGitLabConnection(t, s, workspaceID, "conn-gitlab", gitlab.URL)
+
+	repoDir := filepath.Join(t.TempDir(), "workspace")
+	seedOriginRepo(t, repoDir, gitlab.URL+"/platform/sandbox/init-repo.git")
+	if err := s.st.SaveProject("proj", &entity.Project{Name: "proj", Repo: repoDir}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+
+	task := &entity.Task{ID: "t-init", Status: entity.TaskStatusDoneSuccess, WorktreeDir: repoDir}
+	t.Setenv("MULTIGENT_GITLAB_RUNNER_ID", "7")
+	s.adoptRemoteAfterSync(context.Background(), "proj", task)
+
+	p, _ := s.st.Project("proj")
+	if p.RemoteProjectID != "58" {
+		t.Fatalf("allowlisted namespace must adopt, got RemoteProjectID=%q", p.RemoteProjectID)
+	}
+}
+
+// Allowlist matching is prefix-on-path-segment: "platform" must not match
+// "platform-evil/...", and a same-host repo outside the allowlist stays
+// rejected.
+func TestAdoptRemoteAfterSyncAllowlistPrefixIsSegmentExact(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	t.Setenv(originAdoptAuthorizedNamespaceEnv, "platform")
+
+	var runnerBinds []string
+	gitlab := fakeGitLabProjectServer(t, "platform-evil/repo", &runnerBinds)
+	defer gitlab.Close()
+	seedGitLabConnection(t, s, workspaceID, "conn-gitlab", gitlab.URL)
+
+	repoDir := filepath.Join(t.TempDir(), "workspace")
+	seedOriginRepo(t, repoDir, gitlab.URL+"/platform-evil/repo.git")
+	if err := s.st.SaveProject("proj", &entity.Project{Name: "proj", Repo: repoDir}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+
+	task := &entity.Task{ID: "t-init", Status: entity.TaskStatusDoneSuccess, WorktreeDir: repoDir}
+	s.adoptRemoteAfterSync(context.Background(), "proj", task)
+
+	p, _ := s.st.Project("proj")
+	if p.RemoteProjectID != "" {
+		t.Fatalf("namespace prefix must match on segment boundary, got %q", p.RemoteProjectID)
 	}
 	if len(runnerBinds) != 0 {
 		t.Fatalf("unexpected runner binds: %v", runnerBinds)

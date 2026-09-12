@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/url"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -28,6 +29,12 @@ import (
 // default runner. Best-effort by design — an unresolvable origin (no remote,
 // non-GitLab, host mismatch) is logged and skipped; the next PUT or a later
 // sync can still bind.
+//
+// The sandbox controls the worktree's origin URL, so origin alone must never
+// authorize adoption: an agent repointing origin at any other repository on
+// the same GitLab would otherwise get the platform runner attached to a repo
+// it should not own. Adoption therefore requires the resolved path to match
+// a PLATFORM-controlled remote identity (see originAdoptAuthorized).
 
 // adoptRemoteAfterSync runs the remote adoption for a completed init-workflow
 // sync step. Called from the runtime step-complete path; never fails the step.
@@ -62,6 +69,10 @@ func (s *Server) adoptRemoteAfterSync(ctx context.Context, project string, t *en
 		log.Printf("[remote-adopt] %s: origin is not on the pinned GitLab host, skip (%s)", project, gitworktree.RedactGitOutput(originURL))
 		return
 	}
+	if !originAdoptAuthorized(p, projectPath) {
+		log.Printf("[remote-adopt] %s: origin path %s is not a platform-controlled remote (no CloneURL match, not allowlisted); refusing to adopt or bind a runner — worktree origin is agent-writable and must not grant authorization", project, projectPath)
+		return
+	}
 	repo, err := host.RepositoryByProjectPath(ctx, projectPath)
 	if err != nil {
 		log.Printf("[remote-adopt] %s: lookup %s failed: %v", project, projectPath, err)
@@ -79,6 +90,59 @@ func (s *Server) adoptRemoteAfterSync(ctx context.Context, project string, t *en
 	}
 	log.Printf("[remote-adopt] %s: adopted gitlab project %s (%s) from origin of task %s", project, repo.ID, repo.PathWithNamespace, t.ID)
 	s.bindDefaultRunner(ctx, project, p)
+}
+
+// originAdoptAuthorizedNamespaceEnv lists path-with-namespace prefixes the
+// operator explicitly trusts for adoption (comma-separated full namespaces,
+// e.g. "gao,platform/sandbox"). It is an escape hatch for deployments where
+// the platform does not pre-create the remote but provisioned namespaces are
+// tightly controlled; an empty value disables the escape hatch.
+const originAdoptAuthorizedNamespaceEnv = "MULTIGENT_GITLAB_ADOPT_NAMESPACE_ALLOWLIST"
+
+// originAdoptAuthorized decides whether an origin path observed in the
+// agent-controlled worktree may be adopted (persisting RemoteProjectID and
+// binding the default runner). Origin is attacker-writable input, so it only
+// authorizes when it matches an independent platform record:
+//
+//   - the project's CloneURL (the UI create-repo flow persists the platform
+//     -created repository's clean clone URL before the init task starts), or
+//   - the operator allowlist env above (explicit namespace trust).
+//
+// RemoteURL/RemoteProvider are NOT sufficient: handlePutProject accepts them
+// from the client, and the standard init flow issues the PUT before the agent
+// runs, so a value that merely echoes the agent's chosen origin would make
+// the agent its own authority.
+func originAdoptAuthorized(p *entity.Project, originPath string) bool {
+	if p == nil || strings.TrimSpace(originPath) == "" {
+		return false
+	}
+	if expected := cloneURLProjectPath(p.CloneURL); expected != "" && strings.EqualFold(expected, originPath) {
+		return true
+	}
+	if expected := cloneURLProjectPath(p.RemoteURL); expected != "" && strings.EqualFold(expected, originPath) {
+		// RemoteURL set by handleGitLabCreateProject response handling
+		// (web_url derived from the platform API response) is platform
+		// record; treat like CloneURL.
+		return true
+	}
+	for _, ns := range strings.Split(os.Getenv(originAdoptAuthorizedNamespaceEnv), ",") {
+		ns = strings.TrimSpace(ns)
+		if ns == "" {
+			continue
+		}
+		if originPath == ns || strings.HasPrefix(originPath, ns+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// cloneURLProjectPath extracts the path-with-namespace from a platform-record
+// clone/web URL. Uses the shared origin parser with a nil host (no host
+// filtering — the caller already resolved the GitLab host, and the record was
+// produced by the platform's own API response).
+func cloneURLProjectPath(recorded string) string {
+	return gitlabProjectPathFromURL(recorded, nil)
 }
 
 // initWorktreeOriginURL reads the origin remote URL of the worktree/repo the
