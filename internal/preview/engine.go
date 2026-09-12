@@ -333,9 +333,12 @@ func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktree
 		"--label", "com.multigent.preview.read_only=" + strconv.FormatBool(readOnly),
 		"-v", previewWorktreeMount(worktreeDir, readOnly),
 		"-v", "multigent-toolchains:/opt/multigent/toolchains",
-		"-v", "multigent-npm-cache:/root/.npm",
-		"-v", "multigent-go-cache:/root/go/pkg/mod",
-		"-v", "multigent-go-build-cache:/root/.cache/go-build",
+		// Cache volumes live under /tmp/multigent-cache, matching the agent
+		// sandbox destinations so both paths share one warm cache (previews
+		// run as root here, so ownership is not a concern on this side).
+		"-v", "multigent-npm-cache:" + sandbox.HostUserCacheHome + "/npm",
+		"-v", "multigent-go-cache:" + sandbox.HostUserCacheHome + "/go/pkg/mod",
+		"-v", "multigent-go-build-cache:" + sandbox.HostUserCacheHome + "/go-build",
 		// Note: a shared gradle cache volume is intentionally NOT mounted here
 		// yet (experimental P2): the agent side runs as the host user while
 		// previews run as root, so one shared volume would fight over

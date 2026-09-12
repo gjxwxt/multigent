@@ -179,6 +179,61 @@ func TestPutProjectRuntimeProfileEmptyStringClearsDeclaration(t *testing.T) {
 	}
 }
 
+// A profile-only PUT must not destroy other project fields: initialize-template
+// persists Repo (and operators set descriptions), and the P1.5 inventory
+// backfill writes just runtimeProfile. Omitting repo/description in the body
+// must preserve the stored values; an explicit "" still clears them.
+func TestPutProjectProfileOnlyPreservesRepoAndDescription(t *testing.T) {
+	s, _ := newRuntimeProfileServer(t)
+	if err := s.st.SaveProject("bound", &entity.Project{
+		Name:        "bound",
+		Description: "original description",
+		Repo:        "/srv/projects/bound/workspace",
+	}); err != nil {
+		t.Fatalf("seed bound project: %v", err)
+	}
+
+	put := func(body map[string]any) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := providerTestRequest(http.MethodPut, "/api/v1/projects/bound", "admin", body)
+		req.SetPathValue("name", "bound")
+		s.handlePutProject(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("put status=%d body=%s", rec.Code, rec.Body.String())
+		}
+	}
+	stored := func() *entity.Project {
+		t.Helper()
+		p, err := s.st.Project("bound")
+		if err != nil {
+			t.Fatalf("reload project: %v", err)
+		}
+		return p
+	}
+
+	put(map[string]any{"runtimeProfile": "jvm21"})
+	p := stored()
+	if p.Repo != "/srv/projects/bound/workspace" {
+		t.Fatalf("profile-only PUT wiped repo: %q", p.Repo)
+	}
+	if p.Description != "original description" {
+		t.Fatalf("profile-only PUT wiped description: %q", p.Description)
+	}
+	if p.RuntimeProfile != "jvm21" {
+		t.Fatalf("profile must persist, got %q", p.RuntimeProfile)
+	}
+
+	put(map[string]any{"description": "", "repo": ""})
+	p = stored()
+	if p.Repo != "" || p.Description != "" {
+		t.Fatalf("explicit empty must clear: repo=%q desc=%q", p.Repo, p.Description)
+	}
+	if p.RuntimeProfile != "jvm21" {
+		t.Fatalf("clearing unrelated fields must not touch the profile, got %q", p.RuntimeProfile)
+	}
+}
+
 func TestPutProjectSetsRuntimeProfile(t *testing.T) {
 	s, _ := newRuntimeProfileServer(t)
 

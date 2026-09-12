@@ -79,14 +79,14 @@ GPT 收口要求：api-key-hub 的 Agent runtime 合约此前为手工播种，�
 
 - **ready**：`make install` + `make verify`（前端构建、后端单测）全部通过，`mga task step done` 上报 completed。
 - **sync**：`git init -b main` + 预提交密钥扫描 + commit `11aaf3f chore: initialize project` + 推送 GitLab `root/p15-init-spring`（默认分支 main，本地 HEAD = origin/main）。
-- **ci_ready**：`mga ci ready --wait 300` → **13/13 checks pass，overall=ready，EXIT=0**。首轮曾因 Multigent 项目记录 `repo` 为空（初始化工作流未回写项目记录，工作流输入 `initialization_request` 亦为空）返回 400 "project has no repository path"；PUT repo=workspace 路径绑定后闸门全绿。注意 agent 把"GitLab 级流水线证据被跳过（remote 未在 Multigent 侧绑定）"如实上报为 step failed——闸门本身判定 ready，是上报口径偏保守，不构成平台缺陷；流水线证据属 ci_ready 语义的可选段。
+- **ci_ready**：`mga ci ready --wait 300` → **13/13 checks pass，overall=ready，EXIT=0**。首轮曾返回 400 "project has no repository path"，**根因不是初始化工作流漏回写**——`initialize-template` 本身就落 `project.Repo`（`internal/api/project_template_handlers.go:193`）；真因是 `handlePutProject` 无条件 `p.Repo = body.Repo`，验收过程中一次仅带 `runtimeProfile` 的 PUT 把已绑定的 repo 清空了（`internal/api/server.go`）。该数据丢失缺陷已定位并修复（PUT 改 presence-aware：省略 repo/description 保留，显式空才清除；回归测试 `TestPutProjectProfileOnlyPreservesRepoAndDescription`）。另：agent 把"GitLab 级流水线证据被跳过（remote 未在 Multigent 侧绑定）"如实上报为 step failed——闸门本身判定 ready，是上报口径偏保守，不构成平台缺陷。
 
 ### 7.3 真实任务运行（worktree 全链路）
 
 - 任务 `t-20260912-5ivqnv`（feature，branchName=feat/p15-standard-init-acceptance）自动创建 git worktree：`workspace/.multigent/worktrees/t-20260912-5ivqnv`，基于 baseCommit 11aaf3f。
 - Agent 沙箱（standard path 物化，非手工）：镜像 `multigent/runtime-jvm21:2026.9.1`，env 含完整 `JAVA_TOOL_OPTIONS` 代理属性，`MULTIGENT_RUN_ID=t-20260912-5ivqnv`。
 - Agent 在 `/workspace` 内看到模板代码，修改 3 个文件（HealthController 注入 ItemRepository、HealthResponse 增 items 字段、HealthControllerTest 补断言），`./gradlew test` → **BUILD SUCCESSFUL**。任务 `done_success`。
-- 注意：agent 需 `GRADLE_USER_HOME=/tmp/gradle-cache` 规避 `/tmp/multigent-home` root 属主问题（运行时环境变量，未改项目文件）——P2 缓存治理时一并收敛。
+- 缺陷记录（当时归因为环境差异，后定位为平台缺陷并已修复）：agent 的 `HOME=/tmp/multigent-home` 由 root 属主——docker 为 bind mount 自动创建目标路径（含缺失父目录）时一律 `root:root 0755`，而 run-as-host-user 的 precreate 脚本以非 root 运行，`mkdir -p $HOME/.gradle` 静默失败（rc=1），gradle wrapper 无法建 lock file。修复：缓存卷挂载点与环境变量（GOPATH/GOMODCACHE/GOCACHE/npm_config_cache）整体迁出 HOME 至独立的 `/tmp/multigent-cache`（`sandbox.HostUserCacheHome`），HOME 本身不再被任何 mount 目标污染，由 precreate 以容器用户创建。agent 当时自行 `GRADLE_USER_HOME=/tmp/gradle-cache` 绕过属于正确的自救，但根因在平台。
 
 ### 7.4 Preview（gradle 冷启动下限 + jvm21 链路复验）
 
@@ -101,6 +101,53 @@ GPT 收口要求：api-key-hub 的 Agent runtime 合约此前为手工播种，�
 | 后端健康 | `GET /api/health?pvt=…` → 200 `{"status":"UP",...,"items":1}`（新字段经标准路径任务真实生效）✓ |
 | 前端代理 | `GET /?pvt=…` → 200 ✓ |
 
-### 7.5 结论
+### 7.5 结论与复核修正
 
-GPT 收口条件满足：**标准初始化工作流 → Agent 目录物化 → 真实任务 → Preview** 全链路在零手工播种下成立；jvm21 声明（模板自动落库）贯穿 agent 沙箱与 Preview 两条执行路径。清理：preview 容器已移除；p15-init-spring 项目与两个任务记录保留作证据。遗留同第 6 节：Gradle 缓存 P2；初始化工作流未回写项目 `repo` 字段（sync 步骤只做 git+远端，项目记录绑定需平台侧补一步——已在 7.2 记录，作为初始化工作流的小缺口待后续提交修复）。
+主链路（模板初始化 → 初始化工作流 → worktree 任务 → gradle test → Preview）全部跑通且有证据，但**"零人工补救的标准闭环"结论在首轮复核中被推翻**，两项平台缺陷在验收过程中被带出并已修复：
+
+1. **PUT 数据丢失缺陷（P1）**：`handlePutProject` 原实现无条件覆写 `Repo`/`Description`，仅带 `runtimeProfile` 的 PUT 会清空模板初始化落下的 repo 绑定——这正是 ci_ready 首轮 400 的真因（不是初始化工作流漏回写；`initialize-template` 本就保存 repo）。附带发现存量影响面：api-key-hub、todo-api 等项目的 `repo` 字段同被此缺陷清空（代码与合约文件无损，仅记录字段）。修复：presence-aware PUT + 回归测试。
+2. **HOME 属主缺陷（P1 可用性）**：缓存卷挂载目标在 HOME 之下，docker 自动创建父目录为 root:root，非 root precreate 无法补救 → gradle `$HOME/.gradle` 不可写。修复：缓存挂载与环境变量迁出 HOME 至 `/tmp/multigent-cache`。
+
+修复后的完整重跑（不手工 PUT repo、不设 GRADLE_USER_HOME）见第 8 节；第 6 节遗留的 Gradle 缓存 P2 决策不变。
+
+## 8. 修复后干净重跑（2026-09-12，零手工补救）
+
+对第 7 节两项 P1 修复（presence-aware PUT + HostUserCacheHome 迁出 HOME）部署后的全量重跑：新建项目 **p15-init-spring-v2**，走标准初始化路径，全程未手工 PUT repo、未设置 GRADLE_USER_HOME、未手工播种任何文件。
+
+### 8.1 修复验证（进入重跑前）
+
+- **Fix A（PUT presence-aware）**：v2 项目 initialize-template 自动落 repo → 仅带 `{"runtimeProfile":"jvm21"}` 的 PUT → GET 回读 repo/description **完整保留**；显式 `""` 才清除。回归测试 `TestPutProjectProfileOnlyPreservesRepoAndDescription`。
+- **Fix B（缓存迁出 HOME）**：run argv 中缓存卷挂载于 `/tmp/multigent-cache/{npm,go/pkg/mod,go-build}`，precreate 同时为 HOME 与 cache 两棵树建目录，`HOME=/tmp/multigent-home` 不再是任何 mount 目标。回归测试 `TestBuildArgsRunAsHostUser` 断言无缓存目标位于 HOME 之下。
+
+### 8.2 初始化工作流 wfr-5kvn3txs（修复后二进制）
+
+| 步骤 | 结果 | 证据 |
+|---|---|---|
+| ready | completed（第一次失败后自动恢复重跑成功） | `make install`（npm ci 178 包 + gradle 依赖树 BUILD SUCCESSFUL）、`make verify`（doctor/lint/后端 4 测试类/前端 vitest 7/7/vite build）全过；runtime.json 契约 11 字段程序化校验过 |
+| sync | completed | `git init -b main` + 预提交密钥审计（自行发现并 .gitignore 掉 `.multigent/runtime-tools` 注入的 GitLab PAT credential-helper、`.connections`、`.prompt`，保留非密契约 runtime.json）+ commit `6da4593` + 推送自建 GitLab `root/p15-init-spring-v2`（id 58） |
+| ci_ready | completed | `mga ci ready --wait 300` → **13/13 checks，overall=ready，exit 0**，二次复核稳定；repo 未被任何 PUT 清空（Fix A 生效的直接证据） |
+
+注：首轮 ready 失败是**先修后跑窗口内的旧状态残留**（部署重启前 poller 拉起的第一轮 wake 在旧二进制下挂载 agent home），部署重启后启动自愈扫描器 3s 内用新二进制重新派发，后续轮次全部正确挂载 worktree。首轮失败本身暴露了一个待办：**wake 派发与部署重启竞态时，首轮可能用旧配置运行**——观察项，未复现第二次。
+
+### 8.3 Gradle 就绪（Fix B 的行为验证）
+
+- `make install` 首轮在默认 `HOME/.gradle` 失败于 lock file（与第 7.3 节同一机制），**agent 查看环境后仅设置 `JAVA_HOME=/opt/multigent/jdk`（平台注入的 JDK 路径提示）与 `GRADLE_USER_HOME=/workspace/.toolcache/gradle`**——这是任务级自救（写进 workspace 而非全局），与修复前被 root 属主硬阻塞不同的是：workspace 内目录 agent 自己可写，自救路径天然可用。平台侧不再有 root 属主死锁；缓存卷治理（P2）仍是既定排期。
+- `/tmp/multigent-cache` 三棵缓存树在容器内正常读写（npm/go 缓存真实命中）。
+
+### 8.4 新发现 P1：GitLab runner 未绑定新项目 → 流水线永久 pending
+
+- ci_ready 13/13 通过，但 push 触发的流水线 1058 卡 pending（jobs `started_at=null`）。GitLab API 复核：**两个 runner 均为 project_type（specific），绑定项目清单不含新项目 58**；`failure_reason` 同型案例（兄弟项目 57）为 `stuck_pending_no_matching_runners`。
+- 根因链：`MULTIGENT_GITLAB_RUNNER_ID=1` 已在 systemd 配置，`bindDefaultRunner` 在 `initialize-template` 与 `handlePutProject` 都会 best-effort 绑定，**但绑定前提是 `p.RemoteProjectID` 非空**——标准路径上 remote 绑定（含 RemoteProjectID）发生在**初始化工作流的 sync 步**，晚于 initialize-handler 的绑定时机；而 agent 建仓无法设置 Multigent 侧项目绑定 → 绑定钩子永远赶不上。
+- 已手工修复：GitLab API `POST /projects/58/runners runner_id=1`（并顺手修复遗留的 57）→ 重试流水线 → **pipeline 1058 全 4 job success**（build:backend 54.9s、test:backend 95.3s 等），新建 pipeline 1059 亦 success。
+- **待修（平台侧）**：sync 步回写 RemoteProjectID 后应补触发一次 `bindDefaultRunner`（或 ci_ready 步前置校验 runner 绑定并给出明确报错）。当前状态对第 6 节 AGENTS.md "runner tags 决策" 是新补充：**tags 正确之外，specific runner 的项目级绑定也必须在 remote 绑定落库后同步完成**。
+
+### 8.5 验收任务（真实 worktree + 零手工补救）
+
+- 任务 `t-20260912-ip2wrg`（feature，baseBranch=main，branchName=feat/items-pagination）：平台自动创建 git worktree `workspace/.multigent/worktrees/t-20260912-ip2wrg`，baseCommit=6da4593（确定性基线红线合规）。
+- Agent 完成真实功能（GET /api/v1/items 分页：page/size 默认 0/20、上限 100、非法参数 400、Spring Data Page 返回），改动 7 文件，**强制重跑（--rerun-tasks）gradle test：19 tests，0 failures**，未 commit/push（平台职责），`.multigent/` 契约零改动。任务 `done_success`。
+- **全程无 root 属主阻塞、无手工 GRADLE_USER_HOME 注入到平台配置**——agent 的 workspace 级自救目录不属平台补救。
+- Preview：`POST .../preview/start` → jvm21 容器 running；经签名代理实测 **`/api/v1/items?size=5` 返回 Page 结构**、`page=-1` → 400、`size=500` → 回读 size=100（上限生效）、`/api/health` → 200。
+
+### 8.6 结论
+
+GPT 三项主张全部证实并以硬证据收口：PUT 数据丢失（P1，已修）、description 同损（同缺陷，已修）、HOME 属主（P1，机制为 docker 自动创建 mount 目标父目录，已修）。干净重跑达成了首轮未达成的目标：**标准初始化 → 工作流三步全绿 → 真实任务 worktree → gradle test → preview 后端实测，零手工 repo/权限补救**。新暴露的 runner 绑定时序缺陷（8.4）是标准路径上最后一个已知缺口，已给出修复方向。

@@ -57,10 +57,14 @@ func (DockerProvider) Available() error { return sandbox.CheckDocker() }
 func (DockerProvider) Command(spec ProcessSpec) (string, []string, error) {
 	cfg := DockerConfig(spec.Runtime)
 	cfg.ExtraVolumes = append(cfg.ExtraVolumes,
+		// Cache volumes mount under /tmp/multigent-cache, NOT under HOME:
+		// Docker auto-creates mount destinations (and missing parents) as
+		// root:root, which would make the run-as-host-user HOME unwritable
+		// and break gradle's $HOME/.gradle lock-file creation.
 		"multigent-toolchains:"+agentcli.ToolchainHome,
-		"multigent-npm-cache:/root/.npm",
-		"multigent-go-cache:/root/go/pkg/mod",
-		"multigent-go-build-cache:/root/.cache/go-build",
+		"multigent-npm-cache:"+sandbox.HostUserCacheHome+"/npm",
+		"multigent-go-cache:"+sandbox.HostUserCacheHome+"/go/pkg/mod",
+		"multigent-go-build-cache:"+sandbox.HostUserCacheHome+"/go-build",
 	)
 	pathParts := []string{}
 	if toolBin := runtimeEnvValue(spec.Runtime, "MULTIGENT_TOOL_BIN_DIR"); toolBin != "" {

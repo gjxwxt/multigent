@@ -1296,8 +1296,8 @@ func (s *Server) handlePutProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Description      string `json:"description"`
-		Repo             string `json:"repo"`
+		Description      *string `json:"description"`
+		Repo             *string `json:"repo"`
 		RemoteProvider   string `json:"remoteProvider"`
 		RemoteConnection string `json:"remoteConnection"`
 		RemoteProjectID  string `json:"remoteProjectId"`
@@ -1318,8 +1318,25 @@ func (s *Server) handlePutProject(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	p.Description = body.Description
-	p.Repo = body.Repo
+	// Description/Repo follow the same pointer semantics as RuntimeProfile:
+	// omitted means "keep current". This is load-bearing for template projects —
+	// initialize-template persists Repo, and a profile-only PUT (e.g. the P1.5
+	// inventory backfill writing just runtimeProfile) would otherwise wipe the
+	// binding and make ci_ready report "project has no repository path".
+	// An explicit "" still clears (a project may legitimately unbind a repo).
+	if body.Description != nil {
+		p.Description = *body.Description
+	}
+	if body.Repo != nil {
+		repo := strings.TrimSpace(*body.Repo)
+		if repo != "" && strings.Contains(repo, "://") {
+			p.Repo = repo
+		} else if repo != "" {
+			p.Repo = filepath.Clean(repo)
+		} else {
+			p.Repo = ""
+		}
+	}
 	profileBefore := p.RuntimeProfile
 	profileChanged := false
 	if body.RuntimeProfile != nil {

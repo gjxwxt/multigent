@@ -963,6 +963,15 @@ var runtimeGOOS = runtime.GOOS
 // non-root user can create it, and credential mounts are remapped here.
 const HostUserHome = "/tmp/multigent-home"
 
+// HostUserCacheHome holds the named cache-volume mounts for host-user
+// containers. It must live OUTSIDE HostUserHome: Docker auto-creates a bind
+// mount's destination (and any missing parents, including HOME itself) as
+// root:root 0755, and a non-root precreate script can neither chown that
+// directory nor mkdir inside it — gradle's "$HOME/.gradle" then fails with
+// "Could not create parent directory for lock file". Keeping mounts on a
+// separate top-level /tmp tree leaves HOME owned by the container user.
+const HostUserCacheHome = "/tmp/multigent-cache"
+
 // NamedCacheVolumes are the persistent Docker volumes holding the agent CLI
 // toolchain and build caches. Docker initializes them with root-owned
 // contents; EnsureVolumeOwnership hands them to the server user so
@@ -1028,7 +1037,7 @@ func containerPATHForHostUser(path string, hostUser bool) string {
 	if !hostUser {
 		return path
 	}
-	return strings.ReplaceAll(path, "/root/go/bin", HostUserHome+"/go/bin")
+	return strings.ReplaceAll(path, "/root/go/bin", HostUserCacheHome+"/go/bin")
 }
 
 // hostUserEnvOverrides pins HOME and Go caches to the host-user HOME so the
@@ -1039,10 +1048,10 @@ func hostUserEnvOverrides() []string {
 	pairs := make([]string, 0, 10)
 	for _, kv := range []string{
 		"HOME=" + HostUserHome,
-		"GOPATH=" + HostUserHome + "/go",
-		"GOMODCACHE=" + HostUserHome + "/go/pkg/mod",
-		"GOCACHE=" + HostUserHome + "/.cache/go-build",
-		"npm_config_cache=" + HostUserHome + "/.npm",
+		"GOPATH=" + HostUserCacheHome + "/go",
+		"GOMODCACHE=" + HostUserCacheHome + "/go/pkg/mod",
+		"GOCACHE=" + HostUserCacheHome + "/go-build",
+		"npm_config_cache=" + HostUserCacheHome + "/npm",
 	} {
 		pairs = append(pairs, "-e", kv)
 	}
@@ -1054,9 +1063,9 @@ func hostUserEnvOverrides() []string {
 func hostUserPrecreateScript() string {
 	return "mkdir -p " + shellQuoteJoin([]string{
 		HostUserHome,
-		HostUserHome + "/go/pkg/mod",
-		HostUserHome + "/.cache/go-build",
-		HostUserHome + "/.npm",
+		HostUserCacheHome + "/go/pkg/mod",
+		HostUserCacheHome + "/go-build",
+		HostUserCacheHome + "/npm",
 	})
 }
 

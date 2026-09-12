@@ -328,12 +328,16 @@ func TestBuildArgsRunAsHostUser(t *testing.T) {
 		// Every override must be its own "-e KEY=VALUE" pair: a bare KEY=VALUE
 		// arg is parsed by docker as the image reference and the container
 		// fails with "invalid reference format" (regression of 3189b20).
+		// Cache env must point at HostUserCacheHome, NOT HOME: docker
+		// auto-creates mount destinations under HOME as root:root, which made
+		// $HOME/.gradle unwritable for the non-root user (gradle lock-file
+		// failure in the p15-init-spring acceptance run).
 		for _, want := range []string{
 			"-e HOME=" + HostUserHome,
-			"-e GOPATH=" + HostUserHome + "/go",
-			"-e GOMODCACHE=" + HostUserHome + "/go/pkg/mod",
-			"-e GOCACHE=" + HostUserHome + "/.cache/go-build",
-			"-e npm_config_cache=" + HostUserHome + "/.npm",
+			"-e GOPATH=" + HostUserCacheHome + "/go",
+			"-e GOMODCACHE=" + HostUserCacheHome + "/go/pkg/mod",
+			"-e GOCACHE=" + HostUserCacheHome + "/go-build",
+			"-e npm_config_cache=" + HostUserCacheHome + "/npm",
 		} {
 			if !strings.Contains(joined, want) {
 				t.Fatalf("expected env override %q, got: %s", want, joined)
@@ -342,6 +346,12 @@ func TestBuildArgsRunAsHostUser(t *testing.T) {
 		// HOME precreate bootstrap must wrap the inner command after the image.
 		if !strings.Contains(joined, "mkdir -p") {
 			t.Fatalf("expected HOME precreate wrapper, got: %s", joined)
+		}
+		// Cache mounts must not target anything under HOME: a mount destination
+		// inside HOME makes docker create that parent root-owned before the
+		// non-root precreate script can run.
+		if strings.Contains(joined, HostUserHome+"/.npm") || strings.Contains(joined, HostUserHome+"/go/") || strings.Contains(joined, HostUserHome+"/.cache/go-build") {
+			t.Fatalf("cache mount/env must live outside HOME (%s): %s", HostUserHome, joined)
 		}
 		// Credential mounts targeting /root must be remapped.
 		if strings.Contains(joined, ":/root/.claude") {
@@ -385,7 +395,7 @@ func TestRemapHostUserMount(t *testing.T) {
 
 func TestContainerPATHForHostUser(t *testing.T) {
 	got := containerPATHForHostUser("/usr/local/go/bin:/root/go/bin:/usr/bin", true)
-	if strings.Contains(got, "/root/go/bin") || !strings.Contains(got, HostUserHome+"/go/bin") {
+	if strings.Contains(got, "/root/go/bin") || !strings.Contains(got, HostUserCacheHome+"/go/bin") {
 		t.Fatalf("PATH not rewritten: %q", got)
 	}
 	if got := containerPATHForHostUser("/root/go/bin", false); got != "/root/go/bin" {
