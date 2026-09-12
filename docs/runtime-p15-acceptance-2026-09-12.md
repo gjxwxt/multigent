@@ -43,6 +43,26 @@ RESULT pass=5 fail=0。
 - `go test ./...` 全绿（含新增三态 API 测试、显式 base 反偏好测试、多 worker/mixed/pinned-review inventory 测试、别名对称与 pinned-image BuildArgs 测试）
 - `make web`、`make build` 成功；产物部署 VM（multigent sha256 `823731ae…`，mga `3cdab3e5…`），console 200、journal 无 panic
 
+## 9. 第二次复审：两处假绿与补正（13ab9a89）
+
+第 8 节的验收在两处仍是"假绿"——测试与复验走的都是修正后的理想输入，没有覆盖真实配置到达路径：
+
+1. **Auto 清除从未真正生效**：第 8.2 节声称"PUT base → 逐字返回"验证了三态，但 PUT 空字符串仍经过 `NormalizeProfile` 折叠为 `"base"`——用户在 UI 选"自动"永远无法清除已声明的 jvm21/base，GET 也永远不会再回到继承语义。**补正**（`13ab9a89`）：`""` 不经 NormalizeProfile，直接持久化为空=清除；`base`/`jvm21` 仍逐字落库。测试覆盖 jvm21→`""`、base→`""`（GET 必须为空，且随后 `ResolveRuntime` 必须重新继承 agent 偏好/服务器默认）。
+2. **显式镜像吞掉项目 profile**：`applyProjectRuntimeProfile` 在 agent 配置了显式 image 时整体跳过，项目 jvm21 声明写不进运行时配置 → 该 agent 的 sandbox 拿不到 `JAVA_TOOL_OPTIONS`（第 8.1 节 probe 是手工预填 `{"profile":"jvm21","image":…}` 测的，掩盖了这条路径）。**补正**（`13ab9a89`）：显式 image 仍独占镜像选择，但项目 profile 始终记录到 runtime config，env 注入键于声明权威而非镜像名；测试改为从持久化 Project + AgentWorker RuntimeConfigJSON 经 `applyProjectRuntimeProfile`/`resolveTaskPreviewRuntime` 到真实 BuildArgs/preview env 的完整路径断言。
+
+### 9.1 修正后无 LLM 真实环境验收（部署 13ab9a89，全部通过）
+
+部署：multigent sha256 `9a97d25d06f8ca75…`，mga `425b7af02e1837bb…`，console 200，journal 无 panic。
+
+| 验证项 | 结果 |
+|---|---|
+| 项目 jvm21 + agent pinned image（持久化 Project= jvm21，AgentWorker= pinned image 无 profile，与线上数据一致） | agent sandbox argv：执行镜像保持 `registry.example/team/jdk-stack:21` **且** argv 含 `-e JAVA_TOOL_OPTIONS=-Dhttps.proxyHost=…`；真实 `docker run` 容器内 JTO 完整回读 |
+| 同配置 Preview | 容器镜像同为 pinned image，env 携带完整 JAVA_TOOL_OPTIONS，JVM 打印 "Picked up" 且非代理 `https.proxyHost` 可读 |
+| Auto 清除三态（VM 实库） | PUT `""` → GET `''`、kv 持久化无 runtimeProfile 键（=未声明）；PUT `base` → db 逐字 `'base'`；再 PUT `""` → 回到空；inventory 中清除后 `effectiveSource=agent_image`（pinned worker 的真实观察值）、`suggestedAction=review` |
+| 审计 | 4 条 `project.runtime_profile.update` 事件忠实记录 jvm21↔""↔base↔"" 全部往返 |
+
+验收资源（项目、worker 偏好、临时镜像 tag、probe）已清理；未动批量回填/代理证书生产配置/远端推送/shutdown SEGV。
+
 ## 1. 交付范围（4 个新提交，基于 P1 的 d582f633）
 
 | 提交 | 内容 |
