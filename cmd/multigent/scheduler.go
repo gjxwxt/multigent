@@ -1606,7 +1606,10 @@ func schedulerAttentionWorktreeTarget(root, project, agentName string, signals [
 	if targetTaskID == "" {
 		return "", ""
 	}
-	ts := taskstore.New(root)
+	ts, err := schedulerAttentionTaskStore(root)
+	if err != nil {
+		return "", ""
+	}
 	assigned, err := ts.GetTask(targetProject, agentName, targetTaskID)
 	if err != nil || assigned == nil {
 		return "", ""
@@ -1624,7 +1627,10 @@ func schedulerAttentionTargetTask(root, project, agentName string, signals []con
 	if len(signals) == 0 {
 		return "", ""
 	}
-	ts := taskstore.New(root)
+	ts, err := schedulerAttentionTaskStore(root)
+	if err != nil {
+		return "", ""
+	}
 	distinctTasks := map[string]string{}
 	for _, signal := range signals {
 		if !strings.EqualFold(strings.TrimSpace(signal.SourceKind), "task") {
@@ -1658,6 +1664,19 @@ func schedulerAttentionTargetTask(root, project, agentName string, signals []con
 		}
 	}
 	return "", ""
+}
+
+// schedulerAttentionTaskStore returns the task store that matches how this
+// deployment persists tasks. Deployments backed by the control-plane SQLite DB
+// (kv_records) must resolve attention targets through the DB store; the FS
+// store reads tasks.yaml, which does not exist there and silently breaks
+// workflow-step worktree resolution in wakeup cycles.
+func schedulerAttentionTaskStore(root string) (taskstore.Store, error) {
+	db, err := openControlDBForRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	return taskstore.NewDB(root, db), nil
 }
 
 func parseSchedulerTime(value string) (time.Time, bool) {
