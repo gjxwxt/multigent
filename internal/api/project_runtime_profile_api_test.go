@@ -137,6 +137,9 @@ func TestPutProjectRuntimeProfileEmptyStringClearsDeclaration(t *testing.T) {
 	}
 
 	// jvm21 declaration → "" clears it; base declaration → "" clears it too.
+	// "legacy" is seeded undeclared by newRuntimeProfileServer, so it must
+	// first explicitly declare base for the base→"" case to exercise a real
+	// clear rather than a no-op on an empty value.
 	clear("jvmproj")
 	if stored("jvmproj") != "" {
 		t.Fatalf("clearing a jvm21 declaration must persist empty, got %q", stored("jvmproj"))
@@ -144,9 +147,21 @@ func TestPutProjectRuntimeProfileEmptyStringClearsDeclaration(t *testing.T) {
 	if got := getProfile("jvmproj"); got != "" {
 		t.Fatalf("GET after clearing jvm21 must return empty, got %q", got)
 	}
+	rec := httptest.NewRecorder()
+	req := providerTestRequest(http.MethodPut, "/api/v1/projects/legacy", "admin", map[string]any{
+		"runtimeProfile": "base",
+	})
+	req.SetPathValue("name", "legacy")
+	s.handlePutProject(rec, req)
+	if rec.Code != http.StatusOK || stored("legacy") != "base" {
+		t.Fatalf("legacy must declare base first, status=%d stored=%q", rec.Code, stored("legacy"))
+	}
 	clear("legacy")
 	if stored("legacy") != "" {
 		t.Fatalf("clearing a base declaration must persist empty, got %q", stored("legacy"))
+	}
+	if got := getProfile("legacy"); got != "" {
+		t.Fatalf("GET after clearing base must return empty, got %q", got)
 	}
 
 	// After the clear, ResolveRuntime must fall back to inheritance: the agent
