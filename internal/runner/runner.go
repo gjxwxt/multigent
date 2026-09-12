@@ -1686,19 +1686,27 @@ func (r *Runner) addRuntimeDockerSystemMounts(runtimeCfg *entity.SandboxConfig) 
 // the project declares a runtime profile, it wins over the agent's own
 // sandbox profile so agent sandboxes and preview containers of the project
 // always run the same image family. An explicitly pinned agent image still
-// outranks everything (deliberate operator choice). Agent-level profile
-// preferences only apply in projects that declare none.
+// decides the image reference (deliberate operator choice), but the project
+// profile is still recorded on the runtime config — profile-driven env
+// injection (JVM proxy properties via JAVA_TOOL_OPTIONS, preview parity) must
+// key off the declared project authority, not the image name. Agent-level
+// profile preferences only apply in projects that declare none.
 func (r *Runner) applyProjectRuntimeProfile(project string, runtimeCfg *entity.SandboxConfig) {
 	if runtimeCfg == nil || runtimeCfg.Docker == nil {
 		return
 	}
-	if strings.TrimSpace(runtimeCfg.Image) != "" || strings.TrimSpace(runtimeCfg.Docker.Image) != "" {
+	projectCfg, err := r.agentStore.Project(project)
+	if err != nil || projectCfg == nil {
 		return
 	}
-	projectCfg, err := r.agentStore.Project(project)
-	if err == nil && projectCfg != nil && strings.TrimSpace(projectCfg.RuntimeProfile) != "" {
-		runtimeCfg.Docker.Profile = projectCfg.RuntimeProfile
+	declared := strings.TrimSpace(projectCfg.RuntimeProfile)
+	if declared == "" {
+		return
 	}
+	// A pinned agent image keeps deciding the image reference (deliberate
+	// operator choice); the project profile is still recorded so profile-driven
+	// env injection (JAVA_TOOL_OPTIONS etc.) keys off the declared authority.
+	runtimeCfg.Docker.Profile = declared
 }
 
 // ── HTTP agent task/exec methods ───────────────────────────────────────────────

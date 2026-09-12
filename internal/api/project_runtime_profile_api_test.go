@@ -90,6 +90,80 @@ func TestProjectListSerializesRuntimeProfile(t *testing.T) {
 	}
 }
 
+// Empty-string PUT is a deliberate clear: the declaration goes back to
+// auto/inherit semantics. It must persist as "" (not folded to "base" by
+// NormalizeProfile) and GET must return empty, so a subsequent ResolveRuntime
+// inherits the agent preference or server default again.
+func TestPutProjectRuntimeProfileEmptyStringClearsDeclaration(t *testing.T) {
+	s, workspaceID := newRuntimeProfileServer(t)
+	seedAgentWorkerWithIDForTest(t, s, workspaceID, "legacy", "picky", "aw-picky-clear", "pm-legacy-clear")
+	picky, ok, err := s.controlDB.AgentWorkerByID(workspaceID, "aw-picky-clear")
+	if err != nil || !ok {
+		t.Fatalf("load worker: ok=%v err=%v", ok, err)
+	}
+	picky.RuntimeConfigJSON = `{"sandbox":{"provider":"docker","docker":{"profile":"jvm21"}}}`
+	if err := s.controlDB.UpsertAgentWorker(picky); err != nil {
+		t.Fatalf("update worker: %v", err)
+	}
+
+	clear := func(project string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := providerTestRequest(http.MethodPut, "/api/v1/projects/"+project, "admin", map[string]any{
+			"runtimeProfile": "",
+		})
+		req.SetPathValue("name", project)
+		s.handlePutProject(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("clear %s status=%d body=%s", project, rec.Code, rec.Body.String())
+		}
+	}
+	stored := func(project string) string {
+		t.Helper()
+		p, err := s.st.Project(project)
+		if err != nil {
+			t.Fatalf("reload %s: %v", project, err)
+		}
+		return p.RuntimeProfile
+	}
+	getProfile := func(project string) string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := providerTestRequest(http.MethodGet, "/api/v1/projects/"+project, "admin", nil)
+		req.SetPathValue("name", project)
+		s.handleProject(rec, req)
+		got, _ := projectProfileFromResponse(t, rec.Body.Bytes())
+		return got
+	}
+
+	// jvm21 declaration → "" clears it; base declaration → "" clears it too.
+	clear("jvmproj")
+	if stored("jvmproj") != "" {
+		t.Fatalf("clearing a jvm21 declaration must persist empty, got %q", stored("jvmproj"))
+	}
+	if got := getProfile("jvmproj"); got != "" {
+		t.Fatalf("GET after clearing jvm21 must return empty, got %q", got)
+	}
+	clear("legacy")
+	if stored("legacy") != "" {
+		t.Fatalf("clearing a base declaration must persist empty, got %q", stored("legacy"))
+	}
+
+	// After the clear, ResolveRuntime must fall back to inheritance: the agent
+	// worker's jvm21 preference applies again (auto semantics restored).
+	p, err := s.st.Project("jvmproj")
+	if err != nil {
+		t.Fatalf("reload jvmproj: %v", err)
+	}
+	sel, err := sandbox.ResolveRuntime(sandbox.RuntimeRequest{ProjectProfile: p.RuntimeProfile, AgentProfile: "jvm21"})
+	if err != nil {
+		t.Fatalf("resolve after clear: %v", err)
+	}
+	if sel.Profile != sandbox.ProfileJVM21 {
+		t.Fatalf("cleared project must inherit the agent jvm21 preference, got profile=%q", sel.Profile)
+	}
+}
+
 func TestPutProjectSetsRuntimeProfile(t *testing.T) {
 	s, _ := newRuntimeProfileServer(t)
 

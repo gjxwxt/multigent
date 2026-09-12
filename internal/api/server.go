@@ -1306,12 +1306,16 @@ func (s *Server) handlePutProject(w http.ResponseWriter, r *http.Request) {
 		DefaultBranch    string `json:"defaultBranch"`
 		// RuntimeProfile uses pointer semantics: omitted keeps the declared
 		// value (settings pages that only edit description/repo must not
-		// silently clear it), while an explicit string — including a valid
-		// fallback like "base" — is applied after validation.
+		// silently clear it). The string carries three states: "" explicitly
+		// clears the declaration (back to auto/inherit), "base" and "jvm21"
+		// persist verbatim as explicit project declarations that outrank agent
+		// preferences and the server default. An empty string must NOT pass
+		// through NormalizeProfile — it would fold to "base" and make auto
+		// indistinguishable from a deliberate base declaration.
 		RuntimeProfile *string `json:"runtimeProfile"`
 	}
 	if err := s.readJSON(w, r, &body); err != nil {
-		s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeInvalidJSON, "invalid JSON body")
+		s.jsonError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 	p.Description = body.Description
@@ -1319,19 +1323,19 @@ func (s *Server) handlePutProject(w http.ResponseWriter, r *http.Request) {
 	profileBefore := p.RuntimeProfile
 	profileChanged := false
 	if body.RuntimeProfile != nil {
-		normalized, err := sandbox.NormalizeProfile(*body.RuntimeProfile)
-		if err != nil {
-			s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeValidationFailed, err.Error())
-			return
+		if *body.RuntimeProfile == "" {
+			// Explicit clear: the project returns to auto/inherit semantics.
+			p.RuntimeProfile = ""
+			profileChanged = profileBefore != ""
+		} else {
+			normalized, err := sandbox.NormalizeProfile(*body.RuntimeProfile)
+			if err != nil {
+				s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeValidationFailed, err.Error())
+				return
+			}
+			p.RuntimeProfile = normalized
+			profileChanged = p.RuntimeProfile != profileBefore
 		}
-		// Three-state semantics: "" = auto/undeclared (inherits agent
-		// preference or server default), "base" = explicit project-level base
-		// that WINS over agent preferences and the server default, "jvm21" =
-		// explicit project-level jvm21. An explicit base must persist verbatim
-		// — folding it to "" would make auto and base indistinguishable and
-		// let agent preferences override a deliberate declaration.
-		p.RuntimeProfile = normalized
-		profileChanged = p.RuntimeProfile != profileBefore
 	}
 	if body.RemoteProvider != "" {
 		p.RemoteProvider = body.RemoteProvider

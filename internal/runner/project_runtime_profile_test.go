@@ -3,6 +3,7 @@ package runner
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -136,13 +137,65 @@ func TestAgentPreferenceYieldsToProjectAuthority(t *testing.T) {
 		t.Fatalf("jvm project agent sandbox must run jvm21 image, got %q", image)
 	}
 
-	// An explicitly pinned agent image still outranks the project profile
-	// (deliberate operator choice, not an accident of priority).
-	pinned := &entity.SandboxConfig{Provider: entity.SandboxDocker, Docker: &entity.DockerSandboxConfig{Image: "harbor.corp/custom:v1", Profile: sandbox.ProfileBase}}
+	// An explicitly pinned agent image still decides the image reference
+	// (deliberate operator choice), but the project profile is now recorded on
+	// the runtime config so profile-driven env injection (JAVA_TOOL_OPTIONS)
+	// follows the project authority — the agent sandbox of a jvm21 project must
+	// carry the JVM network args even when the operator pinned a custom image.
+	// The worker starts from its persisted RuntimeConfigJSON (pinned image, no
+	// profile) exactly like the live run path does via cloneRuntimeCfg.
+	if err := db.UpsertAgentWorker(controldb.AgentWorker{
+		ID:                "aw-pinned",
+		WorkspaceID:       workspaceID,
+		Name:              "frozen",
+		RuntimeConfigJSON: `{"sandbox":{"provider":"docker","image":"harbor.corp/custom:v1","docker":{"image":"harbor.corp/custom:v1","profile":"base"}}}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stored, found, err := db.AgentWorkerByID(workspaceID, "aw-pinned")
+	if err != nil || !found {
+		t.Fatalf("load pinned worker: found=%v err=%v", found, err)
+	}
+	var persisted struct {
+		Sandbox *entity.SandboxConfig `json:"sandbox"`
+	}
+	if err := json.Unmarshal([]byte(stored.RuntimeConfigJSON), &persisted); err != nil {
+		t.Fatalf("decode worker runtime config: %v", err)
+	}
+	if persisted.Sandbox == nil {
+		t.Fatalf("worker must carry a sandbox config")
+	}
+	pinned := persisted.Sandbox
 	r.applyProjectRuntimeProfile("jvm-proj", pinned)
-	if pinned.Docker.Profile != sandbox.ProfileBase || pinned.Docker.Image != "harbor.corp/custom:v1" {
+	if pinned.Docker == nil || pinned.Docker.Image != "harbor.corp/custom:v1" {
 		t.Fatalf("explicit agent image must be left untouched, got %+v", pinned.Docker)
 	}
+	if pinned.Docker.Profile != sandbox.ProfileJVM21 {
+		t.Fatalf("project profile must be recorded alongside a pinned image, got %q", pinned.Docker.Profile)
+	}
+	pinnedArgs, err := func() ([]string, error) {
+		// ProfileDockerArgs derives JAVA_TOOL_OPTIONS from the transport env; the
+		// test host may not run behind a proxy, so set one for this derivation.
+		t.Setenv("HTTPS_PROXY", "http://proxy.internal:17890")
+		t.Setenv("HTTP_PROXY", "")
+		t.Setenv("NO_PROXY", "localhost,127.0.0.1")
+		return sandbox.BuildArgs(filepath.Join(root, "projects", "jvm-proj", "agents", "dev"), entity.ModelCodex, pinned.Docker, []string{"echo", "hi"})
+	}()
+	if err != nil {
+		t.Fatalf("build args for pinned agent: %v", err)
+	}
+	if !containsEnvPair(pinnedArgs, sandbox.EnvJVMToolOptions+"=") {
+		t.Fatalf("pinned-image agent sandbox of a jvm21 project must inject %s, got %v", sandbox.EnvJVMToolOptions, pinnedArgs)
+	}
+}
+
+func containsEnvPair(args []string, prefix string) bool {
+	for i, a := range args {
+		if strings.HasPrefix(a, prefix) && i > 0 && args[i-1] == "-e" {
+			return true
+		}
+	}
+	return false
 }
 
 // TestAgentSandboxAndPreviewRuntimeAgree is the Agent/Preview consistency

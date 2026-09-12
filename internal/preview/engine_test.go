@@ -248,6 +248,32 @@ func TestProfilePreviewEnv(t *testing.T) {
 	}
 }
 
+// TestProfilePreviewEnvJTOFromSelection closes the pinned-image parity gap: a
+// project that declares jvm21 while the executing agent pins an explicit image
+// resolves to RuntimeSelection{Profile: jvm21, ImageRef: pinned} — the pinned
+// image decides the container image, and the recorded profile must still drive
+// JAVA_TOOL_OPTIONS so Gradle gets the platform proxy properties.
+func TestProfilePreviewEnvJTOFromSelection(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://proxy.internal:17890")
+	t.Setenv("HTTP_PROXY", "")
+	t.Setenv("NO_PROXY", "localhost,127.0.0.1")
+
+	e := &Engine{}
+	env := e.profilePreviewEnv(RuntimeSelection{
+		Profile:  sandbox.ProfileJVM21,
+		ImageRef: "harbor.example.com/platform/jdk-stack:21",
+	})
+	hasJTO := false
+	for _, kv := range env {
+		if strings.HasPrefix(kv, sandbox.EnvJVMToolOptions+"=") && strings.Contains(kv, "-Dhttps.proxyHost=proxy.internal") {
+			hasJTO = true
+		}
+	}
+	if !hasJTO {
+		t.Fatalf("pinned-image selection with jvm21 profile must inject %s, got %v", sandbox.EnvJVMToolOptions, env)
+	}
+}
+
 // Regression: "install && A & B" backgrounds {install && A} and starts B
 // immediately, so a cold worktree raced the install and vite came up missing
 // (exit 127). The install prefix must sit in a foreground brace group wrapping

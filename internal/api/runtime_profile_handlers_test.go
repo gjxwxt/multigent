@@ -232,6 +232,10 @@ func TestResolveTaskPreviewRuntimeFollowsTaskAssignee(t *testing.T) {
 		if sel.Profile != sandbox.ProfileJVM21 {
 			t.Fatalf("project profile should be recorded in the selection, got %q", sel.Profile)
 		}
+		// The engine renders JAVA_TOOL_OPTIONS from this recorded profile
+		// (asserted in internal/preview: TestProfilePreviewEnvJTOFromSelection);
+		// here the contract is that the pinned image does NOT erase the
+		// project's declared profile from the selection.
 	})
 }
 
