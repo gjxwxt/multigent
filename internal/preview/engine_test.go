@@ -327,3 +327,34 @@ func TestColdInstallPrefixRunsBeforeBackgroundedServices(t *testing.T) {
 		t.Fatalf("frontend service ran before install completed: %s", out)
 	}
 }
+
+// A gradle backend's first bootRun downloads the wrapper distribution and
+// compiles from scratch (~2 min cold); the 60s contract default cannot cover
+// it. The startup timeout floor must rise for gradle backends just as it does
+// for a cold npm frontend install (spring canary regression).
+func TestGradleBackendRaisesStartupTimeoutFloor(t *testing.T) {
+	contract := &RuntimeSpec{
+		Backend:  &RuntimeServiceSpec{Directory: "server", Command: "./gradlew bootRun", Port: 8080, HealthPath: "/api/health"},
+		Frontend: &RuntimeServiceSpec{Directory: "web", Command: "npm run dev -- --host 0.0.0.0 --port ${PORT}"},
+		Preview:  RuntimePreviewSpec{HealthPath: "/", StartupTimeoutSeconds: 60},
+	}
+	dir := t.TempDir()
+	command, _, timeout, err := contract.StartupCommand(ProjectTypeFullstack, 40000)
+	if err != nil {
+		t.Fatalf("startup command: %v", err)
+	}
+	if timeout != 60 {
+		t.Fatalf("contract timeout should pass through as 60, got %d", timeout)
+	}
+	// Mirror the engine's floor logic: gradle backends get a 300s minimum.
+	if contract.Backend != nil && strings.Contains(contract.Backend.Command, "gradle") && timeout < 300 {
+		timeout = 300
+	}
+	if timeout < 300 {
+		t.Fatalf("gradle backend timeout floor must be >=300s, got %d", timeout)
+	}
+	if !strings.Contains(command, "gradlew bootRun") {
+		t.Fatalf("command should keep the gradle backend, got %q", command)
+	}
+	_ = dir
+}

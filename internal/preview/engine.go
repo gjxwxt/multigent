@@ -277,6 +277,14 @@ func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktree
 		if contractTimeout > 0 {
 			startupTimeout = time.Duration(contractTimeout) * time.Second
 		}
+		// A gradle backend's first-ever bootRun downloads the wrapper
+		// distribution and compiles from scratch (~2 min on cold caches); the
+		// 60s contract default cannot cover it, same shape as the cold npm
+		// install below. Raise the floor so Spring canaries don't fail before
+		// Tomcat even starts.
+		if runtimeSpec.Backend != nil && strings.Contains(runtimeSpec.Backend.Command, "gradle") && startupTimeout < 300*time.Second {
+			startupTimeout = 300 * time.Second
+		}
 		if installCmd := frontendInstallCommand(worktreeDir, runtimeSpec.Frontend); installCmd != "" {
 			// A cold worktree has no node_modules (gitignored), so the dev
 			// server would die instantly and take the whole container down.
