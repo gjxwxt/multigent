@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -244,5 +245,59 @@ func TestProfilePreviewEnv(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// Regression: "install && A & B" backgrounds {install && A} and starts B
+// immediately, so a cold worktree raced the install and vite came up missing
+// (exit 127). The install prefix must sit in a foreground brace group wrapping
+// the whole backgrounded service chain.
+func TestColdInstallPrefixRunsBeforeBackgroundedServices(t *testing.T) {
+	runtimeSpec := &RuntimeSpec{
+		Backend:  &RuntimeServiceSpec{Directory: "server", Command: "go run .", Port: 8080},
+		Frontend: &RuntimeServiceSpec{Directory: "web", Command: "npm run dev -- --host 0.0.0.0 --port ${PORT}"},
+	}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "web"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "web", "package.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	command, _, _, err := runtimeSpec.StartupCommand(ProjectTypeFullstack, 5173)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installCmd := frontendInstallCommand(root, runtimeSpec.Frontend)
+	if installCmd == "" {
+		t.Fatal("expected cold install prefix")
+	}
+	composed := "{ " + strings.TrimSuffix(strings.TrimSuffix(installCmd, " "), "&&") + " ; } && { " + command + " ; }"
+
+	// The composed one-liner must be valid sh AND start the dev server only
+	// after the install subshell completes. Exercise it: a slow fake install
+	// that creates vite only at the end must not race the frontend service.
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(fake, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fake, "npm"), []byte("#!/bin/sh\nsleep 0.2\nmkdir -p node_modules/.bin\ntouch node_modules/.bin/vite\nchmod +x node_modules/.bin/vite\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fake+":"+os.Getenv("PATH"))
+	script := strings.ReplaceAll(composed, "cd 'web'", "cd '"+dir+"'")
+	script = strings.ReplaceAll(script, "cd 'server'", "cd '"+dir+"'")
+	script = strings.ReplaceAll(script, "go run .", "echo backend-up")
+	script = strings.ReplaceAll(script, "npm run dev", "test -x node_modules/.bin/vite && echo VITE_WAS_READY || exit 1")
+	// The backend subshell exits after echoing, which makes the backgrounded
+	// job's nonzero status irrelevant; only the install group's exit feeds
+	// the "&&", so a failing install must still fail the whole script.
+	out, err := exec.Command("sh", "-c", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("composed startup script failed: %v output=%s", err, out)
+	}
+	if !strings.Contains(string(out), "VITE_WAS_READY") {
+		t.Fatalf("frontend service ran before install completed: %s", out)
 	}
 }

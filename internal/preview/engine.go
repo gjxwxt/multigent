@@ -280,9 +280,12 @@ func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktree
 		if installCmd := frontendInstallCommand(worktreeDir, runtimeSpec.Frontend); installCmd != "" {
 			// A cold worktree has no node_modules (gitignored), so the dev
 			// server would die instantly and take the whole container down.
-			// The install runs before any service starts, so the readiness
-			// windows must cover a cold npm install too.
-			command = installCmd + command
+			// The install must complete BEFORE any service starts: the service
+			// chain backgrounded with "&" would otherwise race the install
+			// ("install && A & B" backgrounds {install && A} and runs B
+			// immediately, so vite can be missing when the dev server starts).
+			// Braces keep install in the foreground of the whole chain.
+			command = "{ " + strings.TrimSuffix(strings.TrimSuffix(installCmd, " "), "&&") + " ; } && { " + command + " ; }"
 			if startupTimeout < 300*time.Second {
 				startupTimeout = 300 * time.Second
 			}
