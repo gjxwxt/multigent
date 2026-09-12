@@ -274,18 +274,8 @@ func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktree
 			}
 			backendHealthPath = runtimeSpec.Backend.HealthPath
 		}
-		if contractTimeout > 0 {
-			startupTimeout = time.Duration(contractTimeout) * time.Second
-		}
-		// A gradle backend's first-ever bootRun downloads the wrapper
-		// distribution and compiles from scratch (~2 min on cold caches); the
-		// 60s contract default cannot cover it, same shape as the cold npm
-		// install below. Raise the floor so Spring canaries don't fail before
-		// Tomcat even starts.
-		if runtimeSpec.Backend != nil && strings.Contains(runtimeSpec.Backend.Command, "gradle") && startupTimeout < 300*time.Second {
-			startupTimeout = 300 * time.Second
-		}
-		if installCmd := frontendInstallCommand(worktreeDir, runtimeSpec.Frontend); installCmd != "" {
+		installCmd := frontendInstallCommand(worktreeDir, runtimeSpec.Frontend)
+		if installCmd != "" {
 			// A cold worktree has no node_modules (gitignored), so the dev
 			// server would die instantly and take the whole container down.
 			// The install must complete BEFORE any service starts: the service
@@ -294,10 +284,8 @@ func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktree
 			// immediately, so vite can be missing when the dev server starts).
 			// Braces keep install in the foreground of the whole chain.
 			command = "{ " + strings.TrimSuffix(strings.TrimSuffix(installCmd, " "), "&&") + " ; } && { " + command + " ; }"
-			if startupTimeout < 300*time.Second {
-				startupTimeout = 300 * time.Second
-			}
 		}
+		startupTimeout = resolvePreviewStartupTimeout(runtimeSpec, contractTimeout, installCmd != "")
 		runCmd = []string{"sh", "-c", setupEnv + command}
 	} else {
 		switch projType {
@@ -421,6 +409,36 @@ func frontendInstallCommand(worktreeDir string, frontend *RuntimeServiceSpec) st
 		return ""
 	}
 	return "(cd " + shellQuote(dir) + " && npm install --no-audit --no-fund) && "
+}
+
+// resolvePreviewStartupTimeout computes the readiness-wait budget for one
+// preview start. The contract's startupTimeoutSeconds is the baseline; two
+// known slow cold starts raise the floor to 300s because the contract default
+// cannot cover them and the container would be killed before the backend ever
+// listens:
+//   - a gradle backend's first bootRun downloads the wrapper distribution and
+//     compiles from scratch (~2 min on cold caches; spring canary 2026-09-12)
+//   - a cold npm frontend install runs before any service can start
+//
+// Pure function so the decision is directly unit-testable against
+// Engine.startPreview's actual source of truth.
+func resolvePreviewStartupTimeout(runtimeSpec *RuntimeSpec, contractTimeoutSeconds int, needsFrontendInstall bool) time.Duration {
+	const coldStartFloor = 300 * time.Second
+	timeout := 20 * time.Second
+	if contractTimeoutSeconds > 0 {
+		timeout = time.Duration(contractTimeoutSeconds) * time.Second
+	}
+	if runtimeSpec != nil && runtimeSpec.Backend != nil && strings.Contains(runtimeSpec.Backend.Command, "gradle") {
+		if timeout < coldStartFloor {
+			timeout = coldStartFloor
+		}
+	}
+	if needsFrontendInstall {
+		if timeout < coldStartFloor {
+			timeout = coldStartFloor
+		}
+	}
+	return timeout
 }
 
 // failInstance records a startup failure with the container's exit state and

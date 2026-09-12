@@ -328,33 +328,30 @@ func TestColdInstallPrefixRunsBeforeBackgroundedServices(t *testing.T) {
 	}
 }
 
-// A gradle backend's first bootRun downloads the wrapper distribution and
-// compiles from scratch (~2 min cold); the 60s contract default cannot cover
-// it. The startup timeout floor must rise for gradle backends just as it does
-// for a cold npm frontend install (spring canary regression).
+// The startup timeout decision lives in resolvePreviewStartupTimeout (the same
+// function Engine.startPreview calls), so the gradle cold-start floor from the
+// spring canary regression is tested at the source of truth — not by mirroring
+// the logic in the test.
 func TestGradleBackendRaisesStartupTimeoutFloor(t *testing.T) {
-	contract := &RuntimeSpec{
-		Backend:  &RuntimeServiceSpec{Directory: "server", Command: "./gradlew bootRun", Port: 8080, HealthPath: "/api/health"},
-		Frontend: &RuntimeServiceSpec{Directory: "web", Command: "npm run dev -- --host 0.0.0.0 --port ${PORT}"},
-		Preview:  RuntimePreviewSpec{HealthPath: "/", StartupTimeoutSeconds: 60},
+	gradle := &RuntimeSpec{Backend: &RuntimeServiceSpec{Directory: "server", Command: "./gradlew bootRun", Port: 8080}}
+	nonGradle := &RuntimeSpec{Backend: &RuntimeServiceSpec{Directory: "server", Command: "go run .", Port: 8080}}
+
+	cases := []struct {
+		name     string
+		spec     *RuntimeSpec
+		contract int
+		install  bool
+		want     time.Duration
+	}{
+		{"gradle backend + 60s contract raises to 300s", gradle, 60, false, 300 * time.Second},
+		{"gradle backend + 360s contract keeps 360s", gradle, 360, false, 360 * time.Second},
+		{"non-gradle backend + 60s contract stays 60s", nonGradle, 60, false, 60 * time.Second},
+		{"cold npm install keeps its 300s floor", nonGradle, 60, true, 300 * time.Second},
+		{"cold npm install + 360s contract stays 360s", nonGradle, 360, true, 360 * time.Second},
 	}
-	dir := t.TempDir()
-	command, _, timeout, err := contract.StartupCommand(ProjectTypeFullstack, 40000)
-	if err != nil {
-		t.Fatalf("startup command: %v", err)
+	for _, tc := range cases {
+		if got := resolvePreviewStartupTimeout(tc.spec, tc.contract, tc.install); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
 	}
-	if timeout != 60 {
-		t.Fatalf("contract timeout should pass through as 60, got %d", timeout)
-	}
-	// Mirror the engine's floor logic: gradle backends get a 300s minimum.
-	if contract.Backend != nil && strings.Contains(contract.Backend.Command, "gradle") && timeout < 300 {
-		timeout = 300
-	}
-	if timeout < 300 {
-		t.Fatalf("gradle backend timeout floor must be >=300s, got %d", timeout)
-	}
-	if !strings.Contains(command, "gradlew bootRun") {
-		t.Fatalf("command should keep the gradle backend, got %q", command)
-	}
-	_ = dir
 }
