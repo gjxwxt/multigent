@@ -25,6 +25,7 @@ import (
 	"github.com/multigent/multigent/internal/imbridge"
 	"github.com/multigent/multigent/internal/interaction"
 	"github.com/multigent/multigent/internal/preview"
+	"github.com/multigent/multigent/internal/sandbox"
 	"github.com/multigent/multigent/internal/store"
 	"github.com/multigent/multigent/internal/taskstore"
 	"github.com/multigent/multigent/internal/telemetry"
@@ -1228,11 +1229,12 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		out = append(out, map[string]any{
-			"name":        p.Name,
-			"description": p.Description,
-			"repo":        p.Repo,
-		})
+	out = append(out, map[string]any{
+		"name":           p.Name,
+		"description":    p.Description,
+		"repo":           p.Repo,
+		"runtimeProfile": p.RuntimeProfile,
+	})
 	}
 	_ = json.NewEncoder(w).Encode(out)
 }
@@ -1274,6 +1276,7 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		"cloneUrl":         p.CloneURL,
 		"defaultBranch":    p.DefaultBranch,
 		"deployPort":       p.DeployPort,
+		"runtimeProfile":   p.RuntimeProfile,
 	})
 }
 
@@ -1300,6 +1303,11 @@ func (s *Server) handlePutProject(w http.ResponseWriter, r *http.Request) {
 		RemoteURL        string `json:"remoteUrl"`
 		CloneURL         string `json:"cloneUrl"`
 		DefaultBranch    string `json:"defaultBranch"`
+		// RuntimeProfile uses pointer semantics: omitted keeps the declared
+		// value (settings pages that only edit description/repo must not
+		// silently clear it), while an explicit string — including a valid
+		// fallback like "base" — is applied after validation.
+		RuntimeProfile *string `json:"runtimeProfile"`
 	}
 	if err := s.readJSON(w, r, &body); err != nil {
 		s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeInvalidJSON, "invalid JSON body")
@@ -1307,6 +1315,19 @@ func (s *Server) handlePutProject(w http.ResponseWriter, r *http.Request) {
 	}
 	p.Description = body.Description
 	p.Repo = body.Repo
+	if body.RuntimeProfile != nil {
+		normalized, err := sandbox.NormalizeProfile(*body.RuntimeProfile)
+		if err != nil {
+			s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeValidationFailed, err.Error())
+			return
+		}
+		// "" normalizes to "base": only a declared non-base value is stored,
+		// keeping legacy projects distinguishable from explicitly-cleared ones.
+		p.RuntimeProfile = strings.TrimSpace(normalized)
+		if p.RuntimeProfile == sandbox.ProfileBase {
+			p.RuntimeProfile = ""
+		}
+	}
 	if body.RemoteProvider != "" {
 		p.RemoteProvider = body.RemoteProvider
 	}

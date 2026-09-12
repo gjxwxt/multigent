@@ -936,7 +936,12 @@
     "installedUninstallConfirmDetail": "Uninstalling \"{{name}}\" will delete {{bindings}} agent bindings ({{agents}}) and 1 project-level grant; agents in this project will no longer be able to call its tools.",
     "installedPartialError": "Uninstall did not fully succeed: removed {{bindings}} bindings and {{grants}} project grants; {{count}} step(s) failed. Errors: {{errors}}",
     "installedAdapter": "Adapter",
-    "installedCodeHostNote": "Code-host connection: the remote repo, Git push, and CI pipelines run through the workspace-level connection and are unaffected by uninstalling."
+    "installedCodeHostNote": "Code-host connection: the remote repo, Git push, and CI pipelines run through the workspace-level connection and are unaffected by uninstalling.",
+    "runtimeProfile": "Runtime Profile",
+    "runtimeProfileAuto": "Auto (follow agent / server default)",
+    "runtimeProfileBase": "base — Node.js / Go toolchains",
+    "runtimeProfileJvm21": "jvm21 — JDK 21 (Java / Gradle)",
+    "runtimeProfileHint": "Declares the managed runtime for every agent sandbox and preview in this project. Resolution order: a pinned agent image wins, then this project profile, then the agent's own preference, then the server default."
   },
   "sidebar": {
     "footer": "Teams hold your roster; projects are where tasks and messages run. Data will connect to multigent later.",

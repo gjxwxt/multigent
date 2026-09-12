@@ -49,6 +49,7 @@ type ProjectDetail = {
   templateVersion?: string
   templateDigest?: string
   deployPort?: number
+  runtimeProfile?: string
 }
 type PromptData = { content: string }
 
@@ -90,6 +91,7 @@ export default function ProjectSettingsPage() {
               cloneUrl={detail.cloneUrl}
               defaultBranch={detail.defaultBranch}
               deployPort={detail.deployPort}
+              initialRuntimeProfile={detail.runtimeProfile}
               onReload={() => setReloadKey((k) => k + 1)}
             />
           )}
@@ -728,6 +730,7 @@ function BasicInfoEditor({
   remoteProjectId,
   defaultBranch,
   deployPort,
+  initialRuntimeProfile,
   onReload,
 }: {
   projectId: string
@@ -742,11 +745,15 @@ function BasicInfoEditor({
   cloneUrl?: string
   defaultBranch?: string
   deployPort?: number
+  initialRuntimeProfile?: string
   onReload: () => void
 }) {
   const { t } = useTranslation()
   const [description, setDescription] = useState(initialDescription ?? '')
   const [repo, setRepo] = useState(initialRepo ?? '')
+  // Empty server value is presented as "auto" (server default); a declared
+  // profile ("jvm21") shows as the explicit choice.
+  const [runtimeProfile, setRuntimeProfile] = useState(initialRuntimeProfile ?? '')
   const [locked, setLocked] = useState(Boolean(initialRepo && initialRepo.trim() !== ''))
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -788,7 +795,14 @@ function BasicInfoEditor({
     setSaving(true)
     setSaved(false)
     try {
-      await apiPut(`/api/v1/projects/${encodeURIComponent(projectId)}`, { description, repo })
+      // runtimeProfile is always sent explicitly so the chosen "auto" (base)
+      // is a deliberate clear, never an accidental one: the API keeps a
+      // declared profile when the field is omitted.
+      await apiPut(`/api/v1/projects/${encodeURIComponent(projectId)}`, {
+        description,
+        repo,
+        runtimeProfile: runtimeProfile === '' ? 'base' : runtimeProfile,
+      })
       setDirty(false)
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
@@ -797,7 +811,7 @@ function BasicInfoEditor({
     } finally {
       setSaving(false)
     }
-  }, [projectId, description, repo])
+  }, [projectId, description, repo, runtimeProfile])
 
   const change = useCallback((setter: (v: string) => void) => (v: string) => {
     setter(v)
@@ -958,6 +972,29 @@ function BasicInfoEditor({
                 {t('projectSettings.localPathPlaceholder', { name: projectId })}
               </p>
             )}
+          </dd>
+        </div>
+
+        {/* Runtime profile — declares the managed runtime capability for
+            every agent sandbox and preview in this project. Explicitly sent
+            on save so a change to "auto" is a deliberate clear. */}
+        <div className="flex items-start gap-4 px-5 py-2.5">
+          <dt className="w-32 shrink-0 pt-1.5 text-xs font-medium text-neutral-500 dark:text-zinc-500">
+            {t('projectSettings.runtimeProfile')}
+          </dt>
+          <dd className="flex-1 space-y-1.5">
+            <select
+              value={runtimeProfile}
+              onChange={(e) => change(setRuntimeProfile)(e.target.value)}
+              className="w-full max-w-xs rounded-md border border-neutral-200 bg-white px-2.5 py-1.5 text-xs text-neutral-900 outline-none focus:border-sky-400 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+            >
+              <option value="">{t('projectSettings.runtimeProfileAuto')}</option>
+              <option value="base">{t('projectSettings.runtimeProfileBase')}</option>
+              <option value="jvm21">{t('projectSettings.runtimeProfileJvm21')}</option>
+            </select>
+            <p className="text-[11px] text-neutral-400 dark:text-zinc-500">
+              {t('projectSettings.runtimeProfileHint')}
+            </p>
           </dd>
         </div>
 

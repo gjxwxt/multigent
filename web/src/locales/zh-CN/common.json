@@ -936,7 +936,12 @@
     "installedUninstallConfirmDetail": "卸载「{{name}}」将删除 {{bindings}} 条 Agent 绑定（{{agents}}）和 1 条项目级授权；之后本项目 Agent 将无法再调用该连接的工具。",
     "installedPartialError": "卸载未完全成功：已移除 {{bindings}} 条绑定、{{grants}} 条项目授权；{{count}} 项失败。错误：{{errors}}",
     "installedAdapter": "工具形态",
-    "installedCodeHostNote": "代码托管类连接：远端仓库、Git 推送与 CI 流水线走工作区级连接，不受卸载影响。"
+    "installedCodeHostNote": "代码托管类连接：远端仓库、Git 推送与 CI 流水线走工作区级连接，不受卸载影响。",
+    "runtimeProfile": "运行时 Profile",
+    "runtimeProfileAuto": "自动（跟随 Agent / 服务器默认）",
+    "runtimeProfileBase": "base — Node.js / Go 工具链",
+    "runtimeProfileJvm21": "jvm21 — JDK 21（Java / Gradle）",
+    "runtimeProfileHint": "声明本项目所有 Agent 沙箱与预览容器使用的受管运行时。解析顺序：显式指定的 Agent 镜像优先，其次是本项目声明的 Profile，再次是 Agent 自身偏好，最后是服务器默认值。"
   },
   "sidebar": {
     "footer": "团队维护编制与 Agent；项目承载具体任务与消息。后续对接 multigent 数据。",
