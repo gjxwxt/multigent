@@ -291,6 +291,43 @@ func TestAdoptRemoteAfterSyncRejectsSameHostForeignRepo(t *testing.T) {
 	}
 }
 
+// A RemoteURL alone must never authorize adoption. remoteUrl is accepted by
+// handlePutProject from any project manager, so a forged PUT (or the standard
+// init flow's own metadata echo) can make RemoteURL match whatever origin the
+// agent points at — the agent would become its own adoption authority. The
+// only client-independent record is CloneURL (see the A2 hardening: the
+// create-repo endpoint persists the platform identity server-side).
+func TestAdoptRemoteAfterSyncRemoteURLAloneDoesNotAuthorize(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+
+	var runnerBinds []string
+	gitlab := fakeGitLabProjectServer(t, "gao/my-repo", &runnerBinds)
+	defer gitlab.Close()
+	seedGitLabConnection(t, s, workspaceID, "conn-gitlab", gitlab.URL)
+
+	repoDir := filepath.Join(t.TempDir(), "workspace")
+	seedOriginRepo(t, repoDir, gitlab.URL+"/gao/my-repo.git")
+	if err := s.st.SaveProject("proj", &entity.Project{
+		Name:      "proj",
+		Repo:      repoDir,
+		RemoteURL: gitlab.URL + "/gao/my-repo", // exactly what the agent pushed to; still no authority
+	}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+
+	task := &entity.Task{ID: "t-init", Status: entity.TaskStatusDoneSuccess, WorktreeDir: repoDir}
+	t.Setenv("MULTIGENT_GITLAB_RUNNER_ID", "7")
+	s.adoptRemoteAfterSync(context.Background(), "proj", task)
+
+	p, _ := s.st.Project("proj")
+	if p.RemoteProjectID != "" {
+		t.Fatalf("client-writable RemoteURL must not authorize adoption, got RemoteProjectID=%q", p.RemoteProjectID)
+	}
+	if len(runnerBinds) != 0 {
+		t.Fatalf("runner must not bind via RemoteURL-only record, got %v", runnerBinds)
+	}
+}
+
 // A stale agent-controlled RemoteURL must not authorize either: the standard
 // init PUT carries remote metadata from the client, so a value merely echoing
 // the agent's chosen origin would make the agent its own adoption authority.

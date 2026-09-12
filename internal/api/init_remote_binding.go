@@ -108,21 +108,17 @@ const originAdoptAuthorizedNamespaceEnv = "MULTIGENT_GITLAB_ADOPT_NAMESPACE_ALLO
 //     -created repository's clean clone URL before the init task starts), or
 //   - the operator allowlist env above (explicit namespace trust).
 //
-// RemoteURL/RemoteProvider are NOT sufficient: handlePutProject accepts them
-// from the client, and the standard init flow issues the PUT before the agent
-// runs, so a value that merely echoes the agent's chosen origin would make
-// the agent its own authority.
+// RemoteURL is NOT sufficient even though handleGitLabCreateProject's own
+// response handling writes it too: handlePutProject accepts remoteUrl from
+// the client, so the field cannot distinguish platform record from a value
+// that merely echoes the agent's chosen origin. Only CloneURL must stay
+// out of the PUT path for this check to remain sound (see A2: the create-repo
+// endpoint persists the platform identity server-side).
 func originAdoptAuthorized(p *entity.Project, originPath string) bool {
 	if p == nil || strings.TrimSpace(originPath) == "" {
 		return false
 	}
 	if expected := cloneURLProjectPath(p.CloneURL); expected != "" && strings.EqualFold(expected, originPath) {
-		return true
-	}
-	if expected := cloneURLProjectPath(p.RemoteURL); expected != "" && strings.EqualFold(expected, originPath) {
-		// RemoteURL set by handleGitLabCreateProject response handling
-		// (web_url derived from the platform API response) is platform
-		// record; treat like CloneURL.
 		return true
 	}
 	for _, ns := range strings.Split(os.Getenv(originAdoptAuthorizedNamespaceEnv), ",") {

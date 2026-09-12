@@ -1309,6 +1309,9 @@ function InitializeProjectModal({
             namespaceId: selectedNamespaceId || 0,
             visibility: visibility,
             description: currentDescription || `Repository for ${projectId}`,
+            // Server persists the platform-controlled remote identity before
+            // responding; the PUT below keeps sending it for older servers.
+            project: projectId,
           })
           if (createRes && createRes.repository) {
             remoteMetadata = {

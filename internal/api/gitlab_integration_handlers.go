@@ -170,6 +170,14 @@ type gitlabCreateProjectReq struct {
 	NamespaceID  int64  `json:"namespaceId"`
 	Visibility   string `json:"visibility"`
 	Description  string `json:"description"`
+	// Project optionally names the multigent project this remote belongs to.
+	// When set, the created repository's platform-controlled identity
+	// (RemoteProjectID/RemoteURL/CloneURL/DefaultBranch, all taken from the
+	// GitLab API response — never from client echo) is persisted server-side
+	// before the response returns. This is the authoritative record the
+	// remote-adopt authorization (originAdoptAuthorized) trusts, and it makes
+	// the UI's follow-up PUT a no-op for those fields.
+	Project string `json:"project"`
 }
 
 func (s *Server) handleGitLabCreateProject(w http.ResponseWriter, r *http.Request) {
@@ -197,11 +205,40 @@ func (s *Server) handleGitLabCreateProject(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if projectName := strings.TrimSpace(body.Project); projectName != "" {
+		if err := s.persistPlatformRemoteIdentity(projectName, repo); err != nil {
+			// The remote exists but the record failed — surface it rather than
+			// letting the UI PUT carry the identity (that path is exactly what
+			// makes remoteUrl client-echo rather than platform record).
+			s.serverError(w, fmt.Errorf("persist remote identity for project %s: %w", projectName, err))
+			return
+		}
+	}
+
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":           true,
 		"connectionId": connID,
 		"repository":   repo,
 	})
+}
+
+// persistPlatformRemoteIdentity stores the create-repository response onto the
+// project record. Every field comes from the GitLab API response; nothing is
+// accepted from the request body, so the stored identity remains independent
+// of anything an agent or client could have echoed.
+func (s *Server) persistPlatformRemoteIdentity(projectName string, repo *codehost.Repository) error {
+	p, err := s.st.Project(projectName)
+	if err != nil {
+		return err
+	}
+	p.RemoteProvider = "gitlab"
+	p.RemoteProjectID = repo.ID
+	p.RemoteURL = repo.WebURL
+	p.CloneURL = repo.HTTPCloneURL
+	if repo.DefaultBranch != "" {
+		p.DefaultBranch = repo.DefaultBranch
+	}
+	return s.st.SaveProject(projectName, p)
 }
 
 type mergeTaskMRReq struct {
