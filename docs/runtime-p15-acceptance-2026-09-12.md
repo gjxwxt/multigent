@@ -2,6 +2,47 @@
 
 日期：2026-09-12 · 分支 `feat/chatops-live-card-and-d6` · 未推送远端
 
+> **⚠️ 2026-09-12 复审修订**：本记录初版验收存在遗漏（见第 7 节），经复审后以 follow-up 提交 `d95b58f0` 修复三处语义缺陷并补做真实 agent-sandbox 无 LLM 验收。第 1–6 节保留初版事实，第 7–8 节为复审结论与修正后验收。
+
+## 7. 复审发现的验收遗漏与语义缺陷（已全部修复）
+
+初版验收"全绿"但复审发现以下问题，说明当时的检查面不足：
+
+1. **RuntimeProfile 三态语义被破坏（最严重）**：PUT handler 把显式 `"base"` 折叠为 `""` 落库，导致"自动（未声明，继承 agent 偏好）"与"显式项目级 base（必须胜过 agent 偏好）"不可区分；agent 偏好 jvm21 时，用户显式选 base 实际会解析出 jvm21。初版测试甚至把这个错误行为断言成了正确行为（`TestPutProjectRuntimeProfileClearsViaBaseAlias`）。**修正**：显式值经 NormalizeProfile 校验后逐字落库（`d95b58f0`），三态语义：`""`=auto/未声明、`base`=显式项目级 base（胜过 agent 偏好与服务器默认）、`jvm21`=显式 jvm21；前端"自动"与"Base"产生不同的请求与持久化结果。
+2. **Inventory 用单个任意 worker 代表整个项目**：初版只取第一个成员的观察值，多 worker 配置不一致时给出误导性结论；且未声明但有 pinned image 的项目被标为 `none`，掩盖了需要治理的事实。**修正**（`d95b58f0`）：返回全部成员的 runtime observations（稳定排序）；成员不一致时 `effectiveSource=mixed`；未声明项目一律 `suggestedAction=review`（pinned image 不再豁免）。
+3. **JVM 注入别名不对称**：`ProfileDockerArgs` 严格比较 `cfg.Profile != ProfileJVM21`，而运行时解析走 `NormalizeProfile`（接受 jdk21/java21 别名）——别名配置的 agent 拿不到 JVM 网络参数。**修正**（`d95b58f0`）：先 NormalizeProfile 再判定。
+4. **agent 沙箱命令路径零真实验证**：初版仅单测纯函数，未在真实 Docker 上跑过 BuildArgs 产物（见第 8.1 节补做）。
+
+## 8. 修正后验收（d95b58f0，全部通过）
+
+### 8.1 真实 Docker/Agent sandbox 命令路径（无 LLM）
+
+方法：临时 Go probe 链接仓库内 `sandbox.BuildArgs`，对 `entity.DockerSandboxConfig`（flat JSON）生成真实 docker argv，逐场景断言（镜像 + argv 中 `-e JAVA_TOOL_OPTIONS=...` + 容器内实际值），在 VM 上以与 multigent 服务一致的网络环境运行：
+
+| 场景 | cfg JSON | 结果 |
+|---|---|---|
+| canonical | `{"profile":"jvm21"}` | PASS：镜像 `multigent/runtime-jvm21:2026.9.1`，argv 含 JTO，容器打印 `JTO=[-Dhttps.proxyHost=… -Dhttp.nonProxyHosts=…]` |
+| 别名 jdk21 | `{"profile":"jdk21"}` | PASS：同上（NormalizeProfile 对齐后别名生效） |
+| 别名 java21 | `{"profile":"java21"}` | PASS：同上 |
+| 项目 jvm21 + 显式 image | `{"profile":"jvm21","image":"registry.example/team/jdk-stack:21"}` | PASS：使用 pinned 镜像 **且** 携带 JTO（与 Preview 对称） |
+| base 无串扰 | `{"profile":"base"}` | PASS：镜像 `runtime-base:latest`，argv 无 JTO，容器 `JTO=[UNSET]` |
+
+RESULT pass=5 fail=0。
+
+### 8.2 双 profile Preview 复验（三态语义下）
+
+新建 p15v-base / p15v-jvm 两项目，agent Lina 设为 jvm21 偏好后加入两项目：
+
+- **三态回环**：PUT `base` → GET 逐字返回 `runtimeProfile:"base"`（不再折叠）；PUT `jvm21` 同理；inventory 两项目均 `effectiveSource=project / action=none`。
+- **显式 base 胜过 agent 偏好（关键反例）**：p15v-base Preview 容器镜像 `runtime-base:latest`、env 无 `JAVA_TOOL_OPTIONS`——agent 的 jvm21 偏好未渗透。
+- **显式 jvm21**：p15v-jvm Preview 镜像 `multigent/runtime-jvm21:2026.9.1`、env 含完整 JTO、容器内 JVM 打印 "Picked up JAVA_TOOL_OPTIONS" 且 `System.getProperty("https.proxyHost")` 返回代理地址。
+- 两个 Preview HTTP 200（签名 token 鉴权路径）。
+
+### 8.3 修正后门禁
+
+- `go test ./...` 全绿（含新增三态 API 测试、显式 base 反偏好测试、多 worker/mixed/pinned-review inventory 测试、别名对称与 pinned-image BuildArgs 测试）
+- `make web`、`make build` 成功；产物部署 VM（multigent sha256 `823731ae…`，mga `3cdab3e5…`），console 200、journal 无 panic
+
 ## 1. 交付范围（4 个新提交，基于 P1 的 d582f633）
 
 | 提交 | 内容 |
@@ -42,10 +83,10 @@
 2. **Preview 冷启动竞态**（见提交 b1915e02）。
 3. VM 无 buildx，Dockerfile 的 `--platform=$BUILDPLATFORM` 与 `COPY --from=trust`（额外 build context）在 legacy builder 下失败——用临时 sed + 空 trust stage 绕过完成重建，**仓库 Dockerfile 本身未改**。
 
-## 6. 未验证边界 / 待决策
+## 6. 未验证边界 / 待决策（初版；其中 agent 沙箱路径已在第 8 节补验）
 
 - **TLS 拦截代理的自定义 truststore**：当前类型化配置无字段表达，按边界规则未实现 workaround；需要时先扩展 `[network]`/trust 配置。
-- **agent 沙箱路径**（非 Preview）的 JAVA_TOOL_OPTIONS 注入已实现并有单测（ProfileDockerArgs），未在本轮做真实 agent run 验收（零 LLM 验收范围）；逻辑与 Preview 共用同一纯函数。
+- ~~**agent 沙箱路径**未做真实 run 验收~~ → 已在 `d95b58f0` 后补做（第 8.1 节，5/5 PASS）。
 - **批量回填**：仅有 inventory + 单项目审计回填；真实批量迁移按任务书要求另开任务。
 - **shutdown SEGV**：未动（证据收集阶段：SIGTERM 时 log writer Close 与 signal-goroutine log.Printf 竞争，完整堆栈+最小复现后再立项）。
 - gradle 缓存卷仍未挂入 Preview（P2 既有决定）：每轮首启重新下载 Gradle 发行版，JAVA_TOOL_OPTIONS 解决的是"能否下载"，不是"重复下载"。
