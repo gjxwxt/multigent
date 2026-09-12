@@ -188,3 +188,45 @@ GPT 三项主张全部证实并以硬证据收口：PUT 数据丢失（P1，已�
 - gradle 共享缓存卷（预览侧）仍是既定 P2（root vs host-user 属主，见 `docs/intranet-runtime-plan.md`）。
 - v4 preview 生命周期按 30 分钟租期由 reaper 回收，属预期行为。
 - 首个 staging 部署的"prefix 被覆写"事故已固化为 startPreview 级接线测试；教训：**组合类逻辑必须测到 exec 边界，纯函数测试会同时全绿地漏过接线错误**。
+
+## 10. P2 双技术栈并发 Soak（2026-09-13 凌晨，2 项目 × 1 任务，零手工补救）
+
+在 §9 修复全部就位后执行的双项目并发 soak：Go 全栈与 Spring Boot 两条腿同时走完「建项目 → 建仓 → 模板 → 初始化工作流 → feature 任务 → 并发预览」，全程只通过平台 API/UI 语义操作，未手工补 repo、runner、缓存或环境变量。
+
+### 10.1 初始化双腿（并发发起）
+
+| 指标 | Go 腿 | Spring 腿 |
+|---|---|---|
+| 项目/仓库/模板/任务创建 | 201，双腿并发完成 ~201s | 同左 |
+| 远端 adopt（零手工） | gitlab 68，02:23:35 | gitlab 69，02:56:01 |
+| 初始化任务 | 02:20 → 02:39（~19 min） | 02:18 发起 → 03:41 done（~59 min，含 gradle 冷缓存 + 一次 409 重启 + 流水线等待） |
+| runner 绑定 | 自动 | 自动 |
+
+### 10.2 并发启动竞态（新发现，双腿各命中一次）
+
+两个项目的初始化任务同时 autoStart 到同一 agent 时，先抢到的 manual_run 会话持有 agent 忙锁，后到的首次运行 exit 1（日志：agent busy in manual_run session）。
+
+- Go 腿：首次运行 exit 1 → 平台调度器在后续 wake 周期自动恢复，无需干预。
+- Spring 腿：02:42 手动 `POST /tasks/{id}/start` 重启（第一次 409 agent-already-running，第二次成功），03:41 完成。
+- **结论**：竞态是「首跑失败 + 延迟恢复」而非任务丢失；但初始化任务的 autoStart 并发去重值得作为独立 feature 排队（同 agent 串行化或入队退避）。
+
+### 10.3 feature 任务与并发预览
+
+| 指标 | Go 腿 | Spring 腿 |
+|---|---|---|
+| feature 任务 | 03:42 发起，~5 min 完成（同款竞态 exit 1，poller 03:46 恢复） | ~14 min 完成 |
+| 真实改动 | main.go / main_test.go / api-spec.md（+78 行） | VersionController.java / VersionResponse.java / VersionControllerTest.java（新文件） |
+| 预览启动（双腿并发发起） | 5.9 s running | 96.4 s running（gradle/maven 依赖解析） |
+| 业务 API（经签名代理） | `/api/v1/version` → `{"version":"1.0.0"}`；`/api/health` → ok | `/api/version` → `{"version":"1.0.0"}`；`/api/health` → UP |
+
+### 10.4 压力数据
+
+- 02:17 基线：内存 10.9 GiB used，load 2.45。
+- 03:58 双预览运行中：内存 11.3 GiB used，load 3.50；Spring 预览容器 1.53 GiB（gradle daemon 常驻）；磁盘 110G/343G。
+- 双预览并发启动未见 OOM / 容器驱逐；瓶颈是 Spring 腿的初始化时长（~59 min），非资源。
+
+### 10.5 清理记录与产物残留事实
+
+- 平台侧：双项目 `DELETE /api/v1/projects/{name}` 均 200；双预览容器 `docker rm -f` 成功；项目删除不回收 `projects/<name>/workspace/.multigent/worktrees/`（双腿共 ~204 MB，已手工清除）——**项目删除未级联清理 worktree 目录**，已记入待办（executor blindspots 文档 B6 的实例）。
+- 远端：双仓经 GitLab API `DELETE`（202 deletion_scheduled）。注意：实例 `deletion_adjourned_period` 未配置时默认宽限删除，期间仓库存活于 `-deletion_scheduled-<id>` 名称下，到期自动物理清除；instance 设置已恢复默认。
+- 凭据：清理用的连接密钥从平台 DB 读取（`plain-dev` 明文落库——P2 soak 顺带确认连接密钥在未配置 `MULTIGENT_CONNECTION_ENCRYPTION_KEY` 时以明文存储，部署内网前必须设置该 env，见 config-reference 文档），用后即弃，本地/VM /tmp 副本已全部清除。
