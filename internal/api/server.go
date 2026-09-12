@@ -378,6 +378,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/projects/runtime-inventory", s.handleProjectRuntimeInventory)
 	mux.HandleFunc("POST /api/v1/projects", s.handleCreateProject)
 	mux.HandleFunc("DELETE /api/v1/projects/{name}", s.handleDeleteProject)
+	mux.HandleFunc("GET /api/v1/projects/orphans", s.handleProjectOrphans)
+	mux.HandleFunc("DELETE /api/v1/projects/orphans/{name}", s.handleProjectOrphansDelete)
 	mux.HandleFunc("GET /api/v1/agents", s.handleAgentWorkers)
 	mux.HandleFunc("POST /api/v1/agents", s.handleCreateAgentWorker)
 	mux.HandleFunc("GET /api/v1/agents/{id}", s.handleAgentWorker)
@@ -1278,6 +1280,8 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		"defaultBranch":    p.DefaultBranch,
 		"deployPort":       p.DeployPort,
 		"runtimeProfile":   p.RuntimeProfile,
+
+		"remotePipelineRequired": p.RemotePipelineRequired,
 	})
 }
 
@@ -1313,6 +1317,10 @@ func (s *Server) handlePutProject(w http.ResponseWriter, r *http.Request) {
 		// through NormalizeProfile — it would fold to "base" and make auto
 		// indistinguishable from a deliberate base declaration.
 		RuntimeProfile *string `json:"runtimeProfile"`
+		// RemotePipelineRequired: pointer with "" meaning "explicitly inherit
+		// the server default". "required" and "local" are the two declared
+		// ci_ready semantics; anything else is rejected.
+		RemotePipelineRequired *string `json:"remotePipelineRequired"`
 	}
 	if err := s.readJSON(w, r, &body); err != nil {
 		s.jsonError(w, http.StatusBadRequest, "invalid JSON body")
@@ -1371,6 +1379,16 @@ func (s *Server) handlePutProject(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.DefaultBranch != "" {
 		p.DefaultBranch = body.DefaultBranch
+	}
+	if body.RemotePipelineRequired != nil {
+		declared := strings.ToLower(strings.TrimSpace(*body.RemotePipelineRequired))
+		switch declared {
+		case "", "required", "local":
+			p.RemotePipelineRequired = declared
+		default:
+			s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeValidationFailed, "remotePipelineRequired must be \"\", \"required\" or \"local\"")
+			return
+		}
 	}
 	// Lazy deploy-port allocation: covers projects initialized before the
 	// port pool existed. Only template-initialized projects deploy via the

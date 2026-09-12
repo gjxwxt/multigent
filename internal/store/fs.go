@@ -301,8 +301,10 @@ func (s *fsStore) DeleteProject(name string) error {
 		cmd := exec.Command("rm", "-rf", dir)
 		_ = cmd.Run()
 		if _, statErr := os.Stat(dir); statErr == nil {
-			// Some files might be root-owned by docker container, do not crash API
-			return nil
+			// Root-owned files from sandbox containers are the production
+			// failure mode; escalate instead of reporting a clean delete with
+			// project bytes still on disk (p16 soak orphan evidence).
+			return fmt.Errorf("store: remove project dir %q failed after rm -rf fallback (root-owned files?)", dir)
 		}
 	}
 	return nil

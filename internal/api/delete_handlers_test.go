@@ -1,8 +1,12 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	controldb "github.com/multigent/multigent/internal/db"
@@ -136,5 +140,142 @@ func TestDeleteRoleTeamAndProjectRequireWorkspaceAdmin(t *testing.T) {
 	}
 	if len(bindings) != 0 {
 		t.Fatalf("agent channel bindings after delete len=%d", len(bindings))
+	}
+}
+
+// Regression (P1, review 2026-09-14): a successful DELETE must leave no
+// project directory behind. The p16 soak found worktree dirs (~200MB) plus
+// historical orphans surviving a 200 response because RemoveAll failures were
+// swallowed.
+func TestDeleteProjectRemovesPhysicalDirectory(t *testing.T) {
+	s, _ := newConnectionGrantPolicyServer(t)
+
+	// Seed a git workspace with an orphan worktree whose .git is a real
+	// directory (independent-clone semantics — invisible to git worktree
+	// prune) plus a regular file outside worktrees.
+	wsDir := filepath.Join(s.st.ProjectDir("sample"), "workspace")
+	if err := os.MkdirAll(filepath.Join(wsDir, ".multigent", "worktrees", "t-orphan", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wsDir, "README.md"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	req := providerTestRequest(http.MethodDelete, "/api/v1/projects/sample", "admin", nil)
+	req.SetPathValue("name", "sample")
+	rec := httptest.NewRecorder()
+	s.handleDeleteProject(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(s.st.ProjectDir("sample")); !os.IsNotExist(err) {
+		t.Fatalf("project directory survived delete: %v", err)
+	}
+	if _, err := s.st.Project("sample"); err == nil {
+		t.Fatalf("project record still exists")
+	}
+}
+
+// A deletion whose physical teardown fails must keep the project record and
+// report the failure — never 200 with orphaned bytes on disk. The production
+// failure mode is root-owned files left by sandbox containers; in-process we
+// simulate with the macOS immutable flag (the only portable-enough unlink
+// blocker that also defeats the store's chmod walk). On Linux CI this skips —
+// the gate itself is exercised on the VM acceptance pass.
+func TestDeleteProjectKeepsRecordsWhenTeardownFails(t *testing.T) {
+	s, _ := newConnectionGrantPolicyServer(t)
+	if err := s.st.SaveProject("sample", &entity.Project{Name: "sample"}); err != nil {
+		t.Fatalf("reseed project: %v", err)
+	}
+	// dbStore.SaveProject persists to the control DB only; the physical dir
+	// appears when files are written into it, so create it here.
+	if err := os.MkdirAll(s.st.ProjectDir("sample"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	locked := filepath.Join(s.st.ProjectDir("sample"), "locked.txt")
+	if err := os.WriteFile(locked, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("chflags", "uchg", locked).Run(); err != nil {
+		t.Skipf("immutable-flag blocker unavailable on this OS: %v", err)
+	}
+	t.Cleanup(func() { _ = exec.Command("chflags", "nouchg", locked).Run() })
+
+	req := providerTestRequest(http.MethodDelete, "/api/v1/projects/sample", "admin", nil)
+	req.SetPathValue("name", "sample")
+	rec := httptest.NewRecorder()
+	s.handleDeleteProject(rec, req)
+	if rec.Code == http.StatusOK {
+		t.Fatalf("delete must not succeed while the physical directory survives")
+	}
+	if _, err := s.st.Project("sample"); err != nil {
+		t.Fatalf("project record must survive failed teardown: %v", err)
+	}
+}
+
+// The orphan scan lists on-disk project directories that no longer have a
+// record, and the delete endpoint removes exactly the named orphan while
+// refusing anything that still has a record.
+func TestProjectOrphansScanAndDelete(t *testing.T) {
+	s, _ := newConnectionGrantPolicyServer(t)
+
+	// Orphan: directory without a project record (pre-gate failed delete).
+	orphanDir := filepath.Join(s.st.ProjectDir("."), "legacy-orphan")
+	if err := os.MkdirAll(filepath.Join(orphanDir, "workspace", ".multigent", "worktrees", "t-old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Live project stays invisible to the scan.
+	liveDir := filepath.Join(s.st.ProjectDir("."), "sample")
+	if err := os.MkdirAll(liveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	scanRec := httptest.NewRecorder()
+	scanReq := providerTestRequest(http.MethodGet, "/api/v1/projects/orphans", "admin", nil)
+	s.handleProjectOrphans(scanRec, scanReq)
+	if scanRec.Code != http.StatusOK {
+		t.Fatalf("scan status=%d body=%s", scanRec.Code, scanRec.Body.String())
+	}
+	var scanResp struct {
+		Orphans []struct {
+			Name string `json:"name"`
+		} `json:"orphans"`
+	}
+	if err := json.NewDecoder(scanRec.Body).Decode(&scanResp); err != nil {
+		t.Fatalf("decode scan: %v", err)
+	}
+	var found bool
+	for _, o := range scanResp.Orphans {
+		if o.Name == "legacy-orphan" {
+			found = true
+		}
+		if o.Name == "sample" {
+			t.Fatalf("live project must not appear as orphan")
+		}
+	}
+	if !found {
+		t.Fatalf("orphan dir not reported: %s", scanRec.Body.String())
+	}
+
+	// Deleting a LIVE project through the orphan endpoint is refused.
+	liveReq := providerTestRequest(http.MethodDelete, "/api/v1/projects/orphans/sample", "admin", nil)
+	liveReq.SetPathValue("name", "sample")
+	liveRec := httptest.NewRecorder()
+	s.handleProjectOrphansDelete(liveRec, liveReq)
+	if liveRec.Code != http.StatusConflict {
+		t.Fatalf("orphan delete on live project must 409, got %d", liveRec.Code)
+	}
+
+	// Deleting the orphan succeeds and removes the tree.
+	delReq := providerTestRequest(http.MethodDelete, "/api/v1/projects/orphans/legacy-orphan", "admin", nil)
+	delReq.SetPathValue("name", "legacy-orphan")
+	delRec := httptest.NewRecorder()
+	s.handleProjectOrphansDelete(delRec, delReq)
+	if delRec.Code != http.StatusOK {
+		t.Fatalf("orphan delete status=%d body=%s", delRec.Code, delRec.Body.String())
+	}
+	if _, err := os.Stat(orphanDir); !os.IsNotExist(err) {
+		t.Fatalf("orphan dir survived: %v", err)
 	}
 }
