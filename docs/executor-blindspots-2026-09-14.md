@@ -12,12 +12,14 @@
 
 | # | Feature | 现状 | 建议步序 | 风险 |
 |---|---|---|---|---|
-| 1 | **P2 双栈并发 soak（2 项目 × 1 任务）** | 清单已备（HANDOFF §10.18），未执行 | 新会话照单开跑，一轮通过后扩 ×2 | 中：npm/gradle 并发双写共享卷未验证 |
+| 1 | **P2 双栈并发 soak（2 项目 × 1 任务）** | ✅ 已执行通过（2026-09-13，canary §10；双腿 done_success + 双预览验收） | 扩 ×2（四 Agent 并发）待排 | — |
 | 2 | **runtime-jvm21 镜像固化**（intranet-plan P1） | 镜像可用但来自手工构建，无版本化构建流水 | 先把 Dockerfile + 构建参数进 repo，再谈内网 Harbor | 中：当前 `2026.9.1` tag 无人能复现 |
-| 3 | **gradle 共享缓存卷**（预览/agent 两侧属主方案） | 遗留卷 `multigent-gradle-cache` 已建但**平台代码零挂载** | 并入 intranet-plan P2 受管缓存根目录，先删遗留卷防误判 | 低（当前容器内 HOME 可写已够用） |
+| 3 | **gradle 共享缓存卷**（预览/agent 两侧属主方案） | 遗留卷 `multigent-gradle-cache` 已建但**平台代码零挂载**（已实测：卷内 720MB wrapper dists 系手工预热产物，平台从没写过它） | 并入 intranet-plan P2 受管缓存根目录；接入前该卷可当"手工预热仓"用 | 低（当前容器内 HOME 可写已够用） |
 | 4 | **partial 绑定失败重试入口**（HANDOFF 10.16 §5.1） | API 可恢复但 UI 无入口 | 小 UI 迭代 | 低 |
-| 5 | **preview 端口池可观测性** | findFreePort 盲分配，无占用统计 | soak 记录实测端口分布后再定方案 | 低 |
+| 5 | **preview 端口池可观测性** | findFreePort 盲分配，无占用统计 | soak 实测：并发双预览端口无碰撞，方案可缓 | 低 |
 | 6 | **探测子命令 `multigent runtime probe`**（intranet-plan §2.4） | 未实现 | 按 P0 契约实施 | 低 |
+| 7 | **项目删除级联清理**（P2 soak 新发现） | `DELETE /projects/{name}` 删 DB 记录 + `fsStore.DeleteProject`（RemoveAll 整目录），但 `workspace` 常是独立 git 仓库且 worktree 目录可能被 root 属主文件顶住：实测删除后残留 `projects/<name>/workspace/.multigent/worktrees/`（双腿共 ~204MB，需手工删）；另有 11 个历史孤儿目录共 ~510MB 无 project.yaml 也无 API 项目 | 删除路径调用 `cleanupTaskDeliveryArtifacts` 同款 worktree 清理 + 删除后自检残留并告警；孤儿目录可用"无 project.yaml 判据"写回收扫描器 | 中：磁盘缓涨 + worktree 元数据泄漏 |
+| 8 | **worktree 残留自愈扫描**（P2 soak 新发现） | gitworktree 的 `CleanupWorktree` 在任务交付时执行，但"任务被删/项目被删/首次失败"路径不保证走到；残留 worktree 若 `.git` 是真目录（而非指针文件），`git worktree prune` 也不认 | 周期扫描 `.multigent/worktrees/` 下无对应 active 任务的目录并清理（复用项目锁） | 中 |
 
 **明确不做**（防越界，与 intranet-plan 边界一致）：不改 Dockerfile 默认值、不提前动卷挂载、不引入 mise。
 
@@ -55,8 +57,8 @@
 
 ### B6. 环境里会残留"看起来是平台一部分"的手工资源
 
-**经过**：`multigent-gradle-cache` 卷（09-11 手工建）至今无任何代码挂载。诊断和 soak 时极易误判"gradle 缓存卷已生效"。同类：手工 `docker run` 的探针容器、`.service.d/` drop-in。
-**规则**：手工资源要么删、要么在 HANDOFF 记"谁建的、为什么还在"。soak 清单里已加"勿误判"条目。
+**经过**：`multigent-gradle-cache` 卷（09-11 手工建）至今无任何代码挂载。诊断和 soak 时极易误判"gradle 缓存卷已生效"。同类：手工 `docker run` 的探针容器、`.service.d/` drop-in。P2 清理时又添一例：卷内 `wrapper/dists/from-host/` 有 5 个 gradle 发行版共 575MB——全是手工预热放的，平台代码没写过它；卷从未被挂载这件事，看卷的内容根本看不出来。
+**规则**：手工资源要么删、要么在 HANDOFF 记"谁建的、为什么还在"。soak 清单里已加"勿误判"条目。**判定"平台是否真的在用它"要查代码引用 + 容器 Mounts，不能看资源里有没有数据。**
 
 ### B7. 错误信息聚合会把两条报错粘成一条（日志可读性）
 
@@ -88,3 +90,13 @@
 - failInstance 日志按行前缀化（B7）。
 - `docker events` 类诊断命令的 `timeout` 包装写进排障 SOP（防交互式挂住）。
 - preview 双端口（前端 + 后端映射）在 instance JSON 里输出 backendPort，便于外部探活。
+- **连接密钥默认加密**：未配置 `MULTIGENT_CONNECTION_ENCRYPTION_KEY` 时 secretbox 以 plain-dev 明文存 token（P2 清理时实测读出）。建议启动时无 key 打 WARN 日志 + config-reference 已标注迁移必带。
+- **dangling docker 资源周期回收**：soak 一晚就攒了 11 个退出容器 + 18 个 dangling 镜像（~4.5GB）+ 950MB build cache；`docker system prune` 一行可清，建议写进部署 SOP 或加 systemd timer。
+
+---
+
+## E. P2 soak 后补记（2026-09-13 凌晨执行完毕时新增）
+
+- **并发 autoStart 竞态**：同 agent 双任务同刻 autoStart，后到者首跑 exit 1（agent busy in manual_run）。平台后续 wake 自动恢复、无任务丢失，但"首轮失败"会污染任务历史与耗时统计。修法：任务启动入口按 agent 排队或加短暂退避重试（B8 的"追问首轮失败"在此有了具体形态）。
+- **git worktree 的 .git 判据**：正常 worktree 的 `.git` 是指针文件（`gitdir: ...`），被 RemoveAll 硬删后 `git worktree prune` 能回收元数据；但 **孤儿 worktree 的 `.git` 可能是真目录**（独立 clone 语义），prune 对它无效——test7 的两个 2026-08-27 残留 worktree 就长这样，靠 `git worktree list` 看不见。回收扫描器必须直接扫目录 + 校验"无 active 任务"，不能依赖 git 元数据。
+- **清理用凭据的取用路径**：平台 DB 里连接密钥可解出（plain-dev），清理 GitLab 仓库用它合法（soak 仓库本由平台创建）；但取用后必须即弃——本轮在 Mac/VM /tmp 的副本全部删除，这个动作要成为固定收尾步骤。
