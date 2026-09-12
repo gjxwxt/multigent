@@ -186,6 +186,18 @@ type Project struct {
 	CloneURL         string `yaml:"clone_url,omitempty" json:"cloneUrl,omitempty"`                 // Clean Clone URL (no embedded tokens)
 	DefaultBranch    string `yaml:"default_branch,omitempty" json:"defaultBranch,omitempty"`       // Default branch name, e.g. "main"
 
+	// RemotePipelineRequired declares the ci_ready gate semantics explicitly,
+	// instead of inferring them from whether a remote happens to be bound:
+	//
+	//   ""          inherit — server env MULTIGENT_CI_REMOTE_PIPELINE_REQUIRED
+	//               decides (default: not required, local-only projects pass)
+	//   "required"  pipeline evidence for the current HEAD is mandatory; an
+	//               unbound remote is a failing pipeline_evidence check, not
+	//               a skip
+	//   "local"     local-only delivery is acceptable; pipeline evidence is
+	//               informational and its absence never fails the gate
+	RemotePipelineRequired string `yaml:"remote_pipeline_required,omitempty" json:"remotePipelineRequired,omitempty"`
+
 	// ChatOps & IM integration metadata
 	DefaultIMChannelID string `yaml:"default_im_channel_id,omitempty" json:"defaultImChannelId,omitempty"` // Default group channel ID for task projections
 }

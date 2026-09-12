@@ -20,7 +20,33 @@ import (
 var (
 	errNoCommits        = errors.New("repository has no commits yet; push the initialization commit first")
 	errNoPipelineForSHA = errors.New("no pipeline observed for the current HEAD yet; retry with a longer wait")
+	errRemoteRequired   = errors.New("remote pipeline required but the project is not bound to a GitLab remote")
 )
+
+// ciRemotePipelineRequiredEnv is the server-level default for projects that
+// do not declare RemotePipelineRequired themselves. Any of "1", "true",
+// "yes", "required" (case-insensitive) turns the gate strict workspace-wide.
+const ciRemotePipelineRequiredEnv = "MULTIGENT_CI_REMOTE_PIPELINE_REQUIRED"
+
+// ciRemotePipelineRequired resolves the effective gate semantics: explicit
+// project declaration first, then the server env, then local-only (the
+// historical behavior). The declared- vs-bound-inference ambiguity flagged in
+// review 2026-09-14 is resolved by making both sides explicit.
+func ciRemotePipelineRequired(p *entity.Project) bool {
+	if p != nil {
+		switch strings.ToLower(strings.TrimSpace(p.RemotePipelineRequired)) {
+		case "required":
+			return true
+		case "local":
+			return false
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(ciRemotePipelineRequiredEnv))) {
+	case "1", "true", "yes", "required":
+		return true
+	}
+	return false
+}
 
 // ciReadyResponse wraps the deterministic report with optional GitLab
 // pipeline evidence collected after the first push.
@@ -78,11 +104,17 @@ func (s *Server) handleRuntimeCIReady(w http.ResponseWriter, r *http.Request) {
 		waitSeconds = parsed
 	}
 	if waitSeconds > 0 {
-		if project.RemoteProvider != "gitlab" || strings.TrimSpace(project.RemoteProjectID) == "" {
-			response.PipelineError = "project is not bound to a GitLab remote; pipeline evidence skipped"
+		remoteRequired := ciRemotePipelineRequired(project)
+		remoteBound := strings.EqualFold(strings.TrimSpace(project.RemoteProvider), "gitlab") && strings.TrimSpace(project.RemoteProjectID) != ""
+		if !remoteBound && !remoteRequired {
+			// Local-only delivery is explicitly acceptable: report the skip
+			// but keep it out of the checks (nothing failed).
+			response.PipelineError = "project is not bound to a GitLab remote; pipeline evidence skipped (local-only semantics)"
 		} else {
-			evidence, evidenceErr := s.ciReadyPipelineEvidence(r, project, waitSeconds)
-			if evidenceErr != nil {
+			if !remoteBound {
+				response.Pipeline = nil
+				response.PipelineError = errRemoteRequired.Error()
+			} else if evidence, evidenceErr := s.ciReadyPipelineEvidence(r, project, waitSeconds); evidenceErr != nil {
 				response.PipelineError = evidenceErr.Error()
 			} else {
 				response.Pipeline = evidence
@@ -92,24 +124,25 @@ func (s *Server) handleRuntimeCIReady(w http.ResponseWriter, r *http.Request) {
 		// delivery evidence. 13/13 deterministic checks with no successful
 		// pipeline must not read as "ready" — that green masked a permanently
 		// pending pipeline when the runner binding was missing (p15 canary
-		// §8.4). Only a concrete evidence error keeps the local-only pass
-		// (remote bound but unreachable is an infrastructure outage, surfaced
-		// via PipelineError, not a silent green).
-		if response.Pipeline == nil {
+		// §8.4). Under remote-required semantics an UNBOUND remote fails the
+		// same way (explicit declaration, not bound-inference); under
+		// local-only semantics no check is appended at all.
+		localOnlySkip := !remoteBound && !remoteRequired
+		if response.Pipeline == nil && !localOnlySkip {
 			response.Checks = append(response.Checks, ciready.Check{
 				Name:   "pipeline_evidence",
 				Status: ciready.StatusFail,
 				Detail: response.PipelineError,
 			})
 			response.Overall = ciready.OverallNotReady
-		} else if response.Pipeline.Status != "success" {
+		} else if response.Pipeline != nil && response.Pipeline.Status != "success" {
 			response.Checks = append(response.Checks, ciready.Check{
 				Name:   "pipeline_evidence",
 				Status: ciready.StatusFail,
 				Detail: fmt.Sprintf("pipeline %d for HEAD is %s (terminal status required: success)", response.Pipeline.ID, response.Pipeline.Status),
 			})
 			response.Overall = ciready.OverallNotReady
-		} else {
+		} else if response.Pipeline != nil {
 			response.Checks = append(response.Checks, ciready.Check{
 				Name:   "pipeline_evidence",
 				Status: ciready.StatusPass,
