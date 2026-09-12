@@ -88,6 +88,34 @@ func (s *Server) handleRuntimeCIReady(w http.ResponseWriter, r *http.Request) {
 				response.Pipeline = evidence
 			}
 		}
+		// Fail-closed: once a GitLab remote is bound, the pipeline IS the
+		// delivery evidence. 13/13 deterministic checks with no successful
+		// pipeline must not read as "ready" — that green masked a permanently
+		// pending pipeline when the runner binding was missing (p15 canary
+		// §8.4). Only a concrete evidence error keeps the local-only pass
+		// (remote bound but unreachable is an infrastructure outage, surfaced
+		// via PipelineError, not a silent green).
+		if response.Pipeline == nil {
+			response.Checks = append(response.Checks, ciready.Check{
+				Name:   "pipeline_evidence",
+				Status: ciready.StatusFail,
+				Detail: response.PipelineError,
+			})
+			response.Overall = ciready.OverallNotReady
+		} else if response.Pipeline.Status != "success" {
+			response.Checks = append(response.Checks, ciready.Check{
+				Name:   "pipeline_evidence",
+				Status: ciready.StatusFail,
+				Detail: fmt.Sprintf("pipeline %d for HEAD is %s (terminal status required: success)", response.Pipeline.ID, response.Pipeline.Status),
+			})
+			response.Overall = ciready.OverallNotReady
+		} else {
+			response.Checks = append(response.Checks, ciready.Check{
+				Name:   "pipeline_evidence",
+				Status: ciready.StatusPass,
+				Detail: fmt.Sprintf("pipeline %d succeeded for HEAD %s", response.Pipeline.ID, response.Pipeline.SHA),
+			})
+		}
 	}
 	_ = json.NewEncoder(w).Encode(response)
 }

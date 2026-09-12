@@ -1086,6 +1086,11 @@ func (s *Server) handleRuntimeWorkflowStepComplete(w http.ResponseWriter, r *htt
 		s.jsonError(w, http.StatusBadRequest, "task is not attached to an active workflow")
 		return
 	}
+	// After an initialization sync step the agent-created remote exists but the
+	// control plane has no record of it; adopt the origin URL into
+	// RemoteProjectID and bind the default runner so the ci_ready step's
+	// pipeline evidence can actually run (p15 canary §8.4).
+	s.adoptRemoteIfNeededAfterStep(principal.Project, t, stepStatus, transition.Run.DefinitionID, transition.Current.StepID)
 	if transition.Done {
 		prev := t.Status
 		t.Status = entity.TaskStatusDoneSuccess

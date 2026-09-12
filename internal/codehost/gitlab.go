@@ -279,6 +279,16 @@ func normalizeGitLabCloneURL(raw string) string {
 	return g.normalizeGitLabCloneURL(raw)
 }
 
+// BaseURL returns the API base URL (including /api/v4) this host talks to.
+// Callers outside the package use it to decide whether a clone URL belongs to
+// this GitLab instance.
+func (g *GitLabHost) BaseURL() string {
+	if g == nil {
+		return ""
+	}
+	return g.baseURL
+}
+
 func (g *GitLabHost) DeleteRepository(ctx context.Context, projectID string) error {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
@@ -305,6 +315,42 @@ func (g *GitLabHost) DeleteRepository(ctx context.Context, projectID string) err
 		return fmt.Errorf("delete gitlab project status %d: %s", resp.StatusCode, string(b))
 	}
 	return nil
+}
+
+// RepositoryByProjectPath looks up a repository by its URL-encoded
+// path-with-namespace (e.g. "root/my-project"). Used after an agent pushes
+// the initialization commit to a remote it created itself: the control plane
+// must learn the numeric project ID from the URL the agent actually pushed
+// to, or downstream automation (runner binding, pipeline evidence, deploy
+// port) can never attach.
+func (g *GitLabHost) RepositoryByProjectPath(ctx context.Context, pathWithNamespace string) (*Repository, error) {
+	pathWithNamespace = strings.TrimSpace(pathWithNamespace)
+	pathWithNamespace = strings.TrimSuffix(pathWithNamespace, ".git")
+	if pathWithNamespace == "" {
+		return nil, fmt.Errorf("project path is required")
+	}
+	endpoint := fmt.Sprintf("/projects/%s", url.PathEscape(pathWithNamespace))
+	req, err := g.newRequest(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := g.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("lookup gitlab project by path: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, ErrNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("lookup gitlab project %s status %d: %s", pathWithNamespace, resp.StatusCode, string(b))
+	}
+	var p gitlabProjectResp
+	if err := json.NewDecoder(resp.Body).Decode(&p); err != nil {
+		return nil, fmt.Errorf("decode gitlab project %s: %w", pathWithNamespace, err)
+	}
+	return g.toRepository(p), nil
 }
 
 // SetProjectVariable creates or updates a CI/CD project variable. GitLab
