@@ -1588,8 +1588,13 @@ func pendingAttentionSection(root, project, agentName string, i18n wakeupI18n) (
 	}
 	b.WriteString("---\n\n")
 	b.WriteString(i18n.AttentionHint)
-	wtDir, wtBranch := schedulerAttentionWorktreeTarget(root, project, agentName, signals)
-	targetTaskID, targetProject := schedulerAttentionTargetTask(root, project, agentName, signals)
+	// One DB handle serves the whole attention resolution: the target-task
+	// scan and the worktree lookup share it and the caller's defer db.Close()
+	// releases it. Opening a fresh SQLiteStore per lookup leaked one handle
+	// per call (a single wakeup path opened up to three).
+	ts := taskstore.NewDB(root, db)
+	wtDir, wtBranch := schedulerAttentionWorktreeTargetFromStore(ts, project, agentName, signals)
+	targetTaskID, targetProject := schedulerAttentionTargetTaskFromStore(ts, project, agentName, signals)
 	return b.String(), ids, wtDir, wtBranch, targetTaskID, targetProject, nil
 }
 
@@ -1602,12 +1607,22 @@ func schedulerAttentionWorktreeTarget(root, project, agentName string, signals [
 	if len(signals) == 0 {
 		return "", ""
 	}
-	targetTaskID, targetProject := schedulerAttentionTargetTask(root, project, agentName, signals)
-	if targetTaskID == "" {
+	db, err := openControlDBForRoot(root)
+	if err != nil {
 		return "", ""
 	}
-	ts, err := schedulerAttentionTaskStore(root)
-	if err != nil {
+	defer db.Close()
+	return schedulerAttentionWorktreeTargetFromStore(taskstore.NewDB(root, db), project, agentName, signals)
+}
+
+// schedulerAttentionWorktreeTargetFromStore is the store-injected core so the
+// attention path can share one DB handle across target and worktree lookups.
+func schedulerAttentionWorktreeTargetFromStore(ts taskstore.Store, project, agentName string, signals []controldb.AttentionSignal) (worktreeDir, branch string) {
+	if ts == nil || len(signals) == 0 {
+		return "", ""
+	}
+	targetTaskID, targetProject := schedulerAttentionTargetTaskFromStore(ts, project, agentName, signals)
+	if targetTaskID == "" {
 		return "", ""
 	}
 	assigned, err := ts.GetTask(targetProject, agentName, targetTaskID)
@@ -1627,8 +1642,18 @@ func schedulerAttentionTargetTask(root, project, agentName string, signals []con
 	if len(signals) == 0 {
 		return "", ""
 	}
-	ts, err := schedulerAttentionTaskStore(root)
+	db, err := openControlDBForRoot(root)
 	if err != nil {
+		return "", ""
+	}
+	defer db.Close()
+	return schedulerAttentionTargetTaskFromStore(taskstore.NewDB(root, db), project, agentName, signals)
+}
+
+// schedulerAttentionTargetTaskFromStore is the store-injected core so the
+// attention path can share one DB handle across target and worktree lookups.
+func schedulerAttentionTargetTaskFromStore(ts taskstore.Store, project, agentName string, signals []controldb.AttentionSignal) (targetTaskID, targetProject string) {
+	if ts == nil || len(signals) == 0 {
 		return "", ""
 	}
 	distinctTasks := map[string]string{}
@@ -1667,16 +1692,16 @@ func schedulerAttentionTargetTask(root, project, agentName string, signals []con
 }
 
 // schedulerAttentionTaskStore returns the task store that matches how this
-// deployment persists tasks. Deployments backed by the control-plane SQLite DB
-// (kv_records) must resolve attention targets through the DB store; the FS
-// store reads tasks.yaml, which does not exist there and silently breaks
-// workflow-step worktree resolution in wakeup cycles.
-func schedulerAttentionTaskStore(root string) (taskstore.Store, error) {
+// deployment persists tasks, together with its underlying DB handle so the
+// CALLER owns the lifecycle: a wakeup resolution must reuse one handle for
+// the target-task scan and the worktree lookup, then close it exactly once
+// (the old open-per-lookup path leaked a SQLiteStore per call).
+func schedulerAttentionTaskStore(root string) (taskstore.Store, controldb.Store, error) {
 	db, err := openControlDBForRoot(root)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return taskstore.NewDB(root, db), nil
+	return taskstore.NewDB(root, db), db, nil
 }
 
 func parseSchedulerTime(value string) (time.Time, bool) {
