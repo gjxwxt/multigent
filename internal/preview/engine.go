@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/multigent/multigent/internal/agentcli"
+	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/sandbox"
 )
 
@@ -663,6 +664,11 @@ func (e *Engine) profilePreviewEnv(runtime RuntimeSelection) []string {
 			"-e", "JAVA_HOME=/opt/multigent/jdk",
 			"-e", "PATH=/opt/multigent/toolchains/npm/bin:/opt/multigent/jdk/bin:/usr/local/go/bin:/root/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		)
+		// Gradle/JVM ignore HTTPS_PROXY env; without explicit -D system
+		// properties the wrapper download and dependency resolution hang in
+		// proxied environments. Derived from the typed network config at
+		// container-create time — nothing environment-specific is committed.
+		env = append(env, sandbox.ProfileDockerArgs(&entity.DockerSandboxConfig{Profile: runtime.Profile})...)
 	}
 	return env
 }

@@ -234,6 +234,13 @@ func BuildArgs(agentDir string, model entity.AgentModel, cfg *entity.DockerSandb
 		}
 	}
 
+	// 2b. JVM proxy properties for profile-managed runtimes: the JVM ignores
+	//     HTTPS_PROXY/HTTP_PROXY, so Gradle wrapper downloads hang without
+	//     explicit -D system properties. Derived at container-create time from
+	//     the same typed network config that drives the transport env above;
+	//     nothing environment-specific lands in project templates.
+	args = append(args, ProfileDockerArgs(cfg)...)
+
 	// 3. ExtraEnv supports both "KEY" (inherit) and "KEY=VALUE" (explicit).
 	if cfg != nil {
 		for _, kv := range cfg.ExtraEnv {
