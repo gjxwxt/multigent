@@ -151,3 +151,40 @@ GPT 收口要求：api-key-hub 的 Agent runtime 合约此前为手工播种，�
 ### 8.6 结论
 
 GPT 三项主张全部证实并以硬证据收口：PUT 数据丢失（P1，已修）、description 同损（同缺陷，已修）、HOME 属主（P1，机制为 docker 自动创建 mount 目标父目录，已修）。干净重跑达成了首轮未达成的目标：**标准初始化 → 工作流三步全绿 → 真实任务 worktree → gradle test → preview 后端实测，零手工 repo/权限补救**。新暴露的 runner 绑定时序缺陷（8.4）是标准路径上最后一个已知缺口，已给出修复方向。
+
+## 9. 第二轮平台修复与 v3/v4 全链路验收（2026-09-13，零手工补救闭环）
+
+针对 8.4 时序缺陷与首轮 preview 缺口的第二轮修复，全部先补失败前回归测试再实现；验收项目 p15-init-spring-v3（负路径）与 v4（正路径）。
+
+### 9.1 本轮修复（scheduler / initialization / runtime 三个 commit）
+
+| 修复 | 根因 | 代码 | 回归测试 |
+|---|---|---|---|
+| wake 目标解析走 DB 任务库 | `multigent scheduler wakeup` 子进程用 FS store（tasks.yaml）查任务，SQLite 部署恒失败 → wake 任务缺 worktree 变量，agent 正确拒绝执行步骤 | `cmd/multigent/scheduler.go` `schedulerAttentionTaskStore` | `TestPendingAttentionSectionResolvesWorktreeFromDBTask`（任务只存在于 DB store，断言 section 带出真实 worktree 目录与分支） |
+| remote 采用钩子判错状态源 | 工作流跨步复用同一任务，钩子运行时任务状态已被重置为 pending → `done_success` 守卫永不命中，RemoteProjectID 不落库 | `internal/api/init_remote_binding.go` 改判 runtime POST 的**步骤实例状态**（仅 `failed` 拒绝） | `TestAdoptRemoteIfNeededAfterStepFiresForPendingTask` / `...SkipsFailedStep` |
+| ci_ready 缺流水线证据不得 ready | 13/13 确定性检查全绿 + runner 未绑 → 流水线永久 pending 却显示 ready（fail-open） | `internal/api/ci_ready_handlers.go` 远端已绑定时 nil pipeline（无具体证据错误）→ `pipeline_evidence` 显式 FAIL | v3 实测：13/13 但 overall=not ready，agent 正确阻断等待 owner |
+| GitLab 按路径查仓 + runner 绑定时机 | agent 自建远端后平台只有 origin URL；绑定前提 RemoteProjectID 非空而落库晚于 initialize-handler | `internal/codehost/gitlab.go` `BaseURL`/`RepositoryByProjectPath` + sync 步完成后 adopt | v4 实测：`[remote-adopt] adopted gitlab project 64` → `[runner-bind] runner 1 bound`，零手工 API |
+| 会话挂载迁出 HOME | 任何 mount 目标位于 HOME 下都会让 docker 预创建 root 属主 HOME | `internal/sandbox/docker.go` `HostUserSessionHome=/tmp/multigent-session` | `TestBuildArgsRunAsHostUser` 扩展；实测 gradle 在默认 `$HOME/.gradle` 可写（无 GRADLE_USER_HOME） |
+| 预览缓存卷真实生效 | 卷挂了但工具链没指向它们 | `internal/preview/engine.go` `previewDockerBaseArgs` 卷+env 配对 | `TestPreviewDockerBaseArgsCacheEnvsMatchVolumes`；实测 `_cacache`/GOCACHE 写入卷内 |
+| snapshot 预览 EROFS | vite 5.4 ESM config loader 在 `vite.config.ts` 旁写时间戳 .mjs；:ro 快照挂载必死 | `internal/preview/engine.go` readOnly 启动先把 contract 各服务目录拷入 `/tmp/multigent-preview-stage` 再从 staging 运行 | `TestStartPreviewReadOnlyComposesStagingBeforeStartupCommand`（探针 docker 捕获 startPreview 真实 argv——首个部署曾因 prefix 被覆写而漏拷贝，纯函数测试看不到，此测试即为它而生） |
+
+### 9.2 v3（负路径，旧二进制不可恢复态留证）
+
+- wake 缺 worktree 变量 → agent 拒绝工作流步骤（边界正确）。
+- sync 完成时旧二进制未 adopt → ci_ready 13/13 但 `pipeline_evidence` FAIL（平台未绑远端，无流水线证据），overall≠ready，agent 阻断等待 owner——**fail-closed 行为正确**。
+
+### 9.3 v4（正路径，全链路零手工）
+
+| 阶段 | 结果 | 证据 |
+|---|---|---|
+| 初始化工作流 | completed | run wfr completed；任务 t-20260912-9oyydl done_success |
+| ready | completed | make verify 全绿，gradle 跑在默认 HOME（无 GRADLE_USER_HOME） |
+| sync | completed | agent push 至自建 GitLab `root/p15-init-spring-v4`（id 64），平台自动 adopt + runner 1 自动绑定 |
+| ci_ready | completed | pipeline 1061 success（HEAD e880197），`mga ci ready` overall=ready 14/14 |
+| snapshot preview | running | vite `ready in 982 ms`（staging 目录运行，临时 .mjs 写入 staging）、Spring Boot `Started Application in 3.888 seconds`、`/?pvt=…` 与 `/_multigent_preview/feedback.js?pvt=…` 均 200、`/workspace` 写入仍 EROFS（:ro 保持） |
+
+### 9.4 遗留与边界
+
+- gradle 共享缓存卷（预览侧）仍是既定 P2（root vs host-user 属主，见 `docs/intranet-runtime-plan.md`）。
+- v4 preview 生命周期按 30 分钟租期由 reaper 回收，属预期行为。
+- 首个 staging 部署的"prefix 被覆写"事故已固化为 startPreview 级接线测试；教训：**组合类逻辑必须测到 exec 边界，纯函数测试会同时全绿地漏过接线错误**。
