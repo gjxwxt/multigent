@@ -108,6 +108,7 @@ type Server struct {
 	runtimeReaperOnce      sync.Once
 	runtimeReaperDone      chan struct{}
 	runtimeReaperCancel    context.CancelFunc
+	runtimeTaskTokenMu     sync.Mutex
 	connectorSetupMu       sync.Mutex
 	connectorSetupSessions map[string]connectorDeviceAuthSession
 	modelAuthMu            sync.Mutex

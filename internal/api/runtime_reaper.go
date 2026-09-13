@@ -56,11 +56,15 @@ func runtimeRunBlocksAgent(run controldb.RuntimeRun, now time.Time) bool {
 // if this task write then fails, the run stays authoritative (run_key dedup
 // still prevents duplicate dispatch) and the field is compensated later —
 // either by the next enqueue/claim writing it, or by clearStaleTaskRuntimeToken
-// converging on the reaper cycle.
+// converging on the reaper cycle. Stamp and clear share one mutex so an old
+// run's clear can never interleave between a new dispatch's read and write
+// (GPT fix 3: the token is a real fence, not advisory).
 func (s *Server) setTaskActiveRuntimeRun(project, agent, taskID, runID string) {
 	if s == nil || s.ts == nil || strings.TrimSpace(taskID) == "" || strings.TrimSpace(runID) == "" {
 		return
 	}
+	s.runtimeTaskTokenMu.Lock()
+	defer s.runtimeTaskTokenMu.Unlock()
 	task, err := s.ts.GetTask(project, agent, taskID)
 	if err != nil || task == nil {
 		return
@@ -78,11 +82,15 @@ func (s *Server) setTaskActiveRuntimeRun(project, agent, taskID, runID string) {
 // clearTaskActiveRuntimeRunIfRun clears the task's execution token only when
 // it still names runID — the "last conditional update wins" guarantee behind
 // reaper-vs-finish races: whichever side runs second finds the field already
-// changed and does nothing.
+// changed and does nothing. The check and the write are serialized under the
+// same mutex as the stamp, so a stale clear that read the field before a new
+// stamp cannot clobber the new dispatch's fence.
 func (s *Server) clearTaskActiveRuntimeRunIfRun(project, agent, taskID, runID string) bool {
 	if s == nil || s.ts == nil || strings.TrimSpace(taskID) == "" || strings.TrimSpace(runID) == "" {
 		return false
 	}
+	s.runtimeTaskTokenMu.Lock()
+	defer s.runtimeTaskTokenMu.Unlock()
 	task, err := s.ts.GetTask(project, agent, taskID)
 	if err != nil || task == nil {
 		return false
@@ -134,6 +142,59 @@ func (s *Server) clearStaleTaskRuntimeToken(workspaceID, project, agent string, 
 		},
 	})
 	return true
+}
+
+// taskTokenOwnedByRun is the fence check behind every reaper-side task
+// transition (GPT fix 3): the task's ActiveRuntimeRunID must still name THIS
+// run, or the transition is not ours to make.
+func (s *Server) taskTokenOwnedByRun(project, agent string, task *entity.Task, runID string) bool {
+	if s == nil || task == nil {
+		return false
+	}
+	return strings.TrimSpace(task.ActiveRuntimeRunID) == strings.TrimSpace(runID) && strings.TrimSpace(runID) != ""
+}
+
+// transitionReapedTask drives the task forward after its run was force-failed
+// with lease_expired (GPT fix 2). The transition is fenced on the execution
+// token: only the task that still names THIS run is moved. Workflow tasks are
+// left to the workflow engine's own rework path (same exclusion as
+// finalizeRuntimeTaskRun); non-workflow tasks go through the unified infra
+// backoff/blocked logic so the task never stays in_progress.
+func (s *Server) transitionReapedTask(workspaceID string, run controldb.RuntimeRun) {
+	if s == nil || s.ts == nil || strings.TrimSpace(run.TaskID) == "" {
+		return
+	}
+	task, err := s.ts.GetTask(run.ProjectID, run.AgentID, run.TaskID)
+	if err != nil || task == nil {
+		return
+	}
+	// Fence (fix 3): if the token no longer names this run, a newer
+	// dispatch already owns the task — do not touch its state.
+	if !s.taskTokenOwnedByRun(run.ProjectID, run.AgentID, task, run.ID) {
+		return
+	}
+	if task.Status.IsTerminal() {
+		return
+	}
+	if s.runtimeTaskHasWorkflow(workspaceID, run.ProjectID, run.TaskID) {
+		// Workflow runs fail their step through the workflow engine; the
+		// reaper only records the kill. No in_progress residue: the workflow
+		// step fails with the run.
+		s.auditLog(auditLogInput{
+			WorkspaceID:  workspaceID,
+			Action:       "runtime_run.reaped",
+			ResourceType: "task",
+			ResourceID:   task.ID,
+			Summary:      "Workflow task run reaped; step failure handled by the workflow engine",
+			After:        map[string]any{"runId": run.ID, "taskId": task.ID},
+		})
+		return
+	}
+	if task.Status != entity.TaskStatusInProgress && task.Status != entity.TaskStatusPending {
+		return
+	}
+	task.LastError = "lease expired; run reaped by control plane (lease_expired)"
+	s.applyInfraFailureBackoff(workspaceID, run.ProjectID, run.AgentID, task, "lease_expired")
 }
 
 // ── Fork session slot class (D1: decided at enqueue, fail-closed) ────────────
@@ -287,7 +348,7 @@ func (s *Server) runtimeReaperPassWorkspace(workspaceID string, cutoff time.Time
 			continue
 		}
 		if !reaped {
-			// Lost the race against renew/finish/takeover — nothing to do.
+			// Lost the race against renew/finish — nothing to do.
 			continue
 		}
 		slog.Warn("runtime run reaped: lease expired past grace", "run", run.ID, "node", run.RuntimeNodeID, "task", run.TaskID, "leaseExpiredAt", run.LeaseExpiresAt)
@@ -306,12 +367,69 @@ func (s *Server) runtimeReaperPassWorkspace(workspaceID string, cutoff time.Time
 				"leaseGeneration": run.LeaseGeneration + 1,
 			},
 		})
+		// Fenced task transition (fix 2): move the task through the unified
+		// infra backoff/blocked path while the token still names this run,
+		// then release the token. Order matters — the transition check uses
+		// the token, the clear releases it, and anything left over (write
+		// failure mid-transition) is reconciled by the sweep below or the
+		// next pass.
+		s.transitionReapedTask(workspaceID, run)
 		// Conditional token clear: only if the task still names THIS run.
 		if strings.TrimSpace(run.TaskID) != "" && s.ts != nil {
 			if !s.clearTaskActiveRuntimeRunIfRun(run.ProjectID, run.AgentID, run.TaskID, run.ID) {
-				// Field already changed or write failed — the next pass's
+				// Field already changed or write failed — the pass-wide
 				// clearStaleTaskRuntimeToken sweep reconciles any residue.
 				s.reconcileStaleTaskToken(workspaceID, run)
+			}
+		}
+	}
+	s.sweepStaleTaskRuntimeTokens(workspaceID)
+}
+
+// sweepStaleTaskRuntimeTokens is the pass-wide orphan reconciliation (Claude
+// fix-round finding 1): every cycle, ALL projects' tasks are scanned for
+// execution tokens pointing at runs that are already terminal or missing —
+// not just the tasks of runs reaped in this pass. This closes the window
+// where a finish-side token clear failed and the orphan would otherwise
+// persist forever.
+func (s *Server) sweepStaleTaskRuntimeTokens(workspaceID string) {
+	if s == nil || s.ts == nil || s.st == nil {
+		return
+	}
+	projectRows, err := s.st.ListProjects()
+	if err != nil {
+		slog.Warn("stale-token sweep skipped: listing projects failed", "workspace", workspaceID, "error", err)
+		return
+	}
+	for _, project := range projectRows {
+		if project == nil || strings.TrimSpace(project.Name) == "" {
+			continue
+		}
+		memberships, err := s.controlDB.ListProjectMemberships(controldb.ProjectMembershipFilter{
+			WorkspaceID: workspaceID,
+			ProjectID:   project.Name,
+			MemberType:  "agent_worker",
+		})
+		if err != nil {
+			continue
+		}
+		for _, membership := range memberships {
+			agent := strings.TrimSpace(membership.Title)
+			if agent == "" {
+				agent = strings.TrimSpace(membership.MemberID)
+			}
+			if agent == "" {
+				continue
+			}
+			tasks, err := s.ts.ListTasks(project.Name, agent, entity.TaskStatusInProgress, entity.TaskStatusPending, entity.TaskStatusBlocked)
+			if err != nil {
+				continue
+			}
+			for _, task := range tasks {
+				if task == nil || strings.TrimSpace(task.ActiveRuntimeRunID) == "" {
+					continue
+				}
+				s.clearStaleTaskRuntimeToken(workspaceID, project.Name, agent, task)
 			}
 		}
 	}
