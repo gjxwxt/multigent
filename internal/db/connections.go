@@ -313,6 +313,12 @@ func SealConnectionSecret(values map[string]string) (ConnectionSecret, error) {
 	}
 	key := strings.TrimSpace(os.Getenv("MULTIGENT_CONNECTION_ENCRYPTION_KEY"))
 	if key == "" {
+		// Intranet security baseline: the plaintext dev fallback must be a
+		// hard error when the deployment demands encryption — new plaintext
+		// rows must never accumulate silently.
+		if RequireEncryptedSecrets() {
+			return ConnectionSecret{}, fmt.Errorf("%s is required (MULTIGENT_REQUIRE_ENCRYPTED_SECRETS is set; refusing to store connection secrets in plaintext)", "MULTIGENT_CONNECTION_ENCRYPTION_KEY")
+		}
 		return ConnectionSecret{
 			Ciphertext: base64.StdEncoding.EncodeToString(raw),
 			KeyVersion: "plain-dev",

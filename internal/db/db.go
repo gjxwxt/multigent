@@ -76,6 +76,9 @@ type Store interface {
 	DeleteConnection(id string) error
 	UpsertConnectionSecret(secret ConnectionSecret) error
 	ConnectionSecret(connectionID string) (ConnectionSecret, bool, error)
+	UpsertConnectionSecretForID(connectionID string, secret ConnectionSecret) error
+	AuditSecrets() (*SecretsAuditReport, error)
+	MigrateSecrets() (*SecretsMigrateReport, error)
 	CreateConnectionGrant(grant ConnectionGrant) error
 	DeleteConnectionGrant(id string) error
 	ListConnectionGrants(connectionID string) ([]ConnectionGrant, error)
@@ -996,6 +999,10 @@ func (db *SQLiteStore) Close() error {
 	}
 	return db.sql.Close()
 }
+
+// DefaultPath exposes the resolved control DB location for CLI tooling
+// (backups, audits).
+func DefaultPath() (string, error) { return defaultPath() }
 
 func defaultPath() (string, error) {
 	if dataDir := os.Getenv("MULTIGENT_CONTROL_DATA_DIR"); dataDir != "" {
