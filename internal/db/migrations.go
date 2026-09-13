@@ -161,6 +161,19 @@ func (db *SQLiteStore) migrate() error {
 	key_version TEXT NOT NULL DEFAULT '',
 	updated_at TEXT NOT NULL
 )`,
+		`CREATE TABLE IF NOT EXISTS verified_remote_bindings (
+	workspace_id TEXT NOT NULL,
+	project_id TEXT NOT NULL,
+	provider TEXT NOT NULL,
+	connection_id TEXT NOT NULL,
+	remote_project_id TEXT NOT NULL,
+	path_with_namespace TEXT NOT NULL DEFAULT '',
+	verified_at TEXT NOT NULL,
+	source TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY (workspace_id, project_id)
+)`,
 		`CREATE TABLE IF NOT EXISTS connection_grants (
 	id TEXT PRIMARY KEY,
 	workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,

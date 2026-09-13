@@ -79,6 +79,9 @@ type Store interface {
 	UpsertConnectionSecretForID(connectionID string, secret ConnectionSecret) error
 	AuditSecrets() (*SecretsAuditReport, error)
 	MigrateSecrets() (*SecretsMigrateReport, error)
+	UpsertVerifiedRemoteBinding(b VerifiedRemoteBinding) error
+	VerifiedRemoteBindingFor(workspaceID, projectID string) (*VerifiedRemoteBinding, bool, error)
+	DeleteVerifiedRemoteBinding(workspaceID, projectID string) error
 	CreateConnectionGrant(grant ConnectionGrant) error
 	DeleteConnectionGrant(id string) error
 	ListConnectionGrants(connectionID string) ([]ConnectionGrant, error)

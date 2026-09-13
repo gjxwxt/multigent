@@ -91,9 +91,14 @@ func TestMigrateSecretsInterruptionLeavesReRunnableState(t *testing.T) {
 	}
 }
 
-// Concurrent writers during migration: SQLite serializes the writes; the
-// migration must complete and every row must end encrypted.
-func TestMigrateSecretsSurvivesConcurrentWrites(t *testing.T) {
+// Background writes that landed BEFORE the migration (the realistic
+// maintenance-window case: the service was writing until it was stopped).
+// NOTE (P0.6-6, honest scoping): this is NOT a concurrent-migration test —
+// the writer completes before MigrateSecrets starts. Migration is only
+// sanctioned inside a maintenance window with the service quiesced; no
+// online-concurrent-safety claim is made or tested here. The test pins the
+// "migration catches up on everything written before it ran" invariant.
+func TestMigrateSecretsCoversPriorBackgroundWrites(t *testing.T) {
 	store, _ := migrateFixture(t)
 
 	var wg sync.WaitGroup
@@ -113,7 +118,7 @@ func TestMigrateSecretsSurvivesConcurrentWrites(t *testing.T) {
 
 	report, err := store.MigrateSecrets()
 	if err != nil {
-		t.Fatalf("migrate under concurrency: %v", err)
+		t.Fatalf("migrate after background writes: %v", err)
 	}
 	if len(report.Failed) != 0 {
 		t.Fatalf("unexpected failures: %+v", report.Failed)
