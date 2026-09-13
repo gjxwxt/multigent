@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -249,14 +248,18 @@ func TestRuntimeNodeClaimSkipsExpiredRunWhenTaskAlreadyTerminal(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode claim response: %v body=%s", err, rec.Body.String())
 	}
+	// Fix 1: the expired-lease RUNNING run is invisible to claim (only the
+	// reaper terminates running runs). Claim must serve the QUEUED run whose
+	// task is still pending.
 	if resp.Run == nil || resp.Run.ID != queuedRun.ID {
-		t.Fatalf("expected queued run after stale cleanup, got body=%s", rec.Body.String())
+		t.Fatalf("expected queued run, got body=%s", rec.Body.String())
 	}
-	cleaned, found, err := s.controlDB.RuntimeRunByID(workspaceID, staleRun.ID)
+	// The running run must be untouched by claim — no takeover, no finalize.
+	untouched, found, err := s.controlDB.RuntimeRunByID(workspaceID, staleRun.ID)
 	if err != nil || !found {
 		t.Fatalf("load stale run: found=%v err=%v", found, err)
 	}
-	if cleaned.Status != "succeeded" || cleaned.FinishedAt == "" || !strings.Contains(cleaned.ResultJSON, "task_already_terminal") {
-		t.Fatalf("stale run was not finalized as skipped: %#v", cleaned)
+	if untouched.Status != "running" || untouched.FinishedAt != "" || untouched.RuntimeNodeID != "" {
+		t.Fatalf("claim must leave an expired-lease running run for the reaper (fix 1): %#v", untouched)
 	}
 }

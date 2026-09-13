@@ -329,12 +329,16 @@ func (db *SQLiteStore) ClaimRuntimeRun(workspaceID, nodeID string, leaseSeconds 
 	if err != nil {
 		return RuntimeRun{}, false, err
 	}
-	query := runtimeRunSelectSQL() + ` WHERE workspace_id = ? AND (desired_runtime_node_id = '' OR desired_runtime_node_id = ?) AND (
-	status = 'queued'
-	OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at != '' AND lease_expires_at < ?)
-)
+	// GPT fix 1: a running run is NEVER claimable, even when its lease
+	// expired. Only the reaper (lease + grace) terminates running runs;
+	// retries dispatch a NEW run with the same run_key. Claim candidates are
+	// therefore strictly queued rows.
+	query := runtimeRunSelectSQL() + ` WHERE workspace_id = ? AND (desired_runtime_node_id = '' OR desired_runtime_node_id = ?) AND status = 'queued'
 `
-	args := []any{workspaceID, nodeID, now}
+	args := []any{workspaceID, nodeID}
+	// GPT fix 6: the busyAgents exemption is scoped to slot_class='readonly'
+	// fork runs only — a normal fork run occupies its Worker slot exactly
+	// like a task run and must not be double-booked via a stale busy list.
 	if len(busyAgents) > 0 {
 		placeholders := make([]string, 0, len(busyAgents))
 		for _, agent := range busyAgents {
@@ -347,14 +351,29 @@ func (db *SQLiteStore) ClaimRuntimeRun(workspaceID, nodeID string, leaseSeconds 
 		}
 		if len(placeholders) > 0 {
 			query += ` AND (
-	fork_session_id != ''
+	slot_class = 'readonly' AND fork_session_id != ''
 	OR
 	(CASE WHEN agent_worker_id != '' THEN 'worker/' || agent_worker_id ELSE project_id || '/' || agent_id END) NOT IN (` + strings.Join(placeholders, ",") + `)
 )
 `
 		}
 	}
-	query += `ORDER BY priority ASC, created_at ASC, id ASC LIMIT 1`
+	// GPT fix 4: one claim round must serve whichever worker is free, so
+	// candidates already holding a slot are filtered in SQL (NOT via a
+	// single-row LIMIT 1 probe that would end the round). Readonly fork runs
+	// are exempt by slot_class (fix 6).
+	slotKeys := holdingSlotKeys(holdingSlots)
+	query += ` AND (
+	slot_class = 'readonly' AND fork_session_id != ''
+	OR
+	(CASE WHEN agent_worker_id != '' THEN 'worker/' || agent_worker_id ELSE project_id || '/' || agent_id END) NOT IN ` + slotKeyPlaceholders(len(slotKeys)) + `
+)
+ORDER BY priority ASC, created_at ASC, id ASC LIMIT 1`
+	if len(slotKeys) > 0 {
+		for _, key := range slotKeys {
+			args = append(args, key)
+		}
+	}
 	row := tx.QueryRow(query, args...)
 	run, err := scanRuntimeRun(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -363,21 +382,12 @@ func (db *SQLiteStore) ClaimRuntimeRun(workspaceID, nodeID string, leaseSeconds 
 	if err != nil {
 		return RuntimeRun{}, false, err
 	}
-	if _, occupied := holdingSlots[RuntimeRunWorkerKey(run)]; occupied {
-		// The candidate's Worker already holds its slot with a live run.
-		// Queued rows behind it must wait; expired-lease rows will be reaped
-		// or re-claimed after the holder finishes.
-		return RuntimeRun{}, false, nil
-	}
 	lease := nowTime.Add(time.Duration(leaseSeconds) * time.Second).Format(time.RFC3339)
-	// Generation bumps on every claim/takeover. All later renew/finish/reap
-	// updates are conditional on (node, generation), so a stale loop from a
-	// previous claim can never resurrect the run.
+	// Generation bumps on every claim. All later renew/finish/reap updates
+	// are conditional on (node, generation), so a stale loop from a previous
+	// claim can never resurrect the run.
 	res, err := tx.Exec(`UPDATE runtime_runs SET status = 'running', runtime_node_id = ?, claimed_at = ?, started_at = ?, lease_expires_at = ?, lease_generation = lease_generation + 1, updated_at = ?
-WHERE workspace_id = ? AND id = ? AND (desired_runtime_node_id = '' OR desired_runtime_node_id = ?) AND (
-	status = 'queued'
-	OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at != '' AND lease_expires_at < ?)
-)`, nodeID, now, now, lease, now, workspaceID, run.ID, nodeID, now)
+WHERE workspace_id = ? AND id = ? AND status = 'queued'`, nodeID, now, now, lease, now, workspaceID, run.ID)
 	if err != nil {
 		return RuntimeRun{}, false, err
 	}

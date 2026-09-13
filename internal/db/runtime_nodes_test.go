@@ -87,24 +87,45 @@ func TestRuntimeRunClaimLeaseAndExpiredReclaim(t *testing.T) {
 		t.Fatalf("leased running run should not be claimed by another node")
 	}
 
+	// An expired lease does NOT make the run claimable either (GPT fix 1):
+	// only the reaper terminates a running run; retries go through new runs.
 	expired := renewed
 	expired.LeaseExpiresAt = time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
 	if err := db.UpsertRuntimeRun(expired); err != nil {
 		t.Fatalf("expire lease: %v", err)
 	}
+	_, found, err = db.ClaimRuntimeRun(workspaceID, "node-b", 30, nil)
+	if err != nil {
+		t.Fatalf("claim expired-lease: %v", err)
+	}
+	if found {
+		t.Fatalf("expired-lease running run must not be taken over by claim; reaper owns termination")
+	}
+	// Reaper terminates it; afterwards a re-enqueue can claim fresh.
+	if _, err := db.ReapExpiredRuntimeRun(workspaceID, "run-one", renewed.LeaseGeneration, time.Now().UTC()); err != nil {
+		t.Fatalf("reap: %v", err)
+	}
+	if err := db.UpsertRuntimeRun(RuntimeRun{
+		ID: "run-two", WorkspaceID: workspaceID, AgentWorkerID: "aw-one",
+		ProjectMembershipID: "pm-one", ProjectID: "project", AgentID: "agent", TaskID: "task-one",
+		Status: "queued", Priority: 1, SpecJSON: `{"kind":"exec_prompt"}`, ResultJSON: "{}",
+		CreatedAt: nowUTC(), UpdatedAt: nowUTC(),
+	}); err != nil {
+		t.Fatalf("re-enqueue: %v", err)
+	}
 	reclaimed, found, err := db.ClaimRuntimeRun(workspaceID, "node-b", 30, nil)
 	if err != nil || !found {
-		t.Fatalf("reclaim found=%v err=%v", found, err)
+		t.Fatalf("claim fresh run found=%v err=%v", found, err)
 	}
-	if reclaimed.RuntimeNodeID != "node-b" || reclaimed.Status != "running" {
-		t.Fatalf("unexpected reclaimed run: %#v", reclaimed)
+	if reclaimed.ID != "run-two" || reclaimed.RuntimeNodeID != "node-b" || reclaimed.Status != "running" {
+		t.Fatalf("unexpected claimed run: %#v", reclaimed)
 	}
-	if reclaimed.LeaseGeneration != claimed.LeaseGeneration+1 {
-		t.Fatalf("takeover generation = %d, want %d", reclaimed.LeaseGeneration, claimed.LeaseGeneration+1)
+	if reclaimed.LeaseGeneration != 1 {
+		t.Fatalf("fresh run generation = %d, want 1", reclaimed.LeaseGeneration)
 	}
-	// The old owner's lease renewal must fail after takeover.
+	// The old owner's lease renewal on the reaped run must fail.
 	if _, _, err := db.extendRuntimeRunLease(workspaceID, "run-one", "node-a", claimed.LeaseGeneration, 60); !LeaseGenerationMismatch(err) {
-		t.Fatalf("stale renew after takeover: err=%v, want generation mismatch", err)
+		t.Fatalf("stale renew after reap: err=%v, want generation mismatch", err)
 	}
 
 	cancelled := reclaimed

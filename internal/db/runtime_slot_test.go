@@ -156,6 +156,39 @@ func TestClaimRuntimeRunSameWorkerOneSlot(t *testing.T) {
 	}
 }
 
+// A2b (GPT fix 4): the claim cursor must SKIP a worker whose slot is held and
+// keep looking — B's queued run is claimable while A's running run holds the
+// slot. Previously the whole round returned empty in this situation.
+func TestClaimRuntimeRunSkipsOccupiedWorkerAndContinues(t *testing.T) {
+	store := newSlotTestStore(t)
+	slotNode(t, store, "node-a")
+	// Worker A holds the slot with a live running run.
+	holder := slotRun("run-hold-a", "aw-a", "running")
+	holder.LeaseExpiresAt = time.Now().UTC().Add(time.Minute).Format(time.RFC3339)
+	if err := store.UpsertRuntimeRun(holder); err != nil {
+		t.Fatalf("seed holder: %v", err)
+	}
+	// Worker A also has a queued run (must stay queued), and worker B has a
+	// queued run that MUST be claimable.
+	if err := store.UpsertRuntimeRun(slotRun("run-queued-a", "aw-a", "queued")); err != nil {
+		t.Fatalf("seed queued-a: %v", err)
+	}
+	if err := store.UpsertRuntimeRun(slotRun("run-queued-b", "aw-b", "queued")); err != nil {
+		t.Fatalf("seed queued-b: %v", err)
+	}
+	claimed, found, err := store.ClaimRuntimeRun("ws-slot", "node-a", 60, nil)
+	if err != nil || !found {
+		t.Fatalf("claim must continue past the occupied worker: found=%v err=%v", found, err)
+	}
+	if claimed.ID != "run-queued-b" {
+		t.Fatalf("claimed %s, want run-queued-b (skip occupied A, take B)", claimed.ID)
+	}
+	stuckA, _, _ := store.RuntimeRunByID("ws-slot", "run-queued-a")
+	if stuckA.Status != "queued" {
+		t.Fatalf("A's queued run must stay queued while A holds the slot, got %s", stuckA.Status)
+	}
+}
+
 // A3: different workers claim in parallel — both succeed.
 func TestClaimRuntimeRunDifferentWorkersParallel(t *testing.T) {
 	store := newSlotTestStore(t)
@@ -208,47 +241,52 @@ func TestClaimRuntimeRunDifferentWorkersParallel(t *testing.T) {
 	}
 }
 
-// A4: an expired-lease run is taken over by another node with generation+1;
-// the old owner's stale renew and finish (old generation) take no effect.
-func TestClaimRuntimeRunTakeoverBumpsGeneration(t *testing.T) {
+// A4 (revised per GPT fix 1): ClaimRuntimeRun NEVER takes over a running run
+// whose lease merely expired. Only the reaper may terminate such a run after
+// lease + grace; retries must create a NEW run, never execute the old one
+// concurrently. An expired-lease running run is invisible to claim.
+func TestClaimRuntimeRunDoesNotTakeOverExpiredLease(t *testing.T) {
 	store := newSlotTestStore(t)
 	slotNode(t, store, "node-a")
 	slotNode(t, store, "node-b")
-	if err := store.UpsertRuntimeRun(slotRun("run-take", "aw-1", "queued")); err != nil {
+	if err := store.UpsertRuntimeRun(slotRun("run-exp", "aw-1", "queued")); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	first, found, err := store.ClaimRuntimeRun("ws-slot", "node-a", 60, nil)
 	if err != nil || !found {
 		t.Fatalf("first claim: %v", err)
 	}
-	// Expire the lease (simulate node-a dying).
+	// Simulate node-a dying: lease expires, run stays running.
 	expired := first
 	expired.LeaseExpiresAt = time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
 	if err := store.UpsertRuntimeRun(expired); err != nil {
 		t.Fatalf("expire: %v", err)
 	}
-	taken, found, err := store.ClaimRuntimeRun("ws-slot", "node-b", 60, nil)
-	if err != nil || !found {
-		t.Fatalf("takeover claim: %v", err)
+	// Another node claims: the dead run must NOT be handed out.
+	_, found, err = store.ClaimRuntimeRun("ws-slot", "node-b", 60, nil)
+	if err != nil {
+		t.Fatalf("claim after expiry: %v", err)
 	}
-	if taken.RuntimeNodeID != "node-b" {
-		t.Fatalf("takeover node = %s", taken.RuntimeNodeID)
+	if found {
+		t.Fatal("claim must never take over an expired-lease running run; only the reaper terminates it")
 	}
-	if taken.LeaseGeneration != first.LeaseGeneration+1 {
-		t.Fatalf("takeover generation = %d, want %d", taken.LeaseGeneration, first.LeaseGeneration+1)
+	// The run stays running (owned by node-a, stale generation) until reaped.
+	run, _, _ := store.RuntimeRunByID("ws-slot", "run-exp")
+	if run.Status != "running" {
+		t.Fatalf("run must stay running until reaped, got %s", run.Status)
 	}
-	// Old owner's renewal: rejected.
-	if _, _, err := store.ExtendRuntimeRunLeaseWithGeneration("ws-slot", "run-take", "node-a", first.LeaseGeneration, 60); !LeaseGenerationMismatch(err) {
-		t.Fatalf("stale renew: err=%v, want mismatch", err)
+	// After the reaper force-fails it, a fresh enqueue+claim is the retry path.
+	if _, err := store.ReapExpiredRuntimeRun("ws-slot", "run-exp", first.LeaseGeneration, time.Now().UTC()); err != nil {
+		t.Fatalf("reap: %v", err)
 	}
-	// Old owner's finish: rejected and the run stays running under node-b.
-	if _, _, err := store.FinishRuntimeRun("ws-slot", "run-take", "node-a", first.LeaseGeneration, "succeeded", "", "", "{}"); !LeaseGenerationMismatch(err) {
-		t.Fatalf("stale finish: err=%v, want mismatch", err)
+	retry, found, err := store.ClaimRuntimeRun("ws-slot", "node-b", 60, nil)
+	if err != nil {
+		t.Fatalf("claim after reap: %v", err)
 	}
-	check, _, _ := store.RuntimeRunByID("ws-slot", "run-take")
-	if check.Status != "running" || check.RuntimeNodeID != "node-b" {
-		t.Fatalf("run resurrected by stale finish: %+v", check)
-	}
+	_ = retry
+	_ = found
+	// (No queued run exists here — the retry would be a NEW run with the same
+	// run_key, asserted at the api layer.)
 }
 
 // A5: an unexpired lease is never taken over by another node.
@@ -269,45 +307,39 @@ func TestClaimRuntimeRunDoesNotTakeLiveLease(t *testing.T) {
 	}
 }
 
-// A10: same-node stale loop (old generation) renew/finish take no effect.
+// A10: a same-node stale loop (old generation) renew/finish take no effect.
+// A claim yields generation 1; every operation carrying generation 0 (pre-Q0
+// node or a loop from before the claim) is rejected fail-closed.
 func TestStaleSameNodeGenerationRejected(t *testing.T) {
 	store := newSlotTestStore(t)
 	slotNode(t, store, "node-a")
-	if err := store.UpsertRuntimeRun(slotRun("run-gen", "aw-1", "queued")); err != nil {
+	if err := store.UpsertRuntimeRun(slotRun("run-gen1", "aw-1", "queued")); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	first, found, err := store.ClaimRuntimeRun("ws-slot", "node-a", 60, nil)
 	if err != nil || !found {
-		t.Fatalf("claim: %v", err)
+		t.Fatalf("claim 1: %v", err)
 	}
-	// Simulate re-takeover by the SAME node (lease expired, re-claimed).
-	expired := first
-	expired.LeaseExpiresAt = time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
-	if err := store.UpsertRuntimeRun(expired); err != nil {
-		t.Fatalf("expire: %v", err)
+	if first.LeaseGeneration != 1 {
+		t.Fatalf("first claim generation = %d, want 1", first.LeaseGeneration)
 	}
-	second, found, err := store.ClaimRuntimeRun("ws-slot", "node-a", 60, nil)
-	if err != nil || !found {
-		t.Fatalf("re-claim: %v", err)
-	}
-	if second.LeaseGeneration != first.LeaseGeneration+1 {
-		t.Fatalf("re-claim generation = %d, want %d", second.LeaseGeneration, first.LeaseGeneration+1)
-	}
-	// Old generation on the same node: renew and finish both rejected.
-	if _, _, err := store.ExtendRuntimeRunLeaseWithGeneration("ws-slot", "run-gen", "node-a", first.LeaseGeneration, 60); !LeaseGenerationMismatch(err) {
-		t.Fatalf("stale renew same node: err=%v, want mismatch", err)
-	}
-	if _, _, err := store.FinishRuntimeRun("ws-slot", "run-gen", "node-a", first.LeaseGeneration, "succeeded", "", "", "{}"); !LeaseGenerationMismatch(err) {
-		t.Fatalf("stale finish same node: err=%v, want mismatch", err)
-	}
-	// Generation 0 (pre-Q0 node): rejected fail-closed.
-	if _, _, err := store.ExtendRuntimeRunLeaseWithGeneration("ws-slot", "run-gen", "node-a", 0, 60); !LeaseGenerationMismatch(err) {
+	// Pre-claim generation (0) on the same node: renew and finish both rejected.
+	if _, _, err := store.ExtendRuntimeRunLeaseWithGeneration("ws-slot", "run-gen1", "node-a", 0, 60); !LeaseGenerationMismatch(err) {
 		t.Fatalf("generation 0 renew: err=%v, want mismatch", err)
 	}
-	if _, _, err := store.FinishRuntimeRun("ws-slot", "run-gen", "node-a", 0, "succeeded", "", "", "{}"); !LeaseGenerationMismatch(err) {
+	if _, _, err := store.FinishRuntimeRun("ws-slot", "run-gen1", "node-a", 0, "succeeded", "", "", "{}"); !LeaseGenerationMismatch(err) {
 		t.Fatalf("generation 0 finish: err=%v, want mismatch", err)
 	}
-	if _, _, err := store.ExtendRuntimeRunLease("ws-slot", "run-gen", "node-a", 60); err != nil {
+	// Wrong generation (as if a newer claim existed) also rejected.
+	if _, _, err := store.ExtendRuntimeRunLeaseWithGeneration("ws-slot", "run-gen1", "node-a", first.LeaseGeneration+1, 60); !LeaseGenerationMismatch(err) {
+		t.Fatalf("future generation renew: err=%v, want mismatch", err)
+	}
+	if _, _, err := store.FinishRuntimeRun("ws-slot", "run-gen1", "node-a", first.LeaseGeneration+1, "succeeded", "", "", "{}"); !LeaseGenerationMismatch(err) {
+		t.Fatalf("future generation finish: err=%v, want mismatch", err)
+	}
+	// The legacy generationless renew remains available on the Store
+	// interface but must not be used by new code paths.
+	if _, _, err := store.ExtendRuntimeRunLease("ws-slot", "run-gen1", "node-a", 60); err != nil {
 		t.Fatalf("legacy ExtendRuntimeRunLease must stay available for the interface, got %v", err)
 	}
 }
@@ -332,6 +364,61 @@ func TestClaimRuntimeRunReadonlyForkExempt(t *testing.T) {
 	}
 	if claimed.ID != "run-next" {
 		t.Fatalf("claimed %s, want run-next (readonly fork must exempt the slot)", claimed.ID)
+	}
+}
+
+// GPT fix 6: the busyAgents exemption is scoped to slot_class='readonly'
+// candidates. A readonly fork candidate bypasses the node's busyAgents list
+// (it is slot-free); a normal fork or task candidate is blocked by it (a
+// stale busy list must not double-book the worker).
+func TestClaimRuntimeRunBusyAgentsScopedToReadonly(t *testing.T) {
+	// Case 1: normal fork candidate reported busy → NOT claimable.
+	store := newSlotTestStore(t)
+	slotNode(t, store, "node-a")
+	normal := slotRun("run-busy-normal", "aw-1", "queued")
+	normal.SlotClass = "normal"
+	normal.ForkSessionID = "fs-normal"
+	if err := store.UpsertRuntimeRun(normal); err != nil {
+		t.Fatalf("seed normal fork candidate: %v", err)
+	}
+	_, found, err := store.ClaimRuntimeRun("ws-slot", "node-a", 60, []string{"worker/aw-1"})
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if found {
+		t.Fatal("busyAgents must still block a normal fork candidate")
+	}
+
+	// Case 2: readonly fork candidate reported busy → claimable.
+	store2 := newSlotTestStore(t)
+	slotNode(t, store2, "node-a")
+	ro := slotRun("run-busy-ro", "aw-1", "queued")
+	ro.SlotClass = "readonly"
+	ro.ForkSessionID = "fs-ro"
+	if err := store2.UpsertRuntimeRun(ro); err != nil {
+		t.Fatalf("seed readonly fork candidate: %v", err)
+	}
+	claimed, found2, err := store2.ClaimRuntimeRun("ws-slot", "node-a", 60, []string{"worker/aw-1"})
+	if err != nil || !found2 {
+		t.Fatalf("claim past readonly busy report: found=%v err=%v", found2, err)
+	}
+	if claimed.ID != "run-busy-ro" {
+		t.Fatalf("claimed %s, want run-busy-ro", claimed.ID)
+	}
+
+	// Case 3: task candidate reported busy → NOT claimable (unchanged base
+	// semantics).
+	store3 := newSlotTestStore(t)
+	slotNode(t, store3, "node-a")
+	if err := store3.UpsertRuntimeRun(slotRun("run-busy-task", "aw-1", "queued")); err != nil {
+		t.Fatalf("seed task candidate: %v", err)
+	}
+	_, found3, err := store3.ClaimRuntimeRun("ws-slot", "node-a", 60, []string{"worker/aw-1"})
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if found3 {
+		t.Fatal("busyAgents must still block a task candidate")
 	}
 }
 
