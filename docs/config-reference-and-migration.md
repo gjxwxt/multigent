@@ -68,7 +68,7 @@
 
 **迁移 SOP（顺序敏感，勿颠倒）**：
 1. 生成 key（`openssl rand -hex 32`）并**先**注入服务（systemd drop-in）重启——此时旧明文仍可读（明文读取不需要 key），已加密记录可正常解密，`audit` 复核兼容读无报错；
-2. 维护窗口内执行 `secrets migrate --apply`（自动一致性备份），确认退出码 0 且 `audit` 复核零明文；
+2. 维护窗口内（服务已停写或停服）执行 `secrets migrate --apply`（自动一致性备份），确认退出码 0 且 `audit` 复核零明文。迁移只在维护窗口进行——备份本身（`VACUUM INTO`）在服务运行中也是事务一致的，但**不宣称"在线并发迁移安全"**，迁移与业务写入不重叠；
 3. 最后才置 `MULTIGENT_REQUIRE_ENCRYPTED_SECRETS=1` 重启启用硬闸。**顺序错误会翻车**：先迁移后注 key，服务在无 key 窗口内对 env-v1 记录读取 fail-closed，依赖这些凭据的任务会报 "MULTIGENT_CONNECTION_ENCRYPTION_KEY is required"。
 
 **REQUIRE=1 启动 fail-closed**：硬闸开启后，启动审计发现存量明文/未知版本记录即拒绝启动（`[secrets-baseline] FATAL` + 退出码 1），审计本身失败同样拒绝启动；迁移窗口例外——迁移/验证进程显式置 `MULTIGENT_SECRETS_MIGRATION_MODE=1` 可带明文存量启动，迁移完成、audit 归零后务必摘掉该变量。回滚 = 用迁移自动备份（`multigent.db.pre-encrypt-<ts>`，单文件快照）恢复 DB 文件。
@@ -76,7 +76,7 @@
 ### 2.5 GitLab / CI
 `MULTIGENT_GITLAB_RUNNER_ID`（默认 runner 自动绑定；8.4 缺陷修复的配置前提，当前经 systemd drop-in 注入）。
 
-`MULTIGENT_CI_REMOTE_PIPELINE_REQUIRED`：ci_ready 闸门的工作区级**默认值**（非强制下限）——未显式声明 `remote_pipeline_required` 的项目在置 `1`/`true`/`yes`/`required` 后走严格闸门（未绑远端 = pipeline_evidence FAIL）。项目级声明（`required`/`local`）优先于该默认值；如未来需要组织级强制策略（项目级 `local` 不得覆盖），应另立独立设置而非复用此变量。另：远端自动认领授权可用 `MULTIGENT_GITLAB_ADOPT_NAMESPACE_ALLOWLIST`（逗号分隔命名空间，段精确前缀匹配）放开平台未建仓场景，默认关闭。
+`MULTIGENT_CI_REMOTE_PIPELINE_REQUIRED`：ci_ready 闸门的工作区级**默认值**（非强制下限）——未显式声明 `remote_pipeline_required` 的项目在置 `1`/`true`/`yes`/`required` 后走严格闸门（未绑远端 = pipeline_evidence FAIL）。项目级声明（`required`/`local`）优先于该默认值；如未来需要组织级强制策略（项目级 `local` 不得覆盖），应另立独立设置而非复用此变量。另：远端认领自 P0.6 起只信任**受控远端绑定**（verified_remote_bindings，仅由平台建仓返回或管理员只读 verify 写入），原 `MULTIGENT_GITLAB_ADOPT_NAMESPACE_ALLOWLIST` 命名空间放行已移除——命名空间前缀无法钉住具体远端项目 ID。
 
 ### 2.6 嵌入式/子进程内部（迁移时**勿带**）
 `MULTIGENT_WORKER_*`（node 自注册）、`MULTIGENT_WORKTREE_DIR`/`MULTIGENT_WAKEUP_*`（attention 派发）、`MULTIGENT_RUNTIME_NODE_DAEMON_CHILD`、`MULTIGENT_RUN_ID`——这些是进程间契约，出现在迁移清单里会造成噪音。
