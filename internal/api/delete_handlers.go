@@ -106,20 +106,11 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	}
 	workspaceID, _ := s.currentWorkspaceID()
 	if s.controlDB != nil {
-		if workspaceID != "" {
-			if err := s.controlDB.DeleteProjectMembershipsByProject(workspaceID, project); err != nil {
-				log.Printf("[project:delete] failed to delete memberships for project %s: %v", project, err)
-				s.serverError(w, err)
-				return
-			}
-		}
-		if err := s.controlDB.DeleteProjectChannelLinks(workspaceID, project); err != nil {
-			log.Printf("[project:delete] failed to delete channel links for project %s: %v", project, err)
-			s.serverError(w, err)
-			return
-		}
-		if err := s.controlDB.DeleteAgentChannelBindingsByProject(workspaceID, project); err != nil {
-			log.Printf("[project:delete] failed to delete agent channel bindings for project %s: %v", project, err)
+		// One transaction for all project-scoped control-plane rows: a mid-way
+		// failure must not strand a half-deleted project (some agent metadata
+		// alive, some gone), and a retry is a harmless no-op.
+		if err := s.controlDB.DeleteProjectControlPlaneScope(workspaceID, project); err != nil {
+			log.Printf("[project:delete] failed to delete control-plane scope for project %s: %v", project, err)
 			s.serverError(w, err)
 			return
 		}
@@ -144,13 +135,16 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 // label, so stopped/renamed containers are caught too), per-task worktrees,
 // then the project directory itself. Purely physical — it must never touch
 // the DB, so a failure here leaves the project record and all agent metadata
-// exactly as they were. Preview container removal is strict: a container that
-// survives means the caller must not drop the records that name it.
+// exactly as they were. Preview container removal and worktree cleanup are
+// strict: a surviving container or worktree means the caller must not drop
+// the records that name it.
 func (s *Server) destroyProjectArtifacts(project string) error {
 	if err := s.stopProjectPreviewContainers(project); err != nil {
 		return err
 	}
-	s.cleanupProjectWorktrees(project)
+	if err := s.cleanupProjectWorktrees(project); err != nil {
+		return err
+	}
 
 	projectDir := s.st.ProjectDir(project)
 	if dirExists(projectDir) {
@@ -223,24 +217,59 @@ func (s *Server) stopProjectPreviewContainers(project string) error {
 // cleanupProjectWorktrees removes each task worktree through the manager (so
 // git metadata is pruned) and falls back to a raw delete for orphans whose
 // `.git` is a real directory — those are invisible to `git worktree prune`.
-func (s *Server) cleanupProjectWorktrees(project string) {
+// Strict: any managed worktree that survives the attempt (or a re-check that
+// still lists entries) fails the project teardown so the caller keeps all
+// records. Failures name the worktree and never delete the project's record
+// of it.
+func (s *Server) cleanupProjectWorktrees(project string) error {
 	gitRoot := s.resolveProjectGitRoot(project)
 	wtRoot := filepath.Join(gitRoot, ".multigent", "worktrees")
 	entries, err := os.ReadDir(wtRoot)
 	if err != nil {
-		return // no worktrees dir: nothing to clean
+		return nil // no worktrees dir: nothing to clean
 	}
+	var firstErr error
 	for _, e := range entries {
 		taskID := e.Name()
 		if s.worktreeMgr != nil {
 			if err := s.worktreeMgr.CleanupWorktree(gitRoot, taskID); err != nil {
-				log.Printf("[project:delete] %s: worktree cleanup for %s: %v", project, taskID, err)
+				log.Printf("[project:delete] %s: worktree cleanup for %s failed: %v", project, taskID, err)
+				if firstErr == nil {
+					firstErr = fmt.Errorf("worktree %s cleanup: %w", taskID, err)
+				}
 				continue
 			}
-		} else {
-			_ = os.RemoveAll(filepath.Join(wtRoot, taskID))
+		} else if err := os.RemoveAll(filepath.Join(wtRoot, taskID)); err != nil {
+			log.Printf("[project:delete] %s: worktree remove for %s failed: %v", project, taskID, err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("worktree %s remove: %w", taskID, err)
+			}
+			continue
 		}
 	}
+	// Re-check: zero surviving managed worktrees is the gate for proceeding.
+	remaining, err := os.ReadDir(wtRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return firstErr
+		}
+		if firstErr != nil {
+			return fmt.Errorf("%w; re-check worktrees: %v", firstErr, err)
+		}
+		return fmt.Errorf("re-check worktrees: %w", err)
+	}
+	if len(remaining) > 0 {
+		names := make([]string, 0, len(remaining))
+		for _, e := range remaining {
+			names = append(names, e.Name())
+		}
+		survived := fmt.Errorf("%d worktree(s) survived cleanup for project %s: %s; records kept", len(remaining), project, strings.Join(names, ", "))
+		if firstErr != nil {
+			return fmt.Errorf("%w; %v", firstErr, survived)
+		}
+		return survived
+	}
+	return firstErr
 }
 
 func dirExists(path string) bool {
