@@ -60,10 +60,9 @@ func TestSecretsBaselineRequireGateFailsClosedOnPlaintext(t *testing.T) {
 	seedPlaintextConnection(t, s.controlDB.(*controldb.SQLiteStore))
 	requireGateEnv(t, true, false)
 
-	exited := 0
-	s.runSecretStorageBaseline(func(code int) { exited = code })
-	if exited != 1 {
-		t.Fatalf("exit code = %d, want 1 (fail-closed on plaintext)", exited)
+	err := s.EnforceSecretsBaseline()
+	if err == nil {
+		t.Fatal("REQUIRE=1 with plaintext records must return a startup error (fail-closed)")
 	}
 }
 
@@ -73,10 +72,8 @@ func TestSecretsBaselineWarnOnlyWithoutRequire(t *testing.T) {
 	seedPlaintextConnection(t, s.controlDB.(*controldb.SQLiteStore))
 	requireGateEnv(t, false, false)
 
-	exited := -1
-	s.runSecretStorageBaseline(func(code int) { exited = code })
-	if exited != -1 {
-		t.Fatal("baseline audit without REQUIRE must not exit")
+	if err := s.EnforceSecretsBaseline(); err != nil {
+		t.Fatalf("baseline audit without REQUIRE must not fail startup: %v", err)
 	}
 }
 
@@ -87,10 +84,8 @@ func TestSecretsBaselineMigrationModeAllowsPlaintext(t *testing.T) {
 	seedPlaintextConnection(t, s.controlDB.(*controldb.SQLiteStore))
 	requireGateEnv(t, true, true)
 
-	exited := -1
-	s.runSecretStorageBaseline(func(code int) { exited = code })
-	if exited != -1 {
-		t.Fatal("migration mode must exempt the startup gate")
+	if err := s.EnforceSecretsBaseline(); err != nil {
+		t.Fatalf("migration mode must exempt the startup gate: %v", err)
 	}
 }
 
@@ -115,9 +110,7 @@ func TestSecretsBaselineRequireGatePassesEncryptedStore(t *testing.T) {
 		t.Fatalf("plaintext remaining = %d err=%v, want 0", remaining, err)
 	}
 
-	exited := -1
-	s.runSecretStorageBaseline(func(code int) { exited = code })
-	if exited != -1 {
-		t.Fatal("armed gate must pass after migration")
+	if err := s.EnforceSecretsBaseline(); err != nil {
+		t.Fatalf("armed gate must pass after migration: %v", err)
 	}
 }

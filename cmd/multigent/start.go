@@ -94,6 +94,11 @@ remote server. For local development with hot-reload, use
 			srv.SetVersion(version)
 			srv.SetUpdateChecker(GetCachedUpdateInfo)
 			srv.SetDaemonStatus(daemonStatusJSON)
+			// REQUIRE secrets gate: synchronous, BEFORE the scheduler and the
+			// HTTP listener — a failing gate must never bind a port (P0.6-6).
+			if err := srv.EnforceSecretsBaseline(); err != nil {
+				return err
+			}
 			srv.SetLocalRuntimeAPIURL(os.Getenv("MULTIGENT_API_URL"))
 			if err := srv.StartWorkspaceScheduler(); err != nil {
 				return fmt.Errorf("start workspace scheduler: %w", err)
