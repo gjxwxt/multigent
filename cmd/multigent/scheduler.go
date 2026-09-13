@@ -234,7 +234,7 @@ func newSchedulerStartCmd() *cobra.Command {
 			maxIntvLen := 0
 			for _, k := range heartbeatAgents {
 				hb, _ := loadSchedulerHeartbeat(root, k.key.project, k.key.agent, ts)
-				if len(hb.Interval) > maxIntvLen {
+				if hb != nil && len(hb.Interval) > maxIntvLen {
 					maxIntvLen = len(hb.Interval)
 				}
 			}
@@ -864,15 +864,19 @@ func runHeartbeatLoop(ctx context.Context, root, project, agentName string,
 		if cycleResult != nil {
 			agentLog("%s wakeup failed after %s — %v", colorRed+"✗", dur, cycleResult)
 			hb, _ = loadSchedulerHeartbeat(root, project, agentName, ts)
-			hb.LastWakeupStatus = "failed"
-			hb.PID = 0
-			hb.LastCycleDuration = dur.String()
+			if hb != nil {
+				hb.LastWakeupStatus = "failed"
+				hb.PID = 0
+				hb.LastCycleDuration = dur.String()
+			}
 		} else {
 			agentLog("%s wakeup done %sin %s", colorGreen+"✓", colorReset, dur)
 			hb, _ = loadSchedulerHeartbeat(root, project, agentName, ts)
-			hb.LastWakeupStatus = "done"
-			hb.PID = 0
-			hb.LastCycleDuration = dur.String()
+			if hb != nil {
+				hb.LastWakeupStatus = "done"
+				hb.PID = 0
+				hb.LastCycleDuration = dur.String()
+			}
 		}
 		_ = saveSchedulerHeartbeat(root, project, agentName, ts, hb)
 	}
@@ -882,6 +886,13 @@ func runHeartbeatLoop(ctx context.Context, root, project, agentName string,
 // Tasks within one cycle share the same agent session.
 func runAllPendingTasks(ctx context.Context, root, project, agentName string,
 	ts taskstore.Store, s store.Store, hb *entity.HeartbeatConfig) error {
+
+	// Callers reload the heartbeat from the DB right before invoking this; a
+	// mid-flight project/membership delete makes that lookup miss. The nil
+	// case used to panic on the first hb field access.
+	if hb == nil {
+		hb = &entity.HeartbeatConfig{}
+	}
 
 	// taskLog prints a timestamped, indented line for task-level events.
 	taskLog := func(format string, a ...any) {
@@ -1094,9 +1105,14 @@ func runAllPendingTasks(ctx context.Context, root, project, agentName string,
 						interactionLease.SetRuntimeSessionID(result.SessionID)
 					}
 					sessionID = result.SessionID
-					latestHB, _ := loadSchedulerHeartbeat(root, project, agentName, ts)
-					latestHB.SessionID = sessionID
-					_ = saveSchedulerHeartbeat(root, project, agentName, ts, latestHB)
+					// Real-environment crash (SEGV 2026-09-13): the project can
+					// be deleted while the agent run is in flight, leaving
+					// loadSchedulerHeartbeat nil. Keep the in-memory session
+					// instead of panicking.
+					if latestHB, err := loadSchedulerHeartbeat(root, project, agentName, ts); err == nil && latestHB != nil {
+						latestHB.SessionID = sessionID
+						_ = saveSchedulerHeartbeat(root, project, agentName, ts, latestHB)
+					}
 				}
 
 				finished := time.Now().UTC()
@@ -2625,7 +2641,12 @@ useful for testing and for agent-to-agent wakeup from inside a task.`,
 
 			cycleErr := runAllPendingTasks(runCtx, root, project, agentName, ts, s, hb)
 
-			hb, _ = loadSchedulerHeartbeat(root, project, agentName, ts)
+			// The worker/project can vanish mid-cycle (project delete, membership
+			// removal); fall back to the in-memory hb instead of panicking.
+			reloaded, err := loadSchedulerHeartbeat(root, project, agentName, ts)
+			if err == nil && reloaded != nil {
+				hb = reloaded
+			}
 			hb.PID = 0
 			if runCtx.Err() != nil {
 				hb.LastWakeupStatus = "interrupted"
