@@ -224,6 +224,36 @@ key 仅 `[A-Za-z0-9._-]`、1..128，日志/审计只落 SHA-256 前 12 位指纹
    业务失败与平台崩溃（被计方不能持有计数器），后者由 node prepare 阶段
    在任何 agent 业务逻辑之前发出，可证明平台侧。GPT 校验时以本节集合为准，
    不要对照旧计划表。
+6. **收口 6（GPT 复审五条 + node PID 场景，全部核实为真问题并修复）**：
+   - **stamp 是派发票据**（6-1）：`setTaskActiveRuntimeRun` 返回错误；
+     enqueue 时 stamp 失败 → `FailQueuedRuntimeRun` 立即终结该 run
+     （error_code=token_stamp_failed）——无票 run 绝不进入 claim 候选，
+     杜绝"node 执行完、finish 被栅栏丢弃、任务永久 in_progress"的楔死。
+     run 终态后 run_key 释放，调用方可直接重派。
+   - **交付副作用后置**（6-2）：snapshot / 远端 push / worktree 清理从
+     finish mutate 中移出，改为 `runTaskDeliveryPostCommit`——只在任务
+     状态**落库成功后**针对**已持久化的任务**执行；snapshot 失败保留
+     worktree（既有契约）并跳过破坏性清理。消除"持久化失败但 worktree
+     已删、completion commit 随内存丢失"的窗口。
+   - **workflow reaper 重放幂等**（6-3）：重放前检查 workflow run 状态，
+     已终态（failed/completed/cancelled）则不再重驱引擎（重驱至多静默
+     no-op、分支路径直接报错），只收敛任务状态——"workflow 已失败、
+     task 写失败"的恢复一轮收敛，无 Retry 死循环。
+   - **missing-run replay 用发现键**（6-4）：run 行已消失时，重放清栅以
+     task 的发现键（sweep 找到它时的 project/agent/taskID）寻址，不用
+     run 行里可能漂移（改名/别名）的 agent 身份；`TaskMissing` 视为
+     已收敛（栅栏随任务一起消失）。
+   - **node 场景手动 start 与本地 PID 门解耦**（6-5）：node-assigned
+     agent 的手动 start 不再受本地 heartbeat PID 残留（PID 活着 +
+     LastWakeupStatus=running）影响——node 路径一律入队；PID 门只属于
+     本地立即执行路径（调度 wakeup 同理保留）。
+   - 测试：`TestEnqueueFailsRunWhenTokenStampFails`、
+     `TestDeliveryPostCommitRunsAgainstPersistedTask`、
+     `TestWorkflowReapReplayConvergesAfterEngineFailureRecorded`、
+     `TestMissingRunReplayReleasesTokenViaDiscoveryKey`、
+     `TestManualStartEnqueuesForNodeAgentWithStaleLocalPID`、
+     `TestHTTPFailThenSweepReplayConvergesDoneFailed`（真实 HTTP fail +
+     sweep 从 run 记录回放收敛 done_failed，含错误信息透传）。
 
 ## 9. 已知取舍
 
