@@ -636,6 +636,15 @@ func (db *SQLiteStore) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_runtime_runs_agent ON runtime_runs(workspace_id, project_id, agent_id, status)`,
 		`CREATE INDEX IF NOT EXISTS idx_runtime_runs_worker ON runtime_runs(workspace_id, agent_worker_id, status)`,
 		`CREATE INDEX IF NOT EXISTS idx_runtime_runs_fork_session ON runtime_runs(workspace_id, fork_session_id, status)`,
+		// Q0 queue: run_key makes enqueue idempotent. The partial unique index
+		// guards only ACTIVE runs (queued/running) AND only rows with a
+		// non-empty key — legacy rows with run_key='' (and fork/exec runs that
+		// intentionally have no key) must never collide or be constrained.
+		`ALTER TABLE runtime_runs ADD COLUMN run_key TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE runtime_runs ADD COLUMN slot_class TEXT NOT NULL DEFAULT 'normal'`,
+		`ALTER TABLE runtime_runs ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_runs_active_key ON runtime_runs(workspace_id, run_key) WHERE status IN ('queued','running') AND run_key <> ''`,
+		`CREATE INDEX IF NOT EXISTS idx_runtime_runs_lease ON runtime_runs(workspace_id, status, lease_expires_at)`,
 		`CREATE TABLE IF NOT EXISTS runtime_events (
 	id TEXT PRIMARY KEY,
 	workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,

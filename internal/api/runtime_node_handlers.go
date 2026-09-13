@@ -519,6 +519,10 @@ func (s *Server) enqueueRuntimeTaskRun(workspaceID, project, agent string, task 
 		return controldb.RuntimeRun{}, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
+	runKey, keyErr := s.runtimeRunKeyForTask(workspaceID, project, agent, task)
+	if keyErr != nil {
+		return controldb.RuntimeRun{}, keyErr
+	}
 	run := controldb.RuntimeRun{
 		ID:                   runID,
 		WorkspaceID:          workspaceID,
@@ -535,10 +539,16 @@ func (s *Server) enqueueRuntimeTaskRun(workspaceID, project, agent string, task 
 		ResultJSON:           "{}",
 		CreatedAt:            now,
 		UpdatedAt:            now,
+		RunKey:               runKey,
 	}
-	if err := s.controlDB.UpsertRuntimeRun(run); err != nil {
+	// Idempotent enqueue: a concurrent dispatch of the same intent (double
+	// click, scheduler tick racing a manual start, recovery scan racing a
+	// trigger) returns the already-queued run instead of a duplicate.
+	stored, _, err := s.controlDB.UpsertRuntimeRunIdempotent(run)
+	if err != nil {
 		return controldb.RuntimeRun{}, err
 	}
+	run = stored
 	s.markForkSessionRunQueued(workspaceID, forkSessionID, workerID, run.ID, task, project, membershipID)
 	s.auditLog(auditLogInput{
 		WorkspaceID:  workspaceID,

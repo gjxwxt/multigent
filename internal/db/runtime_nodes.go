@@ -150,8 +150,8 @@ func (db *SQLiteStore) UpsertRuntimeRun(run RuntimeRun) error {
 	_, err := db.sql.Exec(`INSERT INTO runtime_runs (
 	id, workspace_id, agent_worker_id, project_membership_id, project_id, agent_id, task_id, workflow_instance_id, workflow_step_id, fork_session_id, desired_runtime_node_id, runtime_node_id,
 	status, priority, spec_json, result_json, lease_expires_at, claimed_at, started_at, finished_at,
-	error_code, error_message, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	error_code, error_message, created_at, updated_at, run_key, slot_class
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	agent_worker_id = excluded.agent_worker_id,
 	project_membership_id = excluded.project_membership_id,
@@ -168,11 +168,76 @@ ON CONFLICT(id) DO UPDATE SET
 	finished_at = excluded.finished_at,
 	error_code = excluded.error_code,
 	error_message = excluded.error_message,
-	updated_at = excluded.updated_at`,
+	updated_at = excluded.updated_at,
+	run_key = excluded.run_key,
+	slot_class = excluded.slot_class`,
 		run.ID, run.WorkspaceID, run.AgentWorkerID, run.ProjectMembershipID, run.ProjectID, run.AgentID, run.TaskID, run.WorkflowInstanceID, run.WorkflowStepID, run.ForkSessionID, run.DesiredRuntimeNodeID, run.RuntimeNodeID,
 		run.Status, run.Priority, defaultJSONObject(run.SpecJSON), defaultJSONObject(run.ResultJSON), run.LeaseExpiresAt, run.ClaimedAt,
-		run.StartedAt, run.FinishedAt, run.ErrorCode, run.ErrorMessage, run.CreatedAt, run.UpdatedAt)
+		run.StartedAt, run.FinishedAt, run.ErrorCode, run.ErrorMessage, run.CreatedAt, run.UpdatedAt,
+		run.RunKey, defaultSlotClass(run.SlotClass))
 	return err
+}
+
+// UpsertRuntimeRunIdempotent inserts a run; when the partial unique index on
+// (workspace_id, run_key) rejects a second ACTIVE run with the same key it
+// returns the already-existing active run instead of an error. Empty RunKey
+// rows bypass the unique index entirely (legacy rows, fork sessions, exec
+// prompts without a caller key) and behave exactly like UpsertRuntimeRun.
+func (db *SQLiteStore) UpsertRuntimeRunIdempotent(run RuntimeRun) (RuntimeRun, bool, error) {
+	if strings.TrimSpace(run.RunKey) == "" {
+		if err := db.UpsertRuntimeRun(run); err != nil {
+			return RuntimeRun{}, false, err
+		}
+		return run, true, nil
+	}
+	if err := db.UpsertRuntimeRun(run); err != nil {
+		// The unique index only fires on a duplicate ACTIVE (queued/running)
+		// row with the same (workspace_id, run_key) — surface the winner.
+		if isUniqueConstraintErr(err) {
+			existing, found, getErr := db.ActiveRuntimeRunByKey(run.WorkspaceID, run.RunKey)
+			if getErr == nil && found {
+				return existing, false, nil
+			}
+		}
+		return RuntimeRun{}, false, err
+	}
+	return run, true, nil
+}
+
+// ActiveRuntimeRunByKey returns the single active (queued/running) run for a
+// run key, if any.
+func (db *SQLiteStore) ActiveRuntimeRunByKey(workspaceID, runKey string) (RuntimeRun, bool, error) {
+	runKey = strings.TrimSpace(runKey)
+	if runKey == "" {
+		return RuntimeRun{}, false, nil
+	}
+	row := db.sql.QueryRow(runtimeRunSelectSQL()+` WHERE workspace_id = ? AND run_key = ? AND status IN ('queued','running') ORDER BY created_at ASC, id ASC LIMIT 1`, workspaceID, runKey)
+	run, err := scanRuntimeRun(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RuntimeRun{}, false, nil
+	}
+	if err != nil {
+		return RuntimeRun{}, false, err
+	}
+	return run, true, nil
+}
+
+// isUniqueConstraintErr reports whether err is a SQLite unique-constraint
+// violation (the modernc driver surfaces the message text; there is no typed
+// error code exported through database/sql).
+func isUniqueConstraintErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "UNIQUE constraint failed") || strings.Contains(msg, "constraint failed: UNIQUE")
+}
+
+func defaultSlotClass(slotClass string) string {
+	if strings.TrimSpace(slotClass) == "" {
+		return "normal"
+	}
+	return slotClass
 }
 
 func (db *SQLiteStore) RuntimeRunByID(workspaceID, id string) (RuntimeRun, bool, error) {
@@ -401,14 +466,14 @@ func scanRuntimeNodeToken(row runtimeNodeScanner) (RuntimeNodeToken, error) {
 func runtimeRunSelectSQL() string {
 	return `SELECT id, workspace_id, agent_worker_id, project_membership_id, project_id, agent_id, task_id, workflow_instance_id, workflow_step_id, fork_session_id, desired_runtime_node_id, runtime_node_id,
 status, priority, spec_json, result_json, lease_expires_at, claimed_at, started_at, finished_at,
-error_code, error_message, created_at, updated_at FROM runtime_runs`
+error_code, error_message, created_at, updated_at, run_key, slot_class, lease_generation FROM runtime_runs`
 }
 
 func scanRuntimeRun(row runtimeNodeScanner) (RuntimeRun, error) {
 	var run RuntimeRun
 	err := row.Scan(&run.ID, &run.WorkspaceID, &run.AgentWorkerID, &run.ProjectMembershipID, &run.ProjectID, &run.AgentID, &run.TaskID, &run.WorkflowInstanceID, &run.WorkflowStepID,
 		&run.ForkSessionID, &run.DesiredRuntimeNodeID, &run.RuntimeNodeID, &run.Status, &run.Priority, &run.SpecJSON, &run.ResultJSON, &run.LeaseExpiresAt, &run.ClaimedAt,
-		&run.StartedAt, &run.FinishedAt, &run.ErrorCode, &run.ErrorMessage, &run.CreatedAt, &run.UpdatedAt)
+		&run.StartedAt, &run.FinishedAt, &run.ErrorCode, &run.ErrorMessage, &run.CreatedAt, &run.UpdatedAt, &run.RunKey, &run.SlotClass, &run.LeaseGeneration)
 	return run, err
 }
 

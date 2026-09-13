@@ -167,6 +167,8 @@ type Store interface {
 	RuntimeNodeTokenByHash(hash string) (RuntimeNodeToken, bool, error)
 	RevokeRuntimeNodeToken(id string) error
 	UpsertRuntimeRun(run RuntimeRun) error
+	UpsertRuntimeRunIdempotent(run RuntimeRun) (RuntimeRun, bool, error)
+	ActiveRuntimeRunByKey(workspaceID, runKey string) (RuntimeRun, bool, error)
 	RuntimeRunByID(workspaceID, id string) (RuntimeRun, bool, error)
 	ListRuntimeRuns(filter RuntimeRunFilter) ([]RuntimeRun, error)
 	ClaimRuntimeRun(workspaceID, nodeID string, leaseSeconds int, busyAgents []string) (RuntimeRun, bool, error)
@@ -942,6 +944,18 @@ type RuntimeRun struct {
 	ErrorMessage         string
 	CreatedAt            string
 	UpdatedAt            string
+	// RunKey makes enqueue idempotent: deterministic per dispatch intent
+	// (task / wakeup / workflow-step / caller Idempotency-Key). Empty = no
+	// dedup (fork sessions, exec prompts without a caller key).
+	RunKey string
+	// SlotClass marks whether the run occupies the Worker execution slot:
+	// "normal" occupies, "readonly" (strict read-only fork sessions) does
+	// not. Decided at ENQUEUE time and persisted — never re-derived later.
+	SlotClass string
+	// LeaseGeneration increments on every claim/takeover. Lease renewal,
+	// finish, and reaper kills are all conditional on it, so a stale loop on
+	// the same node cannot resurrect a run that was taken over.
+	LeaseGeneration int
 }
 
 type RuntimeRunFilter struct {
