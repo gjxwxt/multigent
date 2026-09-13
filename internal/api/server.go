@@ -291,17 +291,32 @@ func (s *Server) SetLocalRuntimeAPIURL(url string) {
 	})
 }
 
-// logSecretStorageBaseline inventories secret records at startup: WARN when
-// plaintext rows exist (with counts per surface, never contents), INFO with
-// the encrypted/empty split otherwise. The hard gate itself lives at seal
-// time (MULTIGENT_REQUIRE_ENCRYPTED_SECRETS); this is the visibility half.
+// logSecretStorageBaseline inventories secret records at startup and enforces
+// the REQUIRE gate on existing data: with MULTIGENT_REQUIRE_ENCRYPTED_SECRETS=1
+// a deployment holding plaintext or unknown-version records refuses to start
+// (fail-closed) unless MULTIGENT_SECRETS_MIGRATION_MODE=1 explicitly marks the
+// process as the migration window (the migrate CLI runs against the same DB
+// and would otherwise be locked out of reading old-format rows). Without the
+// REQUIRE gate the audit is visibility-only: WARN on plaintext (counts per
+// surface, never contents), INFO with the encrypted/empty split otherwise.
+// New-write enforcement lives at seal time in the db/secretbox packages.
 func (s *Server) logSecretStorageBaseline() {
+	s.runSecretStorageBaseline(os.Exit)
+}
+
+// runSecretStorageBaseline is the testable body of logSecretStorageBaseline;
+// fatal is called with exit code 1 when the REQUIRE gate fails closed.
+func (s *Server) runSecretStorageBaseline(fatal func(int)) {
 	if s == nil || s.controlDB == nil {
 		return
 	}
 	report, err := s.controlDB.AuditSecrets()
 	if err != nil {
 		log.Printf("[secrets-baseline] audit failed: %v", err)
+		if controldb.RequireEncryptedSecrets() && !migrationModeEnabled() {
+			log.Printf("[secrets-baseline] FATAL: MULTIGENT_REQUIRE_ENCRYPTED_SECRETS=1 and the secret audit failed; refusing to start (fail-closed)")
+			fatal(1)
+		}
 		return
 	}
 	if len(report.Plaintext) == 0 {
@@ -314,6 +329,27 @@ func (s *Server) logSecretStorageBaseline() {
 	}
 	log.Printf("[secrets-baseline] WARNING: %d plaintext secret record(s) detected (connections=%d, model_providers=%d, oauth_client_configs=%d); key configured=%v. Run `multigent secrets audit` for the inventory and `multigent secrets migrate --apply` after setting MULTIGENT_CONNECTION_ENCRYPTION_KEY.",
 		len(report.Plaintext), byTable["connections"], byTable["model_providers"], byTable["oauth_client_configs"], report.EncryptionKeyConfigured)
+	if controldb.RequireEncryptedSecrets() {
+		if migrationModeEnabled() {
+			log.Printf("[secrets-baseline] REQUIRE gate armed but MULTIGENT_SECRETS_MIGRATION_MODE=1: starting with %d plaintext record(s) for the migration window only", len(report.Plaintext))
+			return
+		}
+		log.Printf("[secrets-baseline] FATAL: MULTIGENT_REQUIRE_ENCRYPTED_SECRETS=1 with %d plaintext/unknown secret record(s) present (connections=%d, model_providers=%d, oauth_client_configs=%d); refusing to start. Set MULTIGENT_SECRETS_MIGRATION_MODE=1 for the migration window or run `multigent secrets migrate --apply`.",
+			len(report.Plaintext), byTable["connections"], byTable["model_providers"], byTable["oauth_client_configs"])
+		fatal(1)
+	}
+}
+
+// migrationModeEnabled reports whether the operator declared the current
+// process part of an explicit migration window. It must be set deliberately
+// (MULTIGENT_SECRETS_MIGRATION_MODE=1) and only for the migrate/verify run:
+// it is the sole exemption from the REQUIRE=1 startup fail-closed.
+func migrationModeEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("MULTIGENT_SECRETS_MIGRATION_MODE"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 func (s *Server) runtimeAPIURLForInternalEvent() string {

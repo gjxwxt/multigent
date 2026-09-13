@@ -1,10 +1,12 @@
 package db
 
 import (
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -185,9 +187,9 @@ type SecretsMigrationResult struct {
 
 // SecretsMigrateReport is the outcome of an --apply migration run.
 type SecretsMigrateReport struct {
-	BackupPath  string                  `json:"backupPath,omitempty"`
-	ReEncrypted int                     `json:"reEncrypted"`
-	Failed      []SecretsMigrationError `json:"failed,omitempty"`
+	BackupPath  string                   `json:"backupPath,omitempty"`
+	ReEncrypted int                      `json:"reEncrypted"`
+	Failed      []SecretsMigrationError  `json:"failed,omitempty"`
 	Details     []SecretsMigrationResult `json:"details,omitempty"`
 }
 
@@ -274,29 +276,41 @@ func (db *SQLiteStore) MigrateSecrets() (*SecretsMigrateReport, error) {
 			continue
 		}
 		version := secretboxEnvelopeVersion(apiKey)
-		if secretStorageMode(version) != secretModePlaintext {
+		// "raw" (bare key, no envelope) is migratable plaintext; other
+		// unrecognized shapes stay skipped — the audit still fails loudly on
+		// them, but their byte layout is not decodable here.
+		if version != "raw" && secretStorageMode(version) != secretModePlaintext {
 			continue
 		}
 		providerID := id
 		plainValue := apiKey
+		// "raw" = the column holds the bare key with no envelope at all
+		// (legacy write before sealing existed). Seal it directly; anything
+		// else goes through the plaintext-envelope decode below.
+		isRaw := version == "raw"
 		pending = append(pending, pendingSecret{
 			table: "model_providers", id: id, from: version,
 			apply: func() error {
-				// Decrypt the plaintext envelope (base64 JSON with the secret
-				// under "ciphertext", itself base64 of the raw key).
-				raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(strings.TrimSpace(plainValue), "sealed:"))
-				if err != nil {
-					return fmt.Errorf("decode envelope: %w", err)
-				}
-				var box struct {
-					Ciphertext string `json:"ciphertext"`
-				}
-				if err := json.Unmarshal(raw, &box); err != nil {
-					return fmt.Errorf("parse envelope: %w", err)
-				}
-				plain, err := base64.StdEncoding.DecodeString(box.Ciphertext)
-				if err != nil {
-					return fmt.Errorf("decode plaintext: %w", err)
+				var plain []byte
+				if isRaw {
+					plain = []byte(plainValue)
+				} else {
+					// Decrypt the plaintext envelope (base64 JSON with the secret
+					// under "ciphertext", itself base64 of the raw key).
+					raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(strings.TrimSpace(plainValue), "sealed:"))
+					if err != nil {
+						return fmt.Errorf("decode envelope: %w", err)
+					}
+					var box struct {
+						Ciphertext string `json:"ciphertext"`
+					}
+					if err := json.Unmarshal(raw, &box); err != nil {
+						return fmt.Errorf("parse envelope: %w", err)
+					}
+					plain, err = base64.StdEncoding.DecodeString(box.Ciphertext)
+					if err != nil {
+						return fmt.Errorf("decode plaintext: %w", err)
+					}
 				}
 				key := strings.TrimSpace(os.Getenv(EnvConnectionEncryptionKey))
 				if key == "" {
@@ -406,6 +420,60 @@ func (db *SQLiteStore) CountPlaintextSecretRecords() (int, error) {
 		return 0, err
 	}
 	return len(report.Plaintext), nil
+}
+
+// BackupConsistent writes a single-file, transactionally consistent snapshot
+// of the control DB to dest via `VACUUM INTO`. Unlike a sequential
+// db+wal+shm file copy, the snapshot is a coherent database even while the
+// server is running and writing. The destination is created with O_EXCL and
+// 0600: an existing file (previous snapshot, or the live DB itself) is never
+// overwritten.
+func (db *SQLiteStore) BackupConsistent(dest string) error {
+	dest = strings.TrimSpace(dest)
+	if dest == "" {
+		return fmt.Errorf("backup destination is required")
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
+		return err
+	}
+	// O_EXCL: refuse to overwrite anything, including a previous snapshot.
+	f, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("backup %s already exists; refusing to overwrite", dest)
+		}
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	// VACUUM INTO requires an empty target file; the O_EXCL create above
+	// guarantees exclusivity while letting SQLite own the final content.
+	if _, err := db.sql.Exec("VACUUM INTO ?", dest); err != nil {
+		_ = os.Remove(dest)
+		return fmt.Errorf("vacuum into %s: %w", dest, err)
+	}
+	return os.Chmod(dest, 0o600)
+}
+
+// VerifyBackup opens a backup snapshot read-only and runs SQLite's
+// integrity_check, proving the file is a loadable, coherent database (not a
+// torn copy) before it is trusted as a rollback anchor.
+func VerifyBackup(path string) error {
+	uri := "file:" + filepath.ToSlash(path) + "?mode=ro"
+	sqlDB, err := sql.Open("sqlite", uri)
+	if err != nil {
+		return err
+	}
+	defer sqlDB.Close()
+	var result string
+	if err := sqlDB.QueryRow("PRAGMA integrity_check").Scan(&result); err != nil {
+		return fmt.Errorf("integrity check failed: %w", err)
+	}
+	if result != "ok" {
+		return fmt.Errorf("integrity check reported %q", result)
+	}
+	return nil
 }
 
 // EnvRequireEncryptedSecrets turns the plaintext fallback into a hard error

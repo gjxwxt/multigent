@@ -64,7 +64,14 @@
 | `MULTIGENT_WEB_API_KEY` | Web API key |
 | `MULTIGENT_ALLOW_SIGNUP` | 注册开关（内网建议 false） |
 
-**凭据安全基线（2026-09-14 起）**：服务启动时审计三类密钥存储面（connection_secrets / model_providers.api_key / oauth_client_configs），存在明文记录则输出 `[secrets-baseline] WARNING`（只含表名/计数，绝无密钥内容）。配套 CLI：`multigent secrets audit`（盘点，退出码 2 = 有明文）与 `multigent secrets migrate [--apply]`（默认 dry-run；--apply 自动备份控制 DB 后重加密，退出码 3 = 部分失败可重跑）。迁移顺序：生成 key（`openssl rand -hex 32`）→ `secrets migrate --apply` → 服务注入 key（systemd drop-in）并重启 → audit 复核零明文。已加密记录缺 key 时读取 fail-closed（报错不降级），回滚 = 用迁移自动备份（`multigent.db.pre-encrypt-<ts>`）恢复 DB 文件。
+**凭据安全基线（2026-09-14 起）**：服务启动时审计三类密钥存储面（connection_secrets / model_providers.api_key / oauth_client_configs），存在明文记录则输出 `[secrets-baseline] WARNING`（只含表名/计数，绝无密钥内容）。配套 CLI：`multigent secrets audit`（盘点，退出码 2 = 有明文）与 `multigent secrets migrate [--apply]`（默认 dry-run；--apply 自动经 `VACUUM INTO` 生成单文件一致性备份——O_EXCL 拒绝覆盖、0600 权限、写入后 `PRAGMA integrity_check` 校验，非顺序 db+wal 拷贝，服务运行中也可安全执行——随后重加密，退出码 3 = 部分失败可重跑）。
+
+**迁移 SOP（顺序敏感，勿颠倒）**：
+1. 生成 key（`openssl rand -hex 32`）并**先**注入服务（systemd drop-in）重启——此时旧明文仍可读（明文读取不需要 key），已加密记录可正常解密，`audit` 复核兼容读无报错；
+2. 维护窗口内执行 `secrets migrate --apply`（自动一致性备份），确认退出码 0 且 `audit` 复核零明文；
+3. 最后才置 `MULTIGENT_REQUIRE_ENCRYPTED_SECRETS=1` 重启启用硬闸。**顺序错误会翻车**：先迁移后注 key，服务在无 key 窗口内对 env-v1 记录读取 fail-closed，依赖这些凭据的任务会报 "MULTIGENT_CONNECTION_ENCRYPTION_KEY is required"。
+
+**REQUIRE=1 启动 fail-closed**：硬闸开启后，启动审计发现存量明文/未知版本记录即拒绝启动（`[secrets-baseline] FATAL` + 退出码 1），审计本身失败同样拒绝启动；迁移窗口例外——迁移/验证进程显式置 `MULTIGENT_SECRETS_MIGRATION_MODE=1` 可带明文存量启动，迁移完成、audit 归零后务必摘掉该变量。回滚 = 用迁移自动备份（`multigent.db.pre-encrypt-<ts>`，单文件快照）恢复 DB 文件。
 
 ### 2.5 GitLab / CI
 `MULTIGENT_GITLAB_RUNNER_ID`（默认 runner 自动绑定；8.4 缺陷修复的配置前提，当前经 systemd drop-in 注入）。

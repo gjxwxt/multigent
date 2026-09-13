@@ -78,15 +78,25 @@ func newSecretsMigrateCmd() *cobra.Command {
 			report := controldb.SecretsMigrateReport{}
 			if apply {
 				if !skipBackup {
-					path, err := defaultSecretsBackupPath(backupPath)
+					path, err := resolveSecretsBackupPath(backupPath)
 					if err != nil {
 						return err
 					}
-					if err := copyControlDBBackup(path); err != nil {
+					// VACUUM INTO produces a single-file consistent snapshot
+					// of the live (possibly WAL-mode) database — a bare
+					// sequential copy of db+wal+shm files is NOT a snapshot
+					// while the server is running. Runs against the live DB
+					// through the same SQLite connection, so it works with
+					// the service up; the maintenance-window recommendation
+					// in the docs is about the key cutover, not the backup.
+					if err := db.BackupConsistent(path); err != nil {
 						return fmt.Errorf("create control DB backup: %w", err)
 					}
+					if err := controldb.VerifyBackup(path); err != nil {
+						return fmt.Errorf("backup failed integrity check: %w", err)
+					}
 					report.BackupPath = path
-					fmt.Printf("backup written: %s\n", path)
+					fmt.Printf("consistent backup written and verified: %s\n", path)
 				}
 				result, err := db.MigrateSecrets()
 				if err != nil {
@@ -132,33 +142,25 @@ func defaultSecretsBackupPath(explicit string) (string, error) {
 	return fmt.Sprintf("%s.pre-encrypt-%s", dbPath, time.Now().UTC().Format("20060102T150405Z")), nil
 }
 
-// copyControlDBBackup copies the live control DB (and WAL/SHM siblings) to
-// dest. Checkpoint-free copy is safe here because the server should be
-// stopped or idle during migration; the copies keep the snapshot consistent
-// either way.
-func copyControlDBBackup(dest string) error {
-	dbPath, err := controldb.DefaultPath()
+// resolveSecretsBackupPath finalizes the backup destination and refuses
+// obviously wrong targets: an existing file (O_EXCL semantics — never
+// overwrite a previous snapshot) and the live control DB itself.
+func resolveSecretsBackupPath(explicit string) (string, error) {
+	path, err := defaultSecretsBackupPath(explicit)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
-		return err
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
 	}
-	for _, suffix := range []string{"", "-wal", "-shm"} {
-		src := dbPath + suffix
-		data, err := os.ReadFile(src)
-		if err != nil {
-			if os.IsNotExist(err) && suffix != "" {
-				continue
-			}
-			if os.IsNotExist(err) {
-				return fmt.Errorf("control DB %s not found", dbPath)
-			}
-			return err
-		}
-		if err := os.WriteFile(dest+suffix, data, 0o600); err != nil {
-			return err
+	if live, err := controldb.DefaultPath(); err == nil {
+		if liveAbs, err := filepath.Abs(live); err == nil && liveAbs == abs {
+			return "", fmt.Errorf("backup path must not be the live control DB itself")
 		}
 	}
-	return nil
+	if _, err := os.Stat(abs); err == nil {
+		return "", fmt.Errorf("backup path %s already exists; refusing to overwrite a previous snapshot", abs)
+	}
+	return abs, nil
 }

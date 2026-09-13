@@ -100,6 +100,7 @@ type Store interface {
 	ListProjectMemberships(filter ProjectMembershipFilter) ([]ProjectMembership, error)
 	DeleteProjectMembership(workspaceID, id string) error
 	DeleteProjectMembershipsByProject(workspaceID, projectID string) error
+	DeleteProjectControlPlaneScope(workspaceID, projectID string) error
 	UpsertAttentionSignal(signal AttentionSignal) error
 	AttentionSignalByID(workspaceID, id string) (AttentionSignal, bool, error)
 	ListAttentionSignals(filter AttentionSignalFilter) ([]AttentionSignal, error)
