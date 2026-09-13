@@ -1356,7 +1356,9 @@
     "featureBranchLabel": "特性分支 (to)",
     "featureBranchPlaceholder": "feature/task-name (留空自动生成)",
     "availableBranches": "可用分支 (Git Branches)",
-    "noBranchMatch": "未找到匹配分支，将使用 \"{{value}}\""
+    "noBranchMatch": "未找到匹配分支，将使用 \"{{value}}\"",
+    "agentAlreadyRunning": "智能体已在后台执行该任务中，重复启动会并入当前队列。",
+    "taskQueued": "任务已入队，将在智能体当前工作完成后执行。"
   },
   "projects": {
     "listEyebrow": "交付",

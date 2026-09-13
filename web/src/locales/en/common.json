@@ -1356,7 +1356,9 @@
     "featureBranchLabel": "Feature branch (to)",
     "featureBranchPlaceholder": "feature/task-name (leave blank to auto-generate)",
     "availableBranches": "Available branches (Git Branches)",
-    "noBranchMatch": "No matching branch; will use \"{{value}}\""
+    "noBranchMatch": "No matching branch; will use \"{{value}}\"",
+    "agentAlreadyRunning": "The agent is already executing this task in the background. Starting again joins the existing queue entry.",
+    "taskQueued": "Task queued. It will run as soon as the agent's current work finishes."
   },
   "projects": {
     "listEyebrow": "Delivery",

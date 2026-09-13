@@ -466,12 +466,13 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
     setStartBusy(true)
     try {
       await apiPost(`/api/v1/projects/${encodeURIComponent(task.project)}/tasks/${encodeURIComponent(task.id)}/start`, {}, { suppressToast: true })
+      showToast(t('tasks.taskQueued', { defaultValue: '任务已入队，将在智能体当前工作完成后执行。' }), 'success')
       onMutated?.()
       window.setTimeout(() => onMutated?.(), 800)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       if (msg.includes('already running') || msg.includes('scheduler_wakeup_failed') || msg.includes('conflict') || msg.includes('忙碌') || msg.includes('正在')) {
-        showToast(t('tasks.agentAlreadyRunning', { defaultValue: '智能体已在后台执行该任务中，正在处理…' }), 'info')
+        showToast(t('tasks.agentAlreadyRunning', { defaultValue: '智能体已在后台执行该任务中，重复启动会并入当前队列。' }), 'info')
       } else {
         showToast(msg || t('apiErrors.bad_request'), 'error')
       }

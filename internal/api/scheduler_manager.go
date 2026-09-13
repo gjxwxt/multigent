@@ -837,9 +837,13 @@ func (s *Server) startProjectTaskDirect(workspaceID, project, agent string, task
 		return 0, "", fmt.Errorf("%w: %s", errRuntimeNotReady, runtimeReadinessErrorMessage(readiness))
 	}
 	if s.usesAssignedRuntimeNode(workspaceID, meta) {
-		if s.hasActiveRuntimeRun(workspaceID, project, agent, "") {
-			return 0, "", fmt.Errorf("%w: agent %s/%s is already running", errAgentAlreadyRunning, project, agent)
-		}
+		// Q0 收口 5 (task-queue semantics): manual start JOINS the queue
+		// instead of 409ing on any queued/running run — run_key idempotency
+		// (idx_runtime_runs_active_key) converges a double click or a
+		// scheduler tick racing this start onto the SAME run, and a running
+		// run simply keeps its lease while the enqueue is deduped. The
+		// per-task slot guard lives in the fence (task.ActiveRuntimeRunID),
+		// not here.
 		run, err := s.enqueueSpecificRuntimeTaskRunFromRequest(workspaceID, project, agent, task, hb, externalServerURL(r), requestUsername(r))
 		if err != nil {
 			return 0, "", fmt.Errorf("queue task run failed: %w", err)

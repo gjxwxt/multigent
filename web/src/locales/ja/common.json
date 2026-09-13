@@ -1154,7 +1154,9 @@
     "featureBranchLabel": "フィーチャーブランチ (to)",
     "featureBranchPlaceholder": "feature/task-name（空欄で自動生成）",
     "availableBranches": "利用可能なブランチ (Git Branches)",
-    "noBranchMatch": "一致するブランチがなく \"{{value}}\" を使用します"
+    "noBranchMatch": "一致するブランチがなく \"{{value}}\" を使用します",
+    "agentAlreadyRunning": "エージェントはすでにこのタスクをバックグラウンドで実行中です。再実行すると既存のキューに統合されます。",
+    "taskQueued": "タスクをキューに追加しました。エージェントの現在の作業が完了次第実行されます。"
   },
   "projects": {
     "listEyebrow": "デリバリー",
