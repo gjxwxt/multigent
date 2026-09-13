@@ -58,10 +58,13 @@
 | 变量 | 说明 |
 |---|---|
 | `MULTIGENT_CONNECTION_ENCRYPTION_KEY` | 连接凭据加密主钥；**迁移必带**，丢了所有已存凭据作废 |
+| `MULTIGENT_REQUIRE_ENCRYPTED_SECRETS` | 凭据硬闸：置 `1` 后缺主钥时所有密封路径（连接/模型商/OAuth）直接报错，不再落明文（dev 兜底关闭）；内网/生产建议开启 |
 | `MULTIGENT_TRUSTED_PROXY_SECRET` | 反向代理信任链 |
 | `MULTIGENT_WORKER_TOKEN`/`MULTIGENT_WORKER_ID`/`MULTIGENT_WORKER_MODE`/`MULTIGENT_WORKER_WORKSPACE` | Runtime Node 注册 |
 | `MULTIGENT_WEB_API_KEY` | Web API key |
 | `MULTIGENT_ALLOW_SIGNUP` | 注册开关（内网建议 false） |
+
+**凭据安全基线（2026-09-14 起）**：服务启动时审计三类密钥存储面（connection_secrets / model_providers.api_key / oauth_client_configs），存在明文记录则输出 `[secrets-baseline] WARNING`（只含表名/计数，绝无密钥内容）。配套 CLI：`multigent secrets audit`（盘点，退出码 2 = 有明文）与 `multigent secrets migrate [--apply]`（默认 dry-run；--apply 自动备份控制 DB 后重加密，退出码 3 = 部分失败可重跑）。迁移顺序：生成 key（`openssl rand -hex 32`）→ `secrets migrate --apply` → 服务注入 key（systemd drop-in）并重启 → audit 复核零明文。已加密记录缺 key 时读取 fail-closed（报错不降级），回滚 = 用迁移自动备份（`multigent.db.pre-encrypt-<ts>`）恢复 DB 文件。
 
 ### 2.5 GitLab / CI
 `MULTIGENT_GITLAB_RUNNER_ID`（默认 runner 自动绑定；8.4 缺陷修复的配置前提，当前经 systemd drop-in 注入）。
