@@ -283,7 +283,8 @@ func (s *Server) SetLocalRuntimeAPIURL(url string) {
 	s.attentionRecoveryOnce.Do(func() {
 		go s.ensurePlatformWorkflowDefinitions()
 		go func() {
-			s.logSecretStorageBaseline()
+			// The REQUIRE secrets gate is NOT here anymore: cmd/multigent runs
+			// EnforceSecretsBaseline synchronously before the listener starts.
 			s.healAgentChannelBindingsAndIdentities()
 			s.recoverActiveWorkflowRunsWithDelay(3 * time.Second)
 			s.recoverPendingAttentionWakeups()
@@ -291,37 +292,35 @@ func (s *Server) SetLocalRuntimeAPIURL(url string) {
 	})
 }
 
-// logSecretStorageBaseline inventories secret records at startup and enforces
-// the REQUIRE gate on existing data: with MULTIGENT_REQUIRE_ENCRYPTED_SECRETS=1
-// a deployment holding plaintext or unknown-version records refuses to start
-// (fail-closed) unless MULTIGENT_SECRETS_MIGRATION_MODE=1 explicitly marks the
-// process as the migration window (the migrate CLI runs against the same DB
-// and would otherwise be locked out of reading old-format rows). Without the
-// REQUIRE gate the audit is visibility-only: WARN on plaintext (counts per
-// surface, never contents), INFO with the encrypted/empty split otherwise.
-// New-write enforcement lives at seal time in the db/secretbox packages.
-func (s *Server) logSecretStorageBaseline() {
-	s.runSecretStorageBaseline(os.Exit)
-}
-
-// runSecretStorageBaseline is the testable body of logSecretStorageBaseline;
-// fatal is called with exit code 1 when the REQUIRE gate fails closed.
-func (s *Server) runSecretStorageBaseline(fatal func(int)) {
+// EnforceSecretsBaseline inventories secret records at startup and enforces
+// the REQUIRE gate on existing data BEFORE the HTTP listener or any scheduler
+// starts: with MULTIGENT_REQUIRE_ENCRYPTED_SECRETS=1 a deployment holding
+// plaintext or unknown-version records returns a startup error (the process
+// never binds a port — fail-closed) unless MULTIGENT_SECRETS_MIGRATION_MODE=1
+// explicitly marks the process as the migration window (the migrate CLI runs
+// against the same DB and would otherwise be locked out of reading old-format
+// rows). Without the REQUIRE gate the audit is visibility-only: WARN on
+// plaintext (counts per surface, never contents), INFO with the
+// encrypted/empty split otherwise. New-write enforcement lives at seal time
+// in the db/secretbox packages.
+//
+// Synchronous by design: cmd/multigent calls this before ListenAndServe, so
+// no request is ever served from a database the gate would have rejected.
+func (s *Server) EnforceSecretsBaseline() error {
 	if s == nil || s.controlDB == nil {
-		return
+		return nil
 	}
 	report, err := s.controlDB.AuditSecrets()
 	if err != nil {
 		log.Printf("[secrets-baseline] audit failed: %v", err)
 		if controldb.RequireEncryptedSecrets() && !migrationModeEnabled() {
-			log.Printf("[secrets-baseline] FATAL: MULTIGENT_REQUIRE_ENCRYPTED_SECRETS=1 and the secret audit failed; refusing to start (fail-closed)")
-			fatal(1)
+			return fmt.Errorf("MULTIGENT_REQUIRE_ENCRYPTED_SECRETS=1 and the secret audit failed; refusing to start (fail-closed): %w", err)
 		}
-		return
+		return nil
 	}
 	if len(report.Plaintext) == 0 {
 		log.Printf("[secrets-baseline] secret storage OK: %d encrypted, %d empty, key configured=%v", report.Encrypted, report.Empty, report.EncryptionKeyConfigured)
-		return
+		return nil
 	}
 	byTable := map[string]int{}
 	for _, rec := range report.Plaintext {
@@ -332,12 +331,12 @@ func (s *Server) runSecretStorageBaseline(fatal func(int)) {
 	if controldb.RequireEncryptedSecrets() {
 		if migrationModeEnabled() {
 			log.Printf("[secrets-baseline] REQUIRE gate armed but MULTIGENT_SECRETS_MIGRATION_MODE=1: starting with %d plaintext record(s) for the migration window only", len(report.Plaintext))
-			return
+			return nil
 		}
-		log.Printf("[secrets-baseline] FATAL: MULTIGENT_REQUIRE_ENCRYPTED_SECRETS=1 with %d plaintext/unknown secret record(s) present (connections=%d, model_providers=%d, oauth_client_configs=%d); refusing to start. Set MULTIGENT_SECRETS_MIGRATION_MODE=1 for the migration window or run `multigent secrets migrate --apply`.",
+		return fmt.Errorf("MULTIGENT_REQUIRE_ENCRYPTED_SECRETS=1 with %d plaintext/unknown secret record(s) present (connections=%d, model_providers=%d, oauth_client_configs=%d); refusing to start. Set MULTIGENT_SECRETS_MIGRATION_MODE=1 for the migration window or run `multigent secrets migrate --apply`",
 			len(report.Plaintext), byTable["connections"], byTable["model_providers"], byTable["oauth_client_configs"])
-		fatal(1)
 	}
+	return nil
 }
 
 // migrationModeEnabled reports whether the operator declared the current
@@ -598,6 +597,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/integrations/gitlab/status", s.handleGitLabStatus)
 	mux.HandleFunc("GET /api/v1/integrations/gitlab/namespaces", s.handleGitLabNamespaces)
 	mux.HandleFunc("POST /api/v1/integrations/gitlab/projects", s.handleGitLabCreateProject)
+	mux.HandleFunc("POST /api/v1/projects/{name}/remote/verify", s.handleProjectRemoteVerify)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{id}/merge", s.handleMergeTaskMR)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview/live", s.handleGetTaskPreviewLive)
 	mux.HandleFunc("/preview/", s.handleTaskPreviewProxy)
@@ -1475,10 +1475,12 @@ func (s *Server) handlePutProject(w http.ResponseWriter, r *http.Request) {
 	if profileChanged {
 		s.recordRuntimeProfileAudit(r, name, profileBefore, p.RuntimeProfile)
 	}
-	// Re-push APP_PORT so a freshly bound (or rebound) GitLab remote picks
-	// up the reserved port. Best-effort, no-op without port+remote.
-	s.pushDeployPortVariable(r.Context(), name, p)
-	s.bindDefaultRunner(r.Context(), name, p)
+	// P0.6: the project PUT produces ZERO GitLab side effects. Remote* body
+	// fields are display/compat metadata only — runner binding, APP_PORT
+	// variable push, and adopt all consume the server-controlled verified
+	// remote binding, written solely by the create-repo endpoint and the
+	// admin verify flow. A forged PUT therefore cannot trigger any platform
+	// credential write against an external forge.
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/multigent/multigent/internal/codehost"
+	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/store"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
@@ -1266,23 +1267,40 @@ func (s *Server) prepareTaskDelivery(r *http.Request, project string, task *enti
 		return err
 	}
 	if p.RemoteProvider == "gitlab" || p.RemoteProvider == "github" {
-		if p.RemoteProjectID == "" || task.RemoteMRIID == "" {
-			return fmt.Errorf("remote %s delivery is incomplete: project ID and change-request ID are required", p.RemoteProvider)
+		if task.RemoteMRIID == "" {
+			return fmt.Errorf("remote %s delivery is incomplete: change-request ID is required", p.RemoteProvider)
 		}
 		var host codehost.CodeHost
+		var remoteProjectID string
 		var err error
 		if p.RemoteProvider == "gitlab" {
-			host, _, err = s.pinnedCodeHost(r.Context(), project, p, "gitlab")
+			// P0.6: merge targets the verified remote binding only — a forged
+			// RemoteProjectID can no longer steer platform credential writes.
+			var binding *controldb.VerifiedRemoteBinding
+			var glHost *codehost.GitLabHost
+			glHost, binding, err = s.verifiedGitLabHost(r.Context(), project)
+			if err == nil {
+				host = glHost
+				remoteProjectID = binding.RemoteProjectID
+			}
 		} else {
-			host, _, err = s.pinnedCodeHost(r.Context(), project, p, "github")
+			var ghHost *codehost.GitHubHost
+			ghHost, _, err = s.resolveGitHubHost("")
+			if err == nil {
+				host = ghHost
+				remoteProjectID = p.RemoteProjectID
+			}
 		}
 		if err != nil {
 			return fmt.Errorf("resolve %s connection: %w", p.RemoteProvider, err)
 		}
+		if remoteProjectID == "" {
+			return fmt.Errorf("remote %s delivery is incomplete: no verified remote project", p.RemoteProvider)
+		}
 		// Always read the remote MR before deciding whether delivery is done.
 		// Task metadata can be stale or reported by an agent, so it must not be
 		// trusted as proof that a remote merge already happened.
-		mr, err := host.GetMR(r.Context(), p.RemoteProjectID, task.RemoteMRIID)
+		mr, err := host.GetMR(r.Context(), remoteProjectID, task.RemoteMRIID)
 		if err != nil {
 			return fmt.Errorf("read %s change request %s before merge: %w", p.RemoteProvider, task.RemoteMRIID, err)
 		}
@@ -1304,7 +1322,7 @@ func (s *Server) prepareTaskDelivery(r *http.Request, project string, task *enti
 			if mergeMessage == "" {
 				mergeMessage = fmt.Sprintf("Merge MR !%s (%s)", task.RemoteMRIID, task.Title)
 			}
-			if err := host.MergeMR(r.Context(), p.RemoteProjectID, task.RemoteMRIID, expectedHeadSHA, mergeMessage); err != nil {
+			if err := host.MergeMR(r.Context(), remoteProjectID, task.RemoteMRIID, expectedHeadSHA, mergeMessage); err != nil {
 				return fmt.Errorf("merge %s change request %s: %w", p.RemoteProvider, task.RemoteMRIID, err)
 			}
 		}

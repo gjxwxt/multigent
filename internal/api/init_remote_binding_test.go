@@ -106,13 +106,12 @@ func TestAdoptRemoteAfterSyncBindsRunner(t *testing.T) {
 	repoDir := filepath.Join(t.TempDir(), "workspace")
 	seedOriginRepo(t, repoDir, gitlab.URL+"/root/p15-init-spring-v2.git")
 	if err := s.st.SaveProject("p15-init-spring-v2", &entity.Project{
-		Name:     "p15-init-spring-v2",
-		Repo:     repoDir,
-		RemoteAdoptPath: "root/p15-init-spring-v2", // platform create-repo record (server-side only field)
-		RemoteAdoptID:   "58",
+		Name: "p15-init-spring-v2",
+		Repo: repoDir,
 	}); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
+	seedVerifiedBinding(t, s, workspaceID, "p15-init-spring-v2", "conn-gitlab", "root/p15-init-spring-v2", "58")
 
 	task := &entity.Task{ID: "t-init", Status: entity.TaskStatusDoneSuccess, WorktreeDir: repoDir}
 	s.adoptRemoteAfterSync(context.Background(), "p15-init-spring-v2", task)
@@ -143,6 +142,25 @@ func TestAdoptRemoteAfterSyncBindsRunner(t *testing.T) {
 // mid-workflow transition has already reset the task to pending for the next
 // step — the v3 canary's sync step completed with the task in "pending" and
 // the old done_success guard skipped adoption.
+
+// seedVerifiedBinding writes the P0.6 trust record: only the verified remote
+// binding authorizes adoption/runner binding in production flows.
+func seedVerifiedBinding(t *testing.T, s *Server, workspaceID, project, connID, path, remoteID string) {
+	t.Helper()
+	if err := s.controlDB.UpsertVerifiedRemoteBinding(controldb.VerifiedRemoteBinding{
+		WorkspaceID:       workspaceID,
+		ProjectID:         project,
+		Provider:          "gitlab",
+		ConnectionID:      connID,
+		RemoteProjectID:   remoteID,
+		PathWithNamespace: path,
+		VerifiedAt:        "2026-09-13T00:00:00Z",
+		Source:            controldb.BindingSourcePlatformCreate,
+	}); err != nil {
+		t.Fatalf("seed verified binding: %v", err)
+	}
+}
+
 func TestAdoptRemoteIfNeededAfterStepFiresForPendingTask(t *testing.T) {
 	s, workspaceID := newConnectionGrantPolicyServer(t)
 
@@ -154,13 +172,12 @@ func TestAdoptRemoteIfNeededAfterStepFiresForPendingTask(t *testing.T) {
 	repoDir := filepath.Join(t.TempDir(), "workspace")
 	seedOriginRepo(t, repoDir, gitlab.URL+"/root/mid-step.git")
 	if err := s.st.SaveProject("proj", &entity.Project{
-		Name:     "proj",
-		Repo:     repoDir,
-		RemoteAdoptPath: "root/mid-step", // platform create-repo record (server-side only field)
-		RemoteAdoptID:   "58",
+		Name: "proj",
+		Repo: repoDir,
 	}); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
+	seedVerifiedBinding(t, s, workspaceID, "proj", "conn-gitlab", "root/mid-step", "58")
 
 	task := &entity.Task{
 		ID:          "t-init",
@@ -330,10 +347,10 @@ func TestAdoptRemoteAfterSyncRemoteURLAloneDoesNotAuthorize(t *testing.T) {
 	}
 }
 
-// The platform-controlled identity record (RemoteAdoptPath/ID, written only
-// by server-side flows) authorizes adoption. Display fields the PUT accepts
-// (CloneURL with a forged matching path, RemoteURL) do not — even when the
-// forged CloneURL exactly matches the observed origin.
+// The verified remote binding (written only by server-side flows) authorizes
+// adoption. Display fields the PUT accepts (CloneURL with a forged matching
+// path, RemoteURL) do not — even when the forged CloneURL exactly matches the
+// observed origin.
 func TestAdoptRemoteAfterSyncPlatformRecordAuthorizes(t *testing.T) {
 	s, workspaceID := newConnectionGrantPolicyServer(t)
 
@@ -345,15 +362,14 @@ func TestAdoptRemoteAfterSyncPlatformRecordAuthorizes(t *testing.T) {
 	repoDir := filepath.Join(t.TempDir(), "workspace")
 	seedOriginRepo(t, repoDir, gitlab.URL+"/gao/my-repo.git")
 	if err := s.st.SaveProject("proj", &entity.Project{
-		Name:            "proj",
-		Repo:            repoDir,
-		RemoteAdoptPath: "gao/my-repo", // server-side create-repo record
-		RemoteAdoptID:   "58",
-		CloneURL:        gitlab.URL + "/gao/echoed-but-untrusted.git",
-		RemoteURL:       gitlab.URL + "/gao/other-repo", // stale/echoed display values must NOT authorize
+		Name:      "proj",
+		Repo:      repoDir,
+		CloneURL:  gitlab.URL + "/gao/echoed-but-untrusted.git",
+		RemoteURL: gitlab.URL + "/gao/other-repo", // stale/echoed display values must NOT authorize
 	}); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
+	seedVerifiedBinding(t, s, workspaceID, "proj", "conn-gitlab", "gao/my-repo", "58")
 
 	task := &entity.Task{ID: "t-init", Status: entity.TaskStatusDoneSuccess, WorktreeDir: repoDir}
 	t.Setenv("MULTIGENT_GITLAB_RUNNER_ID", "7")
@@ -388,8 +404,8 @@ func TestAdoptRemoteAfterSyncForgedDisplayFieldsDoNotAuthorize(t *testing.T) {
 		Name:            "proj",
 		Repo:            repoDir,
 		CloneURL:        gitlab.URL + "/gao/my-repo.git", // forged via PUT to match the origin
-		RemoteURL:       gitlab.URL + "/gao/my-repo",    // forged via PUT
-		RemoteProjectID: "58",                           // forged via PUT
+		RemoteURL:       gitlab.URL + "/gao/my-repo",     // forged via PUT
+		RemoteProjectID: "58",                            // forged via PUT
 	}); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
@@ -421,13 +437,12 @@ func TestAdoptRemoteAfterSyncRejectsStalePlatformRecordID(t *testing.T) {
 	repoDir := filepath.Join(t.TempDir(), "workspace")
 	seedOriginRepo(t, repoDir, gitlab.URL+"/gao/my-repo.git")
 	if err := s.st.SaveProject("proj", &entity.Project{
-		Name:            "proj",
-		Repo:            repoDir,
-		RemoteAdoptPath: "gao/my-repo",
-		RemoteAdoptID:   "999", // recorded before the repo was deleted/recreated; live id is 58
+		Name: "proj",
+		Repo: repoDir,
 	}); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
+	seedVerifiedBinding(t, s, workspaceID, "proj", "conn-gitlab", "gao/my-repo", "999") // recorded before the repo was deleted/recreated; live id is 58
 
 	task := &entity.Task{ID: "t-init", Status: entity.TaskStatusDoneSuccess, WorktreeDir: repoDir}
 	t.Setenv("MULTIGENT_GITLAB_RUNNER_ID", "7")
@@ -442,11 +457,10 @@ func TestAdoptRemoteAfterSyncRejectsStalePlatformRecordID(t *testing.T) {
 	}
 }
 
-// The operator allowlist env is the second authorized path: origins inside an
-// explicitly trusted namespace may be adopted even without a CloneURL record.
-func TestAdoptRemoteAfterSyncAllowlistedNamespaceAuthorizes(t *testing.T) {
+// P0.6: adoption authorizes against the verified remote binding — the only
+// authority left after the namespace allowlist was removed.
+func TestAdoptRemoteAfterSyncVerifiedBindingAuthorizes(t *testing.T) {
 	s, workspaceID := newConnectionGrantPolicyServer(t)
-	t.Setenv(originAdoptAuthorizedNamespaceEnv, "platform/sandbox,others")
 
 	var runnerBinds []string
 	gitlab := fakeGitLabProjectServer(t, "platform/sandbox/init-repo", &runnerBinds)
@@ -458,6 +472,18 @@ func TestAdoptRemoteAfterSyncAllowlistedNamespaceAuthorizes(t *testing.T) {
 	if err := s.st.SaveProject("proj", &entity.Project{Name: "proj", Repo: repoDir}); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
+	if err := s.controlDB.UpsertVerifiedRemoteBinding(controldb.VerifiedRemoteBinding{
+		WorkspaceID:       workspaceID,
+		ProjectID:         "proj",
+		Provider:          "gitlab",
+		ConnectionID:      "conn-gitlab",
+		RemoteProjectID:   "58",
+		PathWithNamespace: "platform/sandbox/init-repo",
+		VerifiedAt:        "2026-09-13T00:00:00Z",
+		Source:            controldb.BindingSourcePlatformCreate,
+	}); err != nil {
+		t.Fatalf("seed binding: %v", err)
+	}
 
 	task := &entity.Task{ID: "t-init", Status: entity.TaskStatusDoneSuccess, WorktreeDir: repoDir}
 	t.Setenv("MULTIGENT_GITLAB_RUNNER_ID", "7")
@@ -465,16 +491,18 @@ func TestAdoptRemoteAfterSyncAllowlistedNamespaceAuthorizes(t *testing.T) {
 
 	p, _ := s.st.Project("proj")
 	if p.RemoteProjectID != "58" {
-		t.Fatalf("allowlisted namespace must adopt, got RemoteProjectID=%q", p.RemoteProjectID)
+		t.Fatalf("verified binding must adopt, got RemoteProjectID=%q", p.RemoteProjectID)
+	}
+	if len(runnerBinds) != 1 {
+		t.Fatalf("runner binds = %v, want 1 via binding", runnerBinds)
 	}
 }
 
-// Allowlist matching is prefix-on-path-segment: "platform" must not match
-// "platform-evil/...", and a same-host repo outside the allowlist stays
-// rejected.
-func TestAdoptRemoteAfterSyncAllowlistPrefixIsSegmentExact(t *testing.T) {
+// An origin inside a DIFFERENT path than the binding (e.g. "platform-evil"
+// vs the verified "platform") must not adopt: only the exact binding path
+// authorizes, on segment boundary.
+func TestAdoptRemoteAfterSyncRejectsOriginOutsideBindingPath(t *testing.T) {
 	s, workspaceID := newConnectionGrantPolicyServer(t)
-	t.Setenv(originAdoptAuthorizedNamespaceEnv, "platform")
 
 	var runnerBinds []string
 	gitlab := fakeGitLabProjectServer(t, "platform-evil/repo", &runnerBinds)
@@ -486,13 +514,25 @@ func TestAdoptRemoteAfterSyncAllowlistPrefixIsSegmentExact(t *testing.T) {
 	if err := s.st.SaveProject("proj", &entity.Project{Name: "proj", Repo: repoDir}); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
+	if err := s.controlDB.UpsertVerifiedRemoteBinding(controldb.VerifiedRemoteBinding{
+		WorkspaceID:       workspaceID,
+		ProjectID:         "proj",
+		Provider:          "gitlab",
+		ConnectionID:      "conn-gitlab",
+		RemoteProjectID:   "58",
+		PathWithNamespace: "platform/repo",
+		VerifiedAt:        "2026-09-13T00:00:00Z",
+		Source:            controldb.BindingSourcePlatformCreate,
+	}); err != nil {
+		t.Fatalf("seed binding: %v", err)
+	}
 
 	task := &entity.Task{ID: "t-init", Status: entity.TaskStatusDoneSuccess, WorktreeDir: repoDir}
 	s.adoptRemoteAfterSync(context.Background(), "proj", task)
 
 	p, _ := s.st.Project("proj")
 	if p.RemoteProjectID != "" {
-		t.Fatalf("namespace prefix must match on segment boundary, got %q", p.RemoteProjectID)
+		t.Fatalf("origin outside the binding path must not adopt, got %q", p.RemoteProjectID)
 	}
 	if len(runnerBinds) != 0 {
 		t.Fatalf("unexpected runner binds: %v", runnerBinds)

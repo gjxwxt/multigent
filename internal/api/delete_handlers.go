@@ -114,6 +114,13 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 			s.serverError(w, err)
 			return
 		}
+		// The verified remote binding dies with the project: a recreated
+		// project must never inherit the old binding's trust.
+		if err := s.controlDB.DeleteVerifiedRemoteBinding(workspaceID, project); err != nil {
+			log.Printf("[project:delete] failed to delete verified remote binding for project %s: %v", project, err)
+			s.serverError(w, err)
+			return
+		}
 	}
 
 	if err := s.st.DeleteProject(project); err != nil {

@@ -90,21 +90,23 @@ func (s *Server) ensureDeployPort(p *entity.Project) (bool, error) {
 // pushDeployPortVariable mirrors the allocated port into the GitLab CI/CD
 // variable APP_PORT. Best-effort by design: the local allocation stays
 // authoritative, and a failed push only means the next deploy falls back
-// to the starter default, so log and move on.
+// to the starter default, so log and move on. P0.6: the write target comes
+// exclusively from the verified remote binding — an unverified project is
+// skipped (fail-closed), and the connection is the binding's pinned one.
 func (s *Server) pushDeployPortVariable(ctx context.Context, project string, p *entity.Project) {
-	if p.DeployPort == 0 || strings.TrimSpace(p.RemoteProjectID) == "" {
+	if p.DeployPort == 0 {
 		return
 	}
-	host, _, err := s.pinnedGitLabHost(ctx, project, p)
+	host, binding, err := s.verifiedGitLabHost(ctx, project)
 	if err != nil {
-		log.Printf("[deploy-port] %s: resolve gitlab host failed, APP_PORT=%d not pushed: %v", project, p.DeployPort, err)
+		log.Printf("[deploy-port] %s: no verified remote binding, APP_PORT=%d not pushed: %v", project, p.DeployPort, err)
 		return
 	}
-	if err := host.SetProjectVariable(ctx, p.RemoteProjectID, "APP_PORT", strconv.Itoa(p.DeployPort)); err != nil {
-		log.Printf("[deploy-port] %s: push APP_PORT=%d to gitlab failed: %v", project, p.DeployPort, err)
+	if err := host.SetProjectVariable(ctx, binding.RemoteProjectID, "APP_PORT", strconv.Itoa(p.DeployPort)); err != nil {
+		log.Printf("[deploy-port] %s: push APP_PORT=%d to gitlab project %s failed: %v", project, p.DeployPort, binding.RemoteProjectID, err)
 		return
 	}
-	log.Printf("[deploy-port] %s: APP_PORT=%d pushed to gitlab project %s", project, p.DeployPort, p.RemoteProjectID)
+	log.Printf("[deploy-port] %s: APP_PORT=%d pushed to gitlab project %s (binding %s)", project, p.DeployPort, binding.RemoteProjectID, binding.ConnectionID)
 }
 
 // defaultRunnerIDEnv names the runner the platform binds into every
@@ -116,23 +118,28 @@ func (s *Server) pushDeployPortVariable(ctx context.Context, project string, p *
 const defaultRunnerIDEnv = "MULTIGENT_GITLAB_RUNNER_ID"
 
 // bindDefaultRunner attaches the configured default runner to the project's
-// GitLab remote. Best-effort by design, mirroring pushDeployPortVariable:
-// initialization must not fail when the remote is absent, the GitLab host is
-// unreachable, or no default runner is configured — handlePutProject
-// re-runs this on every remote update.
+// verified GitLab remote. Best-effort by design, mirroring
+// pushDeployPortVariable: initialization must not fail when the remote is
+// absent, the GitLab host is unreachable, or no default runner is configured.
+// P0.6: the target comes exclusively from the verified remote binding —
+// without a binding nothing is bound (fail-closed).
 func (s *Server) bindDefaultRunner(ctx context.Context, project string, p *entity.Project) {
+	s.bindDefaultRunnerWithBinding(ctx, project, p)
+}
+
+func (s *Server) bindDefaultRunnerWithBinding(ctx context.Context, project string, p *entity.Project) {
 	runnerID := strings.TrimSpace(os.Getenv(defaultRunnerIDEnv))
-	if runnerID == "" || strings.TrimSpace(p.RemoteProjectID) == "" {
+	if runnerID == "" {
 		return
 	}
-	host, _, err := s.pinnedGitLabHost(ctx, project, p)
+	host, binding, err := s.verifiedGitLabHost(ctx, project)
 	if err != nil {
-		log.Printf("[runner-bind] %s: resolve gitlab host failed, runner %s not bound: %v", project, runnerID, err)
+		log.Printf("[runner-bind] %s: no verified remote binding, runner %s not bound: %v", project, runnerID, err)
 		return
 	}
-	if err := host.EnableRunnerOnProject(ctx, p.RemoteProjectID, runnerID); err != nil {
-		log.Printf("[runner-bind] %s: bind runner %s to gitlab project %s failed: %v", project, runnerID, p.RemoteProjectID, err)
+	if err := host.EnableRunnerOnProject(ctx, binding.RemoteProjectID, runnerID); err != nil {
+		log.Printf("[runner-bind] %s: bind runner %s to gitlab project %s failed: %v", project, runnerID, binding.RemoteProjectID, err)
 		return
 	}
-	log.Printf("[runner-bind] %s: runner %s bound to gitlab project %s", project, runnerID, p.RemoteProjectID)
+	log.Printf("[runner-bind] %s: runner %s bound to gitlab project %s (binding %s)", project, runnerID, binding.RemoteProjectID, binding.ConnectionID)
 }

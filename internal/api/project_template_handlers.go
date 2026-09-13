@@ -217,10 +217,9 @@ func (s *Server) handleInitializeProjectTemplate(w http.ResponseWriter, r *http.
 		s.serverError(w, err)
 		return
 	}
-	// Best-effort: no-op until the project has a bound GitLab remote (the
-	// initialization workflow binds it later; handlePutProject re-pushes).
-	s.pushDeployPortVariable(r.Context(), name, project)
-	s.bindDefaultRunner(r.Context(), name, project)
+	// P0.6: no GitLab side effects here — the verified remote binding does
+	// not exist until the platform create-repo flow (or admin verify) writes
+	// it, and every platform forge write resolves through that binding.
 	s.auditLog(auditLogInput{
 		Action:       "project.template_initialize",
 		ResourceType: "project",

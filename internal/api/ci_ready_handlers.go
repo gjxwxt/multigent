@@ -113,7 +113,13 @@ func (s *Server) handleRuntimeCIReady(w http.ResponseWriter, r *http.Request) {
 	}
 	if waitSeconds > 0 {
 		remoteRequired := ciRemotePipelineRequired(project)
-		remoteBound := strings.EqualFold(strings.TrimSpace(project.RemoteProvider), "gitlab") && strings.TrimSpace(project.RemoteProjectID) != ""
+		// P0.6: "bound" means a verified remote binding exists — display
+		// fields on the project record are client-writable and prove nothing.
+		_, _, remoteBound, bindErr := s.verifiedBinding(project.Name)
+		if bindErr != nil {
+			s.serverError(w, bindErr)
+			return
+		}
 		if !remoteBound && !remoteRequired {
 			// Local-only delivery is explicitly acceptable: report the skip
 			// but keep it out of the checks (nothing failed).
@@ -179,7 +185,10 @@ func (s *Server) ciReadyPipelineEvidence(r *http.Request, project *entity.Projec
 	if sha == "" {
 		return nil, errNoCommits
 	}
-	host, _, err := s.pinnedGitLabHost(r.Context(), project.Name, project)
+	// P0.6: pipeline evidence reads the verified remote binding — an
+	// unverified project (or a forged display-field remote id) yields no
+	// evidence rather than a lookup against an attacker-chosen project.
+	host, binding, err := s.verifiedGitLabHost(r.Context(), project.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +196,7 @@ func (s *Server) ciReadyPipelineEvidence(r *http.Request, project *entity.Projec
 	deadline := time.Now().Add(time.Duration(waitSeconds) * time.Second)
 	var last *ciReadyPipelineEvidence
 	for {
-		pipelines, listErr := host.PipelinesForSHA(r.Context(), project.RemoteProjectID, sha)
+		pipelines, listErr := host.PipelinesForSHA(r.Context(), binding.RemoteProjectID, sha)
 		if listErr != nil {
 			return nil, listErr
 		}
@@ -195,7 +204,7 @@ func (s *Server) ciReadyPipelineEvidence(r *http.Request, project *entity.Projec
 			pipe := pipelines[0]
 			last = &ciReadyPipelineEvidence{SHA: sha, ID: pipe.ID, Status: pipe.Status, WebURL: pipe.WebURL}
 			if isPipelineTerminal(pipe.Status) {
-				if jobs, jobsErr := host.PipelineJobs(r.Context(), project.RemoteProjectID, pipe.ID); jobsErr == nil {
+				if jobs, jobsErr := host.PipelineJobs(r.Context(), binding.RemoteProjectID, pipe.ID); jobsErr == nil {
 					last.Jobs = jobs
 				}
 				return last, nil

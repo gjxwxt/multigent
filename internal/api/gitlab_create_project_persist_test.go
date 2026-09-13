@@ -3,7 +3,6 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/multigent/multigent/internal/entity"
@@ -37,9 +36,8 @@ func TestGitLabCreateProjectPersistsRemoteIdentity(t *testing.T) {
 		t.Fatalf("seed project: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/gitlab/projects",
-		strings.NewReader(`{"connectionId":"conn-gitlab","name":"my-repo","path":"my-repo","project":"proj"}`))
-	req.Header.Set("Content-Type", "application/json")
+	req := providerTestRequest(http.MethodPost, "/api/v1/integrations/gitlab/projects", "admin",
+		map[string]any{"connectionId": "conn-gitlab", "name": "my-repo", "path": "my-repo", "project": "proj"})
 	rec := httptest.NewRecorder()
 	s.handleGitLabCreateProject(rec, req)
 	if rec.Code != http.StatusOK {
@@ -75,9 +73,8 @@ func TestGitLabCreateProjectPersistRejectsUnknownProject(t *testing.T) {
 	defer gitlab.Close()
 	seedGitLabConnection(t, s, workspaceID, "conn-gitlab", gitlab.URL)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/gitlab/projects",
-		strings.NewReader(`{"connectionId":"conn-gitlab","name":"my-repo","path":"my-repo","project":"no-such-project"}`))
-	req.Header.Set("Content-Type", "application/json")
+	req := providerTestRequest(http.MethodPost, "/api/v1/integrations/gitlab/projects", "admin",
+		map[string]any{"connectionId": "conn-gitlab", "name": "my-repo", "path": "my-repo", "project": "no-such-project"})
 	rec := httptest.NewRecorder()
 	s.handleGitLabCreateProject(rec, req)
 	if rec.Code != http.StatusInternalServerError {

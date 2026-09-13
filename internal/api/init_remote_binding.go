@@ -4,7 +4,6 @@ import (
 	"context"
 	"log"
 	"net/url"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -54,6 +53,18 @@ func (s *Server) adoptRemoteAfterSync(ctx context.Context, project string, t *en
 		// init flow pushes via the connection-pinned credential helper without
 		// a prior PUT, so fall through and let the origin lookup decide.
 	}
+	// P0.6: the verified remote binding is the only adoption authority. The
+	// origin the agent pushed to must equal the binding's path — origin is
+	// agent-writable, so it can confirm but never create authorization.
+	_, binding, bindingOK, err := s.verifiedBinding(project)
+	if err != nil {
+		log.Printf("[remote-adopt] %s: load verified binding failed, skip: %v", project, err)
+		return
+	}
+	if !bindingOK {
+		log.Printf("[remote-adopt] %s: no verified remote binding (run platform create or admin verify); refusing agent-origin adoption", project)
+		return
+	}
 	host, _, err := s.pinnedGitLabHost(ctx, project, p)
 	if err != nil {
 		log.Printf("[remote-adopt] %s: no GitLab host pinned, skip origin adoption: %v", project, err)
@@ -69,8 +80,8 @@ func (s *Server) adoptRemoteAfterSync(ctx context.Context, project string, t *en
 		log.Printf("[remote-adopt] %s: origin is not on the pinned GitLab host, skip (%s)", project, gitworktree.RedactGitOutput(originURL))
 		return
 	}
-	if !originAdoptAuthorized(p, projectPath) {
-		log.Printf("[remote-adopt] %s: origin path %s is not a platform-controlled remote (no CloneURL match, not allowlisted); refusing to adopt or bind a runner — worktree origin is agent-writable and must not grant authorization", project, projectPath)
+	if !s.adoptRemoteBindingAfterSync(project, binding, projectPath) {
+		log.Printf("[remote-adopt] %s: origin path %s does not match the verified binding path %s; refusing to adopt or bind a runner — worktree origin is agent-writable and must not grant authorization", project, projectPath, binding.PathWithNamespace)
 		return
 	}
 	repo, err := host.RepositoryByProjectPath(ctx, projectPath)
@@ -78,14 +89,11 @@ func (s *Server) adoptRemoteAfterSync(ctx context.Context, project string, t *en
 		log.Printf("[remote-adopt] %s: lookup %s failed: %v", project, projectPath, err)
 		return
 	}
-	// The allowlist path authorizes by namespace; the platform-record path
-	// authorizes by exact path. Either way the GitLab lookup must confirm the
-	// repository still exists at that identity — and when the project carries
-	// a previously recorded platform ID, the lookup must return the SAME id,
-	// so a deleted-and-recreated repository at the same path cannot ride on
-	// the stale record.
-	if p.RemoteAdoptPath != "" && p.RemoteAdoptID != "" && repo.ID != p.RemoteAdoptID {
-		log.Printf("[remote-adopt] %s: GitLab reports id %s for %s but the platform record holds id %s (repository recreated?); refusing to adopt", project, repo.ID, projectPath, p.RemoteAdoptID)
+	// The binding pins the platform identity: the live lookup must return the
+	// SAME id, so a deleted-and-recreated repository at the same path cannot
+	// ride on the verified record.
+	if repo.ID != binding.RemoteProjectID {
+		log.Printf("[remote-adopt] %s: GitLab reports id %s for %s but the verified binding holds id %s (repository recreated?); refusing to adopt", project, repo.ID, projectPath, binding.RemoteProjectID)
 		return
 	}
 	p.RemoteProvider = "gitlab"
@@ -107,45 +115,18 @@ func (s *Server) adoptRemoteAfterSync(ctx context.Context, project string, t *en
 	s.bindDefaultRunner(ctx, project, p)
 }
 
-// originAdoptAuthorizedNamespaceEnv lists path-with-namespace prefixes the
-// operator explicitly trusts for adoption (comma-separated full namespaces,
-// e.g. "gao,platform/sandbox"). It is an escape hatch for deployments where
-// the platform does not pre-create the remote but provisioned namespaces are
-// tightly controlled; an empty value disables the escape hatch.
-const originAdoptAuthorizedNamespaceEnv = "MULTIGENT_GITLAB_ADOPT_NAMESPACE_ALLOWLIST"
-
-// originAdoptAuthorized decides whether an origin path observed in the
-// agent-controlled worktree may be adopted (persisting RemoteProjectID and
-// binding the default runner). Origin is attacker-writable input, so it only
-// authorizes against the platform-controlled identity record:
-//
-//   - RemoteAdoptPath (written exclusively by server-side flows: the GitLab
-//     create-repository endpoint and a previous verified adoption), or
-//   - the operator allowlist env above (explicit namespace trust).
-//
-// CloneURL/RemoteURL/RemoteProjectID are NOT trusted even though
-// handleGitLabCreateProject's own response handling writes them too:
-// handlePutProject accepts all three from any project manager, so a value
-// there is client-echo, not platform record. The trusted fields are absent
-// from the PUT body entirely — forgery is structurally impossible, not just
-// forbidden by handler discipline.
+// originAdoptAuthorized is superseded by the verified remote binding
+// (P0.6): adoption authorizes exclusively against the binding's
+// path-with-namespace, cross-checked against the live GitLab id. The former
+// RemoteAdoptPath / namespace-allowlist paths are retained nowhere — the
+// allowlist env is no longer honored, because a namespace prefix cannot pin
+// a specific remote project id the way a binding can.
 func originAdoptAuthorized(p *entity.Project, originPath string) bool {
 	if p == nil || strings.TrimSpace(originPath) == "" {
 		return false
 	}
-	if expected := strings.TrimSpace(p.RemoteAdoptPath); expected != "" && strings.EqualFold(expected, originPath) {
-		return true
-	}
-	for _, ns := range strings.Split(os.Getenv(originAdoptAuthorizedNamespaceEnv), ",") {
-		ns = strings.TrimSpace(ns)
-		if ns == "" {
-			continue
-		}
-		if originPath == ns || strings.HasPrefix(originPath, ns+"/") {
-			return true
-		}
-	}
-	return false
+	expected := strings.TrimSpace(p.RemoteAdoptPath)
+	return expected != "" && strings.EqualFold(expected, originPath)
 }
 
 // initWorktreeOriginURL reads the origin remote URL of the worktree/repo the

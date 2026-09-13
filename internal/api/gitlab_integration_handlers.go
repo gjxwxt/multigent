@@ -187,6 +187,20 @@ func (s *Server) handleGitLabCreateProject(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// P0.6-4: authorization happens BEFORE any forge write. Naming a project
+	// (or choosing a shared platform connection) means committing platform
+	// side effects against it, so the caller must manage that project and may
+	// only use a connection they are granted; admins pass by definition.
+	projectName := strings.TrimSpace(body.Project)
+	if projectName != "" {
+		if !s.checkProjectManager(w, r, projectName) {
+			return
+		}
+	}
+	if !s.checkConnectionUsable(w, r, body.ConnectionID) {
+		return
+	}
+
 	host, connID, err := s.resolveGitLabHost(body.ConnectionID)
 	if err != nil {
 		s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeValidationFailed, err.Error())
@@ -205,13 +219,31 @@ func (s *Server) handleGitLabCreateProject(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if projectName := strings.TrimSpace(body.Project); projectName != "" {
+	if projectName != "" {
 		if err := s.persistPlatformRemoteIdentity(projectName, repo); err != nil {
 			// The remote exists but the record failed — surface it rather than
 			// letting the UI PUT carry the identity (that path is exactly what
 			// makes remoteUrl client-echo rather than platform record).
 			s.serverError(w, fmt.Errorf("persist remote identity for project %s: %w", projectName, err))
 			return
+		}
+		workspaceID, wsErr := s.currentWorkspaceID()
+		if wsErr != nil {
+			s.serverError(w, fmt.Errorf("resolve workspace for binding: %w", wsErr))
+			return
+		}
+		// The binding (P0.6-1) — not the PUT-writable display fields — is what
+		// authorizes every subsequent platform GitLab write for this project.
+		if err := s.platformCreateRemoteBinding(workspaceID, projectName, connID, repo); err != nil {
+			s.serverError(w, err)
+			return
+		}
+		// Platform-triggered side effects belong to THIS flow (post-authorization,
+		// post-creation) — never to the generic project PUT.
+		p, pErr := s.st.Project(projectName)
+		if pErr == nil {
+			s.pushDeployPortVariable(r.Context(), projectName, p)
+			s.bindDefaultRunnerWithBinding(r.Context(), projectName, p)
 		}
 	}
 
