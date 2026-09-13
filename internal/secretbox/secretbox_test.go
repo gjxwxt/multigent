@@ -56,3 +56,20 @@ func TestOpenStringRejectsPlaintext(t *testing.T) {
 		t.Fatal("expected plaintext secret to be rejected")
 	}
 }
+
+func TestSealStringRefusesPlaintextUnderHardGate(t *testing.T) {
+	t.Setenv(EnvKey, "")
+	t.Setenv("MULTIGENT_REQUIRE_ENCRYPTED_SECRETS", "1")
+	if _, err := SealString("sk-secret"); err == nil || !strings.Contains(err.Error(), "MULTIGENT_REQUIRE_ENCRYPTED_SECRETS") {
+		t.Fatalf("SealString must refuse plaintext under the hard gate, got %v", err)
+	}
+	t.Setenv("MULTIGENT_REQUIRE_ENCRYPTED_SECRETS", "")
+	sealed, err := SealString("sk-secret")
+	if err != nil {
+		t.Fatalf("dev fallback broken: %v", err)
+	}
+	opened, err := OpenString(sealed)
+	if err != nil || opened != "sk-secret" {
+		t.Fatalf("dev fallback roundtrip failed: %v %q", err, opened)
+	}
+}

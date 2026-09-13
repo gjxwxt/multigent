@@ -35,30 +35,50 @@ func SealString(value string) (string, error) {
 	box := Box{KeyVersion: versionPlain, Ciphertext: base64.StdEncoding.EncodeToString(raw)}
 	key := strings.TrimSpace(os.Getenv(EnvKey))
 	if key != "" {
-		sum := sha256.Sum256([]byte(key))
-		block, err := aes.NewCipher(sum[:])
+		sealed, err := sealEnvV1(raw, key)
 		if err != nil {
 			return "", err
 		}
-		gcm, err := cipher.NewGCM(block)
-		if err != nil {
-			return "", err
-		}
-		nonce := make([]byte, gcm.NonceSize())
-		if _, err := rand.Read(nonce); err != nil {
-			return "", err
-		}
-		box = Box{
-			Ciphertext: base64.StdEncoding.EncodeToString(gcm.Seal(nil, nonce, raw, nil)),
-			Nonce:      base64.StdEncoding.EncodeToString(nonce),
-			KeyVersion: versionEnvV1,
-		}
+		box = sealed
+	} else if os.Getenv("MULTIGENT_REQUIRE_ENCRYPTED_SECRETS") != "" && requireEncryptedSecretsFlag() {
+		return "", fmt.Errorf("%s is required (MULTIGENT_REQUIRE_ENCRYPTED_SECRETS is set; refusing to store provider API keys in plaintext)", EnvKey)
 	}
 	payload, err := json.Marshal(box)
 	if err != nil {
 		return "", err
 	}
 	return prefix + base64.StdEncoding.EncodeToString(payload), nil
+}
+
+// requireEncryptedSecretsFlag mirrors internal/db's envFlagSet for the
+// MULTIGENT_REQUIRE_ENCRYPTED_SECRETS hard gate.
+func requireEncryptedSecretsFlag() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("MULTIGENT_REQUIRE_ENCRYPTED_SECRETS"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+func sealEnvV1(raw []byte, key string) (Box, error) {
+	sum := sha256.Sum256([]byte(key))
+	block, err := aes.NewCipher(sum[:])
+	if err != nil {
+		return Box{}, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return Box{}, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return Box{}, err
+	}
+	return Box{
+		Ciphertext: base64.StdEncoding.EncodeToString(gcm.Seal(nil, nonce, raw, nil)),
+		Nonce:      base64.StdEncoding.EncodeToString(nonce),
+		KeyVersion: versionEnvV1,
+	}, nil
 }
 
 func OpenString(sealed string) (string, error) {

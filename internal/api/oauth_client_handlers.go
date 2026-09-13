@@ -17,8 +17,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/multigent/multigent/internal/connector"
 	controldb "github.com/multigent/multigent/internal/db"
+
+	"github.com/multigent/multigent/internal/connector"
 )
 
 const oauthCallbackPath = "/api/v1/oauth/callback"
@@ -775,6 +776,9 @@ func sealOAuthClientSecret(value string) (sealedOAuthClientSecret, error) {
 	}
 	key := strings.TrimSpace(os.Getenv("MULTIGENT_CONNECTION_ENCRYPTION_KEY"))
 	if key == "" {
+		if controldb.RequireEncryptedSecrets() {
+			return sealedOAuthClientSecret{}, fmt.Errorf("MULTIGENT_CONNECTION_ENCRYPTION_KEY is required (MULTIGENT_REQUIRE_ENCRYPTED_SECRETS is set; refusing to store OAuth client secrets in plaintext)")
+		}
 		return sealedOAuthClientSecret{Ciphertext: base64.StdEncoding.EncodeToString(raw), KeyVersion: "dev-plain-base64"}, nil
 	}
 	sum := sha256.Sum256([]byte(key))
