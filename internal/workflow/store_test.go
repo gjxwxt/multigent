@@ -1195,3 +1195,79 @@ func TestHumanReviewGateOutputsAreNeverHandRequired(t *testing.T) {
 		}
 	}
 }
+
+// Reviewer prompt enhancement (2026-09-14): the agent_self_review step's
+// description is the reviewer-agent's entire contract (it rides into the run
+// prompt via Workflow Context). The contract must encode the independent
+// baseline method — build the expected-behavior baseline from requirement/
+// design/tests BEFORE reading the diff, then compare — plus structured output
+// discipline and independence boundaries. Guarded here because the description
+// text is load-bearing, not documentation.
+func TestUnifiedDeliveryPipelineSelfReviewContract(t *testing.T) {
+	// Per-locale markers for the load-bearing contract elements.
+	markers := map[string][]string{
+		"en": {
+			"baseline",                       // independent expected-behavior baseline before the diff
+			"base SHA",                       // frozen baseline commit is part of the evidence chain
+			"acceptance criter",              // criteria-level verification, not vibes
+			"review_rounds",                  // round counter discipline
+			"unverified",                     // never approve what you did not actually run
+			"pass / issues_fixed / escalate", // verdict vocabulary
+		},
+		"zh-CN": {
+			"预期基线",
+			"base SHA",
+			"验收标准",
+			"review_rounds",
+			"unverified",
+			"pass / issues_fixed / escalate",
+		},
+	}
+	for _, locale := range []string{"en", "zh-CN"} {
+		tmpl, ok := Template("unified-delivery-pipeline", locale)
+		if !ok {
+			t.Fatalf("template not registered for %s", locale)
+		}
+		var selfReview *entity.WorkflowStep
+		for i := range tmpl.Steps {
+			if tmpl.Steps[i].ID == "agent_self_review" {
+				selfReview = &tmpl.Steps[i]
+				break
+			}
+		}
+		if selfReview == nil {
+			t.Fatalf("%s: agent_self_review step missing", locale)
+		}
+		desc := selfReview.Description
+		for _, marker := range markers[locale] {
+			if !strings.Contains(desc, marker) {
+				t.Fatalf("%s: self-review contract missing %q marker; description:\n%s", locale, marker, desc)
+			}
+		}
+		if !strings.Contains(desc, "reviewer") && !strings.Contains(desc, "审核") {
+			t.Fatalf("%s: description must frame the step as reviewer-owned", locale)
+		}
+	}
+}
+
+// Greenfield template carries the same reviewer contract.
+func TestGreenfieldSelfReviewContract(t *testing.T) {
+	tmpl, ok := Template("greenfield-delivery-pipeline", "en")
+	if !ok {
+		t.Skip("greenfield template not registered")
+	}
+	var selfReview *entity.WorkflowStep
+	for i := range tmpl.Steps {
+		if tmpl.Steps[i].ID == "self_review" {
+			selfReview = &tmpl.Steps[i]
+			break
+		}
+	}
+	if selfReview == nil {
+		t.Fatal("self_review step missing")
+	}
+	desc := selfReview.Description
+	if !strings.Contains(desc, "baseline") {
+		t.Fatalf("greenfield self-review contract missing baseline method:\n%s", desc)
+	}
+}
