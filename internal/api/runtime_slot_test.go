@@ -1101,9 +1101,15 @@ type flakyTaskStore struct {
 	taskstore.Store
 	failUpdate  int
 	failArchive int
+	// failUpdateWhen, when non-nil, intercepts UpdateTask by predicate
+	// (before the counter logic) — used to target the token stamp write.
+	failUpdateWhen func(t *entity.Task) bool
 }
 
 func (f *flakyTaskStore) UpdateTask(project, agent string, t *entity.Task) error {
+	if f.failUpdateWhen != nil && f.failUpdateWhen(t) {
+		return fmt.Errorf("injected transient store failure")
+	}
 	if f.failUpdate > 0 {
 		f.failUpdate--
 		return fmt.Errorf("injected transient store failure")
@@ -1363,5 +1369,304 @@ func TestManualStartJoinsQueueWhileAgentBusy(t *testing.T) {
 	stored, _ := s.ts.GetTask("sample", "pm", task.ID)
 	if stored.ActiveRuntimeRunID != first.ID {
 		t.Fatalf("execution token must still name the running run: %q", stored.ActiveRuntimeRunID)
+	}
+}
+
+// ── GPT 收口 6: stamp failure awareness, idempotent workflow replay,
+// missing-run replay via discovery key, delivery post-commit ordering ────────
+
+// 6-1: a run whose task-token stamp failed must NEVER dispatch. The enqueue
+// force-fails it (FailQueuedRuntimeRun), so the claim path cannot pick it up
+// and no node executes work whose finish the fence would drop.
+func TestEnqueueFailsRunWhenTokenStampFails(t *testing.T) {
+	s, workspaceID := slotTestServer(t)
+	node := slotTestNode(t, s, workspaceID)
+	now := time.Now().UTC()
+	task := &entity.Task{ID: "task-stamp-fail", Title: "Stamp failure", Status: entity.TaskStatusInProgress, Priority: 2, CreatedAt: now, UpdatedAt: now}
+	if err := s.ts.AddTask("sample", "pm", task); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
+
+	// failUpdateWhen targets the STAMP write specifically: the stamp is the
+	// only UpdateTask that sets ActiveRuntimeRunID on this task.
+	flaky := &flakyTaskStore{Store: s.ts, failUpdateWhen: func(t *entity.Task) bool {
+		return t.ActiveRuntimeRunID != ""
+	}}
+	s.ts = flaky
+	// Drive the enqueue primitive directly with the flaky store in place.
+	hb := &entity.HeartbeatConfig{}
+	_, err := s.enqueueSpecificRuntimeTaskRunFromRequest(workspaceID, "sample", "pm", task, hb, "http://127.0.0.1:1", "admin")
+	if err == nil {
+		t.Fatal("enqueue must surface the stamp failure")
+	}
+	s.ts = flaky.Store
+
+	runs, err := s.controlDB.ListRuntimeRuns(controldb.RuntimeRunFilter{WorkspaceID: workspaceID, TaskID: task.ID})
+	if err != nil {
+		t.Fatalf("list runs: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs=%d, want 1", len(runs))
+	}
+	if runs[0].Status != "failed" || runs[0].ErrorCode != "token_stamp_failed" {
+		t.Fatalf("run must be failed with token_stamp_failed, got status=%s code=%s", runs[0].Status, runs[0].ErrorCode)
+	}
+	// The failed run is invisible to the claim path.
+	claimed, ok, err := s.controlDB.ClaimRuntimeRun(workspaceID, node.ID, 90, nil)
+	if err != nil || ok {
+		t.Fatalf("failed run must not be claimable: ok=%v err=%v", ok, err)
+	}
+	_ = claimed
+}
+
+// 6-3: the workflow reaper replay is idempotent — after the workflow engine
+// already recorded the failure (first pass), a replay pass must NOT re-drive
+// the engine (which would no-op or error) but MUST converge the task state.
+func TestWorkflowReapReplayConvergesAfterEngineFailureRecorded(t *testing.T) {
+	s, workspaceID := slotTestServer(t)
+	now := time.Now().UTC()
+	nowText := now.Format(time.RFC3339)
+	task := &entity.Task{ID: "task-wf-replay", Title: "Replay", Status: entity.TaskStatusInProgress, Priority: 2, CreatedAt: now, UpdatedAt: now}
+	if err := s.ts.AddTask("sample", "pm", task); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
+	wfRun, activeStepID := seedRealWorkflowRun(t, s, workspaceID, "sample", task.ID)
+	run := controldb.RuntimeRun{
+		ID: "run-wf-replay", WorkspaceID: workspaceID, RuntimeNodeID: "rtn-slot",
+		AgentWorkerID: "aw-pm", ProjectID: "sample", AgentID: "pm", TaskID: task.ID,
+		Status: "running", LeaseExpiresAt: now.Add(-10 * time.Minute).Format(time.RFC3339), LeaseGeneration: 1,
+		CreatedAt: nowText, UpdatedAt: nowText,
+	}
+	if err := s.controlDB.UpsertRuntimeRun(run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	s.setTaskActiveRuntimeRun("sample", "pm", task.ID, run.ID)
+
+	// Pass 1: the workflow engine records the failure, but the task persist
+	// fails (injected) — the token must survive for the replay.
+	flaky := &flakyTaskStore{Store: s.ts, failUpdate: 1}
+	s.ts = flaky
+	s.runtimeReaperPass()
+	s.ts = flaky.Store
+
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	reloaded, found, err := wfStore.RunForTask("sample", task.ID)
+	if err != nil || !found {
+		t.Fatalf("workflow run missing: %v %v", found, err)
+	}
+	if reloaded.Status != "failed" {
+		t.Fatalf("engine must have recorded the failure on pass 1, got %s", reloaded.Status)
+	}
+
+	// Pass 2 (replay): the engine is already terminal — the pass must not
+	// wedge; the task must converge to done_failed and release the token.
+	s.runtimeReaperPass()
+	stored, _ := s.ts.GetTask("sample", "pm", task.ID)
+	if stored == nil {
+		t.Fatal("task missing after replay pass")
+	}
+	if stored.Status != entity.TaskStatusDoneFailed {
+		t.Fatalf("replay must converge the task to done_failed, got %s", stored.Status)
+	}
+	if stored.ActiveRuntimeRunID != "" {
+		t.Fatalf("replay must release the token, got %q", stored.ActiveRuntimeRunID)
+	}
+	// The engine state is untouched by the replay (no double transition).
+	final, _, _ := wfStore.RunForTask("sample", task.ID)
+	if final.ID != wfRun.ID || final.Status != "failed" || final.ActiveStepID != "" {
+		t.Fatalf("replay must not mutate the terminal workflow run: %+v", final)
+	}
+	_ = activeStepID
+}
+
+// 6-4: when the run row is already gone, the replay still releases the task's
+// fence — addressed by the task's DISCOVERY key (project/agent as found by the
+// sweep), not by the run's stored agent identity.
+func TestMissingRunReplayReleasesTokenViaDiscoveryKey(t *testing.T) {
+	s, workspaceID := slotTestServer(t)
+	now := time.Now().UTC()
+	task := &entity.Task{ID: "task-missing-run", Title: "Missing run", Status: entity.TaskStatusInProgress, Priority: 2, CreatedAt: now, UpdatedAt: now}
+	if err := s.ts.AddTask("sample", "pm", task); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
+	// A run row that no longer exists; the task still carries its token.
+	ghost := controldb.RuntimeRun{
+		ID: "run-ghost", WorkspaceID: workspaceID,
+		ProjectID: "sample", AgentID: "pm", TaskID: task.ID,
+	}
+	s.setTaskActiveRuntimeRun("sample", "pm", task.ID, ghost.ID)
+
+	cur, _ := s.ts.GetTask("sample", "pm", task.ID)
+	if !s.clearStaleTaskRuntimeToken(workspaceID, "sample", "pm", cur) {
+		t.Fatal("missing-run reconciliation must succeed")
+	}
+	stored, _ := s.ts.GetTask("sample", "pm", task.ID)
+	if stored.ActiveRuntimeRunID != "" {
+		t.Fatalf("token must be released after missing-run replay, got %q", stored.ActiveRuntimeRunID)
+	}
+	if stored.Status != entity.TaskStatusInProgress {
+		t.Fatalf("missing run defines no outcome; status must be untouched, got %s", stored.Status)
+	}
+}
+
+// Node-PID scenario (收口 6-5): a stale LOCAL manual-run process heartbeat
+// (PID alive + status running) must NOT block manual start for an agent that
+// is assigned to a runtime node — the node path always enqueues.
+func TestManualStartEnqueuesForNodeAgentWithStaleLocalPID(t *testing.T) {
+	s, workspaceID := slotTestServer(t)
+	node := slotTestNode(t, s, workspaceID)
+	worker, ok, err := s.controlDB.AgentWorkerByID(workspaceID, "aw-pm")
+	if err != nil || !ok {
+		t.Fatalf("load aw-pm: %v %v", ok, err)
+	}
+	worker.DefaultRuntimeNodeID = node.ID
+	if worker.DefaultModelAccountID == "" {
+		worker.DefaultModelAccountID = "acct-test"
+	}
+	if err := s.controlDB.UpsertAgentWorker(worker); err != nil {
+		t.Fatalf("bind node: %v", err)
+	}
+
+	now := time.Now().UTC()
+	task := &entity.Task{ID: "task-node-stale-pid", Title: "Stale PID", Status: entity.TaskStatusPending, Priority: 2, CreatedAt: now, UpdatedAt: now}
+	if err := s.ts.AddTask("sample", "pm", task); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
+
+	// Simulate a stale local-process heartbeat: PID 1 is always alive on the
+	// host, LastWakeupStatus says running — the legacy immediate-execution
+	// gate would 409 here.
+	target := s.runtimeSchedulerTargetForProjectAgent(workspaceID, "sample", "pm")
+	hb, err := s.loadSchedulerTargetHeartbeat(workspaceID, target)
+	if err != nil || hb == nil {
+		t.Fatalf("load heartbeat: %v", err)
+	}
+	pid := 1
+	hb.PID = pid
+	hb.LastWakeupStatus = "running"
+	if err := s.saveSchedulerTargetHeartbeat(workspaceID, target, hb); err != nil {
+		t.Fatalf("save heartbeat: %v", err)
+	}
+
+	req := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/"+task.ID+"/start", "admin", nil)
+	req.SetPathValue("name", "sample")
+	req.SetPathValue("taskId", task.ID)
+	rec := httptest.NewRecorder()
+	s.handleStartProjectTask(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("node-assigned manual start must enqueue despite live local PID, got %d: %s", rec.Code, rec.Body.String())
+	}
+	runs, err := s.controlDB.ListRuntimeRuns(controldb.RuntimeRunFilter{WorkspaceID: workspaceID, TaskID: task.ID})
+	if err != nil || len(runs) != 1 || runs[0].Status != "queued" {
+		t.Fatalf("expected one queued run, got n=%d err=%v", len(runs), err)
+	}
+}
+
+// 6-2 (delivery ordering): a successful finish persists the task FIRST, then
+// runs the delivery post-commit against the persisted task; a finish whose
+// persist fails never runs delivery at all. worktreeMgr is nil in the test
+// server, so snapshot/push/cleanup are no-ops — the observable contract is
+// that the post-commit hook re-reads the PERSISTED task (done_success) and
+// leaves it intact, and that the finish response is still 200 when delivery
+// is a no-op.
+func TestDeliveryPostCommitRunsAgainstPersistedTask(t *testing.T) {
+	s, workspaceID := slotTestServer(t)
+	node := slotTestNode(t, s, workspaceID)
+	now := time.Now().UTC()
+	nowText := now.Format(time.RFC3339)
+	task := &entity.Task{ID: "task-delivery", Title: "Delivery", Status: entity.TaskStatusInProgress, Priority: 2, CreatedAt: now, UpdatedAt: now}
+	if err := s.ts.AddTask("sample", "pm", task); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
+	run := controldb.RuntimeRun{
+		ID: "run-delivery", WorkspaceID: workspaceID, RuntimeNodeID: node.ID,
+		AgentWorkerID: "aw-pm", ProjectID: "sample", AgentID: "pm", TaskID: task.ID,
+		Status: "running", LeaseExpiresAt: now.Add(time.Minute).Format(time.RFC3339), LeaseGeneration: 1,
+		CreatedAt: nowText, UpdatedAt: nowText,
+	}
+	if err := s.controlDB.UpsertRuntimeRun(run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	s.setTaskActiveRuntimeRun("sample", "pm", task.ID, run.ID)
+
+	body := strings.NewReader(`{"leaseGeneration":1,"result":{"summary":"delivered"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime-node/runs/"+run.ID+"/complete", body)
+	req.SetPathValue("runId", run.ID)
+	req = req.WithContext(contextWithNode(req.Context(), node))
+	rec := httptest.NewRecorder()
+	s.handleRuntimeNodeRunComplete(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("finish status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	stored, _ := s.ts.GetTask("sample", "pm", task.ID)
+	if stored == nil || stored.Status != entity.TaskStatusDoneSuccess {
+		t.Fatalf("task must be done_success after delivery post-commit: %+v", stored)
+	}
+	if stored.ActiveRuntimeRunID != "" {
+		t.Fatalf("token must be released: %q", stored.ActiveRuntimeRunID)
+	}
+	// The run terminal state is preserved through the post-commit.
+	after, found, _ := s.controlDB.RuntimeRunByID(workspaceID, run.ID)
+	if !found || after.Status != "succeeded" {
+		t.Fatalf("run must stay succeeded: found=%v status=%s", found, after.Status)
+	}
+}
+
+// 6-5 (HTTP replay variant): a REAL handleRuntimeNodeRunFail carries the
+// business failure into the fenced transition; the replay (sweep) then
+// converges an interrupted transition from the RUN record alone.
+func TestHTTPFailThenSweepReplayConvergesDoneFailed(t *testing.T) {
+	s, workspaceID := slotTestServer(t)
+	node := slotTestNode(t, s, workspaceID)
+	now := time.Now().UTC()
+	nowText := now.Format(time.RFC3339)
+	task := &entity.Task{ID: "task-http-replay", Title: "HTTP replay", Status: entity.TaskStatusInProgress, Priority: 2, CreatedAt: now, UpdatedAt: now}
+	if err := s.ts.AddTask("sample", "pm", task); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
+	run := controldb.RuntimeRun{
+		ID: "run-http-replay", WorkspaceID: workspaceID, RuntimeNodeID: node.ID,
+		AgentWorkerID: "aw-pm", ProjectID: "sample", AgentID: "pm", TaskID: task.ID,
+		Status: "running", LeaseExpiresAt: now.Add(time.Minute).Format(time.RFC3339), LeaseGeneration: 1,
+		CreatedAt: nowText, UpdatedAt: nowText,
+	}
+	if err := s.controlDB.UpsertRuntimeRun(run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	s.setTaskActiveRuntimeRun("sample", "pm", task.ID, run.ID)
+
+	// The HTTP fail arrives but the task persist fails — the run IS terminal
+	// (FinishRuntimeRun happened), the task stays fenced and untouched.
+	flaky := &flakyTaskStore{Store: s.ts, failUpdate: 1}
+	s.ts = flaky
+	body := strings.NewReader(`{"leaseGeneration":1,"errorCode":"agent_run_failed","errorMessage":"business failure"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime-node/runs/"+run.ID+"/fail", body)
+	req.SetPathValue("runId", run.ID)
+	req = req.WithContext(contextWithNode(req.Context(), node))
+	rec := httptest.NewRecorder()
+	s.handleRuntimeNodeRunFail(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("fail status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	s.ts = flaky.Store
+	terminal, _, _ := s.controlDB.RuntimeRunByID(workspaceID, run.ID)
+	if terminal.Status != "failed" {
+		t.Fatalf("run must be terminal after HTTP fail: %s", terminal.Status)
+	}
+
+	// The sweep replays from the RUN record: business failure → done_failed.
+	cur, _ := s.ts.GetTask("sample", "pm", task.ID)
+	if !s.clearStaleTaskRuntimeToken(workspaceID, "sample", "pm", cur) {
+		t.Fatal("sweep replay must reconcile the interrupted finish")
+	}
+	stored, _ := s.ts.GetTask("sample", "pm", task.ID)
+	if stored == nil || stored.Status != entity.TaskStatusDoneFailed || stored.ArchivedAt == nil {
+		t.Fatalf("replay must archive the task as done_failed: %+v", stored)
+	}
+	if stored.ActiveRuntimeRunID != "" {
+		t.Fatalf("token must be released: %q", stored.ActiveRuntimeRunID)
+	}
+	if stored.LastError != "business failure" {
+		t.Fatalf("replay must carry the run's error message: %q", stored.LastError)
 	}
 }

@@ -551,10 +551,24 @@ func (s *Server) enqueueRuntimeTaskRun(workspaceID, project, agent string, task 
 		return controldb.RuntimeRun{}, err
 	}
 	run = stored
-	// Execution token (Q0 D5): stamp the task AFTER the run insert succeeds.
-	// A failure here never rolls the run back — run_key dedup keeps dispatch
-	// single, and the reaper's stale-token sweep reconciles the field.
-	s.setTaskActiveRuntimeRun(project, agent, task.ID, run.ID)
+	// Execution token (Q0 D5 + GPT 收口 6-1): stamp the task AFTER the run
+	// insert succeeds. The stamp is the run's dispatch ticket — if the task
+	// write fails, the run is force-failed here so it never reaches a node:
+	// a node-finishing an unstamped task would be dropped by the fence
+	// (NotOurs cannot fire on an empty token — the finish would wedge the
+	// task in_progress with no recovery replay). run_key dedup still applies
+	// to a terminal run, so the caller may simply re-enqueue.
+	if err := s.setTaskActiveRuntimeRun(project, agent, task.ID, run.ID); err != nil {
+		slog.Warn("runtime task token stamp failed; failing the run so it never dispatches", "run", run.ID, "task", task.ID, "error", err)
+		if failed, _, ferr := s.controlDB.FailQueuedRuntimeRun(workspaceID, run.ID, "token_stamp_failed", "task execution token stamp failed; run never dispatched"); ferr == nil && failed.ID != "" {
+			run = failed
+		} else if ferr != nil {
+			run = failed
+		} else {
+			slog.Warn("runtime run stamp-failure cleanup failed; stale-token sweep will reconcile", "run", run.ID, "error", ferr)
+		}
+		return run, fmt.Errorf("queue task run failed: %w", err)
+	}
 	s.markForkSessionRunQueued(workspaceID, forkSessionID, workerID, run.ID, task, project, membershipID)
 	s.auditLog(auditLogInput{
 		WorkspaceID:  workspaceID,
@@ -1273,11 +1287,16 @@ func (s *Server) finalizeRuntimeForkSessionAndHeartbeat(run *controldb.RuntimeRu
 // ActiveRuntimeRunID; the mutation (state + ArchivedAt) and the token release
 // land in ONE store write owned by the helper, so a write failure persists
 // nothing and keeps the fence for the sweep replay. The mutation is a pure
-// in-memory decision — it never writes the task store itself.
+// in-memory decision — it never writes the task store itself and performs NO
+// delivery side effects: snapshot/push/worktree cleanup run only after the
+// transition's persist succeeded (GPT 收口 6-2, post-commit), otherwise a
+// persist failure would strand a deleted worktree with no recorded
+// completion commit.
 func (s *Server) applyFencedFinishTransition(run *controldb.RuntimeRun, body runtimeRunFinishRequest) {
 	if s == nil || s.ts == nil || run == nil || strings.TrimSpace(run.TaskID) == "" {
 		return
 	}
+	committedSuccess := false
 	s.fencedTaskTransition(run.WorkspaceID, run.ProjectID, run.AgentID, run.TaskID, run.ID, func(task *entity.Task) fenceDecision {
 		now := time.Now().UTC()
 		if task.Status.IsTerminal() {
@@ -1331,24 +1350,50 @@ func (s *Server) applyFencedFinishTransition(run *controldb.RuntimeRun, body run
 			if summary, _ := body.Result["summary"].(string); strings.TrimSpace(summary) != "" {
 				task.Summary = strings.TrimSpace(summary)
 			}
+			committedSuccess = true
 		}
 		task.UpdatedAt = now
 		entity.ApplyStatusTimestamps(task, prev, now)
-		if task.Status == entity.TaskStatusDoneSuccess {
-			s.captureTaskCompletionSnapshot(task)
-			s.syncTaskCompletionRemote(run.ProjectID, task)
-			s.cleanupTaskDeliveryArtifacts(run.ProjectID, task.ID)
-		}
 		if task.Status.IsTerminal() {
 			task.ArchivedAt = &now
 		}
 		return fenceDecisionApply
 	})
+	// Delivery side effects (GPT 收口 6-2): ONLY after the transition's persist
+	// succeeded, against the PERSISTED task. Snapshot failure deliberately
+	// keeps the worktree alive and skips the destructive cleanup (documented
+	// captureTaskCompletionSnapshot contract).
+	if committedSuccess {
+		s.runTaskDeliveryPostCommit(run)
+	}
 	// Notification hook (Q0 PR-3): when the fenced transition parked the task
 	// in blocked, the human-owner notify (comment/IM/audit) fires AFTER the
 	// fence released — it is a side effect, not task state, and must not hold
 	// the token mutex.
 	s.notifyInfraBlockedOwner(run.WorkspaceID, run.ProjectID, run.AgentID, run.TaskID, body.ErrorCode)
+}
+
+// runTaskDeliveryPostCommit performs the delivery side effects of a successful
+// task completion against the PERSISTED task (re-read, not the in-memory
+// mutation): git snapshot → remote sync → worktree/preview cleanup. Snapshot
+// failure records the error on the persisted task and skips the destructive
+// steps so uncommitted work is never destroyed without a captured commit.
+func (s *Server) runTaskDeliveryPostCommit(run *controldb.RuntimeRun) {
+	if s == nil || s.ts == nil {
+		return
+	}
+	task, err := s.ts.GetTask(run.ProjectID, run.AgentID, run.TaskID)
+	if err != nil || task == nil || task.Status != entity.TaskStatusDoneSuccess {
+		return
+	}
+	if err := s.captureTaskCompletionSnapshot(task); err != nil {
+		slog.Warn("task completion snapshot failed; worktree kept for retry", "task", task.ID, "error", err)
+		_ = s.ts.PersistTask(run.ProjectID, run.AgentID, task)
+		return
+	}
+	s.syncTaskCompletionRemote(run.ProjectID, task)
+	_ = s.ts.PersistTask(run.ProjectID, run.AgentID, task)
+	s.cleanupTaskDeliveryArtifacts(run.ProjectID, task.ID)
 }
 
 func runtimeRunKind(run *controldb.RuntimeRun) string {

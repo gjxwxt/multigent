@@ -204,6 +204,34 @@ func (db *SQLiteStore) UpsertRuntimeRunIdempotent(run RuntimeRun) (RuntimeRun, b
 	return run, true, nil
 }
 
+// FailQueuedRuntimeRun force-fails a still-queued run before any node claims
+// it (Q0 收口 6-1: an enqueue whose task-token stamp failed must never reach a
+// node — the run would execute work whose finish the task fence would drop).
+// The UPDATE is conditioned on status='queued' so a concurrently claimed run
+// is left untouched (its node already owns it; the stale-token sweep covers
+// the residue).
+func (db *SQLiteStore) FailQueuedRuntimeRun(workspaceID, runID, errorCode, errorMessage string) (RuntimeRun, bool, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := db.sql.Exec(`UPDATE runtime_runs SET status = 'failed', error_code = ?, error_message = ?, finished_at = ?, updated_at = ?
+WHERE workspace_id = ? AND id = ? AND status = 'queued'`,
+		strings.TrimSpace(errorCode), strings.TrimSpace(errorMessage), now, now, workspaceID, runID)
+	if err != nil {
+		return RuntimeRun{}, false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return RuntimeRun{}, false, err
+	}
+	if affected == 0 {
+		return RuntimeRun{}, false, nil
+	}
+	run, found, err := db.RuntimeRunByID(workspaceID, runID)
+	if err != nil || !found {
+		return RuntimeRun{}, false, err
+	}
+	return run, true, nil
+}
+
 // ActiveRuntimeRunByKey returns the single active (queued/running) run for a
 // run key, if any.
 func (db *SQLiteStore) ActiveRuntimeRunByKey(workspaceID, runKey string) (RuntimeRun, bool, error) {

@@ -127,6 +127,11 @@ func TestEnqueueRuntimeTaskRunIdempotent(t *testing.T) {
 		t.Fatalf("membership: %v", err)
 	}
 	task := &entity.Task{ID: "t-dup", Title: "dup", Status: entity.TaskStatusPending}
+	// The enqueue stamps the task's execution token (收口 6-1) — the task must
+	// actually exist in the store.
+	if err := s.ts.AddTask("rkproj", "rk-agent", task); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
 
 	run1, err := s.enqueueRuntimeTaskRun(ws, "rkproj", "rk-agent", task, "", "http://127.0.0.1:1", "admin")
 	if err != nil {

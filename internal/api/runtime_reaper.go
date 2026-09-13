@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -54,30 +55,32 @@ func runtimeRunBlocksAgent(run controldb.RuntimeRun, now time.Time) bool {
 
 // setTaskActiveRuntimeRun stamps the task with the run that is about to
 // execute it. Call ordering (plan 2.1-1): the run INSERT must succeed first;
-// if this task write then fails, the run stays authoritative (run_key dedup
-// still prevents duplicate dispatch) and the field is compensated later —
-// either by the next enqueue/claim writing it, or by clearStaleTaskRuntimeToken
-// converging on the reaper cycle. Stamp and clear share one mutex so an old
-// run's clear can never interleave between a new dispatch's read and write
-// (GPT fix 3: the token is a real fence, not advisory).
-func (s *Server) setTaskActiveRuntimeRun(project, agent, taskID, runID string) {
+// if this task write fails the caller MUST treat the run as undispatchable
+// (GPT 收口 6-1: the stamp is the run's ticket — a run without a stamped task
+// must not reach a node, or its finish would be dropped by the fence and the
+// task would wedge in_progress with no token and no transition). Stamp and
+// clear share one mutex so an old run's clear can never interleave between a
+// new dispatch's read and write (GPT fix 3: the token is a real fence, not
+// advisory).
+func (s *Server) setTaskActiveRuntimeRun(project, agent, taskID, runID string) error {
 	if s == nil || s.ts == nil || strings.TrimSpace(taskID) == "" || strings.TrimSpace(runID) == "" {
-		return
+		return fmt.Errorf("runtime token stamp: task and run are required")
 	}
 	s.runtimeTaskTokenMu.Lock()
 	defer s.runtimeTaskTokenMu.Unlock()
 	task, err := s.ts.GetTask(project, agent, taskID)
 	if err != nil || task == nil {
-		return
+		return fmt.Errorf("runtime token stamp: task %s not found: %w", taskID, err)
 	}
 	if task.ActiveRuntimeRunID == runID {
-		return
+		return nil
 	}
 	task.ActiveRuntimeRunID = runID
 	task.UpdatedAt = time.Now().UTC()
 	if err := s.ts.UpdateTask(project, agent, task); err != nil {
-		slog.Warn("runtime task token write failed; run remains authoritative", "run", runID, "task", taskID, "error", err)
+		return fmt.Errorf("runtime token stamp: task write failed: %w", err)
 	}
+	return nil
 }
 
 // clearTaskActiveRuntimeRunIfRun clears the task's execution token only when
@@ -142,10 +145,13 @@ func (s *Server) clearStaleTaskRuntimeToken(workspaceID, project, agent string, 
 	if task.Status.IsTerminal() {
 		transitioned = true // already converged by a previous pass
 	} else {
-		outcome := s.replayTerminalRunTaskTransition(workspaceID, run, found)
+		outcome := s.replayTerminalRunTaskTransition(workspaceID, project, agent, run, found, task)
 		switch outcome {
 		case fencedTransitionApplied, fencedTransitionSkipped:
 			// The replay itself released the fence in its own write.
+			transitioned = true
+		case fencedTransitionTaskMissing:
+			// The task was gone by replay time — the fence died with it.
 			transitioned = true
 		case fencedTransitionNotOurs:
 			// A concurrent actor took the task — re-check: if the token is
@@ -195,19 +201,30 @@ func (s *Server) clearStaleTaskRuntimeToken(workspaceID, project, agent string, 
 // arrived, e.g. reaped run). It reuses the exact mutations of the finish and
 // reaper paths — via transitionReapedTask for reaped runs and a finish-shaped
 // mutate for the rest — so recovery and the original path cannot diverge.
-func (s *Server) replayTerminalRunTaskTransition(workspaceID string, run controldb.RuntimeRun, found bool) fencedTaskTransitionOutcome {
+// project/agent are the DISCOVERY key of the task (GPT 收口 6-4): the run's
+// stored agent identity can drift (rename/alias), but the task was found
+// under the caller's key — releasing its fence must address the same key.
+func (s *Server) replayTerminalRunTaskTransition(workspaceID, project, agent string, run controldb.RuntimeRun, found bool, task *entity.Task) fencedTaskTransitionOutcome {
+	taskID := strings.TrimSpace(run.TaskID)
+	if taskID == "" && task != nil {
+		// The run row is gone (or lost its identity) — the task that carries
+		// the token is the authority on what this run was executing.
+		taskID = strings.TrimSpace(task.ID)
+	}
 	if !found {
 		// Run row already cleaned up: nothing defines the intended outcome —
-		// just release the fence.
-		return s.fencedTaskTransition(workspaceID, run.ProjectID, run.AgentID, run.TaskID, run.ID, nil)
+		// just release the fence, addressed by the task's discovery key.
+		return s.fencedTaskTransition(workspaceID, project, agent, taskID, run.ID, nil)
 	}
 	if strings.EqualFold(strings.TrimSpace(run.ErrorCode), "lease_expired") {
+		// The reaped-path transition re-resolves the task itself; it needs the
+		// run identity for the workflow engine, so pass the run as-is.
 		s.transitionReapedTask(workspaceID, run)
 		return fencedTransitionApplied
 	}
 	switch strings.ToLower(strings.TrimSpace(run.Status)) {
 	case "succeeded":
-		return s.fencedTaskTransition(workspaceID, run.ProjectID, run.AgentID, run.TaskID, run.ID, func(task *entity.Task) fenceDecision {
+		return s.fencedTaskTransition(workspaceID, project, agent, run.TaskID, run.ID, func(task *entity.Task) fenceDecision {
 			if task.Status.IsTerminal() {
 				return fenceDecisionSkip
 			}
@@ -221,7 +238,7 @@ func (s *Server) replayTerminalRunTaskTransition(workspaceID string, run control
 			return fenceDecisionApply
 		})
 	case "failed":
-		return s.fencedTaskTransition(workspaceID, run.ProjectID, run.AgentID, run.TaskID, run.ID, func(task *entity.Task) fenceDecision {
+		return s.fencedTaskTransition(workspaceID, project, agent, run.TaskID, run.ID, func(task *entity.Task) fenceDecision {
 			if task.Status.IsTerminal() {
 				return fenceDecisionSkip
 			}
@@ -425,50 +442,65 @@ func (s *Server) transitionReapedTask(workspaceID string, run controldb.RuntimeR
 }
 
 // transitionReapedWorkflowTask drives a reaped WORKFLOW task into the
-// workflow engine's failure/rework mechanism (GPT 收口 3): the active step is
-// failed explicitly with CompleteAndAdvance("failed") so the step instance,
-// the run, and the task all reach a defined terminal/rework state instead of
-// lingering in_progress. Called under the token fence; it mutates the passed
-// task in memory (status + LastError) and returns false only when the
-// workflow-side writes failed — the helper then keeps the token for retry.
-// Persisting the task is the fenced helper's job (single persist owner).
+// workflow engine's failure/rework mechanism (GPT 收口 3 + 6-3): the active
+// step is failed explicitly with CompleteAndAdvance("failed") so the step
+// instance, the run, and the task all reach a defined terminal/rework state
+// instead of lingering in_progress. Idempotent across replays: if the
+// workflow run is ALREADY terminal (a previous pass persisted the failure but
+// the task write failed), the engine is NOT re-driven — the task state is
+// simply applied so the fenced helper converges. Called under the token
+// fence; it mutates the passed task in memory and returns false only when the
+// workflow-side writes failed this pass — the helper then keeps the token for
+// retry. Persisting the task is the fenced helper's job (single persist
+// owner).
 func (s *Server) transitionReapedWorkflowTask(workspaceID string, run controldb.RuntimeRun, task *entity.Task) bool {
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
 	stepStatus := "failed"
 	stepError := "lease expired; run reaped by control plane (lease_expired)"
-	transitioned := false
 	if task.Vars[workflowBranchIDVar] != "" {
-		// Branch tasks go through the branch completion path with a failed
-		// status so the parent branch instance fails too.
-		if _, err := s.completeRuntimeWorkflowBranch(workspaceID, run.ProjectID, task, nil, stepStatus); err != nil {
-			slog.Warn("reaped workflow branch task: failing branch failed", "run", run.ID, "task", task.ID, "error", err)
-		} else {
-			transitioned = true
+		branchTransitioned, workflowAlreadyTerminal := s.failReapedWorkflowBranch(workspaceID, run, task, stepStatus, stepError)
+		if !branchTransitioned {
+			return false
 		}
-	} else if _, ok, err := wfStore.RunForTask(run.ProjectID, task.ID); err == nil && ok {
-		output := strings.TrimSpace(task.Summary)
-		if output == "" {
-			output = stepError
+		if !workflowAlreadyTerminal {
+			s.auditLog(auditLogInput{
+				WorkspaceID:  workspaceID,
+				Action:       "runtime_run.reaped",
+				ResourceType: "task",
+				ResourceID:   task.ID,
+				Summary:      "Workflow branch task run reaped; branch failed through the workflow rework path",
+				After:        map[string]any{"runId": run.ID, "taskId": task.ID, "stepStatus": stepStatus},
+			})
 		}
-		if _, err := wfStore.CompleteAndAdvance(run.ProjectID, task.ID, task.Summary, output, nil, stepStatus); err != nil {
-			slog.Warn("reaped workflow task: failing step failed", "run", run.ID, "task", task.ID, "error", err)
-		} else {
-			transitioned = true
-		}
+		s.applyReapedWorkflowTaskState(task, stepError)
+		return true
 	}
-	if !transitioned {
-		// Run record missing (already cleaned up) or the workflow write
-		// failed — no workflow-side terminal state was written; the caller
-		// returns Retry and the next pass replays the step failure.
+	wfRun, found, err := wfStore.RunForTask(run.ProjectID, task.ID)
+	if err != nil {
+		slog.Warn("reaped workflow task: reading workflow run failed", "run", run.ID, "task", task.ID, "error", err)
 		return false
 	}
-	prev := task.Status
-	now := time.Now().UTC()
-	task.Status = entity.TaskStatusDoneFailed
-	task.LastError = stepError
-	task.ArchivedAt = &now
-	task.UpdatedAt = now
-	entity.ApplyStatusTimestamps(task, prev, now)
+	if !found {
+		// Run record already cleaned up — nothing workflow-side to fail; the
+		// caller converges the task to its non-workflow backoff state.
+		return false
+	}
+	if workflowRunStatusIsTerminal(wfRun.Status) {
+		// Idempotent replay (GPT 收口 6-3): the engine already recorded the
+		// failure on a previous pass — re-driving CompleteAndAdvance would be
+		// a silent no-op at best. Just converge the task state.
+		s.applyReapedWorkflowTaskState(task, stepError)
+		return true
+	}
+	output := strings.TrimSpace(task.Summary)
+	if output == "" {
+		output = stepError
+	}
+	if _, err := wfStore.CompleteAndAdvance(run.ProjectID, task.ID, task.Summary, output, nil, stepStatus); err != nil {
+		slog.Warn("reaped workflow task: failing step failed", "run", run.ID, "task", task.ID, "error", err)
+		return false
+	}
+	s.applyReapedWorkflowTaskState(task, stepError)
 	s.auditLog(auditLogInput{
 		WorkspaceID:  workspaceID,
 		Action:       "runtime_run.reaped",
@@ -478,6 +510,46 @@ func (s *Server) transitionReapedWorkflowTask(workspaceID string, run controldb.
 		After:        map[string]any{"runId": run.ID, "taskId": task.ID, "stepStatus": stepStatus},
 	})
 	return true
+}
+
+// applyReapedWorkflowTaskState mutates the task in memory into the terminal
+// state of a reaped workflow execution. The fenced helper persists it.
+func (s *Server) applyReapedWorkflowTaskState(task *entity.Task, stepError string) {
+	prev := task.Status
+	now := time.Now().UTC()
+	task.Status = entity.TaskStatusDoneFailed
+	task.LastError = stepError
+	task.ArchivedAt = &now
+	task.UpdatedAt = now
+	entity.ApplyStatusTimestamps(task, prev, now)
+}
+
+// workflowRunStatusIsTerminal reports whether a workflow run status is final.
+func workflowRunStatusIsTerminal(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "failed", "completed", "cancelled", "canceled":
+		return true
+	}
+	return false
+}
+
+// failReapedWorkflowBranch fails a reaped branch task's branch instance.
+// Idempotent across replays: if the parent workflow run is already terminal
+// (the failure landed on a previous pass), the branch store is not re-driven
+// — returns (true, true). Returns (false, false) when the branch write failed
+// this pass so the caller keeps the token for retry.
+func (s *Server) failReapedWorkflowBranch(workspaceID string, run controldb.RuntimeRun, task *entity.Task, stepStatus, stepError string) (branchFailed, workflowAlreadyTerminal bool) {
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	if wfRun, found, err := wfStore.RunForTask(run.ProjectID, task.ID); err == nil && found && workflowRunStatusIsTerminal(wfRun.Status) {
+		// The branch failure already landed on a previous pass — replay only
+		// converges the task state.
+		return true, true
+	}
+	if _, err := s.completeRuntimeWorkflowBranch(workspaceID, run.ProjectID, task, nil, stepStatus); err != nil {
+		slog.Warn("reaped workflow branch task: failing branch failed", "run", run.ID, "task", task.ID, "error", err)
+		return false, false
+	}
+	return true, false
 }
 
 // ── Fork session slot class (D1: decided at enqueue, fail-closed) ────────────
