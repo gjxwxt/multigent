@@ -65,9 +65,13 @@ func (s *Server) adoptRemoteAfterSync(ctx context.Context, project string, t *en
 		log.Printf("[remote-adopt] %s: no verified remote binding (run platform create or admin verify); refusing agent-origin adoption", project)
 		return
 	}
-	host, _, err := s.pinnedGitLabHost(ctx, project, p)
+	// The binding's pinned connection is the ONLY forge identity for this
+	// operation: p.RemoteConnection is PUT-writable and must never pick the
+	// host here (verifiedGitLabHost cross-checks the connection resolves to
+	// the binding's id).
+	host, _, err := s.verifiedGitLabHost(ctx, project)
 	if err != nil {
-		log.Printf("[remote-adopt] %s: no GitLab host pinned, skip origin adoption: %v", project, err)
+		log.Printf("[remote-adopt] %s: verified binding host unusable, skip origin adoption: %v", project, err)
 		return
 	}
 	originURL := s.initWorktreeOriginURL(project, t)

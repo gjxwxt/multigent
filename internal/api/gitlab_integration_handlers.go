@@ -286,6 +286,14 @@ func (s *Server) handleMergeTaskMR(w http.ResponseWriter, r *http.Request) {
 	projectName := r.PathValue("name")
 	taskID := r.PathValue("id")
 
+	// Authorization FIRST (security fix, post-P0.6 review): merging is a
+	// project-level write — it mutates the task record and can drive remote
+	// MR operations — so a caller without project-management rights must be
+	// rejected before any task lookup, let alone any side effect.
+	if !s.checkProjectManager(w, r, projectName) {
+		return
+	}
+
 	p, err := s.st.Project(projectName)
 	if err != nil {
 		if isNotFoundErr(err) {

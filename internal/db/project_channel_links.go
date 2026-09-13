@@ -128,11 +128,12 @@ func (db *SQLiteStore) DeleteProjectChannelLinks(workspaceID, projectID string) 
 
 
 // DeleteProjectControlPlaneScope removes all control-plane rows scoped to a
-// project — memberships, channel links, and agent channel bindings — in ONE
-// transaction. Project deletion previously issued three sequential deletes; a
-// failure in the middle left a half-deleted project (some agent metadata
-// pointing at a project the operator was told is gone). Atomicity also makes
-// the operation idempotent: a retried delete simply deletes nothing.
+// project — memberships, channel links, agent channel bindings, and the
+// verified remote binding — in ONE transaction. Project deletion previously
+// issued three sequential deletes; a failure in the middle left a half-deleted
+// project (some agent metadata pointing at a project the operator was told is
+// gone). Atomicity also makes the operation idempotent: a retried delete
+// simply deletes nothing.
 func (db *SQLiteStore) DeleteProjectControlPlaneScope(workspaceID, projectID string) error {
 	trimmedProjectID := strings.TrimSpace(projectID)
 	if trimmedProjectID == "" {
@@ -150,6 +151,7 @@ func (db *SQLiteStore) DeleteProjectControlPlaneScope(workspaceID, projectID str
 			`DELETE FROM project_memberships WHERE project_id = ?`,
 			`DELETE FROM project_channel_links WHERE project_id = ?`,
 			`DELETE FROM agent_channel_bindings WHERE project_id = ?`,
+			`DELETE FROM verified_remote_bindings WHERE project_id = ?`,
 		} {
 			if _, err := tx.Exec(stmt, trimmedProjectID); err != nil {
 				return err
@@ -160,6 +162,7 @@ func (db *SQLiteStore) DeleteProjectControlPlaneScope(workspaceID, projectID str
 			`DELETE FROM project_memberships WHERE workspace_id = ? AND project_id = ?`,
 			`DELETE FROM project_channel_links WHERE workspace_id = ? AND project_id = ?`,
 			`DELETE FROM agent_channel_bindings WHERE workspace_id = ? AND project_id = ?`,
+			`DELETE FROM verified_remote_bindings WHERE workspace_id = ? AND project_id = ?`,
 		} {
 			if _, err := tx.Exec(stmt, trimmedWorkspaceID, trimmedProjectID); err != nil {
 				return err

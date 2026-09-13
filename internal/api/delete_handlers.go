@@ -106,18 +106,13 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	}
 	workspaceID, _ := s.currentWorkspaceID()
 	if s.controlDB != nil {
-		// One transaction for all project-scoped control-plane rows: a mid-way
-		// failure must not strand a half-deleted project (some agent metadata
-		// alive, some gone), and a retry is a harmless no-op.
+		// One transaction for ALL project-scoped control-plane rows —
+		// memberships, channel links, agent channel bindings, and the verified
+		// remote binding (a recreated project must never inherit the old
+		// binding's trust). A mid-way failure must not strand a half-deleted
+		// project, and a retry is a harmless no-op.
 		if err := s.controlDB.DeleteProjectControlPlaneScope(workspaceID, project); err != nil {
 			log.Printf("[project:delete] failed to delete control-plane scope for project %s: %v", project, err)
-			s.serverError(w, err)
-			return
-		}
-		// The verified remote binding dies with the project: a recreated
-		// project must never inherit the old binding's trust.
-		if err := s.controlDB.DeleteVerifiedRemoteBinding(workspaceID, project); err != nil {
-			log.Printf("[project:delete] failed to delete verified remote binding for project %s: %v", project, err)
 			s.serverError(w, err)
 			return
 		}

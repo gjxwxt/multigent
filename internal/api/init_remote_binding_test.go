@@ -71,16 +71,19 @@ func seedOriginRepo(t *testing.T, dir, originURL string) {
 func seedGitLabConnection(t *testing.T, s *Server, workspaceID, connID, baseURL string) {
 	t.Helper()
 	if err := s.controlDB.UpsertConnection(controldb.Connection{
-		ID:             connID,
-		WorkspaceID:    workspaceID,
-		Provider:       "gitlab",
-		ConnectionName: "local-gitlab",
+		ID:          connID,
+		WorkspaceID: workspaceID,
+		Provider:    "gitlab",
+		// Connection name must be unique per (workspace, provider, owner):
+		// a second seeded connection with the same name would upsert onto the
+		// first row and leave its secret orphaned on a missing FK.
+		ConnectionName: "conn-" + connID,
 		OwnerType:      ConnectionOwnerWorkspace,
 		OwnerID:        workspaceID,
 		AuthType:       "api_key",
 		Status:         "active",
 		IsDefault:      true,
-		ProfileJSON:    `{"connectionName":"local-gitlab","baseUrl":"` + baseURL + `"}`,
+		ProfileJSON:    `{"connectionName":"conn-` + connID + `","baseUrl":"` + baseURL + `"}`,
 	}); err != nil {
 		t.Fatalf("upsert connection: %v", err)
 	}

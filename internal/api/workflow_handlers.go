@@ -1284,12 +1284,12 @@ func (s *Server) prepareTaskDelivery(r *http.Request, project string, task *enti
 				remoteProjectID = binding.RemoteProjectID
 			}
 		} else {
-			var ghHost *codehost.GitHubHost
-			ghHost, _, err = s.resolveGitHubHost("")
-			if err == nil {
-				host = ghHost
-				remoteProjectID = p.RemoteProjectID
-			}
+			// P0.6 security fix: GitHub has no verified remote binding yet, so
+			// the old path here used the client-writable RemoteProjectID and
+			// the provider-default connection to drive remote writes — the
+			// same forgery vector the GitLab branch just closed. Fail closed
+			// until a controlled GitHub binding exists.
+			return fmt.Errorf("remote github delivery is not available: no verified GitHub remote binding exists yet (controlled GitHub remote binding not implemented); refusing remote write")
 		}
 		if err != nil {
 			return fmt.Errorf("resolve %s connection: %w", p.RemoteProvider, err)
