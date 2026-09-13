@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 )
@@ -132,4 +133,27 @@ WHERE workspace_id = ? AND LOWER(status) = 'running' AND slot_class <> ? AND lea
 		out[key] = struct{}{}
 	}
 	return out, rows.Err()
+}
+
+// holdingSlotKeys returns the sorted worker keys of the occupied-slot set so
+// claim can filter candidates in SQL deterministically.
+func holdingSlotKeys(holding map[string]struct{}) []string {
+	if len(holding) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(holding))
+	for key := range holding {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// slotKeyPlaceholders renders a valid SQL IN-list for N keys; zero keys yield
+// a one-element list containing an impossible value so NOT IN still parses.
+func slotKeyPlaceholders(n int) string {
+	if n == 0 {
+		return "('')"
+	}
+	return "(" + strings.TrimSuffix(strings.Repeat("?,", n), ",") + ")"
 }

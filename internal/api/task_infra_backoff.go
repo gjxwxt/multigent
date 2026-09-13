@@ -26,19 +26,21 @@ const runtimeInfraFailureBackoff = 5 * time.Minute
 const runtimeInfraFailureBlockedThreshold = 3
 
 // runtimeInfraErrorCodes is the CLOSED set of server-controlled error codes
-// that count as infrastructure failures. Workflow step failures
-// (workflow_step_not_completed etc.) and business outcomes are deliberately
-// excluded — they go through the workflow rework path. agent_run_failed stays
-// in the set (it covers both agent crashes and failed business outcomes, and
-// the accepted cost of a false business count is one extra 5-minute backoff
-// with a human review cap at 3 — never a lost task).
+// that count as infrastructure failures (GPT fix 6: only PROVABLY
+// platform-side infra codes advance the backoff). agent_run_failed is
+// deliberately excluded — an agent-level run failure may be a business
+// outcome, and the counted party must never hold the counter. Workflow step
+// failures (workflow_step_not_completed etc.) are likewise excluded — they go
+// through the workflow rework path. agent_prepare_failed stays in the set: it
+// is emitted by the runtime node's own prepare stage (cmd/multigent
+// runtime_node.go) before any agent business logic runs, so it is provably
+// platform-side.
 var runtimeInfraErrorCodes = map[string]struct{}{
-	"spec_fetch_failed":         {},
-	"workspace_prepare_failed":  {},
-	"agent_prepare_failed":      {},
-	"executor_failed":           {},
-	"lease_expired":             {},
-	"agent_run_failed":          {},
+	"spec_fetch_failed":        {},
+	"workspace_prepare_failed": {},
+	"agent_prepare_failed":     {},
+	"executor_failed":          {},
+	"lease_expired":            {},
 }
 
 // isRuntimeInfraFailureCode reports whether code is a server-controlled infra
@@ -314,8 +316,11 @@ func (s *Server) projectManagerUsernames(project string) []string {
 
 // sendUserIMDirectMessage delivers one DM through the project's connected
 // human-collaboration channel binding, resolving the recipient's mapped
-// external identity the same way runtime notify does. Best-effort: false
-// means "no mapping / send failed" and the caller degrades to a task comment.
+// external identity STRICTLY within that binding (GPT fix 5): with two
+// Mattermost instances connected, an identity from the other instance must
+// never be picked. Filtering on the binding ID (which pins connectionId and
+// imInstanceId) makes the lookup instance-exact; a user without an identity
+// under this binding returns false and the caller degrades to a task comment.
 func (s *Server) sendUserIMDirectMessage(workspaceID, project, username, message string) bool {
 	if s == nil || s.controlDB == nil || strings.TrimSpace(username) == "" || strings.TrimSpace(message) == "" {
 		return false
@@ -325,9 +330,10 @@ func (s *Server) sendUserIMDirectMessage(workspaceID, project, username, message
 		return false
 	}
 	identities, err := s.controlDB.ListUserChannelIdentities(controldb.UserChannelIdentityFilter{
-		WorkspaceID: workspaceID,
-		UserID:      username,
-		Provider:    binding.Provider,
+		WorkspaceID:      workspaceID,
+		UserID:           username,
+		Provider:         binding.Provider,
+		ChannelBindingID: binding.ID,
 	})
 	if err != nil || len(identities) == 0 {
 		return false
@@ -407,4 +413,3 @@ func (s *Server) addTaskSystemComment(project, agent string, task *entity.Task, 
 		CreatedAt: time.Now().UTC(),
 	}) == nil
 }
-

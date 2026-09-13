@@ -314,14 +314,96 @@ func TestTaskEditKeepsStreak(t *testing.T) {
 
 // Unit: the closed infra error code set behaves as D4 specifies.
 func TestIsRuntimeInfraFailureCode(t *testing.T) {
-	for _, code := range []string{"spec_fetch_failed", "workspace_prepare_failed", "agent_prepare_failed", "executor_failed", "lease_expired", "agent_run_failed"} {
+	// GPT fix 6: only provably platform-side codes count; agent_run_failed
+	// was removed (agent-level failures may be business outcomes).
+	for _, code := range []string{"spec_fetch_failed", "workspace_prepare_failed", "agent_prepare_failed", "executor_failed", "lease_expired"} {
 		if !isRuntimeInfraFailureCode(code) {
 			t.Errorf("%s must count as infra failure", code)
 		}
 	}
-	for _, code := range []string{"", "workflow_step_not_completed", "custom_business_failure", "unsupported_run_kind", "empty_prompt"} {
+	for _, code := range []string{"", "agent_run_failed", "workflow_step_not_completed", "custom_business_failure", "unsupported_run_kind", "empty_prompt"} {
 		if isRuntimeInfraFailureCode(code) {
 			t.Errorf("%q must NOT count as infra failure", code)
 		}
+	}
+}
+
+// GPT fix 5: sendUserIMDirectMessage must resolve the recipient's identity
+// STRICTLY within the project's channel binding. With two Mattermost
+// instances bound, the identity from the OTHER instance must never be picked;
+// a user without an identity under this binding degrades (false → comment).
+func TestSendUserIMDirectMessageScopedToProjectBinding(t *testing.T) {
+	s, workspaceID := slotTestServer(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Two Mattermost instances (different im_instance_id): the fix-5 hazard.
+	for _, conn := range []controldb.Connection{
+		{ID: "conn-a", WorkspaceID: workspaceID, Provider: "mattermost", ConnectionName: "instance-a", OwnerType: "workspace", OwnerID: workspaceID, AuthType: "token", IMInstanceID: "inst-a"},
+		{ID: "conn-b", WorkspaceID: workspaceID, Provider: "mattermost", ConnectionName: "instance-b", OwnerType: "workspace", OwnerID: workspaceID, AuthType: "token", IMInstanceID: "inst-b"},
+	} {
+		if err := s.controlDB.UpsertConnection(conn); err != nil {
+			t.Fatalf("connection %s: %v", conn.ID, err)
+		}
+	}
+
+	// Project binding on instance A (connection conn-a).
+	bindingA := controldb.AgentChannelBinding{
+		ID:           "bind-a", WorkspaceID: workspaceID, ProjectID: "sample",
+		AgentWorkerID: "aw-pm", AgentID: "pm", Provider: "mattermost",
+		ConnectionID: "conn-a", Status: "active", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.controlDB.UpsertAgentChannelBinding(bindingA); err != nil {
+		t.Fatalf("binding A: %v", err)
+	}
+	// Second instance binding (connection conn-b) — the wrong instance.
+	bindingB := controldb.AgentChannelBinding{
+		ID:           "bind-b", WorkspaceID: workspaceID, ProjectID: "other",
+		AgentWorkerID: "aw-backend", AgentID: "backend", Provider: "mattermost",
+		ConnectionID: "conn-b", Status: "active", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.controlDB.UpsertAgentChannelBinding(bindingB); err != nil {
+		t.Fatalf("binding B: %v", err)
+	}
+	// The manager only has an identity under the WRONG binding (B).
+	_ = s.controlDB.UpsertUser(controldb.User{Username: "manager", Role: "admin"})
+	if err := s.controlDB.UpsertUserChannelIdentity(controldb.UserChannelIdentity{
+		ID: "ident-manager-b", WorkspaceID: workspaceID, UserID: "manager",
+		ChannelBindingID: "bind-b", Provider: "mattermost",
+		ExternalUserID: "mm-manager-on-b", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("identity on B: %v", err)
+	}
+
+	// No identity under binding A → delivery must fail (degrade to comment),
+	// never borrow the identity from instance B.
+	if s.sendUserIMDirectMessage(workspaceID, "sample", "manager", "hello") {
+		t.Fatal("identity from the other instance must not be used (fix 5)")
+	}
+
+	// With an identity under binding A, the lookup succeeds far enough to
+	// attempt the send (which fails on connection lookup, still false) — but
+	// the resolution path is proven by the filter itself.
+	if err := s.controlDB.UpsertUserChannelIdentity(controldb.UserChannelIdentity{
+		ID: "ident-manager-a", WorkspaceID: workspaceID, UserID: "manager",
+		ChannelBindingID: "bind-a", Provider: "mattermost",
+		ExternalUserID: "mm-manager-on-a", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("identity on A: %v", err)
+	}
+	binding, found, err := s.projectHumanChannelBinding(workspaceID, "sample")
+	if err != nil || !found {
+		t.Fatalf("project binding: found=%v err=%v", found, err)
+	}
+	if binding.ID != "bind-a" {
+		t.Fatalf("project binding = %s, want bind-a", binding.ID)
+	}
+	idents, err := s.controlDB.ListUserChannelIdentities(controldb.UserChannelIdentityFilter{
+		WorkspaceID:      workspaceID,
+		UserID:           "manager",
+		Provider:         "mattermost",
+		ChannelBindingID: binding.ID,
+	})
+	if err != nil || len(idents) != 1 || idents[0].ExternalUserID != "mm-manager-on-a" {
+		t.Fatalf("scoped identity lookup: idents=%+v err=%v", idents, err)
 	}
 }
