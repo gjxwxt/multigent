@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -820,7 +821,46 @@ var (
 	errRuntimeNotReady     = errors.New("runtime not ready")
 )
 
+// acquireAgentStartGate serializes task/wakeup starts per agent (P2 soak
+// autoStart race): concurrent autoStarts of two tasks to the same agent used
+// to race the heartbeat-PID and interaction-lock ladders, so the loser's first
+// run exited 1 ("agent busy in manual_run") and only a later scheduler wake
+// recovered it. Holding a per-agent gate across the busy check and the
+// enqueue/exec hand-off turns that race into queue-join semantics: the loser
+// enqueues its own run (node path) or starts after the winner (local path).
+// The returned function releases the gate.
+func (s *Server) acquireAgentStartGate(project, agent string) func() {
+	if s == nil {
+		return func() {}
+	}
+	if s.agentStartTestHook != nil {
+		return s.agentStartTestHook(project, agent)
+	}
+	key := strings.TrimSpace(project) + "/" + strings.TrimSpace(agent)
+	s.agentStartMu.Lock()
+	if s.agentStartGates == nil {
+		s.agentStartGates = map[string]*uint32{}
+	}
+	gate, ok := s.agentStartGates[key]
+	if !ok {
+		gate = new(uint32)
+		s.agentStartGates[key] = gate
+	}
+	s.agentStartMu.Unlock()
+	for {
+		if atomic.CompareAndSwapUint32(gate, 0, 1) {
+			return func() { atomic.StoreUint32(gate, 0) }
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func (s *Server) startProjectTaskDirect(workspaceID, project, agent string, task *entity.Task, r *http.Request) (int, string, error) {
+	// P2 soak autoStart race: two autoStarts landing on the same agent in one
+	// tick must not race the busy-check ladders below — serialize per agent
+	// first so the loser joins the queue instead of exit-1ing.
+	releaseGate := s.acquireAgentStartGate(project, agent)
+	defer releaseGate()
 	target := s.runtimeSchedulerTargetForProjectAgent(workspaceID, project, agent)
 	hb, err := s.loadSchedulerTargetHeartbeat(workspaceID, target)
 	if err != nil || hb == nil {

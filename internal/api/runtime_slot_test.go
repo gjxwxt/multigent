@@ -1670,3 +1670,154 @@ func TestHTTPFailThenSweepReplayConvergesDoneFailed(t *testing.T) {
 		t.Fatalf("replay must carry the run's error message: %q", stored.LastError)
 	}
 }
+
+// P2 soak finding (autoStart race): two tasks autoStart to the SAME agent at
+// the same moment. The legacy immediate-execution path gated on the heartbeat
+// PID and 409ed ("agent is already running") the loser — its first run failed
+// and only the scheduler's later wake recovered it. With the agent start gate
+// the second start JOINS the queue (200, distinct queued run) instead of
+// failing: one slot per worker is enforced at claim time, not at start time.
+func TestConcurrentAutoStartSameAgentJoinsQueue(t *testing.T) {
+	s, workspaceID := slotTestServer(t)
+	node := slotTestNode(t, s, workspaceID)
+	worker, ok, err := s.controlDB.AgentWorkerByID(workspaceID, "aw-pm")
+	if err != nil || !ok {
+		t.Fatalf("load aw-pm: %v %v", ok, err)
+	}
+	worker.DefaultRuntimeNodeID = node.ID
+	if worker.DefaultModelAccountID == "" {
+		worker.DefaultModelAccountID = "acct-test"
+	}
+	if err := s.controlDB.UpsertAgentWorker(worker); err != nil {
+		t.Fatalf("bind node: %v", err)
+	}
+
+	now := time.Now().UTC()
+	taskA := &entity.Task{ID: "task-autostart-a", Title: "AutoStart A", Status: entity.TaskStatusPending, Priority: 2, CreatedAt: now, UpdatedAt: now}
+	taskB := &entity.Task{ID: "task-autostart-b", Title: "AutoStart B", Status: entity.TaskStatusPending, Priority: 2, CreatedAt: now, UpdatedAt: now}
+	if err := s.ts.AddTask("sample", "pm", taskA); err != nil {
+		t.Fatalf("add taskA: %v", err)
+	}
+	if err := s.ts.AddTask("sample", "pm", taskB); err != nil {
+		t.Fatalf("add taskB: %v", err)
+	}
+
+	startTask := func(taskID string) *httptest.ResponseRecorder {
+		req := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/"+taskID+"/start", "admin", nil)
+		req.SetPathValue("name", "sample")
+		req.SetPathValue("taskId", taskID)
+		rec := httptest.NewRecorder()
+		s.handleStartProjectTask(rec, req)
+		return rec
+	}
+
+	// Fire both starts concurrently, mirroring two projects autoStarting their
+	// initialization tasks to the same agent in the same tick.
+	var wg sync.WaitGroup
+	recs := make([]*httptest.ResponseRecorder, 2)
+	wg.Add(2)
+	for i, taskID := range []string{taskA.ID, taskB.ID} {
+		go func(i int, taskID string) {
+			defer wg.Done()
+			recs[i] = startTask(taskID)
+		}(i, taskID)
+	}
+	wg.Wait()
+
+	for i, rec := range recs {
+		if rec == nil {
+			t.Fatalf("start %d produced no response", i)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("concurrent start %d status=%d body=%s, want 200 (join queue)", i, rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "already running") {
+			t.Fatalf("concurrent start %d hit the legacy agent-busy 409: %s", i, rec.Body.String())
+		}
+	}
+
+	// Both tasks own distinct queued runs; neither was dropped.
+	runsA, err := s.controlDB.ListRuntimeRuns(controldb.RuntimeRunFilter{WorkspaceID: workspaceID, TaskID: taskA.ID})
+	if err != nil || len(runsA) != 1 || runsA[0].Status != "queued" {
+		t.Fatalf("taskA runs: n=%d status=%v err=%v", len(runsA), runsA, err)
+	}
+	runsB, err := s.controlDB.ListRuntimeRuns(controldb.RuntimeRunFilter{WorkspaceID: workspaceID, TaskID: taskB.ID})
+	if err != nil || len(runsB) != 1 || runsB[0].Status != "queued" {
+		t.Fatalf("taskB runs: n=%d status=%v err=%v", len(runsB), runsB, err)
+	}
+	if runsA[0].ID == runsB[0].ID {
+		t.Fatalf("two distinct tasks must not converge onto one run: %s", runsA[0].ID)
+	}
+
+	// A later claim honors the one-slot-per-worker rule: the second queued run
+	// stays queued while the first holds the slot (unexpired lease).
+	first, ok, err := s.controlDB.ClaimRuntimeRun(workspaceID, node.ID, 90, nil)
+	if err != nil || !ok {
+		t.Fatalf("first claim: ok=%v err=%v", ok, err)
+	}
+	second, ok, err := s.controlDB.ClaimRuntimeRun(workspaceID, node.ID, 90, nil)
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if ok {
+		t.Fatalf("second claim must be refused while the worker slot is held, got run %s", second.ID)
+	}
+	if first.ID != runsA[0].ID && first.ID != runsB[0].ID {
+		t.Fatalf("first claim must be one of the two queued runs, got %s", first.ID)
+	}
+}
+
+// The local (non-node) autoStart path must serialize per agent too: the
+// second concurrent start waits on the gate instead of racing the heartbeat
+// PID check. The hook blocks both callers until released — the contract is
+// that the second start cannot pass the busy checks until the first has left
+// the gate's critical section.
+func TestAgentStartGateSerializesLocalStarts(t *testing.T) {
+	s, workspaceID := slotTestServer(t)
+	seedAgentWorkerForTest(t, s, workspaceID, "sample", "reviewer")
+
+	now := time.Now().UTC()
+	task := &entity.Task{ID: "task-gate-local", Title: "Gate local", Status: entity.TaskStatusPending, Priority: 2, CreatedAt: now, UpdatedAt: now}
+	if err := s.ts.AddTask("sample", "reviewer", task); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
+
+	release := make(chan struct{})
+	var entered, exited int
+	var mu sync.Mutex
+	s.agentStartTestHook = func(project, agent string) func() {
+		mu.Lock()
+		entered++
+		mu.Unlock()
+		<-release
+		mu.Lock()
+		exited++
+		mu.Unlock()
+		return func() {}
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			_, _, _ = s.startProjectTaskDirect(workspaceID, "sample", "reviewer", task, nil)
+		}()
+	}
+	// Give both goroutines a chance to reach the gate, then let them through.
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	bothEntered := entered == 2
+	mu.Unlock()
+	close(release)
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !bothEntered {
+		t.Fatalf("second start must block on the agent gate, entered=%d", entered)
+	}
+	if exited != 2 {
+		t.Fatalf("both starts must pass the gate, exited=%d", exited)
+	}
+}

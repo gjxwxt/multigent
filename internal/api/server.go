@@ -109,6 +109,13 @@ type Server struct {
 	runtimeReaperDone      chan struct{}
 	runtimeReaperCancel    context.CancelFunc
 	runtimeTaskTokenMu     sync.Mutex
+	// agentStartMu guards per-agent task/wakeup start serialization (P2 soak
+	// autoStart race): two autoStarts landing on the same agent in the same
+	// tick must not race the heartbeat-PID / interaction-lock ladders.
+	agentStartMu           sync.Mutex
+	agentStartGates        map[string]*uint32
+	// agentStartTestHook is nil in production; tests swap the gate body.
+	agentStartTestHook     func(project, agent string) func()
 	connectorSetupMu       sync.Mutex
 	connectorSetupSessions map[string]connectorDeviceAuthSession
 	modelAuthMu            sync.Mutex
