@@ -105,6 +105,9 @@ type Server struct {
 	agentIMMu              sync.Mutex
 	agentIMCancel          map[string]context.CancelFunc
 	attentionRecoveryOnce  sync.Once
+	runtimeReaperOnce      sync.Once
+	runtimeReaperDone      chan struct{}
+	runtimeReaperCancel    context.CancelFunc
 	connectorSetupMu       sync.Mutex
 	connectorSetupSessions map[string]connectorDeviceAuthSession
 	modelAuthMu            sync.Mutex
@@ -388,6 +391,9 @@ func (s *Server) ShutdownGracefully(ctx context.Context) {
 		}
 		s.sched.Cleanup()
 	}
+	// The runtime reaper must exit BEFORE the control DB closes (Q0 PR-2):
+	// its loop queries runtime_runs and would panic against a closed store.
+	s.stopRuntimeReaper()
 	_ = s.controlDB.Close()
 }
 

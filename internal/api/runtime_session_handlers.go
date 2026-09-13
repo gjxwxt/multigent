@@ -517,6 +517,11 @@ func (s *Server) enqueueRuntimeForkSessionRun(principal runtimeAgentPrincipal, s
 		ResultJSON:           "{}",
 		CreatedAt:            now,
 		UpdatedAt:            now,
+		// Slot class is decided at ENQUEUE time and persisted (Q0 D1): only
+		// sessions whose declared capability set is strictly within the
+		// platform-fixed read-only category exempt the Worker slot. Parse
+		// failures and unknown modes fail closed to "normal".
+		SlotClass: forkSessionSlotClass(session),
 	}
 	if err := s.controlDB.UpsertRuntimeRun(run); err != nil {
 		return controldb.RuntimeRun{}, err

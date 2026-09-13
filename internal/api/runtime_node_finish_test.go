@@ -63,6 +63,7 @@ func TestRuntimeNodeCompleteMarksNonWorkflowTaskDone(t *testing.T) {
 		ClaimedAt:           nowText,
 		StartedAt:           nowText,
 		LeaseExpiresAt:      now.Add(time.Minute).Format(time.RFC3339),
+		LeaseGeneration:     1,
 		CreatedAt:           nowText,
 		UpdatedAt:           nowText,
 	}
@@ -87,7 +88,7 @@ func TestRuntimeNodeCompleteMarksNonWorkflowTaskDone(t *testing.T) {
 		t.Fatalf("attention signal: %v", err)
 	}
 
-	body, _ := json.Marshal(runtimeRunFinishRequest{Result: map[string]any{
+	body, _ := json.Marshal(runtimeRunFinishRequest{LeaseGeneration: 1, Result: map[string]any{
 		"summary":   "runtime completed successfully",
 		"sessionId": "session-runtime-success",
 	}})

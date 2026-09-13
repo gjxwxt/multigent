@@ -173,6 +173,10 @@ type Store interface {
 	ListRuntimeRuns(filter RuntimeRunFilter) ([]RuntimeRun, error)
 	ClaimRuntimeRun(workspaceID, nodeID string, leaseSeconds int, busyAgents []string) (RuntimeRun, bool, error)
 	ExtendRuntimeRunLease(workspaceID, runID, nodeID string, leaseSeconds int) (RuntimeRun, bool, error)
+	ExtendRuntimeRunLeaseWithGeneration(workspaceID, runID, nodeID string, leaseGeneration, leaseSeconds int) (RuntimeRun, bool, error)
+	FinishRuntimeRun(workspaceID, runID, nodeID string, leaseGeneration int, status string, errorCode, errorMessage, resultJSON string) (RuntimeRun, bool, error)
+	ReapExpiredRuntimeRun(workspaceID, runID string, leaseGeneration int, cutoff time.Time) (bool, error)
+	ListExpiredRunningRuns(workspaceID string, cutoff time.Time, limit int) ([]RuntimeRun, error)
 	CreateRuntimeEvent(event RuntimeEvent) error
 	ListRuntimeEvents(workspaceID, runID string, limit int) ([]RuntimeEvent, error)
 

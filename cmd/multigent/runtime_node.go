@@ -52,6 +52,11 @@ type runtimeNodeRun struct {
 	TaskID              string `json:"taskId"`
 	RuntimeNodeID       string `json:"runtimeNodeId"`
 	Status              string `json:"status"`
+	// LeaseGeneration identifies this claim (Q0). It must be echoed on every
+	// lease renewal and finish; the control plane rejects requests carrying a
+	// stale or missing generation, so the node abandons silently when the run
+	// was taken over, reaped, or finished elsewhere.
+	LeaseGeneration int `json:"leaseGeneration"`
 }
 
 type runtimeNodeSpecEnvelope struct {
@@ -395,10 +400,11 @@ func runtimeNodeHeartbeat(cfg runtimeNodeConfig, status, lastError string) error
 	return err
 }
 
-func runtimeNodeFailRun(cfg runtimeNodeConfig, runID, code, message string) error {
+func runtimeNodeFailRun(cfg runtimeNodeConfig, runID string, leaseGeneration int, code, message string) error {
 	_, err := runtimeNodePost(cfg, "/api/v1/runtime-node/runs/"+runID+"/fail", map[string]any{
-		"errorCode":    code,
-		"errorMessage": message,
+		"leaseGeneration": leaseGeneration,
+		"errorCode":       code,
+		"errorMessage":    message,
 		"result": map[string]any{
 			"summary": message,
 		},
@@ -406,19 +412,21 @@ func runtimeNodeFailRun(cfg runtimeNodeConfig, runID, code, message string) erro
 	return err
 }
 
-func runtimeNodeCompleteRun(cfg runtimeNodeConfig, runID string, result map[string]any) error {
+func runtimeNodeCompleteRun(cfg runtimeNodeConfig, runID string, leaseGeneration int, result map[string]any) error {
 	_, err := runtimeNodePost(cfg, "/api/v1/runtime-node/runs/"+runID+"/complete", map[string]any{
-		"result": result,
+		"leaseGeneration": leaseGeneration,
+		"result":          result,
 	})
 	return err
 }
 
-func runtimeNodeExtendRunLease(cfg runtimeNodeConfig, runID string, leaseSeconds int) error {
+func runtimeNodeExtendRunLease(cfg runtimeNodeConfig, runID string, leaseGeneration, leaseSeconds int) error {
 	if leaseSeconds <= 0 {
 		leaseSeconds = 90
 	}
 	body, err := runtimeNodePost(cfg, "/api/v1/runtime-node/runs/"+runID+"/lease", map[string]any{
-		"leaseSeconds": leaseSeconds,
+		"leaseGeneration": leaseGeneration,
+		"leaseSeconds":    leaseSeconds,
 	})
 	if err != nil {
 		return err
@@ -437,17 +445,17 @@ func runtimeNodeExecuteRun(cfg runtimeNodeConfig, run runtimeNodeRun, workerID i
 			slog.Info("runtime run cancelled before execution", "worker", workerID, "run", run.ID)
 			return nil
 		}
-		_ = runtimeNodeFailRun(cfg, run.ID, "spec_fetch_failed", err.Error())
+		_ = runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "spec_fetch_failed", err.Error())
 		return err
 	}
 	if spec.Kind != runtimeexec.KindExecPrompt && spec.Kind != runtimeexec.KindTask && spec.Kind != runtimeexec.KindForkSession {
 		msg := "unsupported runtime run kind: " + spec.Kind
-		_ = runtimeNodeFailRun(cfg, run.ID, "unsupported_run_kind", msg)
+		_ = runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "unsupported_run_kind", msg)
 		return fmt.Errorf("%s", msg)
 	}
 	if strings.TrimSpace(spec.Prompt) == "" {
 		msg := "runtime run prompt is empty"
-		_ = runtimeNodeFailRun(cfg, run.ID, "empty_prompt", msg)
+		_ = runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "empty_prompt", msg)
 		return fmt.Errorf("%s", msg)
 	}
 	meta := spec.Agent
@@ -467,19 +475,19 @@ func runtimeNodeExecuteRun(cfg runtimeNodeConfig, run runtimeNodeRun, workerID i
 
 	root, err := runtimeNodeWorkspaceRoot(spec.WorkspaceID)
 	if err != nil {
-		_ = runtimeNodeFailRun(cfg, run.ID, "workspace_prepare_failed", err.Error())
+		_ = runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "workspace_prepare_failed", err.Error())
 		return err
 	}
 	st := store.NewFS(root)
 	agentDir := filepath.Join(root, "projects", spec.ProjectID, "agents", spec.AgentID)
 	if err := os.MkdirAll(agentDir, 0o755); err != nil {
-		_ = runtimeNodeFailRun(cfg, run.ID, "agent_prepare_failed", err.Error())
+		_ = runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "agent_prepare_failed", err.Error())
 		return err
 	}
 	r := runner.New(root, taskstore.New(root), st)
 	r.SetAgentMetaOverride(spec.ProjectID, spec.AgentID, &meta)
 	r.SuppressStdout = !streamAgentOutput
-	ctx, stopLease := startRuntimeRunLeaseLoop(cfg, run.ID)
+	ctx, stopLease := startRuntimeRunLeaseLoop(cfg, run.ID, run.LeaseGeneration)
 	defer stopLease()
 	started := time.Now().UTC()
 	slog.Info("runtime run started", "worker", workerID, "run", run.ID, "kind", spec.Kind, "project", spec.ProjectID, "agent", spec.AgentID)
@@ -490,7 +498,7 @@ func runtimeNodeExecuteRun(cfg runtimeNodeConfig, run runtimeNodeRun, workerID i
 			slog.Info("runtime run cancelled during execution", "worker", workerID, "run", run.ID)
 			return nil
 		}
-		_ = runtimeNodeFailRun(cfg, run.ID, "executor_failed", err.Error())
+		_ = runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "executor_failed", err.Error())
 		slog.Error("runtime run executor failed", "worker", workerID, "run", run.ID, "duration_ms", durationMS, "error", err)
 		return err
 	}
@@ -508,15 +516,15 @@ func runtimeNodeExecuteRun(cfg runtimeNodeConfig, run runtimeNodeRun, workerID i
 		if msg == "" {
 			msg = "agent run failed"
 		}
-		_ = runtimeNodeFailRun(cfg, run.ID, "agent_run_failed", msg)
+		_ = runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "agent_run_failed", msg)
 		slog.Warn("runtime run failed", "worker", workerID, "run", run.ID, "status", result.Status, "duration_ms", durationMS, "log", result.LogPath, "error", msg)
 		return fmt.Errorf("%s", msg)
 	}
 	slog.Info("runtime run completed", "worker", workerID, "run", run.ID, "status", result.Status, "duration_ms", durationMS, "session", result.SessionID, "log", result.LogPath)
-	return runtimeNodeCompleteRun(cfg, run.ID, out)
+	return runtimeNodeCompleteRun(cfg, run.ID, run.LeaseGeneration, out)
 }
 
-func startRuntimeRunLeaseLoop(cfg runtimeNodeConfig, runID string) (context.Context, func()) {
+func startRuntimeRunLeaseLoop(cfg runtimeNodeConfig, runID string, leaseGeneration int) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -528,9 +536,18 @@ func startRuntimeRunLeaseLoop(cfg runtimeNodeConfig, runID string) (context.Cont
 				if err := runtimeNodeHeartbeat(cfg, "online", ""); err != nil {
 					slog.Warn("runtime node heartbeat failed during run", "run", runID, "error", err)
 				}
-				if err := runtimeNodeExtendRunLease(cfg, runID, 90); err != nil {
+				if err := runtimeNodeExtendRunLease(cfg, runID, leaseGeneration, 90); err != nil {
 					if errors.Is(err, errRuntimeRunCancelled) {
 						slog.Info("runtime run cancelled by control plane", "run", runID)
+						cancel()
+						return
+					}
+					// A lease lost (taken over / reaped / finished elsewhere)
+					// comes back as a conflict: stop renewing and cancel the
+					// run context so the agent does not keep working on a run
+					// it no longer owns.
+					if strings.Contains(err.Error(), "no longer owned") || strings.Contains(err.Error(), "409") {
+						slog.Warn("runtime lease lost; cancelling run", "run", runID, "error", err)
 						cancel()
 						return
 					}

@@ -70,13 +70,15 @@ type runtimeRunEventRequest struct {
 }
 
 type runtimeRunLeaseRequest struct {
-	LeaseSeconds int `json:"leaseSeconds"`
+	LeaseSeconds    int `json:"leaseSeconds"`
+	LeaseGeneration int `json:"leaseGeneration"`
 }
 
 type runtimeRunFinishRequest struct {
-	Result       map[string]any `json:"result"`
-	ErrorCode    string         `json:"errorCode"`
-	ErrorMessage string         `json:"errorMessage"`
+	Result          map[string]any `json:"result"`
+	ErrorCode       string         `json:"errorCode"`
+	ErrorMessage    string         `json:"errorMessage"`
+	LeaseGeneration int            `json:"leaseGeneration"`
 }
 
 const runtimeWorkflowStepNotCompletedError = "workflow step was not completed by the agent; use `mga task step done --id <id>` with every required output field, or `mga task step done --id <id> --status failed --error <reason>` if the step cannot be completed"
@@ -549,6 +551,10 @@ func (s *Server) enqueueRuntimeTaskRun(workspaceID, project, agent string, task 
 		return controldb.RuntimeRun{}, err
 	}
 	run = stored
+	// Execution token (Q0 D5): stamp the task AFTER the run insert succeeds.
+	// A failure here never rolls the run back — run_key dedup keeps dispatch
+	// single, and the reaper's stale-token sweep reconciles the field.
+	s.setTaskActiveRuntimeRun(project, agent, task.ID, run.ID)
 	s.markForkSessionRunQueued(workspaceID, forkSessionID, workerID, run.ID, task, project, membershipID)
 	s.auditLog(auditLogInput{
 		WorkspaceID:  workspaceID,
@@ -1129,8 +1135,23 @@ func (s *Server) handleRuntimeNodeRunLease(w http.ResponseWriter, r *http.Reques
 	if leaseSeconds <= 0 {
 		leaseSeconds = 90
 	}
-	run, found, err := s.controlDB.ExtendRuntimeRunLease(principal.Node.WorkspaceID, runID, principal.Node.ID, leaseSeconds)
+	// Q0: renewal is generation-conditioned. A node that does not send its
+	// generation (pre-Q0 build) is rejected fail-closed — mixed-version
+	// operation is unsupported; deployment requires drain → stop nodes →
+	// upgrade console → upgrade nodes.
+	if body.LeaseGeneration <= 0 {
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "leaseGeneration is required: upgrade the runtime node (generation-conditional leases reject pre-Q0 nodes)")
+		return
+	}
+	run, found, err := s.controlDB.ExtendRuntimeRunLeaseWithGeneration(principal.Node.WorkspaceID, runID, principal.Node.ID, body.LeaseGeneration, leaseSeconds)
 	if err != nil {
+		if controldb.LeaseGenerationMismatch(err) {
+			// Run taken over, finished, or reaped: the node must abandon
+			// silently. 409 so the lease loop can distinguish it from a
+			// transport error and stop renewing.
+			s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "runtime run lease lost: run is no longer owned by this claim")
+			return
+		}
 		s.serverError(w, err)
 		return
 	}
@@ -1181,18 +1202,33 @@ func (s *Server) finishRuntimeNodeRun(w http.ResponseWriter, r *http.Request, st
 			return
 		}
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	run.Status = status
-	run.ResultJSON = marshalRuntimeObject(body.Result)
-	run.ErrorCode = strings.TrimSpace(body.ErrorCode)
-	run.ErrorMessage = strings.TrimSpace(body.ErrorMessage)
-	run.FinishedAt = now
-	run.UpdatedAt = now
-	s.finalizeRuntimeTaskRun(&run, body)
-	if err := s.controlDB.UpsertRuntimeRun(run); err != nil {
+	// Q0: finish is generation-conditioned. A pre-Q0 node (no generation) or
+	// a stale loop whose run was taken over/reaped is rejected; the run state
+	// is left exactly as the current owner wrote it.
+	if body.LeaseGeneration <= 0 {
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "leaseGeneration is required: upgrade the runtime node (generation-conditional finish rejects pre-Q0 nodes)")
+		return
+	}
+	resultJSON := marshalRuntimeObject(body.Result)
+	finished, found, err := s.controlDB.FinishRuntimeRun(principal.Node.WorkspaceID, runID, principal.Node.ID, body.LeaseGeneration, status, body.ErrorCode, body.ErrorMessage, resultJSON)
+	if err != nil {
+		if controldb.LeaseGenerationMismatch(err) {
+			s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "runtime run finish rejected: run is no longer owned by this claim")
+			return
+		}
 		s.serverError(w, err)
 		return
 	}
+	if !found {
+		s.jsonErrorCode(w, http.StatusNotFound, ErrCodeNotFound, "runtime run not found")
+		return
+	}
+	run = finished
+	s.finalizeRuntimeTaskRun(&run, body)
+	// Conditional token clear: only if the task still names THIS run. When the
+	// reaper already reaped this run (its generation bump invalidates the
+	// finish above) this line is never reached — the 409 path returns first.
+	s.clearTaskActiveRuntimeRunIfRun(run.ProjectID, run.AgentID, run.TaskID, run.ID)
 	if isSuccessfulRuntimeStatus(run.Status) {
 		s.markTaskAttentionSignalsForRun(run, "handled")
 		s.markAttentionSignalsForWakeupRun(run)
@@ -1527,6 +1563,8 @@ func runtimeRunResponse(run controldb.RuntimeRun) map[string]any {
 		"status":               run.Status,
 		"priority":             run.Priority,
 		"leaseExpiresAt":       run.LeaseExpiresAt,
+		"leaseGeneration":      run.LeaseGeneration,
+		"slotClass":            controldb.NormalizedSlotClass(run.SlotClass),
 		"claimedAt":            run.ClaimedAt,
 		"startedAt":            run.StartedAt,
 		"finishedAt":           run.FinishedAt,

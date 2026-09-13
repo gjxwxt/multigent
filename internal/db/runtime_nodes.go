@@ -150,8 +150,8 @@ func (db *SQLiteStore) UpsertRuntimeRun(run RuntimeRun) error {
 	_, err := db.sql.Exec(`INSERT INTO runtime_runs (
 	id, workspace_id, agent_worker_id, project_membership_id, project_id, agent_id, task_id, workflow_instance_id, workflow_step_id, fork_session_id, desired_runtime_node_id, runtime_node_id,
 	status, priority, spec_json, result_json, lease_expires_at, claimed_at, started_at, finished_at,
-	error_code, error_message, created_at, updated_at, run_key, slot_class
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	error_code, error_message, created_at, updated_at, run_key, slot_class, lease_generation
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	agent_worker_id = excluded.agent_worker_id,
 	project_membership_id = excluded.project_membership_id,
@@ -174,7 +174,7 @@ ON CONFLICT(id) DO UPDATE SET
 		run.ID, run.WorkspaceID, run.AgentWorkerID, run.ProjectMembershipID, run.ProjectID, run.AgentID, run.TaskID, run.WorkflowInstanceID, run.WorkflowStepID, run.ForkSessionID, run.DesiredRuntimeNodeID, run.RuntimeNodeID,
 		run.Status, run.Priority, defaultJSONObject(run.SpecJSON), defaultJSONObject(run.ResultJSON), run.LeaseExpiresAt, run.ClaimedAt,
 		run.StartedAt, run.FinishedAt, run.ErrorCode, run.ErrorMessage, run.CreatedAt, run.UpdatedAt,
-		run.RunKey, defaultSlotClass(run.SlotClass))
+		run.RunKey, defaultSlotClass(run.SlotClass), run.LeaseGeneration)
 	return err
 }
 
@@ -321,6 +321,14 @@ func (db *SQLiteStore) ClaimRuntimeRun(workspaceID, nodeID string, leaseSeconds 
 
 	nowTime := time.Now().UTC()
 	now := nowTime.Format(time.RFC3339)
+	// Slot exclusion is evaluated in the same transaction as the claim so a
+	// concurrent claim of the same worker's other run cannot slip through
+	// between the occupancy check and the UPDATE (Q0 D1: one slot per Worker;
+	// queued runs never occupy a slot — only running + unexpired lease do).
+	holdingSlots, err := db.runtimeRunsHoldingSlots(tx, workspaceID, nowTime)
+	if err != nil {
+		return RuntimeRun{}, false, err
+	}
 	query := runtimeRunSelectSQL() + ` WHERE workspace_id = ? AND (desired_runtime_node_id = '' OR desired_runtime_node_id = ?) AND (
 	status = 'queued'
 	OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at != '' AND lease_expires_at < ?)
@@ -355,8 +363,17 @@ func (db *SQLiteStore) ClaimRuntimeRun(workspaceID, nodeID string, leaseSeconds 
 	if err != nil {
 		return RuntimeRun{}, false, err
 	}
+	if _, occupied := holdingSlots[RuntimeRunWorkerKey(run)]; occupied {
+		// The candidate's Worker already holds its slot with a live run.
+		// Queued rows behind it must wait; expired-lease rows will be reaped
+		// or re-claimed after the holder finishes.
+		return RuntimeRun{}, false, nil
+	}
 	lease := nowTime.Add(time.Duration(leaseSeconds) * time.Second).Format(time.RFC3339)
-	res, err := tx.Exec(`UPDATE runtime_runs SET status = 'running', runtime_node_id = ?, claimed_at = ?, started_at = ?, lease_expires_at = ?, updated_at = ?
+	// Generation bumps on every claim/takeover. All later renew/finish/reap
+	// updates are conditional on (node, generation), so a stale loop from a
+	// previous claim can never resurrect the run.
+	res, err := tx.Exec(`UPDATE runtime_runs SET status = 'running', runtime_node_id = ?, claimed_at = ?, started_at = ?, lease_expires_at = ?, lease_generation = lease_generation + 1, updated_at = ?
 WHERE workspace_id = ? AND id = ? AND (desired_runtime_node_id = '' OR desired_runtime_node_id = ?) AND (
 	status = 'queued'
 	OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at != '' AND lease_expires_at < ?)
@@ -379,10 +396,16 @@ WHERE workspace_id = ? AND id = ? AND (desired_runtime_node_id = '' OR desired_r
 	run.ClaimedAt = now
 	run.StartedAt = now
 	run.LeaseExpiresAt = lease
+	run.LeaseGeneration++
 	run.UpdatedAt = now
 	return run, true, nil
 }
 
+// ExtendRuntimeRunLease is the legacy generationless renewal used by the
+// Store interface during migration; it renews only when the caller still owns
+// the run (same node, still running). New callers must use
+// ExtendRuntimeRunLeaseWithGeneration — generation-conditioned renewal is the
+// Q0 contract; generationless renewal cannot detect takeover.
 func (db *SQLiteStore) ExtendRuntimeRunLease(workspaceID, runID, nodeID string, leaseSeconds int) (RuntimeRun, bool, error) {
 	if leaseSeconds <= 0 {
 		leaseSeconds = 60
@@ -408,6 +431,130 @@ WHERE workspace_id = ? AND id = ? AND runtime_node_id = ? AND status = 'running'
 		return RuntimeRun{}, false, err
 	}
 	return run, true, nil
+}
+
+// ExtendRuntimeRunLeaseWithGeneration renews the lease only when the caller
+// still owns the run: same node AND same lease generation. A mismatch (run
+// taken over, finished, or reaped) returns a RuntimeRunLeaseGenerationError —
+// stale renewal loops abandon silently. leaseGeneration <= 0 is rejected
+// fail-closed: pre-Q0 nodes do not know their generation and are not allowed
+// to renew (mixed-version operation is unsupported; deployment requires
+// draining before upgrade).
+func (db *SQLiteStore) ExtendRuntimeRunLeaseWithGeneration(workspaceID, runID, nodeID string, leaseGeneration, leaseSeconds int) (RuntimeRun, bool, error) {
+	return db.extendRuntimeRunLease(workspaceID, runID, nodeID, leaseGeneration, leaseSeconds)
+}
+
+func (db *SQLiteStore) extendRuntimeRunLease(workspaceID, runID, nodeID string, leaseGeneration int, leaseSeconds int) (RuntimeRun, bool, error) {
+	if leaseGeneration <= 0 {
+		return RuntimeRun{}, false, &RuntimeRunLeaseGenerationError{RunID: runID}
+	}
+	if leaseSeconds <= 0 {
+		leaseSeconds = 60
+	}
+	nowTime := time.Now().UTC()
+	now := nowTime.Format(time.RFC3339)
+	lease := nowTime.Add(time.Duration(leaseSeconds) * time.Second).Format(time.RFC3339)
+	res, err := db.sql.Exec(`UPDATE runtime_runs SET lease_expires_at = ?, updated_at = ?
+WHERE workspace_id = ? AND id = ? AND runtime_node_id = ? AND lease_generation = ? AND status = 'running'`,
+		lease, now, workspaceID, runID, nodeID, leaseGeneration)
+	if err != nil {
+		return RuntimeRun{}, false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return RuntimeRun{}, false, err
+	}
+	if affected == 0 {
+		return RuntimeRun{}, false, &RuntimeRunLeaseGenerationError{RunID: runID}
+	}
+	run, found, err := db.RuntimeRunByID(workspaceID, runID)
+	if err != nil || !found {
+		return RuntimeRun{}, false, err
+	}
+	return run, true, nil
+}
+
+// FinishRuntimeRun transitions a running run to a terminal status, conditional
+// on the caller still owning it (node + generation). On success it returns the
+// final run; on ownership loss it returns a RuntimeRunLeaseGenerationError and
+// leaves the run untouched. Terminal runs release their run_key and slot.
+func (db *SQLiteStore) FinishRuntimeRun(workspaceID, runID, nodeID string, leaseGeneration int, status string, errorCode, errorMessage, resultJSON string) (RuntimeRun, bool, error) {
+	if leaseGeneration <= 0 {
+		return RuntimeRun{}, false, &RuntimeRunLeaseGenerationError{RunID: runID}
+	}
+	status = strings.ToLower(strings.TrimSpace(status))
+	switch status {
+	case "succeeded", "failed", "cancelled", "canceled":
+	default:
+		return RuntimeRun{}, false, nil
+	}
+	if strings.TrimSpace(resultJSON) == "" {
+		resultJSON = "{}"
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := db.sql.Exec(`UPDATE runtime_runs SET status = ?, error_code = ?, error_message = ?, result_json = ?, finished_at = ?, updated_at = ?
+WHERE workspace_id = ? AND id = ? AND runtime_node_id = ? AND lease_generation = ? AND status = 'running'`,
+		status, strings.TrimSpace(errorCode), strings.TrimSpace(errorMessage), resultJSON, now, now,
+		workspaceID, runID, nodeID, leaseGeneration)
+	if err != nil {
+		return RuntimeRun{}, false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return RuntimeRun{}, false, err
+	}
+	if affected == 0 {
+		return RuntimeRun{}, false, &RuntimeRunLeaseGenerationError{RunID: runID}
+	}
+	run, found, err := db.RuntimeRunByID(workspaceID, runID)
+	if err != nil || !found {
+		return RuntimeRun{}, false, err
+	}
+	return run, true, nil
+}
+
+// ReapExpiredRuntimeRun force-fails a running run whose lease has been stale
+// for longer than the grace window. The where-clause re-checks the lease
+// timestamp so a run renewed (or finished, or taken over) between the SELECT
+// and this UPDATE is left alone; ownership passes to nobody — the generation
+// bump invalidates every outstanding (node, generation) pair.
+func (db *SQLiteStore) ReapExpiredRuntimeRun(workspaceID, runID string, leaseGeneration int, cutoff time.Time) (bool, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := db.sql.Exec(`UPDATE runtime_runs SET status = 'failed', error_code = 'lease_expired', error_message = ?, lease_generation = lease_generation + 1, finished_at = ?, updated_at = ?
+WHERE workspace_id = ? AND id = ? AND status = 'running' AND lease_generation = ? AND lease_expires_at IS NOT NULL AND lease_expires_at != '' AND lease_expires_at < ?`,
+		"lease expired; run reaped by control plane", now, now, workspaceID, runID, leaseGeneration, cutoff.Format(time.RFC3339))
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
+// ListExpiredRunningRuns returns running runs whose lease expired before the
+// cutoff — the reaper's sole criterion (plan 2.2-1: no node-health join; the
+// lease being renewed IS the heartbeat).
+func (db *SQLiteStore) ListExpiredRunningRuns(workspaceID string, cutoff time.Time, limit int) ([]RuntimeRun, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := db.sql.Query(runtimeRunSelectSQL()+` WHERE workspace_id = ? AND status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at != '' AND lease_expires_at < ? ORDER BY lease_expires_at ASC LIMIT ?`,
+		workspaceID, cutoff.Format(time.RFC3339), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []RuntimeRun{}
+	for rows.Next() {
+		run, err := scanRuntimeRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
 }
 
 func (db *SQLiteStore) CreateRuntimeEvent(event RuntimeEvent) error {

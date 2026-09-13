@@ -753,6 +753,14 @@ type Task struct {
 	DesignSystemID  string `yaml:"design_system_id,omitempty" json:"designSystemId,omitempty"`
 
 	Vars map[string]string `yaml:"vars,omitempty"`
+
+	// ActiveRuntimeRunID is the task's execution token (Q0 D5): the ID of the
+	// runtime run currently executing this task. Written after a successful
+	// idempotent enqueue, cleared conditionally (only when it still names that
+	// run) on finish/reap. Optimistic across the SQLite run store and the
+	// file/DB task store — reconciliation converges on the reaper cycle with
+	// an audit trail, never strong consistency.
+	ActiveRuntimeRunID string `yaml:"active_runtime_run_id,omitempty" json:"activeRuntimeRunId,omitempty"`
 }
 
 // UnmarshalJSON accepts legacy task records that persisted nil time pointers

@@ -50,6 +50,9 @@ func TestRuntimeRunClaimLeaseAndExpiredReclaim(t *testing.T) {
 	if claimed.Status != "running" || claimed.RuntimeNodeID != "node-a" || claimed.LeaseExpiresAt == "" {
 		t.Fatalf("unexpected claimed run: %#v", claimed)
 	}
+	if claimed.LeaseGeneration != 1 {
+		t.Fatalf("first claim generation = %d, want 1", claimed.LeaseGeneration)
+	}
 	filtered, err := db.ListRuntimeRuns(RuntimeRunFilter{WorkspaceID: workspaceID, ProjectID: "project", AgentID: "agent", TaskID: "task-one", Status: "running"})
 	if err != nil {
 		t.Fatalf("filter by task: %v", err)
@@ -65,12 +68,15 @@ func TestRuntimeRunClaimLeaseAndExpiredReclaim(t *testing.T) {
 		t.Fatalf("unexpected worker-filtered runs: %#v", workerFiltered)
 	}
 
-	renewed, found, err := db.ExtendRuntimeRunLease(workspaceID, "run-one", "node-a", 60)
+	renewed, found, err := db.ExtendRuntimeRunLeaseWithGeneration(workspaceID, "run-one", "node-a", claimed.LeaseGeneration, 60)
 	if err != nil || !found {
 		t.Fatalf("renew found=%v err=%v", found, err)
 	}
 	if renewed.RuntimeNodeID != "node-a" || renewed.Status != "running" || renewed.LeaseExpiresAt == "" {
 		t.Fatalf("unexpected renewed run: %#v", renewed)
+	}
+	if renewed.LeaseGeneration != 1 {
+		t.Fatalf("renew must not bump generation, got %d", renewed.LeaseGeneration)
 	}
 
 	_, found, err = db.ClaimRuntimeRun(workspaceID, "node-b", 30, nil)
@@ -92,6 +98,13 @@ func TestRuntimeRunClaimLeaseAndExpiredReclaim(t *testing.T) {
 	}
 	if reclaimed.RuntimeNodeID != "node-b" || reclaimed.Status != "running" {
 		t.Fatalf("unexpected reclaimed run: %#v", reclaimed)
+	}
+	if reclaimed.LeaseGeneration != claimed.LeaseGeneration+1 {
+		t.Fatalf("takeover generation = %d, want %d", reclaimed.LeaseGeneration, claimed.LeaseGeneration+1)
+	}
+	// The old owner's lease renewal must fail after takeover.
+	if _, _, err := db.extendRuntimeRunLease(workspaceID, "run-one", "node-a", claimed.LeaseGeneration, 60); !LeaseGenerationMismatch(err) {
+		t.Fatalf("stale renew after takeover: err=%v, want generation mismatch", err)
 	}
 
 	cancelled := reclaimed

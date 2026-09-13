@@ -415,10 +415,13 @@ func (s *Server) restoreDesiredSchedulers() {
 
 // StartWorkspaceScheduler makes periodic activity part of the server
 // lifecycle. Callers should not need to start a project scheduler manually.
+// Also starts the workspace-level runtime reaper singleton (Q0 PR-2):
+// idempotent — repeated starts never spawn a second loop.
 func (s *Server) StartWorkspaceScheduler() error {
 	if s == nil || s.sched == nil {
 		return fmt.Errorf("scheduler manager is unavailable")
 	}
+	s.startRuntimeReaper(context.Background())
 	return s.sched.StartWorkspace()
 }
 
@@ -1661,24 +1664,11 @@ func (s *Server) hasActiveRuntimeRunForTarget(workspaceID string, target runtime
 	return false
 }
 
-func runtimeRunBlocksAgent(run controldb.RuntimeRun, now time.Time) bool {
-	switch strings.TrimSpace(run.Status) {
-	case "queued":
-		return true
-	case "running":
-		lease := strings.TrimSpace(run.LeaseExpiresAt)
-		if lease == "" {
-			return true
-		}
-		expiresAt, err := time.Parse(time.RFC3339, lease)
-		if err != nil {
-			return true
-		}
-		return expiresAt.After(now)
-	default:
-		return false
-	}
-}
+// runtimeRunBlocksAgent is declared in runtime_reaper.go (Q0 PR-2) and now
+// delegates slot occupancy to runOccupiesWorkerSlot: queued runs still gate
+// dispatch (already-dispatched means don't dispatch again), but only a
+// running run with an unexpired lease and non-readonly slot_class occupies
+// the Worker's execution slot.
 
 func runtimeActiveHourAt(activeHours string, t time.Time) (bool, time.Duration) {
 	parts := strings.SplitN(strings.TrimSpace(activeHours), "-", 2)
