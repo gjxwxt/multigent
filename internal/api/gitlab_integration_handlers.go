@@ -225,7 +225,10 @@ func (s *Server) handleGitLabCreateProject(w http.ResponseWriter, r *http.Reques
 // persistPlatformRemoteIdentity stores the create-repository response onto the
 // project record. Every field comes from the GitLab API response; nothing is
 // accepted from the request body, so the stored identity remains independent
-// of anything an agent or client could have echoed.
+// of anything an agent or client could have echoed. RemoteAdoptPath/ID form
+// the platform-controlled trust record the remote-adopt authorization
+// requires (originAdoptAuthorized); the PUT-visible display fields
+// (RemoteURL/CloneURL) are informational only.
 func (s *Server) persistPlatformRemoteIdentity(projectName string, repo *codehost.Repository) error {
 	p, err := s.st.Project(projectName)
 	if err != nil {
@@ -235,6 +238,8 @@ func (s *Server) persistPlatformRemoteIdentity(projectName string, repo *codehos
 	p.RemoteProjectID = repo.ID
 	p.RemoteURL = repo.WebURL
 	p.CloneURL = repo.HTTPCloneURL
+	p.RemoteAdoptPath = repo.PathWithNamespace
+	p.RemoteAdoptID = repo.ID
 	if repo.DefaultBranch != "" {
 		p.DefaultBranch = repo.DefaultBranch
 	}

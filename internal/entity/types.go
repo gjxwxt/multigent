@@ -186,6 +186,20 @@ type Project struct {
 	CloneURL         string `yaml:"clone_url,omitempty" json:"cloneUrl,omitempty"`                 // Clean Clone URL (no embedded tokens)
 	DefaultBranch    string `yaml:"default_branch,omitempty" json:"defaultBranch,omitempty"`       // Default branch name, e.g. "main"
 
+	// Platform-controlled remote identity: written ONLY by server-side flows
+	// (the GitLab create-repository endpoint, remote adoption). These fields
+	// are absent from handlePutProject's request body entirely, so a project
+	// manager forging cloneUrl/remoteUrl/remoteProjectId can never influence
+	// the remote-adopt authorization decision — display fields and trust
+	// fields are structurally separated, not separated by handler discipline.
+	// RemoteAdoptPath is the GitLab path-with-namespace the platform verified;
+	// RemoteAdoptID is the numeric project ID recorded at the same moment.
+	// Adoption requires the GitLab lookup for the observed origin to return
+	// this same ID, so a deleted-and-recreated repository at the same path
+	// cannot ride on a stale record.
+	RemoteAdoptPath string `yaml:"remote_adopt_path,omitempty" json:"remoteAdoptPath,omitempty"`
+	RemoteAdoptID   string `yaml:"remote_adopt_id,omitempty" json:"remoteAdoptId,omitempty"`
+
 	// RemotePipelineRequired declares the ci_ready gate semantics explicitly,
 	// instead of inferring them from whether a remote happens to be bound:
 	//

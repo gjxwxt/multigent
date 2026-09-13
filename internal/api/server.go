@@ -1308,6 +1308,11 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		"runtimeProfile":   p.RuntimeProfile,
 
 		"remotePipelineRequired": p.RemotePipelineRequired,
+		// Platform-controlled trust record: read-only here (the PUT body has
+		// no corresponding fields by design). Exposed so the UI can show
+		// whether a verified platform identity exists.
+		"remoteAdoptPath": p.RemoteAdoptPath,
+		"remoteAdoptId":   p.RemoteAdoptID,
 	})
 }
 

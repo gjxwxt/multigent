@@ -78,9 +78,24 @@ func (s *Server) adoptRemoteAfterSync(ctx context.Context, project string, t *en
 		log.Printf("[remote-adopt] %s: lookup %s failed: %v", project, projectPath, err)
 		return
 	}
+	// The allowlist path authorizes by namespace; the platform-record path
+	// authorizes by exact path. Either way the GitLab lookup must confirm the
+	// repository still exists at that identity — and when the project carries
+	// a previously recorded platform ID, the lookup must return the SAME id,
+	// so a deleted-and-recreated repository at the same path cannot ride on
+	// the stale record.
+	if p.RemoteAdoptPath != "" && p.RemoteAdoptID != "" && repo.ID != p.RemoteAdoptID {
+		log.Printf("[remote-adopt] %s: GitLab reports id %s for %s but the platform record holds id %s (repository recreated?); refusing to adopt", project, repo.ID, projectPath, p.RemoteAdoptID)
+		return
+	}
 	p.RemoteProvider = "gitlab"
 	p.RemoteProjectID = repo.ID
 	p.RemoteURL = repo.HTTPCloneURL
+	// Persist the platform-controlled identity alongside the display fields:
+	// this adoption just verified the (path, id) pair against the live GitLab,
+	// which makes it exactly the record a future re-adoption may trust.
+	p.RemoteAdoptPath = projectPath
+	p.RemoteAdoptID = repo.ID
 	if repo.DefaultBranch != "" {
 		p.DefaultBranch = repo.DefaultBranch
 	}
@@ -102,23 +117,23 @@ const originAdoptAuthorizedNamespaceEnv = "MULTIGENT_GITLAB_ADOPT_NAMESPACE_ALLO
 // originAdoptAuthorized decides whether an origin path observed in the
 // agent-controlled worktree may be adopted (persisting RemoteProjectID and
 // binding the default runner). Origin is attacker-writable input, so it only
-// authorizes when it matches an independent platform record:
+// authorizes against the platform-controlled identity record:
 //
-//   - the project's CloneURL (the UI create-repo flow persists the platform
-//     -created repository's clean clone URL before the init task starts), or
+//   - RemoteAdoptPath (written exclusively by server-side flows: the GitLab
+//     create-repository endpoint and a previous verified adoption), or
 //   - the operator allowlist env above (explicit namespace trust).
 //
-// RemoteURL is NOT sufficient even though handleGitLabCreateProject's own
-// response handling writes it too: handlePutProject accepts remoteUrl from
-// the client, so the field cannot distinguish platform record from a value
-// that merely echoes the agent's chosen origin. Only CloneURL must stay
-// out of the PUT path for this check to remain sound (see A2: the create-repo
-// endpoint persists the platform identity server-side).
+// CloneURL/RemoteURL/RemoteProjectID are NOT trusted even though
+// handleGitLabCreateProject's own response handling writes them too:
+// handlePutProject accepts all three from any project manager, so a value
+// there is client-echo, not platform record. The trusted fields are absent
+// from the PUT body entirely — forgery is structurally impossible, not just
+// forbidden by handler discipline.
 func originAdoptAuthorized(p *entity.Project, originPath string) bool {
 	if p == nil || strings.TrimSpace(originPath) == "" {
 		return false
 	}
-	if expected := cloneURLProjectPath(p.CloneURL); expected != "" && strings.EqualFold(expected, originPath) {
+	if expected := strings.TrimSpace(p.RemoteAdoptPath); expected != "" && strings.EqualFold(expected, originPath) {
 		return true
 	}
 	for _, ns := range strings.Split(os.Getenv(originAdoptAuthorizedNamespaceEnv), ",") {
@@ -131,14 +146,6 @@ func originAdoptAuthorized(p *entity.Project, originPath string) bool {
 		}
 	}
 	return false
-}
-
-// cloneURLProjectPath extracts the path-with-namespace from a platform-record
-// clone/web URL. Uses the shared origin parser with a nil host (no host
-// filtering — the caller already resolved the GitLab host, and the record was
-// produced by the platform's own API response).
-func cloneURLProjectPath(recorded string) string {
-	return gitlabProjectPathFromURL(recorded, nil)
 }
 
 // initWorktreeOriginURL reads the origin remote URL of the worktree/repo the

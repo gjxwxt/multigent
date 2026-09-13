@@ -108,7 +108,8 @@ func TestAdoptRemoteAfterSyncBindsRunner(t *testing.T) {
 	if err := s.st.SaveProject("p15-init-spring-v2", &entity.Project{
 		Name:     "p15-init-spring-v2",
 		Repo:     repoDir,
-		CloneURL: gitlab.URL + "/root/p15-init-spring-v2.git", // platform create-repo record
+		RemoteAdoptPath: "root/p15-init-spring-v2", // platform create-repo record (server-side only field)
+		RemoteAdoptID:   "58",
 	}); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
@@ -155,7 +156,8 @@ func TestAdoptRemoteIfNeededAfterStepFiresForPendingTask(t *testing.T) {
 	if err := s.st.SaveProject("proj", &entity.Project{
 		Name:     "proj",
 		Repo:     repoDir,
-		CloneURL: gitlab.URL + "/root/mid-step.git", // platform create-repo record
+		RemoteAdoptPath: "root/mid-step", // platform create-repo record (server-side only field)
+		RemoteAdoptID:   "58",
 	}); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
@@ -263,8 +265,9 @@ func TestAdoptRemoteAfterSyncIgnoresForeignOrigin(t *testing.T) {
 // Regression (P0, review 2026-09-14): the worktree origin is agent-writable.
 // An origin pointing at ANOTHER repository on the SAME pinned GitLab must not
 // be adopted — otherwise the agent could steer RemoteProjectID (and with it
-// the default runner binding) at a repo it does not own. Adoption requires a
-// platform-recorded remote identity (CloneURL), not just same-host.
+// the default runner binding) at a repo it does not own. Adoption requires
+// the platform-controlled identity record (RemoteAdoptPath/ID), not just
+// same-host.
 func TestAdoptRemoteAfterSyncRejectsSameHostForeignRepo(t *testing.T) {
 	s, workspaceID := newConnectionGrantPolicyServer(t)
 
@@ -294,9 +297,8 @@ func TestAdoptRemoteAfterSyncRejectsSameHostForeignRepo(t *testing.T) {
 // A RemoteURL alone must never authorize adoption. remoteUrl is accepted by
 // handlePutProject from any project manager, so a forged PUT (or the standard
 // init flow's own metadata echo) can make RemoteURL match whatever origin the
-// agent points at — the agent would become its own adoption authority. The
-// only client-independent record is CloneURL (see the A2 hardening: the
-// create-repo endpoint persists the platform identity server-side).
+// agent points at — the agent would become its own adoption authority. Only
+// the server-side-only RemoteAdoptPath/ID record authorizes.
 func TestAdoptRemoteAfterSyncRemoteURLAloneDoesNotAuthorize(t *testing.T) {
 	s, workspaceID := newConnectionGrantPolicyServer(t)
 
@@ -328,12 +330,11 @@ func TestAdoptRemoteAfterSyncRemoteURLAloneDoesNotAuthorize(t *testing.T) {
 	}
 }
 
-// A stale agent-controlled RemoteURL must not authorize either: the standard
-// init PUT carries remote metadata from the client, so a value merely echoing
-// the agent's chosen origin would make the agent its own adoption authority.
-// Only CloneURL — the platform create-repo flow's API-response record —
-// authorizes.
-func TestAdoptRemoteAfterSyncCloneURLAuthorizes(t *testing.T) {
+// The platform-controlled identity record (RemoteAdoptPath/ID, written only
+// by server-side flows) authorizes adoption. Display fields the PUT accepts
+// (CloneURL with a forged matching path, RemoteURL) do not — even when the
+// forged CloneURL exactly matches the observed origin.
+func TestAdoptRemoteAfterSyncPlatformRecordAuthorizes(t *testing.T) {
 	s, workspaceID := newConnectionGrantPolicyServer(t)
 
 	var runnerBinds []string
@@ -344,10 +345,12 @@ func TestAdoptRemoteAfterSyncCloneURLAuthorizes(t *testing.T) {
 	repoDir := filepath.Join(t.TempDir(), "workspace")
 	seedOriginRepo(t, repoDir, gitlab.URL+"/gao/my-repo.git")
 	if err := s.st.SaveProject("proj", &entity.Project{
-		Name:      "proj",
-		Repo:      repoDir,
-		CloneURL:  gitlab.URL + "/gao/my-repo.git",
-		RemoteURL: gitlab.URL + "/gao/other-repo", // stale/echoed value must NOT authorize
+		Name:            "proj",
+		Repo:            repoDir,
+		RemoteAdoptPath: "gao/my-repo", // server-side create-repo record
+		RemoteAdoptID:   "58",
+		CloneURL:        gitlab.URL + "/gao/echoed-but-untrusted.git",
+		RemoteURL:       gitlab.URL + "/gao/other-repo", // stale/echoed display values must NOT authorize
 	}); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
@@ -361,10 +364,81 @@ func TestAdoptRemoteAfterSyncCloneURLAuthorizes(t *testing.T) {
 		t.Fatalf("reload project: %v", err)
 	}
 	if p.RemoteProjectID != "58" {
-		t.Fatalf("platform-recorded CloneURL must authorize adoption, got RemoteProjectID=%q", p.RemoteProjectID)
+		t.Fatalf("platform-controlled record must authorize adoption, got RemoteProjectID=%q", p.RemoteProjectID)
 	}
 	if len(runnerBinds) != 1 {
 		t.Fatalf("runner binds = %v, want 1", runnerBinds)
+	}
+}
+
+// A project manager forging the PUT-writable display fields (cloneUrl,
+// remoteUrl, remoteProjectId) to match the agent's origin must NOT authorize
+// adoption or runner binding: none of them is the trust record.
+func TestAdoptRemoteAfterSyncForgedDisplayFieldsDoNotAuthorize(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+
+	var runnerBinds []string
+	gitlab := fakeGitLabProjectServer(t, "gao/my-repo", &runnerBinds)
+	defer gitlab.Close()
+	seedGitLabConnection(t, s, workspaceID, "conn-gitlab", gitlab.URL)
+
+	repoDir := filepath.Join(t.TempDir(), "workspace")
+	seedOriginRepo(t, repoDir, gitlab.URL+"/gao/my-repo.git")
+	if err := s.st.SaveProject("proj", &entity.Project{
+		Name:            "proj",
+		Repo:            repoDir,
+		CloneURL:        gitlab.URL + "/gao/my-repo.git", // forged via PUT to match the origin
+		RemoteURL:       gitlab.URL + "/gao/my-repo",    // forged via PUT
+		RemoteProjectID: "58",                           // forged via PUT
+	}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+
+	task := &entity.Task{ID: "t-init", Status: entity.TaskStatusDoneSuccess, WorktreeDir: repoDir}
+	t.Setenv("MULTIGENT_GITLAB_RUNNER_ID", "7")
+	s.adoptRemoteAfterSync(context.Background(), "proj", task)
+
+	p, _ := s.st.Project("proj")
+	if p.RemoteAdoptID != "" {
+		t.Fatalf("forged display fields must not grant adoption, got RemoteAdoptID=%q", p.RemoteAdoptID)
+	}
+	if len(runnerBinds) != 0 {
+		t.Fatalf("runner must not bind via forged display fields, got %v", runnerBinds)
+	}
+}
+
+// A platform record pointing at a path whose live GitLab project now has a
+// DIFFERENT id (deleted and recreated) must not adopt: the stale (path, id)
+// pair fails the identity-consistency check.
+func TestAdoptRemoteAfterSyncRejectsStalePlatformRecordID(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+
+	var runnerBinds []string
+	gitlab := fakeGitLabProjectServer(t, "gao/my-repo", &runnerBinds)
+	defer gitlab.Close()
+	seedGitLabConnection(t, s, workspaceID, "conn-gitlab", gitlab.URL)
+
+	repoDir := filepath.Join(t.TempDir(), "workspace")
+	seedOriginRepo(t, repoDir, gitlab.URL+"/gao/my-repo.git")
+	if err := s.st.SaveProject("proj", &entity.Project{
+		Name:            "proj",
+		Repo:            repoDir,
+		RemoteAdoptPath: "gao/my-repo",
+		RemoteAdoptID:   "999", // recorded before the repo was deleted/recreated; live id is 58
+	}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+
+	task := &entity.Task{ID: "t-init", Status: entity.TaskStatusDoneSuccess, WorktreeDir: repoDir}
+	t.Setenv("MULTIGENT_GITLAB_RUNNER_ID", "7")
+	s.adoptRemoteAfterSync(context.Background(), "proj", task)
+
+	p, _ := s.st.Project("proj")
+	if p.RemoteProjectID != "" {
+		t.Fatalf("stale platform record must not adopt, got RemoteProjectID=%q", p.RemoteProjectID)
+	}
+	if len(runnerBinds) != 0 {
+		t.Fatalf("runner must not bind on stale record, got %v", runnerBinds)
 	}
 }
 
