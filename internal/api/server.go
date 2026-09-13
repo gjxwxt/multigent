@@ -283,11 +283,37 @@ func (s *Server) SetLocalRuntimeAPIURL(url string) {
 	s.attentionRecoveryOnce.Do(func() {
 		go s.ensurePlatformWorkflowDefinitions()
 		go func() {
+			s.logSecretStorageBaseline()
 			s.healAgentChannelBindingsAndIdentities()
 			s.recoverActiveWorkflowRunsWithDelay(3 * time.Second)
 			s.recoverPendingAttentionWakeups()
 		}()
 	})
+}
+
+// logSecretStorageBaseline inventories secret records at startup: WARN when
+// plaintext rows exist (with counts per surface, never contents), INFO with
+// the encrypted/empty split otherwise. The hard gate itself lives at seal
+// time (MULTIGENT_REQUIRE_ENCRYPTED_SECRETS); this is the visibility half.
+func (s *Server) logSecretStorageBaseline() {
+	if s == nil || s.controlDB == nil {
+		return
+	}
+	report, err := s.controlDB.AuditSecrets()
+	if err != nil {
+		log.Printf("[secrets-baseline] audit failed: %v", err)
+		return
+	}
+	if len(report.Plaintext) == 0 {
+		log.Printf("[secrets-baseline] secret storage OK: %d encrypted, %d empty, key configured=%v", report.Encrypted, report.Empty, report.EncryptionKeyConfigured)
+		return
+	}
+	byTable := map[string]int{}
+	for _, rec := range report.Plaintext {
+		byTable[rec.Table]++
+	}
+	log.Printf("[secrets-baseline] WARNING: %d plaintext secret record(s) detected (connections=%d, model_providers=%d, oauth_client_configs=%d); key configured=%v. Run `multigent secrets audit` for the inventory and `multigent secrets migrate --apply` after setting MULTIGENT_CONNECTION_ENCRYPTION_KEY.",
+		len(report.Plaintext), byTable["connections"], byTable["model_providers"], byTable["oauth_client_configs"], report.EncryptionKeyConfigured)
 }
 
 func (s *Server) runtimeAPIURLForInternalEvent() string {
