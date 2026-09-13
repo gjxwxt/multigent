@@ -50,44 +50,72 @@ func isRuntimeInfraFailureCode(code string) bool {
 	return ok
 }
 
-// applyInfraFailureBackoff is called from the non-workflow task finish path
-// when a run failed with an infra error code. streak+1 < 3 → pending with
-// NotBefore = now+5m; streak+1 == 3 → blocked + human-owner notification. The
-// task is always persisted here (terminal done_failed transitions are NOT
-// overridden — infra counting only applies when the finish path returns the
-// task to pending).
+// applyInfraFailureBackoff is the standalone (non-fenced) entry point, kept
+// for callers that transition a task outside the runtime fence. It mutates in
+// place and persists via PersistTask.
 func (s *Server) applyInfraFailureBackoff(workspaceID, project, agent string, task *entity.Task, errorCode string) {
-	if s == nil || s.ts == nil || task == nil {
+	if !applyInfraFailureBackoffMutation(task, errorCode) {
 		return
 	}
-	if !isRuntimeInfraFailureCode(errorCode) {
+	if s == nil || s.ts == nil {
 		return
+	}
+	persistErr := s.ts.PersistTask(project, agent, task)
+	if task.Status == entity.TaskStatusBlocked {
+		if persistErr != nil {
+			slog.Warn("infra failure cap: persisting blocked task failed", "task", task.ID, "error", persistErr)
+		}
+		s.notifyTaskHumanOwners(workspaceID, project, agent, task, errorCode, task.InfraFailureStreak)
+		return
+	}
+	if persistErr != nil {
+		slog.Warn("infra failure backoff: persisting task failed", "task", task.ID, "error", persistErr)
+	}
+}
+
+// notifyInfraBlockedOwner drives the human-owner notification for a task the
+// fenced transition just parked in blocked (Q0 PR-3: blocked is never
+// silent — comment/IM/audit side effects). Called AFTER the fence released:
+// notification is not task state and must not hold the token mutex.
+func (s *Server) notifyInfraBlockedOwner(workspaceID, project, agent, taskID, errorCode string) {
+	if s == nil || s.ts == nil {
+		return
+	}
+	task, err := s.ts.GetTask(project, agent, taskID)
+	if err != nil || task == nil || !taskBlockedByInfraFailures(task) {
+		return
+	}
+	s.notifyTaskHumanOwners(workspaceID, project, agent, task, errorCode, task.InfraFailureStreak)
+}
+
+// applyInfraFailureBackoffMutation is the pure in-memory backoff decision used
+// inside the fenced transition (GPT 收口 2/4d): streak+1 < 3 → pending with
+// NotBefore = now+5m; streak+1 == 3 → blocked. It writes NOTHING — persisting
+// is the fenced helper's job, so a persist failure there leaves the task
+// byte-identical for the retrying pass. Reports whether the task state
+// changed. Terminal done_failed transitions are NOT overridden — infra
+// counting only applies when the task is being returned to pending/blocked.
+func applyInfraFailureBackoffMutation(task *entity.Task, errorCode string) bool {
+	if task == nil || !isRuntimeInfraFailureCode(errorCode) {
+		return false
 	}
 	streak := task.InfraFailureStreak + 1
 	task.InfraFailureStreak = streak
 	now := time.Now().UTC()
 	task.UpdatedAt = now
+	prev := task.Status
 	if streak >= runtimeInfraFailureBlockedThreshold {
-		prev := task.Status
 		task.Status = entity.TaskStatusBlocked
 		task.NotBefore = nil
-		entity.ApplyStatusTimestamps(task, prev, now)
-		if err := s.ts.PersistTask(project, agent, task); err != nil {
-			slog.Warn("infra failure cap: persisting blocked task failed", "task", task.ID, "error", err)
-		}
-		s.notifyTaskHumanOwners(workspaceID, project, agent, task, errorCode, streak)
-		return
+	} else {
+		// Backoff: return the task to pending with a future NotBefore so the
+		// scheduler skips it until the window passes (it stays visible).
+		notBefore := now.Add(runtimeInfraFailureBackoff)
+		task.Status = entity.TaskStatusPending
+		task.NotBefore = &notBefore
 	}
-	// Backoff: return the task to pending with a future NotBefore so the
-	// scheduler skips it until the window passes (it stays visible).
-	prev := task.Status
-	task.Status = entity.TaskStatusPending
-	notBefore := now.Add(runtimeInfraFailureBackoff)
-	task.NotBefore = &notBefore
 	entity.ApplyStatusTimestamps(task, prev, now)
-	if err := s.ts.PersistTask(project, agent, task); err != nil {
-		slog.Warn("infra failure backoff: persisting task failed", "task", task.ID, "error", err)
-	}
+	return true
 }
 
 // resetInfraFailureStreak clears the consecutive-failure counter on success

@@ -13,6 +13,8 @@ import (
 
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
+	"github.com/multigent/multigent/internal/taskstore"
+	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
 
 // Q0 PR-2 service-layer tests. Matrix: B9 (fork slot_class), B17 (queued does
@@ -25,6 +27,44 @@ func slotTestServer(t *testing.T) (*Server, string) {
 	s, workspaceID := newConnectionGrantPolicyServer(t)
 	seedSampleAgentsForTest(t, s, workspaceID)
 	return s, workspaceID
+}
+
+// seedRealWorkflowRun starts a REAL workflow run (workflowstore.StartRun on a
+// saved definition) attached to taskID, and marks the first step's instance
+// running so the task mirrors an in-flight workflow execution. Returns the
+// run and the active step ID.
+func seedRealWorkflowRun(t *testing.T, s *Server, workspaceID, project, taskID string) (entity.WorkflowRun, string) {
+	t.Helper()
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	def := entity.WorkflowDefinition{
+		ID: "wf-fence-test-v1", Name: "Fence Test", Version: 1, Scope: "workspace",
+		StartStepID: "step_a",
+		Steps: []entity.WorkflowStep{
+			{ID: "step_a", Type: "agent_task", Title: "A", Position: entity.WorkflowPosition{X: 0, Y: 0}},
+			{ID: "step_b", Type: "agent_task", Title: "B", Position: entity.WorkflowPosition{X: 100, Y: 0}},
+		},
+		Edges: []entity.WorkflowEdge{
+			{ID: "e_ab", From: "step_a", To: "step_b", IsDefault: true},
+		},
+	}
+	if err := wfStore.SaveDefinition(&def); err != nil {
+		t.Fatalf("save definition: %v", err)
+	}
+	run, instances, err := wfStore.StartRun(project, taskID, def.ID, nil)
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	for i := range instances {
+		if instances[i].StepID != run.ActiveStepID {
+			continue
+		}
+		instances[i].Status = "running"
+		instances[i].UpdatedAt = time.Now().UTC()
+		if err := wfStore.SaveStepInstance(&instances[i]); err != nil {
+			t.Fatalf("mark step running: %v", err)
+		}
+	}
+	return run, run.ActiveStepID
 }
 
 func slotTestNode(t *testing.T, s *Server, workspaceID string) controldb.RuntimeNode {
@@ -804,5 +844,524 @@ func TestFinishRuntimeNodeRunStaleGenerationRejected(t *testing.T) {
 	s.handleRuntimeNodeRunComplete(rec2, req2)
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("current-generation finish status=%d body=%s", rec2.Code, rec2.Body.String())
+	}
+}
+
+// GPT 收口 3: a reaped WORKFLOW task must explicitly enter the workflow
+// failure/rework mechanism — the active step instance, the run, and the task
+// all leave the in-flight state; nothing stays in_progress.
+func TestReaperFailsWorkflowStepThroughReworkPath(t *testing.T) {
+	s, workspaceID := slotTestServer(t)
+	node := slotTestNode(t, s, workspaceID)
+	now := time.Now().UTC()
+	nowText := now.Format(time.RFC3339)
+	task := &entity.Task{ID: "task-wf-reap", Title: "WfReap", Status: entity.TaskStatusInProgress, Priority: 2,
+		Vars: map[string]string{}, CreatedAt: now, UpdatedAt: now}
+	if err := s.ts.AddTask("sample", "pm", task); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
+	wfRun, activeStepID := seedRealWorkflowRun(t, s, workspaceID, "sample", task.ID)
+	task.Vars["workflow_run_id"] = wfRun.ID
+	if err := s.ts.UpdateTask("sample", "pm", task); err != nil {
+		t.Fatalf("stamp workflow var: %v", err)
+	}
+
+	run := controldb.RuntimeRun{
+		ID: "run-wf-reap", WorkspaceID: workspaceID, RuntimeNodeID: node.ID,
+		AgentWorkerID: "aw-pm", ProjectID: "sample", AgentID: "pm", TaskID: task.ID,
+		Status: "running", LeaseExpiresAt: now.Add(-10 * time.Minute).Format(time.RFC3339), LeaseGeneration: 1,
+		CreatedAt: nowText, UpdatedAt: nowText,
+	}
+	if err := s.controlDB.UpsertRuntimeRun(run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	s.setTaskActiveRuntimeRun("sample", "pm", task.ID, run.ID)
+
+	s.runtimeReaperPass()
+
+	// Run: force-failed by the reaper.
+	runFinal, found, err := s.controlDB.RuntimeRunByID(workspaceID, run.ID)
+	if err != nil || !found {
+		t.Fatalf("load run: %v", err)
+	}
+	if runFinal.Status != "failed" || runFinal.ErrorCode != "lease_expired" {
+		t.Fatalf("run not reaped: %+v", runFinal)
+	}
+	// Workflow run: failed (terminal), no dangling ActiveStepID.
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	wfFinal, ok, err := wfStore.RunForTask("sample", task.ID)
+	if err != nil || !ok {
+		t.Fatalf("load workflow run: ok=%v err=%v", ok, err)
+	}
+	if wfFinal.Status != "failed" {
+		t.Fatalf("workflow run status=%s, want failed (rework path)", wfFinal.Status)
+	}
+	// Step instance: failed, finished.
+	instances, err := wfStore.ListStepInstances(wfRun.ID)
+	if err != nil {
+		t.Fatalf("list steps: %v", err)
+	}
+	stepFinal := ""
+	for _, inst := range instances {
+		if inst.StepID == activeStepID {
+			stepFinal = inst.Status
+		}
+	}
+	if stepFinal != "failed" {
+		t.Fatalf("active step status=%q, want failed", stepFinal)
+	}
+	// Task: archived done_failed — never in_progress.
+	archived, err := s.ts.ListArchivedTasks("sample", "pm")
+	if err != nil {
+		t.Fatalf("list archived: %v", err)
+	}
+	var done *entity.Task
+	for _, at := range archived {
+		if at.ID == task.ID {
+			done = at
+		}
+	}
+	if done == nil || done.Status != entity.TaskStatusDoneFailed {
+		t.Fatalf("workflow task not archived as done_failed: %+v", done)
+	}
+	// Token released (persist succeeded inside the fence).
+	active, _ := s.ts.GetTask("sample", "pm", task.ID)
+	if active != nil && active.ActiveRuntimeRunID != "" {
+		t.Fatalf("token must be released after fenced workflow transition: %q", active.ActiveRuntimeRunID)
+	}
+}
+
+// GPT 收口 4a: the OLD-finish-vs-NEW-enqueue race driven through the REAL
+// HTTP finish handler (handleRuntimeNodeRunComplete), not FinishRuntimeRun
+// directly. The old run's late success must never touch the task that a new
+// dispatch now owns — the fence makes the transition a no-op.
+func TestOldHTTPFinishVsNewEnqueueFence(t *testing.T) {
+	for round := 0; round < 10; round++ {
+		t.Run(fmt.Sprintf("round%d", round), func(t *testing.T) {
+			s, workspaceID := slotTestServer(t)
+			node := slotTestNode(t, s, workspaceID)
+			now := time.Now().UTC()
+			nowText := now.Format(time.RFC3339)
+			task := &entity.Task{ID: fmt.Sprintf("task-hofe-%d", round), Title: "HTTP old finish", Status: entity.TaskStatusInProgress, Priority: 2, CreatedAt: now, UpdatedAt: now}
+			if err := s.ts.AddTask("sample", "pm", task); err != nil {
+				t.Fatalf("add task: %v", err)
+			}
+			oldRun := controldb.RuntimeRun{
+				ID: fmt.Sprintf("run-hofe-old-%d", round), WorkspaceID: workspaceID, RuntimeNodeID: node.ID,
+				AgentWorkerID: "aw-pm", ProjectID: "sample", AgentID: "pm", TaskID: task.ID,
+				Status: "running", LeaseExpiresAt: now.Add(time.Minute).Format(time.RFC3339), LeaseGeneration: 1,
+				CreatedAt: nowText, UpdatedAt: nowText,
+			}
+			if err := s.controlDB.UpsertRuntimeRun(oldRun); err != nil {
+				t.Fatalf("seed old run: %v", err)
+			}
+			s.setTaskActiveRuntimeRun("sample", "pm", task.ID, oldRun.ID)
+
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			wg.Add(2)
+			// Old node's late success through the real HTTP handler.
+			go func() {
+				defer wg.Done()
+				<-start
+				body := strings.NewReader(`{"leaseGeneration":1,"result":{"summary":"late success"}}`)
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime-node/runs/"+oldRun.ID+"/complete", body)
+				req.SetPathValue("runId", oldRun.ID)
+				req = req.WithContext(contextWithNode(req.Context(), node))
+				rec := httptest.NewRecorder()
+				s.handleRuntimeNodeRunComplete(rec, req)
+				if rec.Code != http.StatusOK {
+					t.Errorf("old finish status=%d body=%s", rec.Code, rec.Body.String())
+				}
+			}()
+			// New dispatch re-stamps the token to a new run.
+			go func() {
+				defer wg.Done()
+				<-start
+				newRun := controldb.RuntimeRun{
+					ID: fmt.Sprintf("run-hofe-new-%d", round), WorkspaceID: workspaceID, RuntimeNodeID: node.ID,
+					AgentWorkerID: "aw-pm", ProjectID: "sample", AgentID: "pm", TaskID: task.ID,
+					Status: "running", LeaseExpiresAt: now.Add(time.Minute).Format(time.RFC3339), LeaseGeneration: 1,
+					CreatedAt: nowText, UpdatedAt: nowText,
+				}
+				if err := s.controlDB.UpsertRuntimeRun(newRun); err != nil {
+					t.Errorf("new enqueue: %v", err)
+					return
+				}
+				s.setTaskActiveRuntimeRun("sample", "pm", task.ID, newRun.ID)
+			}()
+			close(start)
+			wg.Wait()
+
+			stored, _ := s.ts.GetTask("sample", "pm", task.ID)
+			if stored == nil {
+				t.Fatal("task missing")
+			}
+			// The old finish must NOT have transitioned the task: it stays
+			// active (in_progress) under the new run's fence — never
+			// done_success, never archived.
+			if stored.Status != entity.TaskStatusInProgress {
+				t.Fatalf("round %d: old HTTP finish mutated the task: %s", round, stored.Status)
+			}
+			archived, _ := s.ts.ListArchivedTasks("sample", "pm")
+			for _, at := range archived {
+				if at.ID == task.ID {
+					t.Fatalf("round %d: old finish archived the task", round)
+				}
+			}
+			newRunID := fmt.Sprintf("run-hofe-new-%d", round)
+			if stored.ActiveRuntimeRunID != newRunID {
+				t.Fatalf("round %d: token = %q, want the new run's fence", round, stored.ActiveRuntimeRunID)
+			}
+		})
+	}
+}
+
+// GPT 收口 4b: reaper vs new enqueue race — the reaper kills the old run but
+// the task has already been re-dispatched to a new run; the fenced transition
+// must leave the new dispatch untouched and release only the old run's claim.
+func TestReaperVsNewEnqueueFence(t *testing.T) {
+	for round := 0; round < 10; round++ {
+		t.Run(fmt.Sprintf("round%d", round), func(t *testing.T) {
+			s, workspaceID := slotTestServer(t)
+			node := slotTestNode(t, s, workspaceID)
+			now := time.Now().UTC()
+			nowText := now.Format(time.RFC3339)
+			task := &entity.Task{ID: fmt.Sprintf("task-rvne-%d", round), Title: "Reaper vs enqueue", Status: entity.TaskStatusInProgress, Priority: 2, CreatedAt: now, UpdatedAt: now}
+			if err := s.ts.AddTask("sample", "pm", task); err != nil {
+				t.Fatalf("add task: %v", err)
+			}
+			oldRun := controldb.RuntimeRun{
+				ID: fmt.Sprintf("run-rvne-old-%d", round), WorkspaceID: workspaceID, RuntimeNodeID: node.ID,
+				AgentWorkerID: "aw-pm", ProjectID: "sample", AgentID: "pm", TaskID: task.ID,
+				Status: "running", LeaseExpiresAt: now.Add(-10 * time.Minute).Format(time.RFC3339), LeaseGeneration: 1,
+				CreatedAt: nowText, UpdatedAt: nowText,
+			}
+			if err := s.controlDB.UpsertRuntimeRun(oldRun); err != nil {
+				t.Fatalf("seed old run: %v", err)
+			}
+			s.setTaskActiveRuntimeRun("sample", "pm", task.ID, oldRun.ID)
+
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			wg.Add(2)
+			// Reaper pass kills the expired run.
+			go func() {
+				defer wg.Done()
+				<-start
+				s.runtimeReaperPass()
+			}()
+			// New dispatch re-stamps the token.
+			go func() {
+				defer wg.Done()
+				<-start
+				newRun := controldb.RuntimeRun{
+					ID: fmt.Sprintf("run-rvne-new-%d", round), WorkspaceID: workspaceID, RuntimeNodeID: node.ID,
+					AgentWorkerID: "aw-pm", ProjectID: "sample", AgentID: "pm", TaskID: task.ID,
+					Status: "running", LeaseExpiresAt: now.Add(time.Minute).Format(time.RFC3339), LeaseGeneration: 1,
+					CreatedAt: nowText, UpdatedAt: nowText,
+				}
+				if err := s.controlDB.UpsertRuntimeRun(newRun); err != nil {
+					t.Errorf("new enqueue: %v", err)
+					return
+				}
+				s.setTaskActiveRuntimeRun("sample", "pm", task.ID, newRun.ID)
+			}()
+			close(start)
+			wg.Wait()
+
+			stored, _ := s.ts.GetTask("sample", "pm", task.ID)
+			if stored == nil {
+				t.Fatal("task missing")
+			}
+			newRunID := fmt.Sprintf("run-rvne-new-%d", round)
+			if stored.ActiveRuntimeRunID == newRunID {
+				// New dispatch owns the task: the reaper must not have moved
+				// it out of in_progress or advanced the streak.
+				if stored.Status != entity.TaskStatusInProgress {
+					t.Fatalf("round %d: reaper moved a task owned by the new dispatch: %s", round, stored.Status)
+				}
+				if stored.InfraFailureStreak != 0 {
+					t.Fatalf("round %d: reaper advanced the streak on a fenced-out task: %d", round, stored.InfraFailureStreak)
+				}
+			}
+			// Old run must be dead either way.
+			oldFinal, _, _ := s.controlDB.RuntimeRunByID(workspaceID, oldRun.ID)
+			if oldFinal.Status != "failed" || oldFinal.ErrorCode != "lease_expired" {
+				t.Fatalf("round %d: old run not reaped: %+v", round, oldFinal)
+			}
+		})
+	}
+}
+
+// flakyTaskStore wraps a taskstore.Store and fails the first N UpdateTask and
+// ArchiveTask writes (simulating a transient store failure) so the fenced
+// transition's persist-failure contract can be exercised end to end.
+type flakyTaskStore struct {
+	taskstore.Store
+	failUpdate  int
+	failArchive int
+}
+
+func (f *flakyTaskStore) UpdateTask(project, agent string, t *entity.Task) error {
+	if f.failUpdate > 0 {
+		f.failUpdate--
+		return fmt.Errorf("injected transient store failure")
+	}
+	return f.Store.UpdateTask(project, agent, t)
+}
+
+func (f *flakyTaskStore) ArchiveTask(project, agent string, t *entity.Task) error {
+	if f.failArchive > 0 {
+		f.failArchive--
+		return fmt.Errorf("injected transient store failure")
+	}
+	return f.Store.ArchiveTask(project, agent, t)
+}
+
+// GPT 收口 1/4d: when the task-store write fails inside the fenced finish
+// transition, the token must NOT be released (the transition stays retryable
+// under the old fence), and a retrying finish converges to the correct final
+// state.
+func TestFencedFinishWriteFailureKeepsTokenThenRecovers(t *testing.T) {
+	s, workspaceID := slotTestServer(t)
+	node := slotTestNode(t, s, workspaceID)
+	now := time.Now().UTC()
+	nowText := now.Format(time.RFC3339)
+	task := &entity.Task{ID: "task-wf-fail", Title: "Write failure", Status: entity.TaskStatusInProgress, Priority: 2, CreatedAt: now, UpdatedAt: now}
+	if err := s.ts.AddTask("sample", "pm", task); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
+	run := controldb.RuntimeRun{
+		ID: "run-wf-fail", WorkspaceID: workspaceID, RuntimeNodeID: node.ID,
+		AgentWorkerID: "aw-pm", ProjectID: "sample", AgentID: "pm", TaskID: task.ID,
+		Status: "running", LeaseExpiresAt: now.Add(time.Minute).Format(time.RFC3339), LeaseGeneration: 1,
+		CreatedAt: nowText, UpdatedAt: nowText,
+	}
+	if err := s.controlDB.UpsertRuntimeRun(run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	s.setTaskActiveRuntimeRun("sample", "pm", task.ID, run.ID)
+
+	// Inject one persist failure into the finish path. The fenced helper is
+	// the single persist owner: the mutation + token release ride ONE
+	// UpdateTask write, so a failure persists nothing and the fence holds.
+	flaky := &flakyTaskStore{Store: s.ts, failUpdate: 1}
+	s.ts = flaky
+	body := strings.NewReader(`{"leaseGeneration":1,"result":{"summary":"done"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime-node/runs/"+run.ID+"/complete", body)
+	req.SetPathValue("runId", run.ID)
+	req = req.WithContext(contextWithNode(req.Context(), node))
+	rec := httptest.NewRecorder()
+	s.handleRuntimeNodeRunComplete(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("finish with failing store status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	// The run is terminal, but the task must be untouched: still in_progress,
+	// not archived, token still naming the run — the transition is retryable
+	// by the sweep replay, not lost.
+	stored, _ := s.ts.GetTask("sample", "pm", task.ID)
+	if stored == nil {
+		t.Fatal("task must remain active after write failure")
+	}
+	if stored.ActiveRuntimeRunID != run.ID {
+		t.Fatalf("token must be kept on persist failure, got %q", stored.ActiveRuntimeRunID)
+	}
+	if stored.ArchivedAt != nil {
+		t.Fatal("task must not be archived while its persist failed")
+	}
+	if stored.Status != entity.TaskStatusInProgress {
+		t.Fatalf("task state must be untouched on persist failure, got %s", stored.Status)
+	}
+
+	// Recovery: heal the store and let the pass-wide sweep replay the finish
+	// transition — the production recovery path (clearStaleTaskRuntimeToken
+	// replays a terminal run's task transition before releasing the fence).
+	s.ts = flaky.Store
+	server := s
+	found := server.clearStaleTaskRuntimeToken(workspaceID, "sample", "pm", mustActiveTask(t, s, "sample", "pm", task.ID))
+	if !found {
+		t.Fatal("sweep replay did not reconcile the task")
+	}
+	archived, err := s.ts.ListArchivedTasks("sample", "pm")
+	if err != nil {
+		t.Fatalf("list archived: %v", err)
+	}
+	var done *entity.Task
+	for _, at := range archived {
+		if at.ID == task.ID {
+			done = at
+		}
+	}
+	if done == nil || done.Status != entity.TaskStatusDoneSuccess {
+		t.Fatalf("recovery did not archive the task as success: %+v", done)
+	}
+	if done.ActiveRuntimeRunID != "" {
+		t.Fatalf("recovery must release the token: %q", done.ActiveRuntimeRunID)
+	}
+}
+
+// mustActiveTask loads a task from the active queue for the sweep helpers.
+func mustActiveTask(t *testing.T, s *Server, project, agent, taskID string) *entity.Task {
+	t.Helper()
+	task, err := s.ts.GetTask(project, agent, taskID)
+	if err != nil || task == nil {
+		t.Fatalf("load task %s: %v", taskID, err)
+	}
+	return task
+}
+
+// GPT 收口 1/4d (reaper side): a persist failure inside the reaper's fenced
+// transition keeps the token; the next reaper pass converges to the unified
+// backoff state.
+func TestFencedReaperWriteFailureKeepsTokenThenConverges(t *testing.T) {
+	s, workspaceID := slotTestServer(t)
+	node := slotTestNode(t, s, workspaceID)
+	now := time.Now().UTC()
+	nowText := now.Format(time.RFC3339)
+	task := &entity.Task{ID: "task-wf-fail-reap", Title: "Reap write failure", Status: entity.TaskStatusInProgress, Priority: 2, CreatedAt: now, UpdatedAt: now}
+	if err := s.ts.AddTask("sample", "pm", task); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
+	run := controldb.RuntimeRun{
+		ID: "run-wf-fail-reap", WorkspaceID: workspaceID, RuntimeNodeID: node.ID,
+		AgentWorkerID: "aw-pm", ProjectID: "sample", AgentID: "pm", TaskID: task.ID,
+		Status: "running", LeaseExpiresAt: now.Add(-10 * time.Minute).Format(time.RFC3339), LeaseGeneration: 1,
+		CreatedAt: nowText, UpdatedAt: nowText,
+	}
+	if err := s.controlDB.UpsertRuntimeRun(run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	s.setTaskActiveRuntimeRun("sample", "pm", task.ID, run.ID)
+
+	// First pass with an injected persist failure inside the fenced
+	// transition (the mutation is in-memory; the helper's UpdateTask is the
+	// single persist and it is what fails).
+	flaky := &flakyTaskStore{Store: s.ts, failUpdate: 1}
+	s.ts = flaky
+	s.runtimeReaperPass()
+	stored, _ := s.ts.GetTask("sample", "pm", task.ID)
+	if stored == nil {
+		t.Fatal("task missing")
+	}
+	// Same-pass convergence: the pass-wide sweep replays the reaped
+	// transition under the fence (token still names the run) and persists the
+	// backoff. The task must NOT be left in_progress or dropped unfenced.
+	if stored.Status != entity.TaskStatusPending || stored.NotBefore == nil {
+		t.Fatalf("same-pass sweep must converge to backoff: status=%s notBefore=%v", stored.Status, stored.NotBefore)
+	}
+	if stored.ActiveRuntimeRunID != "" {
+		t.Fatalf("sweep must release the token after a successful replay: %q", stored.ActiveRuntimeRunID)
+	}
+	if stored.InfraFailureStreak != 1 {
+		t.Fatalf("streak=%d, want exactly 1 (single fenced application, no double count)", stored.InfraFailureStreak)
+	}
+
+	// Recovery pass with a healthy store: the run is already reaped (not in
+	// the expired list) so this pass must be a no-op for the task — the
+	// backoff is NOT applied a second time.
+	s.ts = flaky.Store
+	s.runtimeReaperPass()
+	stored, _ = s.ts.GetTask("sample", "pm", task.ID)
+	if stored == nil {
+		t.Fatal("task missing after recovery")
+	}
+	if stored.Status != entity.TaskStatusPending || stored.NotBefore == nil {
+		t.Fatalf("recovery pass must keep the converged backoff: status=%s notBefore=%v", stored.Status, stored.NotBefore)
+	}
+	if stored.InfraFailureStreak != 1 {
+		t.Fatalf("streak=%d after recovery pass, want exactly 1 (no double count)", stored.InfraFailureStreak)
+	}
+	if stored.ActiveRuntimeRunID != "" {
+		t.Fatalf("token must stay released: %q", stored.ActiveRuntimeRunID)
+	}
+}
+
+// Q0 收口 5: manual start JOINs the queue (task-queue semantics). With an
+// agent already holding a queued/running run on its assigned node, a manual
+// start must converge onto the SAME run via run_key idempotency (200), NOT
+// 409. The legacy immediate-execution 409 is gone; backoff/blocked gates are
+// unchanged (B8 covers them).
+func TestManualStartJoinsQueueWhileAgentBusy(t *testing.T) {
+	s, workspaceID := slotTestServer(t)
+	node := slotTestNode(t, s, workspaceID)
+	// Bind the pm worker to the online node so the manual start takes the
+	// runtime-node enqueue path.
+	worker, ok, err := s.controlDB.AgentWorkerByID(workspaceID, "aw-pm")
+	if err != nil || !ok {
+		t.Fatalf("load aw-pm: %v %v", ok, err)
+	}
+	worker.DefaultRuntimeNodeID = node.ID
+	if worker.DefaultModelAccountID == "" {
+		// Readiness gate: runnable agents must bind an explicit model account.
+		worker.DefaultModelAccountID = "acct-test"
+	}
+	if err := s.controlDB.UpsertAgentWorker(worker); err != nil {
+		t.Fatalf("bind node: %v", err)
+	}
+
+	now := time.Now().UTC()
+	task := &entity.Task{ID: "task-manual-queue", Title: "Manual queue", Status: entity.TaskStatusPending, Priority: 2, CreatedAt: now, UpdatedAt: now}
+	if err := s.ts.AddTask("sample", "pm", task); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
+
+	startTask := func() *httptest.ResponseRecorder {
+		req := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/"+task.ID+"/start", "admin", nil)
+		req.SetPathValue("name", "sample")
+		req.SetPathValue("taskId", task.ID)
+		rec := httptest.NewRecorder()
+		s.handleStartProjectTask(rec, req)
+		return rec
+	}
+
+	// First manual start → queued run.
+	rec1 := startTask()
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first manual start status=%d body=%s", rec1.Code, rec1.Body.String())
+	}
+	runs, err := s.controlDB.ListRuntimeRuns(controldb.RuntimeRunFilter{WorkspaceID: workspaceID, TaskID: task.ID})
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("runs after first start: n=%d err=%v", len(runs), err)
+	}
+	first := runs[0]
+	if first.Status != "queued" {
+		t.Fatalf("first run status=%s, want queued", first.Status)
+	}
+
+	// Second manual start while the run is queued → same run (idempotent),
+	// 200 — the task-queue semantic, not a 409.
+	rec2 := startTask()
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second manual start status=%d body=%s, want 200 (join queue)", rec2.Code, rec2.Body.String())
+	}
+	if !strings.Contains(rec2.Body.String(), first.ID) {
+		t.Fatalf("second start must reference the SAME run %s, got %s", first.ID, rec2.Body.String())
+	}
+	runs, _ = s.controlDB.ListRuntimeRuns(controldb.RuntimeRunFilter{WorkspaceID: workspaceID, TaskID: task.ID})
+	if len(runs) != 1 {
+		t.Fatalf("duplicate run created: n=%d, want 1", len(runs))
+	}
+
+	// A third start while the run is RUNNING (unexpired lease) → still
+	// converges onto the same run; the fence (task token) stays intact.
+	claimed, ok, err := s.controlDB.ClaimRuntimeRun(workspaceID, node.ID, 90, nil)
+	if err != nil || !ok || claimed.ID != first.ID {
+		t.Fatalf("claim run for running phase: ok=%v id=%s err=%v", ok, claimed.ID, err)
+	}
+	rec3 := startTask()
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("third manual start status=%d body=%s, want 200 (join queue)", rec3.Code, rec3.Body.String())
+	}
+	if !strings.Contains(rec3.Body.String(), first.ID) {
+		t.Fatalf("third start must reference the SAME run %s, got %s", first.ID, rec3.Body.String())
+	}
+	runs, _ = s.controlDB.ListRuntimeRuns(controldb.RuntimeRunFilter{WorkspaceID: workspaceID, TaskID: task.ID})
+	if len(runs) != 1 {
+		t.Fatalf("running-phase duplicate: n=%d, want 1", len(runs))
+	}
+	stored, _ := s.ts.GetTask("sample", "pm", task.ID)
+	if stored.ActiveRuntimeRunID != first.ID {
+		t.Fatalf("execution token must still name the running run: %q", stored.ActiveRuntimeRunID)
 	}
 }

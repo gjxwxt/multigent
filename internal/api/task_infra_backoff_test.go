@@ -43,6 +43,9 @@ func infraFailRun(t *testing.T, s *Server, workspaceID, taskID, errorCode string
 	if err := s.controlDB.UpsertRuntimeRun(run); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
+	// The real enqueue path stamps the execution token; the fenced finish
+	// transition refuses to touch an unstamped task.
+	s.setTaskActiveRuntimeRun("sample", "pm", taskID, run.ID)
 	body := strings.NewReader(fmt.Sprintf(`{"leaseGeneration":1,"errorCode":%q,"errorMessage":"boom"}`, errorCode))
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime-node/runs/"+run.ID+"/fail", body)
 	req.SetPathValue("runId", run.ID)
@@ -141,6 +144,8 @@ func TestInfraFailureStreakResetOnSuccess(t *testing.T) {
 	if err := s.controlDB.UpsertRuntimeRun(run); err != nil {
 		t.Fatalf("seed ok run: %v", err)
 	}
+	// Re-dispatch stamps a fresh token (as the enqueue path would).
+	s.setTaskActiveRuntimeRun("sample", "pm", task.ID, run.ID)
 	body := strings.NewReader(`{"leaseGeneration":1,"result":{"summary":"done"}}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime-node/runs/"+run.ID+"/complete", body)
 	req.SetPathValue("runId", run.ID)

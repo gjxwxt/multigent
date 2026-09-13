@@ -1224,11 +1224,12 @@ func (s *Server) finishRuntimeNodeRun(w http.ResponseWriter, r *http.Request, st
 		return
 	}
 	run = finished
-	s.finalizeRuntimeTaskRun(&run, body)
-	// Conditional token clear: only if the task still names THIS run. When the
-	// reaper already reaped this run (its generation bump invalidates the
-	// finish above) this line is never reached — the 409 path returns first.
-	s.clearTaskActiveRuntimeRunIfRun(run.ProjectID, run.AgentID, run.TaskID, run.ID)
+	s.finalizeRuntimeForkSessionAndHeartbeat(&run, body)
+	// GPT 收口 1+2: the task transition goes through the SAME unified
+	// fenced critical section as the reaper — read → fence-check
+	// (ActiveRuntimeRunID == runID) → mutate → persist → release token, all
+	// under one token-mutex hold. No unconditional finalize-then-clear.
+	s.applyFencedFinishTransition(&run, body)
 	if isSuccessfulRuntimeStatus(run.Status) {
 		s.markTaskAttentionSignalsForRun(run, "handled")
 		s.markAttentionSignalsForWakeupRun(run)
@@ -1237,18 +1238,20 @@ func (s *Server) finishRuntimeNodeRun(w http.ResponseWriter, r *http.Request, st
 	_ = json.NewEncoder(w).Encode(map[string]any{"run": runtimeRunResponse(run)})
 }
 
-func (s *Server) finalizeRuntimeTaskRun(run *controldb.RuntimeRun, body runtimeRunFinishRequest) {
-	if s == nil || s.ts == nil || run == nil || strings.TrimSpace(run.TaskID) == "" {
-		if run != nil && strings.TrimSpace(run.ForkSessionID) != "" {
-			s.finalizeRuntimeForkSessionRun(run, body)
-		}
+// finalizeRuntimeForkSessionAndHeartbeat is the run-side (unfenced) part of a
+// finish: fork-session projection and the agent heartbeat record. These are
+// keyed to the run/session, not to the task fence, so they stay outside the
+// task critical section. Task-state mutation happens exclusively inside
+// applyFencedFinishTransition.
+func (s *Server) finalizeRuntimeForkSessionAndHeartbeat(run *controldb.RuntimeRun, body runtimeRunFinishRequest) {
+	if s == nil || run == nil {
 		return
 	}
 	if strings.TrimSpace(run.ForkSessionID) != "" {
 		s.finalizeRuntimeForkSessionRun(run, body)
-		if runtimeRunKind(run) == runtimeexec.KindForkSession {
-			return
-		}
+	}
+	if s.ts == nil || strings.TrimSpace(run.TaskID) == "" {
+		return
 	}
 	now := time.Now().UTC()
 	if hb, err := s.runtimeRunHeartbeat(run); err == nil && hb != nil {
@@ -1263,68 +1266,89 @@ func (s *Server) finalizeRuntimeTaskRun(run *controldb.RuntimeRun, body runtimeR
 		}
 		_ = s.saveRuntimeRunHeartbeat(run, hb)
 	}
-	task, err := s.ts.GetTask(run.ProjectID, run.AgentID, run.TaskID)
-	if err != nil || task == nil {
+}
+
+// applyFencedFinishTransition moves the task of a finished run through the
+// unified fencedTaskTransition critical section (GPT 收口 1+2): fenced on
+// ActiveRuntimeRunID; the mutation (state + ArchivedAt) and the token release
+// land in ONE store write owned by the helper, so a write failure persists
+// nothing and keeps the fence for the sweep replay. The mutation is a pure
+// in-memory decision — it never writes the task store itself.
+func (s *Server) applyFencedFinishTransition(run *controldb.RuntimeRun, body runtimeRunFinishRequest) {
+	if s == nil || s.ts == nil || run == nil || strings.TrimSpace(run.TaskID) == "" {
 		return
 	}
-	if task.Status.IsTerminal() {
-		return
-	}
-	if s.runtimeTaskHasWorkflow(run.WorkspaceID, run.ProjectID, run.TaskID) {
-		if task.Status == entity.TaskStatusInProgress || task.Status == entity.TaskStatusPending {
-			msg := firstNonEmpty(strings.TrimSpace(body.ErrorMessage), strings.TrimSpace(body.ErrorCode), "runtime run failed")
-			errorCode := firstNonEmpty(strings.TrimSpace(body.ErrorCode), "runtime_run_failed")
-			if run.Status != "failed" {
-				msg = runtimeWorkflowStepNotCompletedError
-				errorCode = "workflow_step_not_completed"
+	s.fencedTaskTransition(run.WorkspaceID, run.ProjectID, run.AgentID, run.TaskID, run.ID, func(task *entity.Task) fenceDecision {
+		now := time.Now().UTC()
+		if task.Status.IsTerminal() {
+			return fenceDecisionSkip
+		}
+		if s.runtimeTaskHasWorkflow(run.WorkspaceID, run.ProjectID, run.TaskID) {
+			if task.Status == entity.TaskStatusInProgress || task.Status == entity.TaskStatusPending {
+				msg := firstNonEmpty(strings.TrimSpace(body.ErrorMessage), strings.TrimSpace(body.ErrorCode), "runtime run failed")
+				errorCode := firstNonEmpty(strings.TrimSpace(body.ErrorCode), "runtime_run_failed")
+				if run.Status != "failed" {
+					msg = runtimeWorkflowStepNotCompletedError
+					errorCode = "workflow_step_not_completed"
+				}
+				prev := task.Status
+				task.Status = entity.TaskStatusDoneFailed
+				task.LastError = msg
+				task.ArchivedAt = &now
+				task.UpdatedAt = now
+				entity.ApplyStatusTimestamps(task, prev, now)
+				run.Status = "failed"
+				run.ErrorCode = errorCode
+				run.ErrorMessage = msg
+				if body.Result == nil {
+					body.Result = map[string]any{}
+				}
+				body.Result["error"] = msg
+				run.ResultJSON = marshalRuntimeObject(body.Result)
 			}
-			prev := task.Status
+			return fenceDecisionApply
+		}
+		if task.Status != entity.TaskStatusInProgress && task.Status != entity.TaskStatusPending {
+			return fenceDecisionSkip
+		}
+		prev := task.Status
+		if run.Status == "failed" {
+			// Q0 D4: infra failures (closed server-controlled error-code set)
+			// back off or block the task instead of archiving it as
+			// done_failed; business failures still land on done_failed.
+			if isRuntimeInfraFailureCode(body.ErrorCode) {
+				task.LastError = firstNonEmpty(strings.TrimSpace(body.ErrorMessage), strings.TrimSpace(body.ErrorCode), "runtime run failed")
+				if !applyInfraFailureBackoffMutation(task, body.ErrorCode) {
+					return fenceDecisionSkip
+				}
+				return fenceDecisionApply
+			}
 			task.Status = entity.TaskStatusDoneFailed
-			task.LastError = msg
-			task.UpdatedAt = now
-			entity.ApplyStatusTimestamps(task, prev, now)
-			_ = s.ts.ArchiveTask(run.ProjectID, run.AgentID, task)
-			run.Status = "failed"
-			run.ErrorCode = errorCode
-			run.ErrorMessage = msg
-			if body.Result == nil {
-				body.Result = map[string]any{}
-			}
-			body.Result["error"] = msg
-			run.ResultJSON = marshalRuntimeObject(body.Result)
-		}
-		return
-	}
-	if task.Status != entity.TaskStatusInProgress && task.Status != entity.TaskStatusPending {
-		return
-	}
-	prev := task.Status
-	if run.Status == "failed" {
-		// Q0 D4: infra failures (closed server-controlled error-code set) back
-		// off or block the task instead of archiving it as done_failed;
-		// business failures still land on done_failed untouched.
-		if isRuntimeInfraFailureCode(body.ErrorCode) {
 			task.LastError = firstNonEmpty(strings.TrimSpace(body.ErrorMessage), strings.TrimSpace(body.ErrorCode), "runtime run failed")
-			s.applyInfraFailureBackoff(run.WorkspaceID, run.ProjectID, run.AgentID, task, body.ErrorCode)
-			return
+		} else {
+			task.Status = entity.TaskStatusDoneSuccess
+			resetInfraFailureStreak(task)
+			if summary, _ := body.Result["summary"].(string); strings.TrimSpace(summary) != "" {
+				task.Summary = strings.TrimSpace(summary)
+			}
 		}
-		task.Status = entity.TaskStatusDoneFailed
-		task.LastError = firstNonEmpty(strings.TrimSpace(body.ErrorMessage), strings.TrimSpace(body.ErrorCode), "runtime run failed")
-	} else {
-		task.Status = entity.TaskStatusDoneSuccess
-		resetInfraFailureStreak(task)
-		if summary, _ := body.Result["summary"].(string); strings.TrimSpace(summary) != "" {
-			task.Summary = strings.TrimSpace(summary)
+		task.UpdatedAt = now
+		entity.ApplyStatusTimestamps(task, prev, now)
+		if task.Status == entity.TaskStatusDoneSuccess {
+			s.captureTaskCompletionSnapshot(task)
+			s.syncTaskCompletionRemote(run.ProjectID, task)
+			s.cleanupTaskDeliveryArtifacts(run.ProjectID, task.ID)
 		}
-	}
-	task.UpdatedAt = now
-	entity.ApplyStatusTimestamps(task, prev, now)
-	if task.Status == entity.TaskStatusDoneSuccess {
-		s.captureTaskCompletionSnapshot(task)
-		s.syncTaskCompletionRemote(run.ProjectID, task)
-		s.cleanupTaskDeliveryArtifacts(run.ProjectID, task.ID)
-	}
-	_ = s.ts.ArchiveTask(run.ProjectID, run.AgentID, task)
+		if task.Status.IsTerminal() {
+			task.ArchivedAt = &now
+		}
+		return fenceDecisionApply
+	})
+	// Notification hook (Q0 PR-3): when the fenced transition parked the task
+	// in blocked, the human-owner notify (comment/IM/audit) fires AFTER the
+	// fence released — it is a side effect, not task state, and must not hold
+	// the token mutex.
+	s.notifyInfraBlockedOwner(run.WorkspaceID, run.ProjectID, run.AgentID, run.TaskID, body.ErrorCode)
 }
 
 func runtimeRunKind(run *controldb.RuntimeRun) string {

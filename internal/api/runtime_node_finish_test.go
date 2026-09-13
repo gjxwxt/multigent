@@ -69,6 +69,9 @@ func TestRuntimeNodeCompleteMarksNonWorkflowTaskDone(t *testing.T) {
 	if err := s.controlDB.UpsertRuntimeRun(run); err != nil {
 		t.Fatalf("runtime run: %v", err)
 	}
+	// The real enqueue path stamps the execution token; the fenced finish
+	// transition refuses to touch an unstamped task.
+	s.setTaskActiveRuntimeRun("sample", "pm", task.ID, run.ID)
 	if err := s.controlDB.UpsertAttentionSignal(controldb.AttentionSignal{
 		ID:            "asig-runtime-success-task",
 		WorkspaceID:   workspaceID,

@@ -9,6 +9,7 @@ import (
 
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
+	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
 
 // Q0 PR-2: Worker-slot occupancy, task execution token, and the workspace
@@ -109,8 +110,14 @@ func (s *Server) clearTaskActiveRuntimeRunIfRun(project, agent, taskID, runID st
 
 // clearStaleTaskRuntimeToken is the reaper-side reconciliation for the
 // cross-storage window (plan 2.1-1 direction 2): a task whose token points at
-// a run that is already terminal or no longer exists is stale — clear it and
-// audit so the task can be dispatched again. run-side data is authoritative.
+// a run that is already terminal or no longer exists is stale. Before
+// releasing the token the transition the run never got to apply is REPLAYED
+// through the fenced section (GPT 收口 4d recovery path) — a reaped run drives
+// the unified infra backoff, a succeeded run completes the task, a failed run
+// applies backoff or done_failed — so a persist failure in any finish path
+// converges on the next sweep instead of leaving the task half-transitioned.
+// Only after the transition succeeds (or reports there was nothing to do) is
+// the token cleared and audited.
 func (s *Server) clearStaleTaskRuntimeToken(workspaceID, project, agent string, task *entity.Task) bool {
 	if s == nil || s.ts == nil || task == nil {
 		return false
@@ -127,7 +134,46 @@ func (s *Server) clearStaleTaskRuntimeToken(workspaceID, project, agent string, 
 	if found && (run.Status == "queued" || run.Status == "running") {
 		return false
 	}
+	// Replay the run's task transition under the fence. The token still names
+	// runID (checked above within this same pass), so the fence check inside
+	// transitions the task exactly when the token survives — if a concurrent
+	// finish snuck in first, NotOurs leaves everything untouched.
+	transitioned := false
+	if task.Status.IsTerminal() {
+		transitioned = true // already converged by a previous pass
+	} else {
+		outcome := s.replayTerminalRunTaskTransition(workspaceID, run, found)
+		switch outcome {
+		case fencedTransitionApplied, fencedTransitionSkipped:
+			// The replay itself released the fence in its own write.
+			transitioned = true
+		case fencedTransitionNotOurs:
+			// A concurrent actor took the task — re-check: if the token is
+			// gone the task is someone else's business now.
+			if cur, err := s.ts.GetTask(project, agent, task.ID); err == nil && cur != nil && cur.ActiveRuntimeRunID == "" {
+				transitioned = true
+			}
+		}
+	}
+	if !transitioned {
+		return false
+	}
 	if !s.clearTaskActiveRuntimeRunIfRun(project, agent, task.ID, runID) {
+		// Token already released by the replay's write — that is success.
+		if cur, err := s.ts.GetTask(project, agent, task.ID); err == nil && cur != nil && cur.ActiveRuntimeRunID == "" {
+			s.auditLog(auditLogInput{
+				WorkspaceID:  workspaceID,
+				Action:       "task.runtime_token_orphan",
+				ResourceType: "task",
+				ResourceID:   task.ID,
+				Summary:      "Replayed the run's task transition; execution token already released by the replay",
+				After: map[string]any{
+					"runId":       runID,
+					"runTerminal": found,
+				},
+			})
+			return true
+		}
 		return false
 	}
 	s.auditLog(auditLogInput{
@@ -135,13 +181,72 @@ func (s *Server) clearStaleTaskRuntimeToken(workspaceID, project, agent string, 
 		Action:       "task.runtime_token_orphan",
 		ResourceType: "task",
 		ResourceID:   task.ID,
-		Summary:      "Cleared stale runtime execution token (run already terminal or missing)",
+		Summary:      "Cleared stale runtime execution token after replaying the run's task transition",
 		After: map[string]any{
 			"runId":       runID,
 			"runTerminal": found,
 		},
 	})
 	return true
+}
+
+// replayTerminalRunTaskTransition re-applies the task transition a terminal
+// run should have driven but whose fenced persist failed (or the finish never
+// arrived, e.g. reaped run). It reuses the exact mutations of the finish and
+// reaper paths — via transitionReapedTask for reaped runs and a finish-shaped
+// mutate for the rest — so recovery and the original path cannot diverge.
+func (s *Server) replayTerminalRunTaskTransition(workspaceID string, run controldb.RuntimeRun, found bool) fencedTaskTransitionOutcome {
+	if !found {
+		// Run row already cleaned up: nothing defines the intended outcome —
+		// just release the fence.
+		return s.fencedTaskTransition(workspaceID, run.ProjectID, run.AgentID, run.TaskID, run.ID, nil)
+	}
+	if strings.EqualFold(strings.TrimSpace(run.ErrorCode), "lease_expired") {
+		s.transitionReapedTask(workspaceID, run)
+		return fencedTransitionApplied
+	}
+	switch strings.ToLower(strings.TrimSpace(run.Status)) {
+	case "succeeded":
+		return s.fencedTaskTransition(workspaceID, run.ProjectID, run.AgentID, run.TaskID, run.ID, func(task *entity.Task) fenceDecision {
+			if task.Status.IsTerminal() {
+				return fenceDecisionSkip
+			}
+			prev := task.Status
+			now := time.Now().UTC()
+			task.Status = entity.TaskStatusDoneSuccess
+			resetInfraFailureStreak(task)
+			task.ArchivedAt = &now
+			task.UpdatedAt = now
+			entity.ApplyStatusTimestamps(task, prev, now)
+			return fenceDecisionApply
+		})
+	case "failed":
+		return s.fencedTaskTransition(workspaceID, run.ProjectID, run.AgentID, run.TaskID, run.ID, func(task *entity.Task) fenceDecision {
+			if task.Status.IsTerminal() {
+				return fenceDecisionSkip
+			}
+			if task.Status != entity.TaskStatusInProgress && task.Status != entity.TaskStatusPending {
+				return fenceDecisionSkip
+			}
+			prev := task.Status
+			now := time.Now().UTC()
+			task.LastError = firstNonEmpty(strings.TrimSpace(run.ErrorMessage), strings.TrimSpace(run.ErrorCode), "runtime run failed")
+			if isRuntimeInfraFailureCode(run.ErrorCode) {
+				if !applyInfraFailureBackoffMutation(task, run.ErrorCode) {
+					return fenceDecisionSkip
+				}
+				return fenceDecisionApply
+			}
+			task.Status = entity.TaskStatusDoneFailed
+			task.ArchivedAt = &now
+			task.UpdatedAt = now
+			entity.ApplyStatusTimestamps(task, prev, now)
+			return fenceDecisionApply
+		})
+	default:
+		// cancelled or unknown terminal status — just release the fence.
+		return s.fencedTaskTransition(workspaceID, run.ProjectID, run.AgentID, run.TaskID, run.ID, nil)
+	}
 }
 
 // taskTokenOwnedByRun is the fence check behind every reaper-side task
@@ -154,47 +259,225 @@ func (s *Server) taskTokenOwnedByRun(project, agent string, task *entity.Task, r
 	return strings.TrimSpace(task.ActiveRuntimeRunID) == strings.TrimSpace(runID) && strings.TrimSpace(runID) != ""
 }
 
+// fenceDecision is the three-state result of the fenced transition's mutate:
+// the mutation decides IN MEMORY only — it never writes the task store itself,
+// so the helper stays the single persist owner.
+type fenceDecision int
+
+const (
+	// fenceDecisionApply: the task was mutated in memory; the helper must
+	// persist it (and archive it when the mutation set ArchivedAt), then
+	// release the token.
+	fenceDecisionApply fenceDecision = iota
+	// fenceDecisionSkip: nothing to transition — the helper releases the
+	// token without persisting task-state changes.
+	fenceDecisionSkip
+	// fenceDecisionRetry: the mutation's own side-state writes (workflow
+	// engine, IM notification, …) failed or must be retried — the helper
+	// keeps the token while the run is live, or releases it to the sweep
+	// once the run is terminal.
+	fenceDecisionRetry
+)
+
+// fencedTaskTransitionOutcome classifies the result of the unified task
+// runtime transition critical section.
+type fencedTaskTransitionOutcome int
+
+const (
+	// fencedTransitionNotOurs: the token no longer names this run — a newer
+	// dispatch owns the task, its state must not be touched.
+	fencedTransitionNotOurs fencedTaskTransitionOutcome = iota
+	// fencedTransitionSkipped: task is terminal / not in a transitionable
+	// state — nothing to do, token released when persist succeeded.
+	fencedTransitionSkipped
+	// fencedTransitionApplied: mutation persisted AND token released.
+	fencedTransitionApplied
+	// fencedTransitionPersistFailed: the task-store write failed — the token
+	// is deliberately NOT released so the transition stays retryable (the
+	// reaper sweep or the next finish converges).
+	fencedTransitionPersistFailed
+	// fencedTransitionTaskMissing: task not found in the store.
+	fencedTransitionTaskMissing
+)
+
+// fencedTaskTransition is THE single critical section for "move the task that
+// run R is executing" (GPT 收口 1+2): under one token-mutex hold it reads the
+// task, verifies the fence (ActiveRuntimeRunID == runID), applies the caller's
+// mutation, and persists it. Both the finish path (applyFencedFinishTransition)
+// and the reaper (transitionReapedTask) go through this helper — neither may
+// finalize unconditionally and clear afterwards, and neither may mutate the
+// task outside the fence.
+//
+// The mutation is a pure in-memory three-state decision — the helper is the
+// SINGLE owner of every task-store write (including the archive move, which
+// rides the same write via ArchivedAt):
+//
+//	fenceDecisionApply  → mutate the task AND clear the token in ONE store
+//	                      write; a follow-up ArchiveTask call moves FS-store
+//	                      rows best-effort (the DB row is already archived)
+//	fenceDecisionSkip   → nothing to do (terminal/non-transitionable); one
+//	                      store write releases the token
+//	fenceDecisionRetry  → the mutation's own side-state writes (workflow
+//	                      engine, …) failed; NOTHING is persisted and the
+//	                      token stays, so the pass-wide sweep replay — which
+//	                      requires the fence — redrives the transition
+//
+// Contract (GPT 收口 4d): a failed task-store write persists NOTHING and
+// releases NOTHING — the stored task stays byte-identical to what a replaying
+// sweep re-reads, so the retry can never double-apply. The token is only ever
+// released in the same write that lands the (skipping or applied) state.
+func (s *Server) fencedTaskTransition(workspaceID, project, agent, taskID, runID string, mutate func(task *entity.Task) fenceDecision) fencedTaskTransitionOutcome {
+	if s == nil || s.ts == nil || strings.TrimSpace(taskID) == "" || strings.TrimSpace(runID) == "" {
+		return fencedTransitionTaskMissing
+	}
+	s.runtimeTaskTokenMu.Lock()
+	defer s.runtimeTaskTokenMu.Unlock()
+	task, err := s.ts.GetTask(project, agent, taskID)
+	if err != nil || task == nil {
+		return fencedTransitionTaskMissing
+	}
+	if task.ActiveRuntimeRunID != runID {
+		// Fence: a newer dispatch owns the task — do not touch its state
+		// and do not release anything.
+		return fencedTransitionNotOurs
+	}
+	decision := fenceDecisionApply
+	if mutate != nil {
+		decision = mutate(task)
+	}
+	switch decision {
+	case fenceDecisionRetry:
+		// Side-state writes (workflow engine) failed on this attempt. Keep
+		// the token so the sweep replay can redrive the transition under the
+		// same fence; nothing was persisted.
+		slog.Warn("fenced transition: side-state write failed; token kept for replay", "run", runID, "task", task.ID)
+		return fencedTransitionPersistFailed
+	case fenceDecisionSkip:
+		task.ActiveRuntimeRunID = ""
+		task.UpdatedAt = time.Now().UTC()
+		if err := s.ts.UpdateTask(project, agent, task); err != nil {
+			slog.Warn("fenced transition: token release write failed; sweep will reconcile", "run", runID, "task", task.ID, "error", err)
+			return fencedTransitionPersistFailed
+		}
+		return fencedTransitionSkipped
+	}
+	// Apply: mutation + token release land in ONE write under the fence, so a
+	// persist failure leaves nothing behind for a replay to double-apply.
+	task.ActiveRuntimeRunID = ""
+	task.UpdatedAt = time.Now().UTC()
+	if err := s.ts.UpdateTask(project, agent, task); err != nil {
+		slog.Warn("fenced transition: persist failed; token kept for replay", "run", runID, "task", task.ID, "error", err)
+		return fencedTransitionPersistFailed
+	}
+	if task.ArchivedAt != nil {
+		// Archive move for stores that keep active and archived rows apart.
+		// The DB write above already persisted the archived state; a failure
+		// here cannot unfence anything (the token is released) and is
+		// invisible to active listings, so it is best-effort.
+		if err := s.ts.ArchiveTask(project, agent, task); err != nil {
+			slog.Warn("fenced transition: archive move failed; state already persisted", "run", runID, "task", task.ID, "error", err)
+		}
+	}
+	return fencedTransitionApplied
+}
+
 // transitionReapedTask drives the task forward after its run was force-failed
-// with lease_expired (GPT fix 2). The transition is fenced on the execution
-// token: only the task that still names THIS run is moved. Workflow tasks are
-// left to the workflow engine's own rework path (same exclusion as
-// finalizeRuntimeTaskRun); non-workflow tasks go through the unified infra
-// backoff/blocked logic so the task never stays in_progress.
+// with lease_expired (GPT fix 2 + 收口 2): it goes through the SAME unified
+// fencedTaskTransition critical section as the finish path — no bare
+// applyInfraFailureBackoff outside the fence. Non-workflow tasks land in the
+// unified infra backoff/blocked logic; workflow tasks fail their active step
+// explicitly through the workflow engine's own failure/rework mechanism
+// (CompleteAndAdvance "failed"), so the step and run never stay in_progress.
 func (s *Server) transitionReapedTask(workspaceID string, run controldb.RuntimeRun) {
 	if s == nil || s.ts == nil || strings.TrimSpace(run.TaskID) == "" {
 		return
 	}
-	task, err := s.ts.GetTask(run.ProjectID, run.AgentID, run.TaskID)
-	if err != nil || task == nil {
-		return
+	outcome := s.fencedTaskTransition(workspaceID, run.ProjectID, run.AgentID, run.TaskID, run.ID, func(task *entity.Task) fenceDecision {
+		if task.Status.IsTerminal() {
+			return fenceDecisionSkip
+		}
+		if task.Status != entity.TaskStatusInProgress && task.Status != entity.TaskStatusPending {
+			return fenceDecisionSkip
+		}
+		if s.runtimeTaskHasWorkflow(workspaceID, run.ProjectID, run.TaskID) {
+			// Workflow-side failure is driven by transitionReapedWorkflowTask
+			// (its own store); on success the task mutation below lands with
+			// the fence release in the helper's single write. A workflow write
+			// failure returns Retry so NOTHING is persisted and the token
+			// stays for the next pass's replay.
+			if !s.transitionReapedWorkflowTask(workspaceID, run, task) {
+				return fenceDecisionRetry
+			}
+			return fenceDecisionApply
+		}
+		task.LastError = "lease expired; run reaped by control plane (lease_expired)"
+		applyInfraFailureBackoffMutation(task, "lease_expired")
+		return fenceDecisionApply
+	})
+	switch outcome {
+	case fencedTransitionApplied:
+		slog.Warn("reaped run's task transitioned through the fence", "run", run.ID, "task", run.TaskID)
+	case fencedTransitionNotOurs:
+		// A newer dispatch owns the task — nothing to do.
+	case fencedTransitionPersistFailed:
+		// Token kept; the reaper sweep or the next pass converges.
 	}
-	// Fence (fix 3): if the token no longer names this run, a newer
-	// dispatch already owns the task — do not touch its state.
-	if !s.taskTokenOwnedByRun(run.ProjectID, run.AgentID, task, run.ID) {
-		return
+}
+
+// transitionReapedWorkflowTask drives a reaped WORKFLOW task into the
+// workflow engine's failure/rework mechanism (GPT 收口 3): the active step is
+// failed explicitly with CompleteAndAdvance("failed") so the step instance,
+// the run, and the task all reach a defined terminal/rework state instead of
+// lingering in_progress. Called under the token fence; it mutates the passed
+// task in memory (status + LastError) and returns false only when the
+// workflow-side writes failed — the helper then keeps the token for retry.
+// Persisting the task is the fenced helper's job (single persist owner).
+func (s *Server) transitionReapedWorkflowTask(workspaceID string, run controldb.RuntimeRun, task *entity.Task) bool {
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	stepStatus := "failed"
+	stepError := "lease expired; run reaped by control plane (lease_expired)"
+	transitioned := false
+	if task.Vars[workflowBranchIDVar] != "" {
+		// Branch tasks go through the branch completion path with a failed
+		// status so the parent branch instance fails too.
+		if _, err := s.completeRuntimeWorkflowBranch(workspaceID, run.ProjectID, task, nil, stepStatus); err != nil {
+			slog.Warn("reaped workflow branch task: failing branch failed", "run", run.ID, "task", task.ID, "error", err)
+		} else {
+			transitioned = true
+		}
+	} else if _, ok, err := wfStore.RunForTask(run.ProjectID, task.ID); err == nil && ok {
+		output := strings.TrimSpace(task.Summary)
+		if output == "" {
+			output = stepError
+		}
+		if _, err := wfStore.CompleteAndAdvance(run.ProjectID, task.ID, task.Summary, output, nil, stepStatus); err != nil {
+			slog.Warn("reaped workflow task: failing step failed", "run", run.ID, "task", task.ID, "error", err)
+		} else {
+			transitioned = true
+		}
 	}
-	if task.Status.IsTerminal() {
-		return
+	if !transitioned {
+		// Run record missing (already cleaned up) or the workflow write
+		// failed — no workflow-side terminal state was written; the caller
+		// returns Retry and the next pass replays the step failure.
+		return false
 	}
-	if s.runtimeTaskHasWorkflow(workspaceID, run.ProjectID, run.TaskID) {
-		// Workflow runs fail their step through the workflow engine; the
-		// reaper only records the kill. No in_progress residue: the workflow
-		// step fails with the run.
-		s.auditLog(auditLogInput{
-			WorkspaceID:  workspaceID,
-			Action:       "runtime_run.reaped",
-			ResourceType: "task",
-			ResourceID:   task.ID,
-			Summary:      "Workflow task run reaped; step failure handled by the workflow engine",
-			After:        map[string]any{"runId": run.ID, "taskId": task.ID},
-		})
-		return
-	}
-	if task.Status != entity.TaskStatusInProgress && task.Status != entity.TaskStatusPending {
-		return
-	}
-	task.LastError = "lease expired; run reaped by control plane (lease_expired)"
-	s.applyInfraFailureBackoff(workspaceID, run.ProjectID, run.AgentID, task, "lease_expired")
+	prev := task.Status
+	now := time.Now().UTC()
+	task.Status = entity.TaskStatusDoneFailed
+	task.LastError = stepError
+	task.ArchivedAt = &now
+	task.UpdatedAt = now
+	entity.ApplyStatusTimestamps(task, prev, now)
+	s.auditLog(auditLogInput{
+		WorkspaceID:  workspaceID,
+		Action:       "runtime_run.reaped",
+		ResourceType: "task",
+		ResourceID:   task.ID,
+		Summary:      "Workflow task run reaped; active step failed through the workflow rework path",
+		After:        map[string]any{"runId": run.ID, "taskId": task.ID, "stepStatus": stepStatus},
+	})
+	return true
 }
 
 // ── Fork session slot class (D1: decided at enqueue, fail-closed) ────────────
@@ -375,8 +658,10 @@ func (s *Server) runtimeReaperPassWorkspace(workspaceID string, cutoff time.Time
 		// next pass.
 		s.transitionReapedTask(workspaceID, run)
 		// Conditional token clear: only if the task still names THIS run.
+		// clearStaleTaskRuntimeToken replays the reaped transition first, so
+		// a fenced persist failure above is retried before the fence drops.
 		if strings.TrimSpace(run.TaskID) != "" && s.ts != nil {
-			if !s.clearTaskActiveRuntimeRunIfRun(run.ProjectID, run.AgentID, run.TaskID, run.ID) {
+			if !s.clearStaleTaskRuntimeTokenByID(workspaceID, run) {
 				// Field already changed or write failed — the pass-wide
 				// clearStaleTaskRuntimeToken sweep reconciles any residue.
 				s.reconcileStaleTaskToken(workspaceID, run)
@@ -433,6 +718,20 @@ func (s *Server) sweepStaleTaskRuntimeTokens(workspaceID string) {
 			}
 		}
 	}
+}
+
+// clearStaleTaskRuntimeTokenByID is the run-referenced variant of
+// clearStaleTaskRuntimeToken: it loads the task the reaped run was executing
+// and runs the replay+clear reconciliation against it.
+func (s *Server) clearStaleTaskRuntimeTokenByID(workspaceID string, run controldb.RuntimeRun) bool {
+	if s == nil || s.ts == nil || strings.TrimSpace(run.TaskID) == "" {
+		return false
+	}
+	task, err := s.ts.GetTask(run.ProjectID, run.AgentID, run.TaskID)
+	if err != nil || task == nil {
+		return false
+	}
+	return s.clearStaleTaskRuntimeToken(workspaceID, run.ProjectID, run.AgentID, task)
 }
 
 // reconcileStaleTaskToken sweeps the task referenced by a reaped run if the
