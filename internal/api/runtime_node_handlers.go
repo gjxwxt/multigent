@@ -1300,10 +1300,19 @@ func (s *Server) finalizeRuntimeTaskRun(run *controldb.RuntimeRun, body runtimeR
 	}
 	prev := task.Status
 	if run.Status == "failed" {
+		// Q0 D4: infra failures (closed server-controlled error-code set) back
+		// off or block the task instead of archiving it as done_failed;
+		// business failures still land on done_failed untouched.
+		if isRuntimeInfraFailureCode(body.ErrorCode) {
+			task.LastError = firstNonEmpty(strings.TrimSpace(body.ErrorMessage), strings.TrimSpace(body.ErrorCode), "runtime run failed")
+			s.applyInfraFailureBackoff(run.WorkspaceID, run.ProjectID, run.AgentID, task, body.ErrorCode)
+			return
+		}
 		task.Status = entity.TaskStatusDoneFailed
 		task.LastError = firstNonEmpty(strings.TrimSpace(body.ErrorMessage), strings.TrimSpace(body.ErrorCode), "runtime run failed")
 	} else {
 		task.Status = entity.TaskStatusDoneSuccess
+		resetInfraFailureStreak(task)
 		if summary, _ := body.Result["summary"].(string); strings.TrimSpace(summary) != "" {
 			task.Summary = strings.TrimSpace(summary)
 		}

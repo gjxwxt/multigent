@@ -761,6 +761,16 @@ type Task struct {
 	// file/DB task store — reconciliation converges on the reaper cycle with
 	// an audit trail, never strong consistency.
 	ActiveRuntimeRunID string `yaml:"active_runtime_run_id,omitempty" json:"activeRuntimeRunId,omitempty"`
+
+	// InfraFailureStreak counts consecutive infrastructure failures for this
+	// task (Q0 D4). Only server-controlled infra error codes count
+	// (spec_fetch_failed, workspace_prepare_failed, executor_failed,
+	// lease_expired, agent_run_failed); human cancellation, workflow step
+	// failures (rework path), and business outcomes never touch it. 1-2
+	// consecutive failures back off the next dispatch by 5 minutes; 3 puts
+	// the task into blocked until a project manager unblocks it. A success
+	// resets the streak; editing the task does not.
+	InfraFailureStreak int `yaml:"infra_failure_streak,omitempty" json:"infraFailureStreak,omitempty"`
 }
 
 // UnmarshalJSON accepts legacy task records that persisted nil time pointers

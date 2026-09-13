@@ -585,6 +585,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/workflow", s.handleGetTaskWorkflow)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/workflow/review/draft", s.handleGetTaskWorkflowReviewDraft)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/start", s.handleStartProjectTask)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/unblock", s.handleUnblockProjectTask)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/workflow/review", s.handlePostTaskWorkflowReview)
 	mux.HandleFunc("GET /api/v1/projects/{name}/branches", s.handleListProjectBranches)
 	mux.HandleFunc("POST /api/v1/projects/{name}/branches/refresh", s.handlePostProjectBranchesRefresh)

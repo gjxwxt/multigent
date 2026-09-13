@@ -783,6 +783,18 @@ func (s *Server) handleStartProjectTask(w http.ResponseWriter, r *http.Request) 
 		s.jsonErrorCode(w, http.StatusConflict, ErrCodeValidationFailed, "current assignee is not an agent")
 		return
 	}
+	// Q0 D4: infra-blocked tasks refuse manual start until explicitly
+	// unblocked; backoff tasks refuse until NotBefore passes.
+	if taskBlockedByInfraFailures(task) {
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "task is blocked after repeated infrastructure failures; resolve the failure and POST /api/v1/projects/"+project+"/tasks/"+task.ID+"/unblock to re-enable dispatch")
+		return
+	}
+	if task.Status == entity.TaskStatusPending && task.NotBefore != nil {
+		if remaining := time.Until(*task.NotBefore); remaining > 0 {
+			s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, fmt.Sprintf("task is backing off after an infrastructure failure; retry available in %s", remaining.Round(time.Second)))
+			return
+		}
+	}
 	pid, runID, err := s.startProjectTaskDirect(workspaceID, project, agent, task, r)
 	if err != nil {
 		if errors.Is(err, errAgentAlreadyRunning) {
@@ -1107,6 +1119,10 @@ func (s *Server) nextRuntimeUrgentPendingTask(project, agent string) (*entity.Ta
 		if task == nil || task.Type == "wakeup" {
 			continue
 		}
+		// Q0 D4: infra-blocked tasks only re-enter dispatch via unblock.
+		if taskBlockedByInfraFailures(task) {
+			continue
+		}
 		if !entity.TaskReady(task, now) {
 			continue
 		}
@@ -1132,6 +1148,10 @@ func (s *Server) nextRuntimePendingTask(project, agent string) (*entity.Task, er
 	now := time.Now().UTC()
 	for _, task := range tasks {
 		if task == nil || task.Type == "wakeup" {
+			continue
+		}
+		// Q0 D4: infra-blocked tasks only re-enter dispatch via unblock.
+		if taskBlockedByInfraFailures(task) {
 			continue
 		}
 		if !entity.TaskReady(task, now) {
