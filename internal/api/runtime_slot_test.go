@@ -1785,7 +1785,7 @@ func TestAgentStartGateSerializesLocalStarts(t *testing.T) {
 	release := make(chan struct{})
 	var entered, exited int
 	var mu sync.Mutex
-	s.agentStartTestHook = func(project, agent string) func() {
+	s.agentStartTestHook = func(key string) func() {
 		mu.Lock()
 		entered++
 		mu.Unlock()
