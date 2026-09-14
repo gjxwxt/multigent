@@ -190,9 +190,72 @@ runtime_runs.runtime_node_id），再按记录去对应主机找进程；不要�
 |---|---|---|---|
 | 9 | **admin-token CLI** | ✅ 已完成（`multigent admin-token`） | F3 收口，部署机一条命令签短期 token |
 | 10 | **启动日志 version/commit** | ✅ 已完成 | F2 收口，commit=NONE 打 WARN |
-| 11 | **`multigent config check`** | 新增排期 | §4-2 建议的落地：启动前自检 + 生效配置快照（secret 打码），迁移日收益最大 |
+| 11 | **`multigent config check`** | 部分完成 | 已落地两块相邻能力：admin-token 静默新建 DB 的 stderr 预警（见 F12）、runtime-node 版本漂移 WARN（见 F13）；完整自检命令仍排期 |
 | 12 | **节点日志/run 产物轮转** | 新增排期 | 节点侧 run exec.log 无轮转（实测 32 个文件/18MB，慢但单调涨）；multigent.log 已有 max_size_mb，节点 workspaces 侧没有 |
 | 13 | **poller 20s 周期的可观测性** | 新增排期 | 触发派发目前只有 audit `runtime_run.enqueue`（reason 字段可辨来源），建议加一条 debug 日志便于验证"派发走了哪条路"（本次冒烟全靠 audit 链反推） |
 | 14 | **docker system prune timer** | 维持 §D 建议并提级 | 容器/镜像垃圾在冒烟频繁的 VM 上增长很快（§D 实测 ~4.5GB/晚） |
+| 15 | **版本对齐检查** | ✅ console 侧已完成 | 节点心跳版本 ≠ console 版本 → 一次 WARN（按 node+version 去重，对齐后清条目）；node 侧升级提示/上线拦截仍排期 |
 
 §A 原有 1–8 项维持不变。
+
+### F10. 触发器双写竞态面的核实结论（2026-09-15 通宵第三轮收口）
+
+针对「poller × 手动 start × workflow followup × attention wakeup 并发命中同一任务」的
+竞态面做了完整核实，结论是**数据库层双保险已闭合，进程内 gate 只是延迟优化**：
+
+- **第一层：`hasActiveRuntimeRunForTarget`**（入队前检查）——queued run 恒阻塞；
+  running run 在租约未过期且非只读槽位时阻塞。
+- **第二层：`run_key` 部分唯一索引**（`idx_runtime_runs_active_key`，
+  migrations.go:646）——并发入队同一 intent 时，唯一约束冲突方经
+  `UpsertRuntimeRunIdempotent` 收敛到已存在的 active run（返回 false），不会重复入队。
+- **run_key 派生优先级**（run_key_service.go）：workflow step >
+  attention 信号 > scheduled wakeup > plain task；空 key 完全绕过去重（legacy 行），
+  即"空 key 绝不静默吞掉真重复"的设计方向是对的。
+
+核实过的具体路径：
+
+1. **poller**（trigger.go:140）：本地 inflight map 先查一轮（防抖），随后 Fire()
+   → nodeTaskDispatch hook → `fireTaskTriggerOrQueueRuntime` 内再过一次
+   hasActiveRuntimeRun + run_key 幂等。poller 每轮之间不存在去重窗口缺口。
+2. **手动 start**（scheduler_manager.go:829 `startProjectTaskDirect`）：
+   `acquireAgentStartGate` 按 AgentWorker 粒度串行化两个并发 autoStart，
+   输方走 queue-join（入队被 run_key 收敛为同一条 run）；手动 start 注释明确
+   "Q0 收口 5: manual start JOINS the queue instead of 409ing"。
+3. **workflow followup**（scheduler_attention.go:590）：advanceTaskWorkflow 后
+   先查 hasActiveRuntimeRun，再 fireTaskTriggerOrQueueRuntime。
+4. **节点 hook 路径绕过进程内 inflight map**（trigger.go:344 nodeTaskDispatch
+   hook 在 inflight 检查**之前**执行）：这是设计使然——inflight/queued map 只保护
+   本地 wakeup 路径；node 路径的安全性完全由 DB 两层兜底。**不要**误以为是漏网。
+
+遗留的唯一真实缺口（维持 F13/优先级表 #13 的判断）：poller 20s 周期里"派发走了
+哪条路"没有 debug 日志，冒烟验证全靠 audit `runtime_run.enqueue` 的 reason 字段
+反推。这是可观测性缺口，不是正确性缺口。
+
+### F11. 本轮（通宵第三轮）落地清单
+
+- **F10**：触发器双写竞态面核实结论（DB 双保险闭合，见上）。
+- **admin-token 静默新建 DB 预警**：`warnIfControlDBLooksFresh`（cmd/multigent/token.go）——
+  resolved 控制库文件不存在时先打 3 行 stderr：会新建空库+新 jwt_secret / env 未指到
+  $HOME/.multigent（sudo 下是 root 家目录）/ 该 token 必被运行中服务拒绝并给出正确命令
+  形态。已实测：fresh HOME 无 env → 3 行全出；DB 已存在 → 静默；env 指向新目录 → 只出
+  2 行（跳过 $HOME 提示）。
+- **runtime-node 版本漂移 WARN**（internal/api/runtime_node_handlers.go
+  `warnRuntimeNodeVersionDrift`）：heartbeat 上报版本 ≠ console `s.version` → slog WARN
+  一次，按 (nodeID, nodeVersion) 去重；版本回到一致时清掉去重条目（每个漂移"episode"
+  恰好一条，downgrade 再漂会再报）。**warn-only 是有意设计**：运行中节点的 heartbeat
+  一旦被拒，租约续期饥饿 → live run 被 reaper 收走，比版本漂移本身危害大。测试覆盖
+  4 段场景 + 空 console/空 node 版本不误报。
+
+### F12. admin-token 预警的判定窗口选择
+
+预警在 `OpenDefault()` **之前**做 `os.Stat`，因为打开动作本身就会创建文件——打开后再
+判"刚创建"需要对比 inode/mtime，复杂且仍有竞态。Stat-then-open 有 TOCTOU 窗口（极小概率
+别的进程恰好在此间创建库），但该方向的误差是"少一条警告"，无害；反方向（打开后补判）误差
+是"误报"，会稀释警告可信度。选误差无害的方向。
+
+### F13. 版本漂移只做 console 侧 WARN 的边界
+
+node 上报 version 的通道已存在（register + heartbeat 都带），console 侧比较是零协议成本。
+没做 node 侧"上线拦截"的原因：lease-generation 已 fail-closed 挡住 pre-Q0 节点续租，
+升级期间的短暂漂移靠 WARN 提示人处理即可，硬拦截会把滚动升级变成停机窗口。node 侧
+"你的版本落后于 console"提示留在 UI/CLI 排期（F9 表 #15）。
