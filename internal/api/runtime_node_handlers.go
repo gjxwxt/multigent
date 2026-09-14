@@ -1718,6 +1718,12 @@ func parseRuntimeTTL(raw string, fallback time.Duration) time.Duration {
 }
 
 func externalServerURL(r *http.Request) string {
+	// Background dispatch paths (poller/trigger/followup) have no request;
+	// an empty URL means the run spec carries no control-plane address, which
+	// nodes tolerate (they use their own configured console URL).
+	if r == nil {
+		return ""
+	}
 	proto := r.Header.Get("X-Forwarded-Proto")
 	if proto == "" {
 		proto = "http"

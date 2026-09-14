@@ -37,6 +37,15 @@ type triggerManager struct {
 	ts        taskstore.Store
 	db        controldb.Store
 
+	// nodeTaskDispatch, when set, routes OnTask triggers for agents pinned to
+	// a runtime node into the runtime-node dispatch queue instead of the
+	// local CLI wakeup cycle. The local cycle runs the agent executable on the
+	// console host (claude not installed there) and archives a node task as
+	// done_failed on the first exec error — a real production incident
+	// (t-20260914-mv6qm1). Returns true when the trigger was handled by the
+	// runtime path (or intentionally dropped); false falls back to local.
+	nodeTaskDispatch func(project, agent, reason string) bool
+
 	cancel   context.CancelFunc
 	pollDone chan struct{}
 }
@@ -326,6 +335,16 @@ func (tm *triggerManager) Fire(project, agent string, triggerType entity.Trigger
 	if hb.Paused {
 		fmt.Fprintf(os.Stderr, "[trigger] %s/%s: skip — paused\n", project, agent)
 		return
+	}
+
+	// Runtime-node agents must never run the local wakeup cycle: the cycle
+	// would execute the agent CLI on the console host and archive the task on
+	// the first exec error while the node run may still be in flight. When the
+	// runtime path claims the trigger, local execution is skipped entirely.
+	if triggerType == entity.TriggerOnTask && tm.nodeTaskDispatch != nil {
+		if tm.nodeTaskDispatch(project, agent, reason) {
+			return
+		}
 	}
 
 	tm.fireWakeup(project, agent, hb, triggerType, reason)

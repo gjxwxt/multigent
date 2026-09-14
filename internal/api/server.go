@@ -153,7 +153,6 @@ func NewServer(root, apiKey string) *Server {
 	sched := newSchedulerManager(root)
 	ts := taskstore.NewDB(root, controlDB)
 	tm := newTriggerManager(root, sched.binPath, ts, controlDB)
-	tm.StartPoller()
 	s := &Server{
 		root:                   root,
 		apiKey:                 strings.TrimSpace(apiKey),
@@ -177,6 +176,12 @@ func NewServer(root, apiKey string) *Server {
 		previewSessions:        make(map[string]*previewChatSession),
 		threadProjections:      imbridge.NewTaskThreadProjectionService(controlDB, nil),
 	}
+	// Runtime-node agents' task triggers join the node dispatch queue instead
+	// of the local wakeup cycle (hook wired after s exists; nil-safe before).
+	tm.nodeTaskDispatch = func(project, agent, reason string) bool {
+		return s.dispatchTaskTriggerViaRuntime(project, agent, reason, nil)
+	}
+	tm.StartPoller()
 	// Preview image selection happens per-project at preview start time
 	// (resolved from the project's runtime profile), not server-wide here.
 	// Scheduler restore is intentionally absent: upstream v2.0.10 made the

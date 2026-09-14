@@ -1701,6 +1701,49 @@ func (s *Server) hasActiveRuntimeRun(workspaceID, project, agent, taskID string)
 	return s.hasActiveRuntimeRunForTarget(workspaceID, target, taskID)
 }
 
+// dispatchTaskTriggerViaRuntime is the triggerManager's node-dispatch hook: a
+// task trigger for an agent pinned to a runtime node must join the runtime
+// dispatch queue, not run the local wakeup cycle (the console host has no
+// agent CLI; the local cycle archived a node task done_failed mid-node-run in
+// production). Returns true when the trigger was handled (node path or active
+// run dedupe) so the caller skips the local wakeup; false falls back to local
+// execution for locally-run agents. r may be nil (poller context).
+func (s *Server) dispatchTaskTriggerViaRuntime(project, agent, reason string, r *http.Request) bool {
+	if s == nil || s.controlDB == nil || s.ts == nil {
+		return false
+	}
+	workspaceID, err := s.currentWorkspaceID()
+	if err != nil || strings.TrimSpace(workspaceID) == "" {
+		return false
+	}
+	meta, err := s.agentMetaForProjectMember(workspaceID, project, agent)
+	if err != nil || meta == nil || !s.usesAssignedRuntimeNode(workspaceID, meta) {
+		return false
+	}
+	// The agent runs on a runtime node: route the trigger through the queue.
+	// hasActiveRuntimeRun inside fireTaskTriggerOrQueueRuntime dedupes a
+	// trigger racing an in-flight node run (queue-join semantics).
+	tasks, listErr := s.ts.ListTasks(project, agent, entity.TaskStatusPending)
+	if listErr != nil || len(tasks) == 0 {
+		// No pending task row locally (it may live under a membership-title
+		// alias); treat as handled so the local cycle never touches a
+		// node-assigned agent's queue.
+		return true
+	}
+	dispatchedAny := false
+	for _, task := range tasks {
+		if task == nil || task.Status.IsTerminal() {
+			continue
+		}
+		if err := s.fireTaskTriggerOrQueueRuntime(workspaceID, project, agent, task, r, reason); err != nil {
+			log.Printf("[trigger] runtime dispatch %s/%s task=%s failed: %v", project, agent, task.ID, err)
+			continue
+		}
+		dispatchedAny = true
+	}
+	return dispatchedAny
+}
+
 func (s *Server) hasActiveRuntimeRunForTarget(workspaceID string, target runtimeSchedulerAgentTarget, taskID string) bool {
 	if s == nil || s.controlDB == nil {
 		return false
