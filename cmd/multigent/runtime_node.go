@@ -28,7 +28,119 @@ import (
 
 const runtimeNodeConfigEnv = "MULTIGENT_RUNTIME_NODE_CONFIG"
 
+const (
+	// runtimeNodeMaxBackoff caps the worker loop's reconnect backoff: after
+	// repeated consecutive failures the loop slows down instead of hammering
+	// a down console at full poll rate, but it never gives up — a daemon that
+	// stops retrying needs systemd to resurrect it, which hides the outage.
+	runtimeNodeMaxBackoff = time.Minute
+	// runtimeNodeCapabilitiesTTL bounds how long a cached capability probe is
+	// trusted. detectRuntimeNodeCapabilities spawns several docker processes
+	// (~250ms); heartbeats fire every poll interval, so probing per heartbeat
+	// would burn CPU on every node forever.
+	runtimeNodeCapabilitiesTTL = 5 * time.Minute
+)
+
 var errRuntimeRunCancelled = errors.New("runtime run cancelled")
+
+// runtimeNodeCapabilitiesProbe is a package-level seam so tests can stub the
+// docker-probing capability detection out.
+var runtimeNodeCapabilitiesProbe = detectRuntimeNodeCapabilities
+
+type runtimeNodeCapabilitiesCache struct {
+	mu        sync.Mutex
+	payload   map[string]any
+	expiresAt time.Time
+}
+
+// get returns the cached capabilities when fresh, re-probing (once per call
+// under the lock) when expired. Register always re-probes fresh and refreshes
+// the cache as a side effect.
+func (c *runtimeNodeCapabilitiesCache) get() map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	if c.payload != nil && now.Before(c.expiresAt) {
+		return c.payload
+	}
+	payload := runtimeNodeCapabilitiesProbe()
+	c.payload = payload
+	c.expiresAt = now.Add(runtimeNodeCapabilitiesTTL)
+	return payload
+}
+
+func (c *runtimeNodeCapabilitiesCache) refresh() map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	payload := runtimeNodeCapabilitiesProbe()
+	c.payload = payload
+	c.expiresAt = time.Now().Add(runtimeNodeCapabilitiesTTL)
+	return payload
+}
+
+var runtimeNodeCachedCapabilities runtimeNodeCapabilitiesCache
+
+// runtimeNodeReconnectState tracks the worker loop's outage so the loop can
+// back off while the console is down, log the recovery, and re-register once
+// per outage (a console restart loses nothing, but its node row's last_error
+// and capability snapshot are only refreshed by a register call).
+type runtimeNodeReconnectState struct {
+	inOutage   bool
+	outageFrom time.Time
+	failures   int
+}
+
+// runtimeNodeBackoffDelay returns how long the loop should sleep before the
+// next attempt after `failures` consecutive errors: the poll interval for the
+// first failure, then doubling, capped at runtimeNodeMaxBackoff.
+func runtimeNodeBackoffDelay(pollInterval time.Duration, failures int) time.Duration {
+	if pollInterval <= 0 {
+		pollInterval = 3 * time.Second
+	}
+	if failures <= 1 {
+		return pollInterval
+	}
+	delay := pollInterval
+	for i := 1; i < failures && delay < runtimeNodeMaxBackoff; i++ {
+		delay *= 2
+	}
+	if delay > runtimeNodeMaxBackoff {
+		return runtimeNodeMaxBackoff
+	}
+	return delay
+}
+
+// observeFailure records a failed loop attempt and returns the sleep duration
+// before the next attempt.
+func (st *runtimeNodeReconnectState) observeFailure(pollInterval time.Duration, err error) time.Duration {
+	if !st.inOutage {
+		st.inOutage = true
+		st.outageFrom = time.Now()
+	}
+	st.failures++
+	delay := runtimeNodeBackoffDelay(pollInterval, st.failures)
+	if st.failures == 1 {
+		slog.Warn("runtime worker loop error", "error", err, "retry_in", delay.String())
+	} else {
+		slog.Warn("runtime worker loop error", "error", err, "consecutive_failures", st.failures, "retry_in", delay.String())
+	}
+	return delay
+}
+
+// observeSuccess ends an outage: it logs one reconnect line with the outage
+// duration and reports whether the node should re-register (once per outage)
+// to refresh the console's node row after a console restart.
+func (st *runtimeNodeReconnectState) observeSuccess() (reRegister bool) {
+	if !st.inOutage {
+		return false
+	}
+	outage := time.Since(st.outageFrom).Truncate(time.Second)
+	slog.Info("runtime node reconnected after outage", "outage", outage.String(), "consecutive_failures", st.failures)
+	st.inOutage = false
+	st.outageFrom = time.Time{}
+	st.failures = 0
+	return true
+}
 
 type runtimeNodeConfig struct {
 	ServerURL     string `json:"serverUrl"`
@@ -209,6 +321,9 @@ func newRuntimeStartCmd() *cobra.Command {
 			}
 			defer logCloser()
 			if err := runtimeNodeRegister(cfg); err != nil {
+				// systemd restarts the unit (Restart=always); the explicit
+				// error line keeps each retry explainable in the log.
+				slog.Error("runtime node register failed; exiting for systemd retry", "server", cfg.ServerURL, "error", err)
 				return err
 			}
 			if concurrency <= 0 {
@@ -251,10 +366,20 @@ func runtimeNodeRunWorkers(cfg runtimeNodeConfig, concurrency int, pollInterval 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			var reconnect runtimeNodeReconnectState
 			for {
 				if err := runtimeNodeLoopOnce(cfg, workerID, coord, streamAgentOutput); err != nil {
-					slog.Warn("runtime worker loop error", "worker", workerID, "error", err)
-					_ = runtimeNodeHeartbeat(cfg, "online", err.Error())
+					time.Sleep(reconnect.observeFailure(pollInterval, err))
+					continue
+				}
+				if reconnect.observeSuccess() {
+					// The console may have been restarted during the outage;
+					// refresh its node row (version, capabilities, last_error)
+					// once per outage. Failure here is non-fatal: the next
+					// outage re-registers again.
+					if err := runtimeNodeRegister(cfg); err != nil {
+						slog.Warn("runtime node re-register after reconnect failed", "error", err)
+					}
 				}
 				time.Sleep(pollInterval)
 			}
@@ -381,7 +506,7 @@ func runtimeNodeRegister(cfg runtimeNodeConfig) error {
 		"arch":         runtime.GOARCH,
 		"hostname":     hostname,
 		"version":      version,
-		"capabilities": detectRuntimeNodeCapabilities(),
+		"capabilities": runtimeNodeCachedCapabilities.refresh(),
 	})
 	return err
 }
@@ -395,7 +520,7 @@ func runtimeNodeHeartbeat(cfg runtimeNodeConfig, status, lastError string) error
 		"hostname":     hostname,
 		"version":      version,
 		"lastError":    lastError,
-		"capabilities": detectRuntimeNodeCapabilities(),
+		"capabilities": runtimeNodeCachedCapabilities.get(),
 	})
 	return err
 }
