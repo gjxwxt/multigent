@@ -152,16 +152,52 @@ func TestUnifiedSelfReviewUnknownVerdictFailsClosed(t *testing.T) {
 	if err == nil {
 		t.Fatalf("unknown verdict %q must fail closed, got transition to %v", "passs", transition.Next)
 	}
-	// Fail-closed means the step stays active and addressable for a re-run.
+	// Fail-closed means the step stays re-runnable: routing is validated
+	// BEFORE persistence, so the instance must still be pending with no
+	// output recorded and no completion event written.
 	run, ok, err := store.RunForTask("project", "task-self-review")
 	if err != nil || !ok {
 		t.Fatalf("run must stay addressable: ok=%v err=%v", ok, err)
 	}
-	if run.Status != "active" {
-		t.Fatalf("run must stay active after a rejected verdict, got %q", run.Status)
+	if run.Status != "active" || run.ActiveStepID != "agent_self_review" {
+		t.Fatalf("run must stay on agent_self_review, got status=%q active=%q", run.Status, run.ActiveStepID)
 	}
-	if run.ActiveStepID != "agent_self_review" {
-		t.Fatalf("step must stay active for a re-run, got active step %q", run.ActiveStepID)
+	instances, err := store.ListStepInstances(run.ID)
+	if err != nil {
+		t.Fatalf("list instances: %v", err)
+	}
+	for _, inst := range instances {
+		if inst.StepID != "agent_self_review" {
+			continue
+		}
+		if inst.Status != "pending" {
+			t.Fatalf("instance must stay pending after a rejected verdict, got %q", inst.Status)
+		}
+		if inst.OutputArtifact != "" || len(inst.OutputValues) > 0 {
+			t.Fatalf("rejected completion must not persist outputs: artifact=%q values=%v", inst.OutputArtifact, inst.OutputValues)
+		}
+	}
+	events, err := store.ListStepEvents(run.ID)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	for _, ev := range events {
+		if ev.StepID == "agent_self_review" {
+			t.Fatalf("rejected completion must not write a step event, got status %q", ev.Status)
+		}
+	}
+	// The re-run contract: the same call with a legal verdict must now drive
+	// the pipeline forward to the CI gate.
+	retry, err := store.CompleteAndAdvance("project", "task-self-review", "reviewed", "", map[string]string{
+		"self_review":         "full report",
+		"self_review_verdict": "pass",
+		"review_rounds":       "1",
+	}, "completed")
+	if err != nil {
+		t.Fatalf("legal re-run after rejected verdict: %v", err)
+	}
+	if retry.Next == nil || retry.Next.ID != "ci_ready_gate" {
+		t.Fatalf("legal re-run must advance to ci_ready_gate, got %v", retry.Next)
 	}
 }
 

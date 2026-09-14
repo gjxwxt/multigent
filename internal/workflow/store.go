@@ -2104,6 +2104,69 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 	if strings.TrimSpace(summary) == "" {
 		summary = workflowSummaryFromValues(values)
 	}
+	// A failed step is a terminal workflow outcome — it never routes. It must
+	// not follow a success edge with empty outputs, otherwise downstream
+	// actors can mistake a failed step for a valid result. Short-circuit
+	// before routing so a failed completion with empty outputs is not
+	// rejected by the route partition.
+	if strings.TrimSpace(status) == "failed" {
+		for i := range instances {
+			if instances[i].StepID != run.ActiveStepID {
+				continue
+			}
+			instances[i].Summary = strings.TrimSpace(summary)
+			instances[i].OutputArtifact = output
+			instances[i].OutputValues = values
+			instances[i].Status = "failed"
+			instances[i].FinishedAt = now
+			instances[i].UpdatedAt = now
+			if err := s.SaveStepInstance(&instances[i]); err != nil {
+				return result, err
+			}
+			_ = s.SaveStepEvent(&entity.WorkflowStepEvent{
+				RunID:          instances[i].RunID,
+				StepID:         instances[i].StepID,
+				Status:         "failed",
+				ActorType:      instances[i].ActorType,
+				ActorID:        instances[i].ActorID,
+				Summary:        instances[i].Summary,
+				StartedAt:      instances[i].StartedAt,
+				FinishedAt:     instances[i].FinishedAt,
+				InputArtifact:  instances[i].InputArtifact,
+				OutputArtifact: instances[i].OutputArtifact,
+				InputValues:    instances[i].InputValues,
+				OutputValues:   instances[i].OutputValues,
+				CreatedAt:      now,
+			})
+			result.Current = instances[i]
+			break
+		}
+		run.Status = "failed"
+		run.ActiveStepID = ""
+		run.CurrentAssigneeType = ""
+		run.CurrentAssigneeID = ""
+		run.CurrentAssigneeMembershipID = ""
+		run.UpdatedAt = now
+		run.FinishedAt = now
+		if err := s.SaveRun(&run); err != nil {
+			return result, err
+		}
+		result.Run = run
+		result.Done = true
+		return result, nil
+	}
+	// Route FIRST, persist AFTER. Choosing the next edge and validating the
+	// target step before writing the completed instance keeps the store
+	// consistent when no route matches (e.g. an invalid self-review verdict):
+	// the step instance stays pending with no output and no completion event,
+	// so a corrected re-run can drive it forward. Persisting first would leave
+	// a completed instance under an active run — a state the startup recovery
+	// cannot re-dispatch (it only resumes pending/running instances).
+	edge, hasNext := chooseNextEdge(def.Edges, currentStep.ID, values, output)
+	if !hasNext && workflowHasOutgoingEdges(def.Edges, currentStep.ID) && !isTerminalReviewApproval(currentStep, def.Edges, values) {
+		return result, fmt.Errorf("workflow step %q output did not match any outgoing route", currentStep.Title)
+	}
+	nextStep, nextFound := stepByID(def.Steps, edge.To)
 	for i := range instances {
 		if instances[i].StepID != run.ActiveStepID {
 			continue
@@ -2138,28 +2201,6 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 		result.Current = instances[i]
 		break
 	}
-	// A failed step is a terminal workflow outcome. It must not follow a
-	// success edge with empty outputs, otherwise downstream actors can mistake
-	// a failed step for a valid result.
-	if strings.TrimSpace(status) == "failed" {
-		run.Status = "failed"
-		run.ActiveStepID = ""
-		run.CurrentAssigneeType = ""
-		run.CurrentAssigneeID = ""
-		run.CurrentAssigneeMembershipID = ""
-		run.UpdatedAt = now
-		run.FinishedAt = now
-		if err := s.SaveRun(&run); err != nil {
-			return result, err
-		}
-		result.Run = run
-		result.Done = true
-		return result, nil
-	}
-	edge, hasNext := chooseNextEdge(def.Edges, currentStep.ID, values, output)
-	if !hasNext && workflowHasOutgoingEdges(def.Edges, currentStep.ID) && !isTerminalReviewApproval(currentStep, def.Edges, values) {
-		return result, fmt.Errorf("workflow step %q output did not match any outgoing route", currentStep.Title)
-	}
 	if !hasNext {
 		run.Status = "completed"
 		run.ActiveStepID = ""
@@ -2175,8 +2216,11 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 		result.Done = true
 		return result, nil
 	}
-	nextStep, ok := stepByID(def.Steps, edge.To)
-	if !ok {
+	if !nextFound {
+		// A default edge pointing at a step that no longer exists in the
+		// snapshot: the run cannot advance, but the completed instance above
+		// is valid, so close the run cleanly instead of leaving a dangling
+		// active step.
 		run.Status = "completed"
 		run.ActiveStepID = ""
 		run.CurrentAssigneeType = ""
@@ -2307,15 +2351,20 @@ func normalizeWorkflowOutputValues(step entity.WorkflowStep, values map[string]s
 	// Self-review conditional contract: an escalate verdict promises a
 	// structured outstanding-issues case file for the human gate — an empty
 	// escalation_case would hand code_review an empty folder. On pass /
-	// issues_fixed the field legitimately does not exist.
-	verdictRequiredCase := step.Type == "agent_task" && strings.EqualFold(strings.TrimSpace(out["self_review_verdict"]), "escalate")
+	// issues_fixed the field legitimately does not exist. Scoped to exactly
+	// this field so the conditional never leaks onto unrelated optional
+	// outputs of the same step.
+	escalateWithoutCase := strings.EqualFold(strings.TrimSpace(out["self_review_verdict"]), "escalate")
 	for _, field := range step.OutputFields {
 		name := strings.TrimSpace(field.Name)
 		if name == "" {
 			continue
 		}
 		if strings.TrimSpace(out[name]) == "" {
-			if (field.Optional && !verdictRequiredCase) || (isReworkReview && name != "decision" && name != "comments") {
+			if field.Optional && !(name == "escalation_case" && escalateWithoutCase) {
+				continue
+			}
+			if isReworkReview && name != "decision" && name != "comments" {
 				continue
 			}
 			return nil, fmt.Errorf("workflow output field %q is required for step %q", name, step.Title)
