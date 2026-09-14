@@ -2217,23 +2217,13 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 		return result, nil
 	}
 	if !nextFound {
-		// A default edge pointing at a step that no longer exists in the
-		// snapshot: the run cannot advance, but the completed instance above
-		// is valid, so close the run cleanly instead of leaving a dangling
-		// active step.
-		run.Status = "completed"
-		run.ActiveStepID = ""
-		run.CurrentAssigneeType = ""
-		run.CurrentAssigneeID = ""
-		run.CurrentAssigneeMembershipID = ""
-		run.UpdatedAt = now
-		run.FinishedAt = now
-		if err := s.SaveRun(&run); err != nil {
-			return result, err
-		}
-		result.Run = run
-		result.Done = true
-		return result, nil
+		// A dangling edge — it points at a step missing from the snapshot.
+		// That is a workflow definition/configuration error, not a legitimate
+		// end of work: silently completing the run would fake success. The
+		// completed instance above is itself valid, so keep it persisted but
+		// fail closed with a config error; the run stays active on the same
+		// step for a corrected definition / operator intervention.
+		return result, fmt.Errorf("workflow step %q routes to missing step %q (definition configuration error)", currentStep.ID, edge.To)
 	}
 	run.ActiveStepID = nextStep.ID
 	run.Status = "active"

@@ -15,6 +15,7 @@ package workflow
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
@@ -273,5 +274,58 @@ func TestGreenfieldSelfReviewVerdictPartition(t *testing.T) {
 	}
 	if !conditions["issues_fixed"] {
 		t.Fatal("greenfield missing eq edge for verdict issues_fixed")
+	}
+}
+
+// A dangling edge — one pointing at a step missing from the definition — is a
+// configuration error and must fail closed: the run may NOT be reported as
+// completed, which would fake a successful delivery (GPT final review, P1).
+func TestCompleteAndAdvanceDanglingEdgeFailsClosed(t *testing.T) {
+	controlDB, err := db.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = controlDB.Close() })
+	if err := controlDB.UpsertWorkspace(db.Workspace{ID: "workspace-1", Name: "Workspace", Slug: "workspace", Root: t.TempDir()}); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	store := NewStore(controlDB, "workspace-1")
+	now := time.Now().UTC()
+	def := &entity.WorkflowDefinition{
+		ID:          "wf-dangling-edge",
+		Name:        "Dangling Edge Test",
+		Version:     1,
+		Scope:       "workspace",
+		StartStepID: "solo",
+		Steps: []entity.WorkflowStep{
+			{ID: "solo", Type: "agent_task", Title: "Solo", ActorRole: "dev", OutputFields: []entity.WorkflowField{{Name: "done"}}},
+			{ID: "gone", Type: "human_review", Title: "Vanished Gate"},
+		},
+		Edges:     []entity.WorkflowEdge{{ID: "e1", From: "solo", To: "gone"}},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	// Save the definition, then drop the target step so the edge dangles.
+	def.Steps = def.Steps[:1]
+	if err := store.SaveDefinition(def); err != nil {
+		t.Fatalf("save definition: %v", err)
+	}
+	if _, _, err := store.StartRun("project", "task-dangling", def.ID, map[string]entity.WorkflowActorBinding{
+		"dev": {Type: "agent", ID: "dev-agent"},
+	}); err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if _, err := store.CompleteAndAdvance("project", "task-dangling", "done", "", map[string]string{"done": "yes"}, "completed"); err == nil {
+		t.Fatal("dangling edge must fail closed with a configuration error")
+	}
+	run, found, err := store.RunForTask("project", "task-dangling")
+	if err != nil || !found {
+		t.Fatalf("run must stay addressable: found=%v err=%v", found, err)
+	}
+	if run.Status == "completed" {
+		t.Fatal("dangling edge must not fake a completed run")
+	}
+	if run.ActiveStepID != "solo" {
+		t.Fatalf("run must stay on the completing step, got active=%q", run.ActiveStepID)
 	}
 }
