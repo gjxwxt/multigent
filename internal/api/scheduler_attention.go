@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
@@ -525,6 +526,119 @@ func (s *Server) recoverPendingAttentionWakeups() {
 		}
 		s.requestAgentAttentionWakeup(binding, "startup_recovery", runtimeAPIURL, "system", focusID)
 	}
+}
+
+// dispatchWorkflowFollowupAfterRun re-drives the workflow dispatch after a
+// runtime run finishes. A step completed mid-run (mga task step done) can
+// advance the workflow to the next agent step while THIS run is still
+// active; fireTaskTriggerOrQueueRuntime then silently skips enqueueing
+// (hasActiveRuntimeRun matches the run itself) and the pipeline stalls until
+// a poller tick — which runs the task locally, not on the node. Now that the
+// run is finished, the standard dispatch path works again; call it with the
+// same queue-join semantics as a manual start. Best-effort: failures only
+// log — the run's HTTP response is already committed by the caller. r may be
+// nil (reaper-style callers); enqueueRuntimeTaskRun then derives no external
+// server URL.
+func (s *Server) dispatchWorkflowFollowupAfterRun(run *controldb.RuntimeRun, r *http.Request) {
+	if s == nil || s.controlDB == nil || run == nil {
+		return
+	}
+	taskID := strings.TrimSpace(run.TaskID)
+	project := strings.TrimSpace(run.ProjectID)
+	agent := strings.TrimSpace(run.AgentID)
+	workspaceID := strings.TrimSpace(run.WorkspaceID)
+	if taskID == "" || project == "" || agent == "" || workspaceID == "" {
+		return
+	}
+	if !s.runtimeTaskHasWorkflow(workspaceID, project, taskID) {
+		return
+	}
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	wfRun, ok, err := wfStore.RunForTask(project, taskID)
+	if err != nil || !ok || wfRun.Status != "active" || strings.TrimSpace(wfRun.ActiveStepID) == "" {
+		return
+	}
+	def, ok, err := wfStore.RunDefinition(wfRun)
+	if err != nil || !ok {
+		return
+	}
+	nextStep, ok := stepByIDForDispatch(def.Steps, wfRun.ActiveStepID)
+	if !ok || nextStep.Type != "agent_task" {
+		return // human gate or terminal: no runtime dispatch needed
+	}
+	instances, err := wfStore.ListStepInstances(wfRun.ID)
+	if err != nil {
+		return
+	}
+	pending := false
+	for _, inst := range instances {
+		if inst.StepID == wfRun.ActiveStepID && inst.Status == "pending" {
+			pending = true
+			break
+		}
+	}
+	if !pending {
+		return
+	}
+	task, err := s.ts.GetTask(project, agent, taskID)
+	if err != nil || task == nil {
+		return
+	}
+	if task.Status.IsTerminal() {
+		return
+	}
+	if s.hasActiveRuntimeRun(workspaceID, project, agent, taskID) {
+		return
+	}
+	if err := s.fireTaskTriggerOrQueueRuntime(workspaceID, project, agent, task, r, "workflow followup after run "+run.ID); err != nil {
+		log.Printf("[workflow-followup] dispatch after run %s failed for %s/%s task=%s: %v", run.ID, project, agent, taskID, err)
+	}
+}
+
+// workflowAdvancedDuringRun reports whether the task's workflow left the run's
+// original step behind while the run was still executing: the run is now on a
+// DIFFERENT active step whose newest event records a handoff (the run's own
+// step completed mid-run). Used by the finish transition to distinguish a
+// normal mid-run handoff (task stays where the dispatch placed it) from an
+// abandoned step (workflow_step_not_completed). Best-effort: an error reading
+// the workflow state means "not advanced" so the fail-closed behavior is kept.
+func (s *Server) workflowAdvancedDuringRun(run *controldb.RuntimeRun) bool {
+	if s == nil || s.controlDB == nil || run == nil {
+		return false
+	}
+	project := strings.TrimSpace(run.ProjectID)
+	taskID := strings.TrimSpace(run.TaskID)
+	wfStore := workflowstore.NewStore(s.controlDB, strings.TrimSpace(run.WorkspaceID))
+	wfRun, ok, err := wfStore.RunForTask(project, taskID)
+	if err != nil || !ok || wfRun.Status != "active" || strings.TrimSpace(wfRun.ActiveStepID) == "" {
+		return false
+	}
+	instances, err := wfStore.ListStepInstances(wfRun.ID)
+	if err != nil {
+		return false
+	}
+	inst, ok := workflowStepInstanceByStepID(instances, wfRun.ActiveStepID)
+	if !ok || inst.Status != "pending" {
+		return false
+	}
+	events, err := wfStore.ListStepEvents(wfRun.ID)
+	if err != nil || len(events) == 0 {
+		return false
+	}
+	latest := events[len(events)-1]
+	return strings.TrimSpace(latest.StepID) != strings.TrimSpace(wfRun.ActiveStepID) &&
+		(latest.Status == "completed" || latest.Status == "failed")
+}
+
+// stepByIDForDispatch mirrors workflowstore's stepByID without exporting it.
+func stepByIDForDispatch(steps []entity.WorkflowStep, id string) (entity.WorkflowStep, bool) {
+	id = strings.TrimSpace(id)
+	for i := range steps {
+		if strings.TrimSpace(steps[i].ID) == id {
+			return steps[i], true
+		}
+	}
+	return entity.WorkflowStep{}, false
 }
 
 func (s *Server) requestPendingAttentionWakeupAfterRun(run controldb.RuntimeRun) {

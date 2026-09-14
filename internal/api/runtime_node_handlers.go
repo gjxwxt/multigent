@@ -1248,6 +1248,13 @@ func (s *Server) finishRuntimeNodeRun(w http.ResponseWriter, r *http.Request, st
 		s.markTaskAttentionSignalsForRun(run, "handled")
 		s.markAttentionSignalsForWakeupRun(run)
 	}
+	// A step completed DURING this run (mga task step done) may have advanced
+	// the workflow to the next agent step; that mid-run dispatch was silently
+	// suppressed by hasActiveRuntimeRun because THIS run was still active.
+	// Now that the run finished, re-attempt the dispatch so the pipeline does
+	// not stall until the next poller tick (which would run the task locally
+	// instead of on the node).
+	s.dispatchWorkflowFollowupAfterRun(&run, r)
 	s.requestPendingAttentionWakeupAfterRun(run)
 	_ = json.NewEncoder(w).Encode(map[string]any{"run": runtimeRunResponse(run)})
 }
@@ -1304,6 +1311,16 @@ func (s *Server) applyFencedFinishTransition(run *controldb.RuntimeRun, body run
 		}
 		if s.runtimeTaskHasWorkflow(run.WorkspaceID, run.ProjectID, run.TaskID) {
 			if task.Status == entity.TaskStatusInProgress || task.Status == entity.TaskStatusPending {
+				// A step completed mid-run (`mga task step done`) advances the
+				// workflow to the next step while THIS run is still active; the
+				// dispatch lands the task pending on the next agent. When the
+				// run then finishes, the active step instance is pending but
+				// fresh — that is a normal handoff, not an abandoned step: keep
+				// the task as the dispatch placed it (release the fence only)
+				// and let dispatchWorkflowFollowupAfterRun re-drive the run.
+				if s.workflowAdvancedDuringRun(run) {
+					return fenceDecisionSkip
+				}
 				msg := firstNonEmpty(strings.TrimSpace(body.ErrorMessage), strings.TrimSpace(body.ErrorCode), "runtime run failed")
 				errorCode := firstNonEmpty(strings.TrimSpace(body.ErrorCode), "runtime_run_failed")
 				if run.Status != "failed" {
