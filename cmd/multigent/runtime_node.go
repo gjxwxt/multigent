@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,6 +45,50 @@ var errRuntimeRunCancelled = errors.New("runtime run cancelled")
 // (startup + post-outage re-register) — heartbeats never probe, so a wedged
 // docker daemon cannot starve lease renewals on a running run.
 var runtimeNodeCapabilitiesProbe = detectRuntimeNodeCapabilities
+
+// errRuntimeNodeRunReported marks an error returned by runtimeNodeExecuteRun
+// AFTER the run's failure was already successfully reported to the console
+// (agent_run_failed, unsupported_run_kind, empty_prompt). The control plane
+// acknowledged the outcome, so the node is communicating fine — the worker
+// loop must treat these as business results, not as console outages, and
+// must not enter the backoff/re-register path on their account.
+var errRuntimeNodeRunReported = errors.New("runtime run failed (reported)")
+
+func wrapRuntimeNodeReportedError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %w", errRuntimeNodeRunReported, err)
+}
+
+func isRuntimeNodeReportedExecutionError(err error) bool {
+	return errors.Is(err, errRuntimeNodeRunReported)
+}
+
+// isRuntimeNodeTransportError reports whether err came from the HTTP layer
+// (dial/timeout/refused/reset) rather than a well-formed console response.
+// Transport errors mean the console is unreachable — an outage. A decoded
+// response (even a 5xx error body) proves the control plane is up.
+func isRuntimeNodeTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "no such host") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "Client.Timeout")
+}
 
 // runtimeNodeReconnectState tracks the worker loop's outage so the loop can
 // back off while the console is down, log the recovery, and re-register once
@@ -325,22 +371,43 @@ func runtimeNodeRunWorkers(cfg runtimeNodeConfig, concurrency int, pollInterval 
 		pollInterval = 3 * time.Second
 	}
 	var wg sync.WaitGroup
+	// Outage state is NODE-level, not per worker: a console outage hits every
+	// worker goroutine at once, and per-worker state would log N reconnect
+	// lines and fire N duplicate re-registers for one incident.
+	var reconnect runtimeNodeReconnectState
+	var reconnectMu sync.Mutex
 	for i := 1; i <= concurrency; i++ {
 		workerID := i
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			var reconnect runtimeNodeReconnectState
 			for {
 				if err := runtimeNodeLoopOnce(cfg, workerID, coord, streamAgentOutput); err != nil {
-					time.Sleep(reconnect.observeFailure(pollInterval, err))
+					// An execution failure that was already reported to the
+					// console (agent_run_failed etc.) is a business outcome,
+					// not a control-plane outage: log it and continue at
+					// normal cadence without touching the outage state.
+					if isRuntimeNodeReportedExecutionError(err) {
+						slog.Warn("runtime worker run failed (reported to console)", "worker", workerID, "error", err)
+						time.Sleep(pollInterval)
+						continue
+					}
+					reconnectMu.Lock()
+					delay := reconnect.observeFailure(pollInterval, err)
+					reconnectMu.Unlock()
+					time.Sleep(delay)
 					continue
 				}
-				if reconnect.observeSuccess() {
+				reconnectMu.Lock()
+				reRegister := reconnect.observeSuccess()
+				reconnectMu.Unlock()
+				if reRegister {
 					// The console may have been restarted during the outage;
 					// refresh its node row (version, capabilities, last_error)
-					// once per outage. Failure here is non-fatal: the next
-					// outage re-registers again.
+					// once per outage, under the state lock so N workers
+					// recovering from the same outage produce ONE re-register.
+					// Failure here is non-fatal: the next outage re-registers
+					// again.
 					if err := runtimeNodeRegister(cfg); err != nil {
 						slog.Warn("runtime node re-register after reconnect failed", "error", err)
 					}
@@ -539,18 +606,31 @@ func runtimeNodeExecuteRun(cfg runtimeNodeConfig, run runtimeNodeRun, workerID i
 			slog.Info("runtime run cancelled before execution", "worker", workerID, "run", run.ID)
 			return nil
 		}
-		_ = runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "spec_fetch_failed", err.Error())
+		// A spec fetch that failed for transport reasons (connection refused,
+		// 5xx) IS a console outage — leave the error unclassified so the loop
+		// enters the backoff path. The best-effort fail report's own error
+		// (if the console is down, it errors too) must not mask that.
+		if reportErr := runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "spec_fetch_failed", err.Error()); reportErr == nil && !isRuntimeNodeTransportError(err) {
+			// Console reachable and acknowledged the failure, but the spec
+			// itself was bad (e.g. decoded garbage) — a business outcome.
+			return wrapRuntimeNodeReportedError(err)
+		}
 		return err
 	}
 	if spec.Kind != runtimeexec.KindExecPrompt && spec.Kind != runtimeexec.KindTask && spec.Kind != runtimeexec.KindForkSession {
 		msg := "unsupported runtime run kind: " + spec.Kind
-		_ = runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "unsupported_run_kind", msg)
-		return fmt.Errorf("%s", msg)
+		if reportErr := runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "unsupported_run_kind", msg); reportErr != nil {
+			// The console never learned of the outcome; treat as an outage.
+			return reportErr
+		}
+		return wrapRuntimeNodeReportedError(fmt.Errorf("%s", msg))
 	}
 	if strings.TrimSpace(spec.Prompt) == "" {
 		msg := "runtime run prompt is empty"
-		_ = runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "empty_prompt", msg)
-		return fmt.Errorf("%s", msg)
+		if reportErr := runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "empty_prompt", msg); reportErr != nil {
+			return reportErr
+		}
+		return wrapRuntimeNodeReportedError(fmt.Errorf("%s", msg))
 	}
 	meta := spec.Agent
 	if strings.TrimSpace(meta.Name) == "" {
@@ -569,14 +649,18 @@ func runtimeNodeExecuteRun(cfg runtimeNodeConfig, run runtimeNodeRun, workerID i
 
 	root, err := runtimeNodeWorkspaceRoot(spec.WorkspaceID)
 	if err != nil {
-		_ = runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "workspace_prepare_failed", err.Error())
-		return err
+		if reportErr := runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "workspace_prepare_failed", err.Error()); reportErr != nil {
+			return reportErr
+		}
+		return wrapRuntimeNodeReportedError(err)
 	}
 	st := store.NewFS(root)
 	agentDir := filepath.Join(root, "projects", spec.ProjectID, "agents", spec.AgentID)
 	if err := os.MkdirAll(agentDir, 0o755); err != nil {
-		_ = runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "agent_prepare_failed", err.Error())
-		return err
+		if reportErr := runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "agent_prepare_failed", err.Error()); reportErr != nil {
+			return reportErr
+		}
+		return wrapRuntimeNodeReportedError(err)
 	}
 	r := runner.New(root, taskstore.New(root), st)
 	r.SetAgentMetaOverride(spec.ProjectID, spec.AgentID, &meta)
@@ -592,9 +676,13 @@ func runtimeNodeExecuteRun(cfg runtimeNodeConfig, run runtimeNodeRun, workerID i
 			slog.Info("runtime run cancelled during execution", "worker", workerID, "run", run.ID)
 			return nil
 		}
-		_ = runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "executor_failed", err.Error())
+		if reportErr := runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "executor_failed", err.Error()); reportErr != nil {
+			// The console never learned of the outcome; treat as an outage.
+			slog.Error("runtime run executor failed AND failure report was rejected", "worker", workerID, "run", run.ID, "duration_ms", durationMS, "report_error", reportErr, "exec_error", err)
+			return reportErr
+		}
 		slog.Error("runtime run executor failed", "worker", workerID, "run", run.ID, "duration_ms", durationMS, "error", err)
-		return err
+		return wrapRuntimeNodeReportedError(err)
 	}
 	out := map[string]any{
 		"status":     string(result.Status),
@@ -610,9 +698,13 @@ func runtimeNodeExecuteRun(cfg runtimeNodeConfig, run runtimeNodeRun, workerID i
 		if msg == "" {
 			msg = "agent run failed"
 		}
-		_ = runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "agent_run_failed", msg)
+		if reportErr := runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "agent_run_failed", msg); reportErr != nil {
+			// The console never learned of the outcome; treat as an outage.
+			slog.Warn("runtime run failed AND failure report was rejected", "worker", workerID, "run", run.ID, "status", result.Status, "duration_ms", durationMS, "report_error", reportErr, "error", msg)
+			return reportErr
+		}
 		slog.Warn("runtime run failed", "worker", workerID, "run", run.ID, "status", result.Status, "duration_ms", durationMS, "log", result.LogPath, "error", msg)
-		return fmt.Errorf("%s", msg)
+		return wrapRuntimeNodeReportedError(fmt.Errorf("%s", msg))
 	}
 	slog.Info("runtime run completed", "worker", workerID, "run", run.ID, "status", result.Status, "duration_ms", durationMS, "session", result.SessionID, "log", result.LogPath)
 	return runtimeNodeCompleteRun(cfg, run.ID, run.LeaseGeneration, out)
