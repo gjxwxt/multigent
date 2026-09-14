@@ -219,7 +219,10 @@ func TestUnifiedSelfReviewEscalateRequiresCaseFile(t *testing.T) {
 }
 
 // The rework edge must carry the round counter and the report back into
-// implement so the round cap actually accumulates.
+// implement so the round cap actually accumulates. The counter is
+// platform-incremented on rework: the reviewing model self-reported 2, and
+// the platform bumps it to 3 for the next implement entry (production
+// showed models under-reporting rounds, silently voiding the 3-round cap).
 func TestUnifiedSelfReviewReworkCarriesRoundsAndReport(t *testing.T) {
 	store := startUnifiedSelfReviewRun(t)
 	driveToSelfReview(t, store)
@@ -234,8 +237,8 @@ func TestUnifiedSelfReviewReworkCarriesRoundsAndReport(t *testing.T) {
 	if transition.NextInst == nil {
 		t.Fatal("expected reworked implement instance")
 	}
-	if gotRounds := transition.NextInst.InputValues["review_rounds"]; gotRounds != "2" {
-		t.Fatalf("rework must carry review_rounds into implement, got %q", gotRounds)
+	if gotRounds := transition.NextInst.InputValues["review_rounds"]; gotRounds != "3" {
+		t.Fatalf("rework must platform-increment review_rounds into implement (model said 2, next round is 3), got %q", gotRounds)
 	}
 	if gotComments := transition.NextInst.InputValues["review_comments"]; gotComments == "" {
 		t.Fatal("rework must carry the self-review report as review_comments")
@@ -327,5 +330,60 @@ func TestCompleteAndAdvanceDanglingEdgeFailsClosed(t *testing.T) {
 	}
 	if run.ActiveStepID != "solo" {
 		t.Fatalf("run must stay on the completing step, got active=%q", run.ActiveStepID)
+	}
+}
+
+// The platform increments review_rounds on rework edges and clamps to the
+// escalation cap regardless of what the model reported — including garbage.
+func TestReworkRoundIncrementPlatformSide(t *testing.T) {
+	nextImplement := entity.WorkflowStep{ID: "implement", Type: "agent_task"}
+	nextHuman := entity.WorkflowStep{ID: "code_review", Type: "human_review"}
+	reworkEdge := entity.WorkflowEdge{ID: "e-self-rework", From: "agent_self_review", To: "implement"}
+	forwardEdge := entity.WorkflowEdge{ID: "e-self-escalate", From: "agent_self_review", To: "code_review"}
+	current := entity.WorkflowStepInstance{
+		InputValues:  map[string]string{"review_rounds": "1"},
+		OutputValues: map[string]string{"self_review_verdict": "issues_fixed", "review_rounds": "7"},
+	}
+
+	cases := []struct {
+		name    string
+		current string
+		want    string
+	}{
+		{"model under-reports", "1", "2"},
+		{"model over-reports", "5", "3"},
+		{"empty counts as first rework", "", "1"},
+		{"garbage counts as first rework", "banana", "1"},
+		{"zero counts as first rework", "0", "1"},
+		{"at cap stays at cap", "3", "3"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			edge := reworkEdge
+			edge.InputMapping = map[string]string{"review_comments": "$output.self_review", "review_rounds": "$output.review_rounds"}
+			current.OutputValues["review_rounds"] = tc.current
+			got := buildNextInputValues(current, nextImplement, edge)
+			if got["review_rounds"] != tc.want {
+				t.Fatalf("rework increment: got %q, want %q", got["review_rounds"], tc.want)
+			}
+		})
+	}
+
+	// Forward edges must carry the reported value unchanged — increments only
+	// happen when work actually returns to an agent implement step.
+	forwardEdge.InputMapping = map[string]string{"review_rounds": "$output.review_rounds"}
+	current.OutputValues["review_rounds"] = "2"
+	got := buildNextInputValues(current, nextHuman, forwardEdge)
+	if got["review_rounds"] != "2" {
+		t.Fatalf("forward edge must not increment: got %q", got["review_rounds"])
+	}
+
+	// A rework edge into a human step (mis-ID) must not increment either.
+	humanRework := reworkEdge
+	humanRework.InputMapping = map[string]string{"review_rounds": "$output.review_rounds"}
+	current.OutputValues["review_rounds"] = "2"
+	got = buildNextInputValues(current, nextHuman, humanRework)
+	if got["review_rounds"] != "2" {
+		t.Fatalf("human-step rework must not increment: got %q", got["review_rounds"])
 	}
 }

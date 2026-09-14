@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -2590,6 +2591,42 @@ func compareWorkflowValue(actual, op, value string, values []string) bool {
 	}
 }
 
+// maxReviewRounds is the escalation cap the unified delivery pipeline
+// documents to agents (three rounds, then escalate to human review).
+const maxReviewRounds = 3
+
+// reviewRoundsField is the step-field name the pipeline uses to count
+// agent-review rounds consumed by a task.
+const reviewRoundsField = "review_rounds"
+
+// incrementReviewRounds returns current+1 clamped to maxReviewRounds.
+// Non-numeric or empty currents count as round 1 (first rework entry).
+func incrementReviewRounds(current string) string {
+	current = strings.TrimSpace(current)
+	n := 0
+	if current != "" {
+		if parsed, err := strconv.Atoi(current); err == nil && parsed > 0 {
+			n = parsed
+		}
+	}
+	n++
+	if n > maxReviewRounds {
+		n = maxReviewRounds
+	}
+	return strconv.Itoa(n)
+}
+
+// isReworkEdge reports whether this edge sends work back to an agent
+// implement step for another review round. Only rework edges may increment
+// review_rounds — forward edges must carry the count unchanged, and the
+// clamp guarantees the counter can never exceed the escalation cap.
+func isReworkEdge(next entity.WorkflowStep, edge entity.WorkflowEdge) bool {
+	if strings.TrimSpace(next.Type) != "agent_task" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(edge.ID), "rework")
+}
+
 func buildNextInputValues(currentInst entity.WorkflowStepInstance, next entity.WorkflowStep, edge entity.WorkflowEdge) map[string]string {
 	out := make(map[string]string)
 	resolve := func(expr string) string {
@@ -2610,6 +2647,15 @@ func buildNextInputValues(currentInst entity.WorkflowStepInstance, next entity.W
 				continue
 			}
 			out[key] = strings.TrimSpace(resolve(expr))
+		}
+		// Platform-side round accounting: the reviewing model's self-reported
+		// review_rounds has proven unreliable (production round 2 reported
+		// round 1), and a stale count lets the three-round escalation cap
+		// silently become a loop. Rework edges into an agent implement step
+		// increment the counter deterministically, regardless of what the
+		// model reported; the value is clamped to the cap.
+		if _, ok := out[reviewRoundsField]; ok && isReworkEdge(next, edge) {
+			out[reviewRoundsField] = incrementReviewRounds(out[reviewRoundsField])
 		}
 		return out
 	}
