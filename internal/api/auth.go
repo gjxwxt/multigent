@@ -96,6 +96,13 @@ func newUserStore(db controldb.Store) *UserStore {
 	return s
 }
 
+// NewUserStore exposes the user store to CLI surfaces that manage local
+// accounts without booting the whole server (e.g. admin token issuance on
+// the deployment host).
+func NewUserStore(db controldb.Store) *UserStore {
+	return newUserStore(db)
+}
+
 func (s *UserStore) ensureInitialized() error {
 	if s.db == nil {
 		return fmt.Errorf("control database unavailable")

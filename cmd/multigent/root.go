@@ -114,6 +114,7 @@ func init() {
 		newSchemaCmd(),
 		newSecretsCmd(),
 		newMattermostBridgeCmd(),
+		newAdminTokenCmd(),
 	)
 }
 
