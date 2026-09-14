@@ -323,6 +323,20 @@ func DockerCommandContext(ctx context.Context, args ...string) *exec.Cmd {
 	return cmd
 }
 
+// Docker inspection commands must never hang the caller: the daemon answers
+// these in milliseconds when healthy, so a long block means Docker itself is
+// wedged and the only useful move is to fail fast and let callers degrade.
+const dockerInspectTimeout = 5 * time.Second
+
+// DockerCommandWithTimeout wraps DockerCommandContext with a hard timeout for
+// bounded, metadata-only docker invocations (inspect, info, ps). Never use it
+// for commands whose duration scales with data or network (pull, build, run
+// of agent workloads) — those need their own, larger budgets.
+func DockerCommandWithTimeout(args ...string) (*exec.Cmd, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), dockerInspectTimeout)
+	return DockerCommandContext(ctx, args...), cancel
+}
+
 // DockerCommandEnv prefixes common Docker Desktop binary directories to PATH.
 func DockerCommandEnv(env []string) []string {
 	prefixes := []string{
@@ -433,8 +447,12 @@ func ImageDigest(image string) string {
 	if image == "" {
 		return ""
 	}
-	out, err := DockerCommand("image", "inspect", image,
-		"--format", "{{range .RepoDigests}}{{.}} {{end}}{{.ID}}").Output()
+	out, err := func() ([]byte, error) {
+		cmd, cancel := DockerCommandWithTimeout("image", "inspect", image,
+			"--format", "{{range .RepoDigests}}{{.}} {{end}}{{.ID}}")
+		defer cancel()
+		return cmd.Output()
+	}()
 	if err != nil {
 		return ""
 	}
@@ -498,7 +516,9 @@ func archAlias(arch string) string {
 // can simulate platform mismatches without docker.
 var (
 	imagePlatformOf = func(image string) (string, bool) {
-		inspect, err := DockerCommand("image", "inspect", image, "--format", "{{.Os}}/{{.Architecture}}").Output()
+		cmd, cancel := DockerCommandWithTimeout("image", "inspect", image, "--format", "{{.Os}}/{{.Architecture}}")
+		defer cancel()
+		inspect, err := cmd.Output()
 		if err != nil {
 			return "", false
 		}
@@ -506,7 +526,9 @@ var (
 		return platform, platform != ""
 	}
 	hostPlatformOf = func() (string, bool) {
-		info, err := DockerCommand("info", "--format", "{{.OSType}}/{{.Architecture}}").Output()
+		cmd, cancel := DockerCommandWithTimeout("info", "--format", "{{.OSType}}/{{.Architecture}}")
+		defer cancel()
+		info, err := cmd.Output()
 		if err != nil {
 			return "", false
 		}
@@ -777,7 +799,9 @@ func imageExists(image string) bool {
 	if strings.TrimSpace(image) == "" {
 		return false
 	}
-	inspect, err := DockerCommand("image", "inspect", image, "--format", "{{.Os}}/{{.Architecture}}").Output()
+	inspectCmd, cancel := DockerCommandWithTimeout("image", "inspect", image, "--format", "{{.Os}}/{{.Architecture}}")
+	defer cancel()
+	inspect, err := inspectCmd.Output()
 	if err != nil {
 		return false
 	}
@@ -785,7 +809,9 @@ func imageExists(image string) bool {
 	if imagePlatform == "" {
 		return true
 	}
-	host, err := DockerCommand("info", "--format", "{{.OSType}}/{{.Architecture}}").Output()
+	hostCmd, cancelHost := DockerCommandWithTimeout("info", "--format", "{{.OSType}}/{{.Architecture}}")
+	defer cancelHost()
+	host, err := hostCmd.Output()
 	if err != nil {
 		return true
 	}
@@ -1117,9 +1143,17 @@ func EnsureVolumeOwnership(image string) error {
 	}
 	uidgid := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
 	for _, vol := range NamedCacheVolumes {
-		cmd := DockerCommand("run", "--rm", "-v", vol+":/vol", image,
+		// chown walks the whole volume; a huge npm cache can legitimately take
+		// a while, but an unbounded call here can hang server start forever.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		cmd := DockerCommandContext(ctx, "run", "--rm", "-v", vol+":/vol", image,
 			"/bin/sh", "-lc", "chown -R "+uidgid+" /vol")
-		if out, err := cmd.CombinedOutput(); err != nil {
+		out, err := cmd.CombinedOutput()
+		cancel()
+		if err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("chown volume %s: timed out after 2m — volume too large or daemon wedged", vol)
+			}
 			return fmt.Errorf("chown volume %s: %w (%s)", vol, err, strings.TrimSpace(string(out)))
 		}
 	}

@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1052,26 +1053,35 @@ func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Tas
 	}
 
 	// 1. Check for uncommitted working tree changes from in-context preview copilot
-	statusCmd := exec.Command("git", "status", "--porcelain")
+	// (all git calls bounded — this runs on the approve request path)
+	statusCtx, statusCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	statusCmd := exec.CommandContext(statusCtx, "git", "status", "--porcelain")
 	statusCmd.Dir = gitRoot
 	statusOut, err := statusCmd.Output()
+	statusCancel()
 	if err != nil || len(bytes.TrimSpace(statusOut)) == 0 {
 		return // working tree is clean
 	}
 
 	// 2. Stage and commit
-	addCmd := exec.Command("git", "add", "-A")
+	addCtx, addCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	addCmd := exec.CommandContext(addCtx, "git", "add", "-A")
 	addCmd.Dir = gitRoot
-	if addOut, err := addCmd.CombinedOutput(); err != nil {
-		log.Printf("[review-commit] git add failed for task %s (project %s): %v (%s)", t.ID, project, err, strings.TrimSpace(string(addOut)))
+	addOut, addErr := addCmd.CombinedOutput()
+	addCancel()
+	if addErr != nil {
+		log.Printf("[review-commit] git add failed for task %s (project %s): %v (%s)", t.ID, project, addErr, strings.TrimSpace(string(addOut)))
 		return
 	}
 
 	commitMsg := "chore(review): user in-context preview feedback fixes"
-	commitCmd := exec.Command("git", "commit", "-m", commitMsg)
+	commitCtx, commitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	commitCmd := exec.CommandContext(commitCtx, "git", "commit", "-m", commitMsg)
 	commitCmd.Dir = gitRoot
-	if commitOut, err := commitCmd.CombinedOutput(); err != nil {
-		log.Printf("[review-commit] git commit failed for task %s (project %s): %v (%s)", t.ID, project, err, strings.TrimSpace(string(commitOut)))
+	commitOut, commitErr := commitCmd.CombinedOutput()
+	commitCancel()
+	if commitErr != nil {
+		log.Printf("[review-commit] git commit failed for task %s (project %s): %v (%s)", t.ID, project, commitErr, strings.TrimSpace(string(commitOut)))
 		return
 	}
 
@@ -1087,19 +1097,25 @@ func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Tas
 		branchName = "main"
 	}
 
-	remoteCmd := exec.Command("git", "remote", "get-url", "origin")
+	remoteCtx, remoteCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	remoteCmd := exec.CommandContext(remoteCtx, "git", "remote", "get-url", "origin")
 	remoteCmd.Dir = gitRoot
-	if remoteOut, err := remoteCmd.Output(); err == nil && len(bytes.TrimSpace(remoteOut)) > 0 {
-		pushCmd := exec.Command("git", "push", "origin", branchName)
+	remoteOut, remoteErr := remoteCmd.Output()
+	remoteCancel()
+	if remoteErr == nil && len(bytes.TrimSpace(remoteOut)) > 0 {
+		pushCtx, pushCancel := context.WithTimeout(context.Background(), 90*time.Second)
+		pushCmd := exec.CommandContext(pushCtx, "git", "push", "origin", branchName)
 		pushCmd.Dir = gitRoot
-		if pushOut, err := pushCmd.CombinedOutput(); err != nil {
-			log.Printf("[review-commit] git push origin %s failed for task %s: %v (%s)", branchName, t.ID, err, strings.TrimSpace(string(pushOut)))
+		pushOut, pushErr := pushCmd.CombinedOutput()
+		pushCancel()
+		if pushErr != nil {
+			log.Printf("[review-commit] git push origin %s failed for task %s: %v (%s)", branchName, t.ID, pushErr, strings.TrimSpace(string(pushOut)))
 			if s.ts != nil && agent != "" {
 				_ = s.ts.AddComment(project, agent, &entity.TaskComment{
 					ID:        entity.NewCommentID(),
 					TaskID:    t.ID,
 					Author:    "system",
-					Body:      fmt.Sprintf("⚠️ 审核阶段修改自动推送至远程分支 `%s` 失败: %v", branchName, err),
+					Body:      fmt.Sprintf("⚠️ 审核阶段修改自动推送至远程分支 `%s` 失败: %v", branchName, pushErr),
 					CreatedAt: time.Now().UTC(),
 				})
 			}

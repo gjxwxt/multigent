@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -1271,9 +1272,16 @@ func cloneSkillSource(source, dst string) error {
 	if strings.Count(source, "/") == 1 && !strings.Contains(source, "://") && !strings.HasPrefix(source, "git@") {
 		cloneURL = "https://github.com/" + source + ".git"
 	}
-	cmd := exec.Command("git", "clone", "--depth", "1", cloneURL, dst)
+	// Bounded: an unresponsive remote or credential prompt must not hang the
+	// install request. 2 minutes covers typical shallow clones of skill repos.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", cloneURL, dst)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("git clone timed out after 2m: %s", strings.TrimSpace(string(out)))
+		}
 		return fmt.Errorf("git clone failed: %s", strings.TrimSpace(string(out)))
 	}
 	return nil

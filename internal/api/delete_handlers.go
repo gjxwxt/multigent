@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,7 +10,19 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// dockerInspectOutput runs a time-bounded, metadata-only docker command
+// (ps / rm -f / inspect) from API handlers. Bounded because these answer in
+// milliseconds on a healthy daemon; a timeout means Docker is wedged and the
+// handler must fail the request instead of hanging it.
+func dockerInspectOutput(timeout time.Duration, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	return cmd.CombinedOutput()
+}
 
 func (s *Server) handleDeleteTeam(w http.ResponseWriter, r *http.Request) {
 	if !s.checkCurrentWorkspaceAdmin(w, r) {
@@ -190,9 +203,10 @@ func (s *Server) deleteProjectFiles(projectDir string) error {
 // this project. Label-based so containers survive even when the in-memory
 // engine map lost them (restart, reaper already dropped the entry). Returns
 // an error when a container could not be removed — the caller must then keep
-// all records.
+// all records. Every docker call is time-bounded: a wedged daemon fails the
+// teardown cleanly instead of hanging the HTTP request forever.
 func (s *Server) stopProjectPreviewContainers(project string) error {
-	out, err := exec.Command("docker", "ps", "-aq", "--filter", "label=com.multigent.preview.project="+project).Output()
+	out, err := dockerInspectOutput(10*time.Second, "ps", "-aq", "--filter", "label=com.multigent.preview.project="+project)
 	if err != nil {
 		// Listing requires docker; without it nothing is known about
 		// leftover containers, so fail rather than silently proceed.
@@ -200,7 +214,7 @@ func (s *Server) stopProjectPreviewContainers(project string) error {
 	}
 	ids := strings.Fields(string(out))
 	for _, id := range ids {
-		if out, err := exec.Command("docker", "rm", "-f", id).CombinedOutput(); err != nil {
+		if out, err := dockerInspectOutput(15*time.Second, "rm", "-f", id); err != nil {
 			return fmt.Errorf("remove preview container %s: %w (%s)", id, err, strings.TrimSpace(string(out)))
 		}
 	}
@@ -208,7 +222,7 @@ func (s *Server) stopProjectPreviewContainers(project string) error {
 		return nil
 	}
 	// Re-check: zero surviving containers is the gate for proceeding.
-	if out, err := exec.Command("docker", "ps", "-aq", "--filter", "label=com.multigent.preview.project="+project).Output(); err != nil {
+	if out, err := dockerInspectOutput(10*time.Second, "ps", "-aq", "--filter", "label=com.multigent.preview.project="+project); err != nil {
 		return fmt.Errorf("re-check preview containers: %w", err)
 	} else if strings.TrimSpace(string(out)) != "" {
 		return fmt.Errorf("preview containers survived removal for project %s; records kept", project)

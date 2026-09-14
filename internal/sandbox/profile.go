@@ -150,7 +150,9 @@ func localImageExists(image string) bool {
 	if strings.TrimSpace(image) == "" {
 		return false
 	}
-	return DockerCommand("image", "inspect", image).Run() == nil
+	cmd, cancel := DockerCommandWithTimeout("image", "inspect", image)
+	defer cancel()
+	return cmd.Run() == nil
 }
 
 // ImageForProfile returns the managed image for a profile, honoring the same

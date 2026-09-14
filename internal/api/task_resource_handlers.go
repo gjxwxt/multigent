@@ -88,8 +88,11 @@ func taskWorktreeDir(task *entity.Task, gitRoot, taskID string) string {
 
 // countGitLines counts non-empty porcelain lines from one read-only git
 // command; display only, cleanup re-derives state under the project lock.
+// Bounded: a wedged repo must not stall the resource popover.
 func countGitLines(dir string, args ...string) int {
-	cmd := exec.Command("git", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
@@ -154,16 +157,23 @@ func (s *Server) pushTaskBranchBestEffort(project string, task *entity.Task, wor
 	if branchName == "" {
 		return
 	}
-	remoteCmd := exec.Command("git", "remote", "get-url", "origin")
+	remoteCtx, remoteCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	remoteCmd := exec.CommandContext(remoteCtx, "git", "remote", "get-url", "origin")
 	remoteCmd.Dir = worktreeDir
 	remoteOut, err := remoteCmd.Output()
+	remoteCancel()
 	if err != nil || len(strings.TrimSpace(string(remoteOut))) == 0 {
 		return
 	}
-	pushCmd := exec.Command("git", "push", "origin", branchName)
+	// Bounded push: a credential-helper prompt or dead remote must not hang
+	// the cleanup request. Failure is already reported via task comment.
+	pushCtx, pushCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	pushCmd := exec.CommandContext(pushCtx, "git", "push", "origin", branchName)
 	pushCmd.Dir = worktreeDir
 	pushCmd.Env = gitworktree.PushNetworkEnv()
-	if out, err := pushCmd.CombinedOutput(); err != nil {
+	out, err := pushCmd.CombinedOutput()
+	pushCancel()
+	if err != nil {
 		log.Printf("[resource-cleanup] push checkpoint %s to %s failed for task %s: %v (%s)",
 			shortSHA(sha), branchName, task.ID, err, gitworktree.RedactGitOutput(strings.TrimSpace(string(out))))
 		if s.ts != nil {

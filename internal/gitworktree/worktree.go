@@ -2,6 +2,7 @@ package gitworktree
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -13,6 +14,40 @@ import (
 	"syscall"
 	"time"
 )
+
+// Git operation timeouts, tuned per operation class. All Manager methods run
+// under the manager mutex AND the per-project directory lock, so one hung git
+// call would freeze every other task's worktree operations on the project
+// (and, for the manager mutex, across all projects). Local operations answer
+// in milliseconds; network operations get a larger budget that still caps a
+// wedged remote or credential-helper prompt.
+const (
+	gitLocalTimeout   = 15 * time.Second
+	gitNetworkTimeout = 90 * time.Second
+)
+
+// gitLocal runs a local, metadata-only git command (rev-parse, status,
+// show-ref, worktree add/prune) with a hard timeout. Callers must invoke the
+// returned cancel after Wait to release the timer.
+func gitLocal(dir string, args ...string) (*exec.Cmd, context.CancelFunc) {
+	return gitTimed(gitLocalTimeout, dir, args...)
+}
+
+// gitRemote runs a network git command (fetch, push, ls-remote) with a hard
+// timeout. A timeout here usually means a credential helper is waiting for
+// interactive input or the remote is unreachable — both are failures the
+// caller should see promptly. Callers must invoke the returned cancel after
+// Wait to release the timer.
+func gitRemote(dir string, args ...string) (*exec.Cmd, context.CancelFunc) {
+	return gitTimed(gitNetworkTimeout, dir, args...)
+}
+
+func gitTimed(timeout time.Duration, dir string, args ...string) (*exec.Cmd, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	return cmd, cancel
+}
 
 // Manager manages git worktrees for isolated task execution.
 type Manager struct {
@@ -176,13 +211,14 @@ func (m *Manager) EnsureSnapshotWorktree(projectRoot, taskID, commit string) (st
 	if err := os.MkdirAll(filepath.Dir(targetDir), 0755); err != nil {
 		return "", fmt.Errorf("create worktrees parent dir: %w", err)
 	}
-	cmd := exec.Command("git", "worktree", "add", "--detach", targetDir, commit)
-	cmd.Dir = projectRoot
+	cmd, cancel := gitLocal(projectRoot, "worktree", "add", "--detach", targetDir, commit)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		cancel()
 		return "", fmt.Errorf("git snapshot worktree add failed: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
 	}
+	cancel()
 	if err := preserveRuntimeContract(projectRoot, targetDir); err != nil {
 		log.Printf("[worktree] preserve runtime contract warning for %s: %v", targetDir, err)
 	}
@@ -190,8 +226,8 @@ func (m *Manager) EnsureSnapshotWorktree(projectRoot, taskID, commit string) (st
 }
 
 func gitRevision(worktreeDir string) (string, error) {
-	cmd := exec.Command("git", "rev-parse", "HEAD^{commit}")
-	cmd.Dir = worktreeDir
+	cmd, cancel := gitLocal(worktreeDir, "rev-parse", "HEAD^{commit}")
+	defer cancel()
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -213,11 +249,10 @@ func (m *Manager) resolveBaseCommit(projectRoot, baseBranch string) (string, err
 	}
 
 	ref := baseBranch
-	cmdRemote := exec.Command("git", "remote")
-	cmdRemote.Dir = projectRoot
-	if out, err := cmdRemote.Output(); err == nil && hasRemote(string(out), "origin") {
-		cmdFetch := exec.Command("git", "fetch", "origin", baseBranch)
-		cmdFetch.Dir = projectRoot
+	cmdRemote, remoteCancel := gitLocal(projectRoot, "remote")
+	if out, err := cmdRemote.Output(); func() bool { remoteCancel(); return err == nil }() && hasRemote(string(out), "origin") {
+		cmdFetch, fetchCancel := gitRemote(projectRoot, "fetch", "origin", baseBranch)
+		defer fetchCancel()
 		cmdFetch.Env = gitNetworkEnv()
 		var stderr bytes.Buffer
 		cmdFetch.Stderr = &stderr
@@ -243,15 +278,15 @@ func (m *Manager) resolveBaseCommit(projectRoot, baseBranch string) (string, err
 
 // cmdLocalRevParse checks (without error formatting) that a ref resolves.
 func cmdLocalRevParse(projectRoot, ref string) error {
-	cmd := exec.Command("git", "rev-parse", "--verify", ref+"^{commit}")
-	cmd.Dir = projectRoot
+	cmd, cancel := gitLocal(projectRoot, "rev-parse", "--verify", ref+"^{commit}")
+	defer cancel()
 	return cmd.Run()
 }
 
 // gitRevParse verifies a ref and returns its full commit SHA.
 func gitRevParse(projectRoot, ref string) (string, error) {
-	cmd := exec.Command("git", "rev-parse", "--verify", ref+"^{commit}")
-	cmd.Dir = projectRoot
+	cmd, cancel := gitLocal(projectRoot, "rev-parse", "--verify", ref+"^{commit}")
+	defer cancel()
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("resolve base commit %s failed: %w", ref, err)
@@ -378,21 +413,22 @@ func (m *Manager) ensureWorktree(projectRoot, taskID, baseBranch, baseCommit, fe
 
 	// Check if the feature branch already exists locally
 	branchExists := false
-	cmdCheck := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+featureBranch)
-	cmdCheck.Dir = projectRoot
+	cmdCheck, checkCancel := gitLocal(projectRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+featureBranch)
 	if err := cmdCheck.Run(); err == nil {
 		branchExists = true
 	}
+	checkCancel()
 
 	var cmdWorktree *exec.Cmd
+	var worktreeCancel context.CancelFunc
 	if branchExists {
 		// Checkout existing branch into worktree
-		cmdWorktree = exec.Command("git", "worktree", "add", targetDir, featureBranch)
+		cmdWorktree, worktreeCancel = gitLocal(projectRoot, "worktree", "add", targetDir, featureBranch)
 	} else {
-		cmdWorktree = exec.Command("git", "worktree", "add", "-b", featureBranch, targetDir, startPoint)
+		cmdWorktree, worktreeCancel = gitLocal(projectRoot, "worktree", "add", "-b", featureBranch, targetDir, startPoint)
 	}
+	defer worktreeCancel()
 
-	cmdWorktree.Dir = projectRoot
 	var stderr bytes.Buffer
 	cmdWorktree.Stderr = &stderr
 	if err := cmdWorktree.Run(); err != nil {
@@ -425,8 +461,8 @@ func (m *Manager) CheckedOutBranch(worktreeDir string) (string, error) {
 }
 
 func checkedOutBranch(worktreeDir string) (string, error) {
-	cmd := exec.Command("git", "branch", "--show-current")
-	cmd.Dir = worktreeDir
+	cmd, cancel := gitLocal(worktreeDir, "branch", "--show-current")
+	defer cancel()
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -455,11 +491,13 @@ func (m *Manager) CleanupWorktree(projectRoot, taskID string) error {
 
 	// Run git worktree remove --force
 	var removeErr error
-	cmd := exec.Command("git", "worktree", "remove", "--force", targetDir)
-	cmd.Dir = projectRoot
+	cmd, removeCancel := gitLocal(projectRoot, "worktree", "remove", "--force", targetDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
+		removeCancel()
 		removeErr = fmt.Errorf("git worktree remove: %w (%s)", err, redactGitOutput(strings.TrimSpace(string(out))))
 		log.Printf("[worktree-cleanup] %v", removeErr)
+	} else {
+		removeCancel()
 	}
 
 	// Ensure directory is completely removed; only fail when it survives both
@@ -472,9 +510,9 @@ func (m *Manager) CleanupWorktree(projectRoot, taskID string) error {
 	}
 
 	// Run git worktree prune to clean up stale metadata
-	cmdPrune := exec.Command("git", "worktree", "prune")
-	cmdPrune.Dir = projectRoot
+	cmdPrune, pruneCancel := gitLocal(projectRoot, "worktree", "prune")
 	_ = cmdPrune.Run()
+	pruneCancel()
 
 	return nil
 }
@@ -489,9 +527,9 @@ func (m *Manager) ListWorktrees(projectRoot string) ([]string, error) {
 		realProjectRoot = filepath.Clean(projectRoot)
 	}
 
-	cmd := exec.Command("git", "worktree", "list", "--porcelain")
-	cmd.Dir = projectRoot
+	cmd, listCancel := gitLocal(projectRoot, "worktree", "list", "--porcelain")
 	out, err := cmd.Output()
+	listCancel()
 	if err != nil {
 		return nil, fmt.Errorf("git worktree list: %w", err)
 	}
@@ -545,21 +583,22 @@ func (m *Manager) FetchRemoteUpdates(projectRoot string) error {
 	defer unlock()
 
 	sanitizeSharedGitConfig(projectRoot)
-	cmdRemote := exec.Command("git", "remote")
-	cmdRemote.Dir = projectRoot
+	cmdRemote, remoteCancel := gitLocal(projectRoot, "remote")
 	out, err := cmdRemote.Output()
+	remoteCancel()
 	if err != nil || !hasRemote(string(out), "origin") {
 		// No remote: nothing to fetch, treat as success.
 		return nil
 	}
-	cmd := exec.Command("git", "fetch", "origin", "--prune")
-	cmd.Dir = projectRoot
+	cmd, fetchCancel := gitRemote(projectRoot, "fetch", "origin", "--prune")
 	cmd.Env = gitNetworkEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		fetchCancel()
 		return fmt.Errorf("git fetch origin --prune failed: %w (%s)", err, strings.TrimSpace(stderr.String()))
 	}
+	fetchCancel()
 	return nil
 }
 
@@ -576,22 +615,25 @@ func (m *Manager) ListBranchesDetailed(projectRoot string) ([]BranchInfo, error)
 	infos := make([]BranchInfo, 0, len(names))
 	for _, name := range names {
 		info := BranchInfo{Name: name}
-		cmdResolve := exec.Command("git", "rev-parse", "--verify", "--short=7", "refs/heads/"+name)
-		cmdResolve.Dir = projectRoot
-		if out, err := cmdResolve.Output(); err == nil && strings.TrimSpace(string(out)) != "" {
+		cmdResolve, resolveCancel := gitLocal(projectRoot, "rev-parse", "--verify", "--short=7", "refs/heads/"+name)
+		out, err := cmdResolve.Output()
+		resolveCancel()
+		if err == nil && strings.TrimSpace(string(out)) != "" {
 			info.SHA = strings.TrimSpace(string(out))
 		} else {
-			cmd := exec.Command("git", "rev-parse", "--verify", "--short=7", "refs/remotes/origin/"+name)
-			cmd.Dir = projectRoot
-			if o, err := cmd.Output(); err == nil {
+			cmd, remoteResolveCancel := gitLocal(projectRoot, "rev-parse", "--verify", "--short=7", "refs/remotes/origin/"+name)
+			o, rerr := cmd.Output()
+			remoteResolveCancel()
+			if rerr == nil {
 				info.SHA = strings.TrimSpace(string(o))
 			}
 		}
 		if info.SHA != "" {
-			cmdDate := exec.Command("git", "log", "-1", "--format=%cr", info.SHA)
-			cmdDate.Dir = projectRoot
-			if out, err := cmdDate.Output(); err == nil {
-				info.LastCommitDate = strings.TrimSpace(string(out))
+			cmdDate, dateCancel := gitLocal(projectRoot, "log", "-1", "--format=%cr", info.SHA)
+			dout, derr := cmdDate.Output()
+			dateCancel()
+			if derr == nil {
+				info.LastCommitDate = strings.TrimSpace(string(dout))
 			}
 		}
 		infos = append(infos, info)
@@ -600,9 +642,9 @@ func (m *Manager) ListBranchesDetailed(projectRoot string) ([]BranchInfo, error)
 }
 
 func listBranches(projectRoot string) ([]string, error) {
-	cmd := exec.Command("git", "branch", "-a", "--format=%(refname:short)")
-	cmd.Dir = projectRoot
+	cmd, cancel := gitLocal(projectRoot, "branch", "-a", "--format=%(refname:short)")
 	out, err := cmd.Output()
+	cancel()
 	if err != nil {
 		return []string{"main"}, nil
 	}
@@ -646,9 +688,9 @@ func (m *Manager) GetCommitHash(projectRoot, ref string) string {
 	if ref == "" {
 		ref = "HEAD"
 	}
-	cmd := exec.Command("git", "rev-parse", "--short=7", ref)
-	cmd.Dir = projectRoot
+	cmd, cancel := gitLocal(projectRoot, "rev-parse", "--short=7", ref)
 	out, err := cmd.Output()
+	cancel()
 	if err != nil {
 		return ""
 	}
@@ -683,9 +725,9 @@ func commitWorktreeStateLocked(worktreeDir, message string) (string, bool, error
 	if worktreeDir == "" {
 		return "", false, fmt.Errorf("worktree directory is required")
 	}
-	status := exec.Command("git", "status", "--porcelain")
-	status.Dir = worktreeDir
+	status, statusCancel := gitLocal(worktreeDir, "status", "--porcelain")
 	out, err := status.Output()
+	statusCancel()
 	if err != nil {
 		return "", false, fmt.Errorf("check worktree status: %w", err)
 	}
@@ -697,16 +739,18 @@ func commitWorktreeStateLocked(worktreeDir, message string) (string, bool, error
 		return sha, false, nil
 	}
 
-	add := exec.Command("git", "add", "-A")
-	add.Dir = worktreeDir
+	add, addCancel := gitLocal(worktreeDir, "add", "-A")
 	if addOut, err := add.CombinedOutput(); err != nil {
+		addCancel()
 		return "", true, fmt.Errorf("git add: %w (%s)", err, redactGitOutput(strings.TrimSpace(string(addOut))))
 	}
-	commit := exec.Command("git", "commit", "-m", message)
-	commit.Dir = worktreeDir
+	addCancel()
+	commit, commitCancel := gitLocal(worktreeDir, "commit", "-m", message)
 	if commitOut, err := commit.CombinedOutput(); err != nil {
+		commitCancel()
 		return "", true, fmt.Errorf("git commit: %w (%s)", err, redactGitOutput(strings.TrimSpace(string(commitOut))))
 	}
+	commitCancel()
 	sha, err := gitRevParse(worktreeDir, "HEAD")
 	if err != nil {
 		return "", true, fmt.Errorf("read committed HEAD: %w", err)
@@ -727,9 +771,9 @@ func (m *Manager) CaptureSnapshot(worktreeDir string) (string, error) {
 	if worktreeDir == "" {
 		return "", fmt.Errorf("worktree directory is required")
 	}
-	status := exec.Command("git", "status", "--porcelain")
-	status.Dir = worktreeDir
+	status, statusCancel := gitLocal(worktreeDir, "status", "--porcelain")
 	out, err := status.Output()
+	statusCancel()
 	if err != nil {
 		return "", fmt.Errorf("check worktree status: %w", err)
 	}
@@ -737,9 +781,9 @@ func (m *Manager) CaptureSnapshot(worktreeDir string) (string, error) {
 		return "", fmt.Errorf("worktree has uncommitted changes")
 	}
 
-	cmd := exec.Command("git", "rev-parse", "--verify", "HEAD^{commit}")
-	cmd.Dir = worktreeDir
+	cmd, headCancel := gitLocal(worktreeDir, "rev-parse", "--verify", "HEAD^{commit}")
 	out, err = cmd.Output()
+	headCancel()
 	if err != nil {
 		return "", fmt.Errorf("read worktree HEAD: %w", err)
 	}
@@ -769,19 +813,20 @@ func (m *Manager) PushBranch(projectRoot, branch, expectedCommit string) error {
 	}
 	sanitizeSharedGitConfig(projectRoot)
 
-	cmd := exec.Command("git", "push", "origin", "refs/heads/"+branch+":refs/heads/"+branch)
-	cmd.Dir = projectRoot
+	cmd, pushCancel := gitRemote(projectRoot, "push", "origin", "refs/heads/"+branch+":refs/heads/"+branch)
 	cmd.Env = gitNetworkEnv()
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 	if err := cmd.Run(); err != nil {
+		pushCancel()
 		return fmt.Errorf("git push origin %s failed: %w (%s)", branch, err, redactGitOutput(output.String()))
 	}
+	pushCancel()
 
-	verify := exec.Command("git", "ls-remote", "--heads", "origin", "refs/heads/"+branch)
-	verify.Dir = projectRoot
+	verify, verifyCancel := gitRemote(projectRoot, "ls-remote", "--heads", "origin", "refs/heads/"+branch)
 	out, err := verify.Output()
+	verifyCancel()
 	if err != nil {
 		return fmt.Errorf("verify remote branch %s failed: %w", branch, err)
 	}
@@ -822,9 +867,9 @@ func (m *Manager) PushTag(projectRoot, tag, commit, message, expectedAncestorOf 
 	}
 	sanitizeSharedGitConfig(projectRoot)
 
-	resolve := exec.Command("git", "rev-parse", "--verify", commit+"^{commit}")
-	resolve.Dir = projectRoot
+	resolve, resolveCancel := gitLocal(projectRoot, "rev-parse", "--verify", commit+"^{commit}")
 	out, err := resolve.Output()
+	resolveCancel()
 	if err != nil {
 		return fmt.Errorf("resolve tag target %s failed: %w", commit, err)
 	}
@@ -841,20 +886,20 @@ func (m *Manager) PushTag(projectRoot, tag, commit, message, expectedAncestorOf 
 		}
 	}
 
-	tagCmd := exec.Command("git", "tag", "-a", tag, "-m", message, targetSHA)
-	tagCmd.Dir = projectRoot
+	tagCmd, tagCancel := gitLocal(projectRoot, "tag", "-a", tag, "-m", message, targetSHA)
 	var tagOut bytes.Buffer
 	tagCmd.Stdout = &tagOut
 	tagCmd.Stderr = &tagOut
 	if err := tagCmd.Run(); err != nil {
+		tagCancel()
 		if strings.Contains(tagOut.String(), "already exists") {
 			return fmt.Errorf("tag %s already exists", tag)
 		}
 		return fmt.Errorf("create tag %s failed: %w (%s)", tag, err, redactGitOutput(tagOut.String()))
 	}
+	tagCancel()
 
-	push := exec.Command("git", "push", "origin", "refs/tags/"+tag+":refs/tags/"+tag)
-	push.Dir = projectRoot
+	push, tagPushCancel := gitRemote(projectRoot, "push", "origin", "refs/tags/"+tag+":refs/tags/"+tag)
 	push.Env = gitNetworkEnv()
 	var pushOut bytes.Buffer
 	push.Stdout = &pushOut
@@ -862,13 +907,17 @@ func (m *Manager) PushTag(projectRoot, tag, commit, message, expectedAncestorOf 
 	if err := push.Run(); err != nil {
 		// Do not leave a local-only tag behind: a failed push must not make
 		// the next attempt "already exists" against a tag nobody can fetch.
-		_ = exec.Command("git", "tag", "-d", tag).Run()
+		delCmd, delCancel := gitLocal(projectRoot, "tag", "-d", tag)
+		_ = delCmd.Run()
+		delCancel()
+		tagPushCancel()
 		return fmt.Errorf("push tag %s failed: %w (%s)", tag, err, redactGitOutput(pushOut.String()))
 	}
+	tagPushCancel()
 
-	verify := exec.Command("git", "ls-remote", "--tags", "origin", "refs/tags/"+tag, "refs/tags/"+tag+"^{}")
-	verify.Dir = projectRoot
+	verify, tagVerifyCancel := gitRemote(projectRoot, "ls-remote", "--tags", "origin", "refs/tags/"+tag, "refs/tags/"+tag+"^{}")
 	out, err = verify.Output()
+	tagVerifyCancel()
 	if err != nil {
 		return fmt.Errorf("verify remote tag %s failed: %w", tag, err)
 	}
@@ -900,9 +949,9 @@ func (m *Manager) isAncestorLocked(projectRoot, ancestor, descendant string) (bo
 	if strings.TrimSpace(projectRoot) == "" || ancestor == "" || descendant == "" {
 		return false, fmt.Errorf("project root, ancestor, and descendant are required")
 	}
-	cmd := exec.Command("git", "merge-base", "--is-ancestor", ancestor, descendant)
-	cmd.Dir = projectRoot
+	cmd, cancel := gitLocal(projectRoot, "merge-base", "--is-ancestor", ancestor, descendant)
 	err := cmd.Run()
+	cancel()
 	if err == nil {
 		return true, nil
 	}
@@ -929,9 +978,9 @@ func (m *Manager) IsAncestor(projectRoot, ancestor, descendant string) (bool, er
 	if strings.TrimSpace(projectRoot) == "" || ancestor == "" || descendant == "" {
 		return false, fmt.Errorf("project root, ancestor, and descendant are required")
 	}
-	cmd := exec.Command("git", "merge-base", "--is-ancestor", ancestor, descendant)
-	cmd.Dir = projectRoot
+	cmd, cancel := gitLocal(projectRoot, "merge-base", "--is-ancestor", ancestor, descendant)
 	err = cmd.Run()
+	cancel()
 	if err == nil {
 		return true, nil
 	}
@@ -1014,9 +1063,9 @@ func (m *Manager) MergeBranchLocally(projectRoot, targetBranch, sourceBranch, co
 	}
 
 	// 1. Check if root repository is clean (ignoring .multigent runtime artifacts)
-	cmdStatus := exec.Command("git", "status", "--porcelain")
-	cmdStatus.Dir = projectRoot
+	cmdStatus, statusCancel := gitLocal(projectRoot, "status", "--porcelain")
 	statusOut, err := cmdStatus.Output()
+	statusCancel()
 	if err != nil {
 		return "", fmt.Errorf("check repository status: %w", err)
 	}
@@ -1033,34 +1082,36 @@ func (m *Manager) MergeBranchLocally(projectRoot, targetBranch, sourceBranch, co
 	}
 
 	// 2. Checkout target branch
-	cmdCheckout := exec.Command("git", "checkout", targetBranch)
-	cmdCheckout.Dir = projectRoot
+	cmdCheckout, checkoutCancel := gitLocal(projectRoot, "checkout", targetBranch)
 	var stderrCheckout bytes.Buffer
 	cmdCheckout.Stderr = &stderrCheckout
 	if err := cmdCheckout.Run(); err != nil {
+		checkoutCancel()
 		return "", fmt.Errorf("checkout target branch %s failed: %w (%s)", targetBranch, err, stderrCheckout.String())
 	}
+	checkoutCancel()
 
 	// 3. Perform merge with --no-ff
 	if commitMessage == "" {
 		commitMessage = fmt.Sprintf("merge: branch '%s' into '%s'", sourceBranch, targetBranch)
 	}
-	cmdMerge := exec.Command("git", "merge", "--no-ff", "-m", commitMessage, sourceBranch)
-	cmdMerge.Dir = projectRoot
+	cmdMerge, mergeCancel := gitLocal(projectRoot, "merge", "--no-ff", "-m", commitMessage, sourceBranch)
 	var stderrMerge bytes.Buffer
 	cmdMerge.Stderr = &stderrMerge
 	if err := cmdMerge.Run(); err != nil {
 		// Attempt clean abort on failure / conflict
-		cmdAbort := exec.Command("git", "merge", "--abort")
-		cmdAbort.Dir = projectRoot
+		cmdAbort, abortCancel := gitLocal(projectRoot, "merge", "--abort")
 		_ = cmdAbort.Run()
+		abortCancel()
+		mergeCancel()
 		return "", fmt.Errorf("merge branch %s into %s failed: %w (%s)", sourceBranch, targetBranch, err, stderrMerge.String())
 	}
+	mergeCancel()
 
 	// 4. Retrieve resulting HEAD commit hash
-	cmdRev := exec.Command("git", "rev-parse", "HEAD")
-	cmdRev.Dir = projectRoot
+	cmdRev, revCancel := gitLocal(projectRoot, "rev-parse", "HEAD")
 	out, err := cmdRev.Output()
+	revCancel()
 	if err != nil {
 		return "", fmt.Errorf("read merged commit hash: %w", err)
 	}
@@ -1088,12 +1139,13 @@ func (m *Manager) SyncMain(projectRoot, defaultBranch string) error {
 	}
 
 	// Check if origin remote exists
-	cmdRemote := exec.Command("git", "remote")
-	cmdRemote.Dir = projectRoot
-	if out, err := cmdRemote.Output(); err == nil && hasRemote(string(out), "origin") {
-		cmdBranch := exec.Command("git", "branch", "--show-current")
-		cmdBranch.Dir = projectRoot
+	cmdRemote, remoteCancel := gitLocal(projectRoot, "remote")
+	remoteOut, remoteErr := cmdRemote.Output()
+	remoteCancel()
+	if remoteErr == nil && hasRemote(string(remoteOut), "origin") {
+		cmdBranch, branchCancel := gitLocal(projectRoot, "branch", "--show-current")
 		branchOut, err := cmdBranch.Output()
+		branchCancel()
 		if err != nil {
 			return fmt.Errorf("read current branch before sync: %w", err)
 		}
@@ -1101,9 +1153,9 @@ func (m *Manager) SyncMain(projectRoot, defaultBranch string) error {
 			return fmt.Errorf("cannot sync %s: repository is on branch %s", defaultBranch, current)
 		}
 
-		cmdStatus := exec.Command("git", "status", "--porcelain")
-		cmdStatus.Dir = projectRoot
+		cmdStatus, syncStatusCancel := gitLocal(projectRoot, "status", "--porcelain")
 		statusOut, err := cmdStatus.Output()
+		syncStatusCancel()
 		if err != nil {
 			return fmt.Errorf("check repository status before sync: %w", err)
 		}
@@ -1111,16 +1163,19 @@ func (m *Manager) SyncMain(projectRoot, defaultBranch string) error {
 			return fmt.Errorf("cannot sync %s: repository has uncommitted changes", defaultBranch)
 		}
 
-		cmdFetch := exec.Command("git", "fetch", "origin", defaultBranch)
-		cmdFetch.Dir = projectRoot
+		cmdFetch, syncFetchCancel := gitRemote(projectRoot, "fetch", "origin", defaultBranch)
+		cmdFetch.Env = gitNetworkEnv()
 		if err := cmdFetch.Run(); err != nil {
+			syncFetchCancel()
 			return fmt.Errorf("fetch origin %s failed: %w", defaultBranch, err)
 		}
-		cmdMerge := exec.Command("git", "merge", "--ff-only", "origin/"+defaultBranch)
-		cmdMerge.Dir = projectRoot
+		syncFetchCancel()
+		cmdMerge, mergeCancel := gitLocal(projectRoot, "merge", "--ff-only", "origin/"+defaultBranch)
 		if err := cmdMerge.Run(); err != nil {
+			mergeCancel()
 			return fmt.Errorf("fast-forward %s from origin failed: %w", defaultBranch, err)
 		}
+		mergeCancel()
 	}
 	return nil
 }

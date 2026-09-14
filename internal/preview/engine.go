@@ -203,7 +203,7 @@ func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktree
 		// A task can transition to completed while its writable preview is
 		// still alive. Replace that container before exposing a read-only
 		// completion snapshot.
-		_ = exec.Command("docker", "rm", "-f", inst.ContainerID).Run()
+		dockerRmF("preview", inst.ContainerID)
 		delete(e.instances, taskID)
 	}
 
@@ -231,7 +231,7 @@ func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktree
 
 	containerName := fmt.Sprintf("multigent-preview-%s", sanitizeContainerName(taskID))
 	// Remove any existing container with the same name
-	_ = exec.Command("docker", "rm", "-f", containerName).Run()
+	dockerRmF("preview", containerName)
 
 	instance := &PreviewInstance{
 		TaskID:      taskID,
@@ -535,9 +535,9 @@ func resolvePreviewStartupTimeout(runtimeSpec *RuntimeSpec, contractTimeoutSecon
 // exit is reported as such: a dead frontend process otherwise masquerades as
 // "backend did not become ready".
 func failInstance(instance *PreviewInstance, containerName, reason string) error {
-	logs, _ := exec.Command("docker", "logs", "--tail", "120", containerName).CombinedOutput()
+	logs, _ := dockerOutput(10*time.Second, "logs", "--tail", "120", containerName)
 	exit := ""
-	if out, err := exec.Command("docker", "inspect", "--format", "{{.State.Status}} exitcode={{.State.ExitCode}}", containerName).Output(); err == nil {
+	if out, err := dockerOutput(5*time.Second, "inspect", "--format", "{{.State.Status}} exitcode={{.State.ExitCode}}", containerName); err == nil {
 		if s := strings.TrimSpace(string(out)); strings.HasPrefix(s, "exited") {
 			exit = s
 		}
@@ -547,7 +547,7 @@ func failInstance(instance *PreviewInstance, containerName, reason string) error
 	}
 	instance.Status = "error"
 	instance.Error = fmt.Sprintf("%s; logs: %s", reason, strings.TrimSpace(string(logs)))
-	_ = exec.Command("docker", "rm", "-f", containerName).Run()
+	dockerRmF("preview", containerName)
 	return errors.New(reason)
 }
 
@@ -563,8 +563,10 @@ func previewWorktreeMount(worktreeDir string, readOnly bool) string {
 // after a service restart. Containers are only managed when they carry the
 // Multigent preview label; unrelated Docker workloads are untouched.
 func (e *Engine) Reconcile(ctx context.Context) error {
-	// List container IDs with the preview label
-	out, err := exec.CommandContext(ctx, "docker", "ps", "-aq", "--filter", "label=com.multigent.preview=true").Output()
+	// List container IDs with the preview label. The startup caller passes
+	// context.Background(); bound each docker call so a wedged daemon cannot
+	// hang the reconciliation goroutine on a single metadata command.
+	out, err := dockerOutput(10*time.Second, "ps", "-aq", "--filter", "label=com.multigent.preview=true")
 	if err != nil {
 		return fmt.Errorf("list preview containers: %w", err)
 	}
@@ -576,7 +578,7 @@ func (e *Engine) Reconcile(ctx context.Context) error {
 	// Batch inspect container state and labels in a single invocation
 	format := `{{.Id}}\t{{.State.Status}}\t{{json .Config.Labels}}`
 	inspectArgs := append([]string{"inspect", "--format", format}, containerIDs...)
-	inspectOut, err := exec.CommandContext(ctx, "docker", inspectArgs...).Output()
+	inspectOut, err := dockerOutput(10*time.Second, inspectArgs...)
 	if err != nil {
 		return fmt.Errorf("inspect preview containers: %w", err)
 	}
@@ -598,7 +600,7 @@ func (e *Engine) Reconcile(ctx context.Context) error {
 		}
 		expiresAt, err := time.Parse(time.RFC3339, strings.TrimSpace(labels["com.multigent.preview.expires_at"]))
 		if err != nil || !now.Before(expiresAt) || state != "running" {
-			_ = exec.CommandContext(ctx, "docker", "rm", "-f", id).Run()
+			dockerRmF("expired preview", id)
 			continue
 		}
 		port, err := strconv.Atoi(strings.TrimSpace(labels["com.multigent.preview.port"]))
@@ -652,8 +654,7 @@ func (e *Engine) StopEphemeralPreview(taskID string) error {
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		cmd := exec.Command("docker", "rm", "-f", containerName)
-		out, err := cmd.CombinedOutput()
+		out, err := dockerOutput(15*time.Second, "rm", "-f", containerName)
 		if err == nil {
 			lastErr = nil
 			break
@@ -683,11 +684,30 @@ func (e *Engine) StopEphemeralPreview(taskID string) error {
 // containerExistsByTaskLabel reports whether any container carries the
 // preview task label, regardless of its lifecycle state.
 func containerExistsByTaskLabel(taskID string) (bool, error) {
-	out, err := exec.Command("docker", "ps", "-aq", "--filter", "label=com.multigent.preview.task="+taskID).Output()
+	out, err := dockerOutput(5*time.Second, "ps", "-aq", "--filter", "label=com.multigent.preview.task="+taskID)
 	if err != nil {
 		return false, err
 	}
 	return strings.TrimSpace(string(out)) != "", nil
+}
+
+// dockerOutput runs a bounded metadata docker command (ps, inspect, logs, rm)
+// and returns its combined output. These commands answer in milliseconds on a
+// healthy daemon; a timeout means Docker is wedged and the caller should
+// degrade rather than block a request or the reaper indefinitely.
+func dockerOutput(timeout time.Duration, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return sandbox.DockerCommandContext(ctx, args...).CombinedOutput()
+}
+
+// dockerRmF is the fire-and-forget form of `docker rm -f` with a hard
+// timeout. Errors are logged, never returned — callers use it where failure
+// only means cleanup happens on the next reaper pass.
+func dockerRmF(what, nameOrID string) {
+	if _, err := dockerOutput(15*time.Second, "rm", "-f", nameOrID); err != nil {
+		log.Printf("[preview] docker rm -f %s %s failed (will retry on next reaper pass): %v", what, nameOrID, err)
+	}
 }
 
 func sanitizeContainerName(s string) string {
