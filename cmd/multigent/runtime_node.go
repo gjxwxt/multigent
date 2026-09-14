@@ -34,51 +34,15 @@ const (
 	// a down console at full poll rate, but it never gives up — a daemon that
 	// stops retrying needs systemd to resurrect it, which hides the outage.
 	runtimeNodeMaxBackoff = time.Minute
-	// runtimeNodeCapabilitiesTTL bounds how long a cached capability probe is
-	// trusted. detectRuntimeNodeCapabilities spawns several docker processes
-	// (~250ms); heartbeats fire every poll interval, so probing per heartbeat
-	// would burn CPU on every node forever.
-	runtimeNodeCapabilitiesTTL = 5 * time.Minute
 )
 
 var errRuntimeRunCancelled = errors.New("runtime run cancelled")
 
 // runtimeNodeCapabilitiesProbe is a package-level seam so tests can stub the
-// docker-probing capability detection out.
+// docker-probing capability detection out. It is only invoked by register
+// (startup + post-outage re-register) — heartbeats never probe, so a wedged
+// docker daemon cannot starve lease renewals on a running run.
 var runtimeNodeCapabilitiesProbe = detectRuntimeNodeCapabilities
-
-type runtimeNodeCapabilitiesCache struct {
-	mu        sync.Mutex
-	payload   map[string]any
-	expiresAt time.Time
-}
-
-// get returns the cached capabilities when fresh, re-probing (once per call
-// under the lock) when expired. Register always re-probes fresh and refreshes
-// the cache as a side effect.
-func (c *runtimeNodeCapabilitiesCache) get() map[string]any {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	now := time.Now()
-	if c.payload != nil && now.Before(c.expiresAt) {
-		return c.payload
-	}
-	payload := runtimeNodeCapabilitiesProbe()
-	c.payload = payload
-	c.expiresAt = now.Add(runtimeNodeCapabilitiesTTL)
-	return payload
-}
-
-func (c *runtimeNodeCapabilitiesCache) refresh() map[string]any {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	payload := runtimeNodeCapabilitiesProbe()
-	c.payload = payload
-	c.expiresAt = time.Now().Add(runtimeNodeCapabilitiesTTL)
-	return payload
-}
-
-var runtimeNodeCachedCapabilities runtimeNodeCapabilitiesCache
 
 // runtimeNodeReconnectState tracks the worker loop's outage so the loop can
 // back off while the console is down, log the recovery, and re-register once
@@ -506,21 +470,26 @@ func runtimeNodeRegister(cfg runtimeNodeConfig) error {
 		"arch":         runtime.GOARCH,
 		"hostname":     hostname,
 		"version":      version,
-		"capabilities": runtimeNodeCachedCapabilities.refresh(),
+		"capabilities": runtimeNodeCapabilitiesProbe(),
 	})
 	return err
 }
 
+// runtimeNodeHeartbeat intentionally omits capabilities: the probe spawns
+// docker processes, and a heartbeat must never depend on docker health — the
+// lease-renewal heartbeat inside a running run would starve while the probe
+// stalls, and the console would reap a live run. Capabilities reach the
+// console via register (startup + post-outage re-register), which is the only
+// freshness the node row needs.
 func runtimeNodeHeartbeat(cfg runtimeNodeConfig, status, lastError string) error {
 	hostname, _ := os.Hostname()
 	_, err := runtimeNodePost(cfg, "/api/v1/runtime-node/heartbeat", map[string]any{
-		"status":       status,
-		"os":           runtime.GOOS,
-		"arch":         runtime.GOARCH,
-		"hostname":     hostname,
-		"version":      version,
-		"lastError":    lastError,
-		"capabilities": runtimeNodeCachedCapabilities.get(),
+		"status":    status,
+		"os":        runtime.GOOS,
+		"arch":      runtime.GOARCH,
+		"hostname":  hostname,
+		"version":   version,
+		"lastError": lastError,
 	})
 	return err
 }

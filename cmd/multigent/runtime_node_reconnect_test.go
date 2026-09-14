@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -144,36 +145,59 @@ func swapRuntimeNodeCapabilitiesProbe(fn func() map[string]any) func() {
 	return func() { runtimeNodeCapabilitiesProbe = prev }
 }
 
-// Heartbeats fire every poll interval; the capability probe behind them
-// spawns several docker processes. The cache must bound the probe rate (one
-// probe per TTL window), not probe per heartbeat.
-func TestRuntimeNodeCapabilitiesCacheBoundsProbes(t *testing.T) {
-	var probes atomic.Int64
+// Heartbeats must not carry a capability payload at all: the probe spawns
+// docker processes, and the lease-renewal heartbeat inside a running run
+// would stall behind a wedged docker daemon — the console would then reap a
+// live run (observed live as lease lost → SIGKILL after a runaway model run
+// loaded the node). Register is the only capability carrier.
+func TestRuntimeNodeHeartbeatOmitsCapabilities(t *testing.T) {
+	var heartbeatCaps atomic.Bool
+	var registerCaps atomic.Bool
+	var probeCount atomic.Int64
 	restore := swapRuntimeNodeCapabilitiesProbe(func() map[string]any {
-		probes.Add(1)
-		return map[string]any{"os": "test", "n": probes.Load()}
+		probeCount.Add(1)
+		return map[string]any{"os": "test"}
 	})
 	defer restore()
 
-	var cache runtimeNodeCapabilitiesCache
-	first := cache.get()
-	for i := 0; i < 20; i++ {
-		got := cache.get()
-		if got["n"] != first["n"] {
-			t.Fatalf("cache re-probed within TTL: first n=%v, call %d n=%v", first["n"], i, got["n"])
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/runtime-node/heartbeat", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Capabilities map[string]any `json:"capabilities"`
 		}
-	}
-	if probes.Load() != 1 {
-		t.Fatalf("expected 1 probe for 21 gets, got %d", probes.Load())
-	}
+		_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body)
+		if body.Capabilities != nil {
+			heartbeatCaps.Store(true)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	})
+	mux.HandleFunc("/api/v1/runtime-node/register", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Capabilities map[string]any `json:"capabilities"`
+		}
+		_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body)
+		if body.Capabilities != nil {
+			registerCaps.Store(true)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"node": map[string]any{"id": "rtn_test"}, "status": "registered"})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
 
-	// Register must refresh: it reports version/capabilities to the console,
-	// so a stale snapshot would mislead scheduling decisions.
-	refreshed := cache.refresh()
-	if refreshed["n"] == first["n"] {
-		t.Fatalf("refresh returned the stale snapshot: n=%v", refreshed["n"])
+	cfg := runtimeNodeConfig{ServerURL: server.URL, Token: "test-token"}
+	if err := runtimeNodeHeartbeat(cfg, "online", ""); err != nil {
+		t.Fatalf("heartbeat: %v", err)
 	}
-	if probes.Load() != 2 {
-		t.Fatalf("expected 2 probes after refresh, got %d", probes.Load())
+	if heartbeatCaps.Load() {
+		t.Fatalf("heartbeat must not carry capabilities (probe starvation risk)")
+	}
+	if err := runtimeNodeRegister(cfg); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if !registerCaps.Load() {
+		t.Fatalf("register must carry a fresh capability snapshot")
+	}
+	if probeCount.Load() != 1 {
+		t.Fatalf("expected exactly 1 probe (register only), got %d", probeCount.Load())
 	}
 }
