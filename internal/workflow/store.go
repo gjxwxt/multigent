@@ -1017,13 +1017,16 @@ func unifiedDeliveryPipelineTemplate(locale string) entity.WorkflowTemplate {
 			edge("e-clarify-approved", "clarify_review", "implement", text["approved"], cond("decision", "eq", "approve"), map[string]string{"approved_scope": "$output.approved_scope", "review_comments": "$output.comments"}, false),
 			edge("e-clarify-rework", "clarify_review", "clarify", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "request": "$input.clarified"}, false),
 			edge("e-implement-review", "implement", "agent_self_review", "", nil, nil, true),
-			// Routing keys on the dedicated self_review_verdict field, one
-			// mutually-exclusive eq edge per verdict (od-e2e incident: a
-			// neq-escalate condition declared before the rework edge let
-			// issues_fixed satisfy the pass route — first-match-wins). A
-			// missing/unrecognized verdict falls through to the default
-			// pass edge so the human gate stays in the loop.
-			edge("e-self-pass", "agent_self_review", "ci_ready_gate", text["approved"], cond("self_review_verdict", "eq", "pass"), nil, true),
+			// Routing keys on the dedicated self_review_verdict field, three
+			// mutually-exclusive precise eq edges and NO default (od-e2e
+			// incident: a neq-escalate pass edge declared before the rework
+			// edge let issues_fixed satisfy the pass route — first-match-wins;
+			// review round 2: an IsDefault pass edge let a non-empty invalid
+			// verdict like "passs" ride the fallback into the CI gate). With
+			// no fallback, any verdict outside the vocabulary — or a missing
+			// one — matches nothing and CompleteAndAdvance fails closed with
+			// a route-mismatch error, keeping the step active for a re-run.
+			edge("e-self-pass", "agent_self_review", "ci_ready_gate", text["approved"], cond("self_review_verdict", "eq", "pass"), nil, false),
 			edge("e-self-rework", "agent_self_review", "implement", text["changesRequested"], cond("self_review_verdict", "eq", "issues_fixed"), map[string]string{"review_comments": "$output.self_review", "review_rounds": "$output.review_rounds"}, false),
 			edge("e-self-escalate", "agent_self_review", "code_review", "escalate", cond("self_review_verdict", "eq", "escalate"), map[string]string{"escalation_case": "$output.escalation_case", "review_comments": "$output.self_review", "review_rounds": "$output.review_rounds"}, false),
 			edge("e-ci-ready-review", "ci_ready_gate", "code_review", "", nil, map[string]string{"implementation": "$input.implementation", "ci_ready_report": "$output.ci_ready_report"}, true),
@@ -2301,13 +2304,18 @@ func normalizeWorkflowOutputValues(step entity.WorkflowStep, values map[string]s
 		return out, nil
 	}
 	isReworkReview := step.Type == "human_review" && isWorkflowRejectionDecision(out["decision"])
+	// Self-review conditional contract: an escalate verdict promises a
+	// structured outstanding-issues case file for the human gate — an empty
+	// escalation_case would hand code_review an empty folder. On pass /
+	// issues_fixed the field legitimately does not exist.
+	verdictRequiredCase := step.Type == "agent_task" && strings.EqualFold(strings.TrimSpace(out["self_review_verdict"]), "escalate")
 	for _, field := range step.OutputFields {
 		name := strings.TrimSpace(field.Name)
 		if name == "" {
 			continue
 		}
 		if strings.TrimSpace(out[name]) == "" {
-			if field.Optional || (isReworkReview && name != "decision" && name != "comments") {
+			if (field.Optional && !verdictRequiredCase) || (isReworkReview && name != "decision" && name != "comments") {
 				continue
 			}
 			return nil, fmt.Errorf("workflow output field %q is required for step %q", name, step.Title)

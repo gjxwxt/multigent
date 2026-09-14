@@ -120,11 +120,13 @@ func TestUnifiedSelfReviewRoutingRealTransitions(t *testing.T) {
 	}
 }
 
-// A missing verdict must not ride a wrong route. With no matching condition
-// and no other non-default edge, the run fails closed (route-mismatch error),
-// keeping the step active so the reviewer can be re-prompted — the verdict
-// vocabulary is in the contract, so an absent token is a contract violation,
-// not a pass.
+// A missing OR non-vocabulary verdict must not ride a wrong route. There is
+// no default edge on agent_self_review: no matching condition means the run
+// fails closed (route-mismatch error), keeping the step active so the
+// reviewer can be re-prompted. The missing case is caught by the required
+// field check before routing; a non-empty invalid token like "passs" passes
+// output validation (the field only requires non-empty) and must then be
+// caught by the route partition — review round 2 of the od-e2e incident.
 func TestUnifiedSelfReviewMissingVerdictFailsClosed(t *testing.T) {
 	store := startUnifiedSelfReviewRun(t)
 	driveToSelfReview(t, store)
@@ -134,6 +136,48 @@ func TestUnifiedSelfReviewMissingVerdictFailsClosed(t *testing.T) {
 		"review_rounds": "1",
 	}, "completed"); err == nil {
 		t.Fatal("missing self_review_verdict must fail closed, got a successful transition")
+	}
+}
+
+func TestUnifiedSelfReviewUnknownVerdictFailsClosed(t *testing.T) {
+	store := startUnifiedSelfReviewRun(t)
+	driveToSelfReview(t, store)
+	// Non-empty invalid token: survives required-field validation, must be
+	// stopped by the eq-partition (no default edge) — never reach the CI gate.
+	transition, err := store.CompleteAndAdvance("project", "task-self-review", "reviewed", "", map[string]string{
+		"self_review":         "full report",
+		"self_review_verdict": "passs",
+		"review_rounds":       "1",
+	}, "completed")
+	if err == nil {
+		t.Fatalf("unknown verdict %q must fail closed, got transition to %v", "passs", transition.Next)
+	}
+	// Fail-closed means the step stays active and addressable for a re-run.
+	run, ok, err := store.RunForTask("project", "task-self-review")
+	if err != nil || !ok {
+		t.Fatalf("run must stay addressable: ok=%v err=%v", ok, err)
+	}
+	if run.Status != "active" {
+		t.Fatalf("run must stay active after a rejected verdict, got %q", run.Status)
+	}
+	if run.ActiveStepID != "agent_self_review" {
+		t.Fatalf("step must stay active for a re-run, got active step %q", run.ActiveStepID)
+	}
+}
+
+// An escalate verdict promises a structured case file for the human gate;
+// an empty escalation_case must be rejected so code_review never receives
+// an empty folder.
+func TestUnifiedSelfReviewEscalateRequiresCaseFile(t *testing.T) {
+	store := startUnifiedSelfReviewRun(t)
+	driveToSelfReview(t, store)
+	if _, err := store.CompleteAndAdvance("project", "task-self-review", "escalating", "", map[string]string{
+		"self_review":         "round cap reached with outstanding P0",
+		"self_review_verdict": "escalate",
+		"review_rounds":       "3",
+		// escalation_case deliberately omitted
+	}, "completed"); err == nil {
+		t.Fatal("escalate without escalation_case must be rejected")
 	}
 }
 
