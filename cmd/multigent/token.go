@@ -28,10 +28,15 @@ func newAdminTokenCmd() *cobra.Command {
 The token signs with the same jwt_secret the running server validates against,
 so it works immediately against http://127.0.0.1:<addr>/api/v1 while the
 console is up. Default subject is the first admin account; default lifetime is
-30 minutes. Run this on the deployment host with access to the data directory:
+30 minutes. Run this on the deployment host with access to the data directory.
+The control DB is resolved exactly like the server's (MULTIGENT_DATA_DIR /
+MULTIGENT_CONTROL_DATA_DIR / $HOME/.multigent) — pass the same environment the
+service runs with, e.g.:
 
-  multigent --dir <data-root> admin-token
-  multigent --dir <data-root> admin-token --user admin --ttl 15m
+  sudo systemctl show multigent --property=Environment   # find MULTIGENT_DATA_DIR
+  sudo env MULTIGENT_DATA_DIR=/opt/multigent/data multigent admin-token
+
+  multigent admin-token --user admin --ttl 15m
 
 Use the token as "Authorization: Bearer <token>". Treat it as a credential:
 it grants the named account's full API access until it expires.`,
