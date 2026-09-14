@@ -100,3 +100,99 @@
 - **并发 autoStart 竞态**：同 agent 双任务同刻 autoStart，后到者首跑 exit 1（agent busy in manual_run）。平台后续 wake 自动恢复、无任务丢失，但"首轮失败"会污染任务历史与耗时统计。修法：任务启动入口按 agent 排队或加短暂退避重试（B8 的"追问首轮失败"在此有了具体形态）。
 - **git worktree 的 .git 判据**：正常 worktree 的 `.git` 是指针文件（`gitdir: ...`），被 RemoveAll 硬删后 `git worktree prune` 能回收元数据；但 **孤儿 worktree 的 `.git` 可能是真目录**（独立 clone 语义），prune 对它无效——test7 的两个 2026-08-27 残留 worktree 就长这样，靠 `git worktree list` 看不见。回收扫描器必须直接扫目录 + 校验"无 active 任务"，不能依赖 git 元数据。
 - **清理用凭据的取用路径**：平台 DB 里连接密钥可解出（plain-dev），清理 GitLab 仓库用它合法（soak 仓库本由平台创建）；但取用后必须即弃——本轮在 Mac/VM /tmp 的副本全部删除，这个动作要成为固定收尾步骤。
+
+---
+
+## F. ChatOps 通宵冲刺后补记（2026-09-15 凌晨，两轮通宵执行的新盲点）
+
+> 收录标准不变：审查代码看不出来、只有跑到运行时才暴露。本节是 ChatOps 全闭环
+> + 超时治理 + 双侧部署执行过程的新增发现。
+
+### F1. commit message 会带出本机环境（PATH 泄漏实例）
+
+**经过**：把生产日志里的报错原文粘进 commit message（`exec: claude: executable
+file not found in <完整 $PATH>`），提交后才发现整条本机 PATH（含各人工具目录）
+已写进 git 历史。所幸未 push，amend 掉了。
+**规则**：commit message 里引用日志必须先脱敏——报错原文里的环境相关部分
+（PATH、IP、路径）要手动截断成 `not found in $PATH` 之类的占位。`git log -p`
+是公开面，按"会贴到 README"的标准写。
+
+### F2. 手工 go build 绕过 Makefile = 版本元数据静默丢失
+
+**经过**：交叉编译时手写 `go build -ldflags "-s -w"`，漏掉 Makefile 里的
+`-X main.version/commit/buildDate`。部署成功、服务正常，但 `multigent version`
+显示 `commit : none`，health 端点只有 "dev"——直到行为验证时才发现无法证明
+"跑的是哪个提交"。
+**修复**：平台已加启动日志（`multigent build: version=... commit=...`），
+commit=NONE 时打 WARN 指引重建。另加 `multigent admin-token` CLI（见 F3）。
+**规则**：交叉编译一律 `make linux-amd64` / `make linux-arm64`（或照抄 Makefile
+LDFLAGS 块），不要手写 ldflags；部署后验证清单第一项 = 启动日志里的 commit 行。
+
+### F3. 运维缺口：本地管理员 token 无签发入口
+
+**经过**：验证 ChatOps 审批闭环需要在生产 console 上创建冒烟任务，但没有
+浏览器登录流的条件下无 token 可用——最后是从 DB 读 jwt_secret、用 Python
+复刻 Go 的**自定义 base64 字母表** JWT 签名手搓了一个。能跑通，但这是只有
+读过 auth.go 全文才能完成的操作，且 db 直读 + 手搓签名不该是常规运维动作。
+**修复**：新增 `multigent admin-token [--user U] [--ttl 15m]`（本仓 CLI），
+在部署主机上一条命令签出与运行中 server 同密钥的短期 token。
+**规则**：凡是"执行 Agent 自己都要手搓一次"的运维动作，就是 CLI 缺口。
+
+### F4. 部署拓扑的认知偏差：节点不在"那台 VM"上
+
+**经过**：HANDOFF §15.4 写了"runtime node 服务在 VM 上当前 inactive"——这是
+误判。节点守护进程实际运行在**另一台独立节点机**上（与 console 不同主机），console
+VM 上自然找不到进程。DB 里节点 online + runs 有 runtime_node_id，两行数据
+本可及早戳穿误判，但当时只查了 console 侧 systemctl。
+**规则**：排查"某服务在哪跑"先查 DB 的关联记录（runtime_nodes 表、
+runtime_runs.runtime_node_id），再按记录去对应主机找进程；不要假设
+"部署 = 单机"。多机拓扑下每台机器的身份、职责要在 HANDOFF 拓扑图里显式维护。
+
+### F5. 超时治理的覆盖面判定：能挂死锁持有者的调用优先级最高
+
+**经过**：审计 50+ 个裸 `exec.Command` 时发现，危险性不取决于命令本身，
+而取决于**调用点持有什么锁**：gitworktree 的 44 个调用全部在 manager 互斥锁
++ 项目目录锁之下，一个挂死的 `git fetch`（credential helper 等待 TTY 输入
+是经典场景）冻结的是全项目所有任务的 worktree 操作；而 runner 的 agent 进程
+虽然"更重"，但它的生命周期已有 run 租约和任务 context 治理，反而不用动。
+**规则**：给 subprocess 加超时前先画"锁持有图"。判据是"这个调用挂死时谁在
+等"——持锁调用点 > 请求路径调用点 > 后台 best-effort 调用点。
+
+### F6. 自定义 JWT 字母表是隐性协议（跨语言复刻成本高）
+
+**经过**：Go 侧 `base64Encode` 用的是自定义字母表 + 定制 padding 截断
+（`A-Za-z0-9-_`，尾部按余数裁字符，不是标准 URL-safe base64 的 `=` 填充）。
+用 Python 标准库复刻签名时必须逐字符对照实现，`base64.urlsafe_b64encode`
+直接用会错。任何跨语言复刻该签名的脚本都会踩。
+**规则**：这类"自造编码"要么在 doc 注明"非标准，复刻需对照实现"，要么提供
+官方签发入口（F3 已做）把外部复刻需求归零。
+
+### F7. journalctl 的 --since 会漏"刚刚发生"的日志（时钟/写入延迟）
+
+**经过**：`journalctl -u multigent --since "2 minutes ago"` 返回空，怀疑没
+日志；实际是 dispatch 发生在 sleep 窗口之后、`--since` 的相对时间按执行时
+计算导致窗口错位。改用 `-n N` 尾随 + grep 才稳定。
+**规则**：排障时优先 `-n 200 | grep` 尾随，`--since` 只用于确定的历史窗口；
+两者结论冲突时信尾随。
+
+### F8. 平台侧增量 > 提示词侧约束（review_rounds 的教训泛化）
+
+**经过**：三轮升级上限写在步骤描述里让模型自觉递增，生产第二轮就破防
+（上报 1）。平台在 rework 边确定性 +1 后问题归零，且 5 行代码。
+**规则**：计数器、轮次、预算这类"必须精确"的状态，一律平台持有、平台递增；
+提示词只负责告知，不负责记账。模型上报值只作参考，永不作为唯一事实源。
+
+### F9. 剩余 Feature 优先级修订（2026-09-15）
+
+综合两轮通宵执行，对 §A 清单的修订与新增：
+
+| # | 项 | 变化 | 说明 |
+|---|---|---|---|
+| 9 | **admin-token CLI** | ✅ 已完成（`multigent admin-token`） | F3 收口，部署机一条命令签短期 token |
+| 10 | **启动日志 version/commit** | ✅ 已完成 | F2 收口，commit=NONE 打 WARN |
+| 11 | **`multigent config check`** | 新增排期 | §4-2 建议的落地：启动前自检 + 生效配置快照（secret 打码），迁移日收益最大 |
+| 12 | **节点日志/run 产物轮转** | 新增排期 | 节点侧 run exec.log 无轮转（实测 32 个文件/18MB，慢但单调涨）；multigent.log 已有 max_size_mb，节点 workspaces 侧没有 |
+| 13 | **poller 20s 周期的可观测性** | 新增排期 | 触发派发目前只有 audit `runtime_run.enqueue`（reason 字段可辨来源），建议加一条 debug 日志便于验证"派发走了哪条路"（本次冒烟全靠 audit 链反推） |
+| 14 | **docker system prune timer** | 维持 §D 建议并提级 | 容器/镜像垃圾在冒烟频繁的 VM 上增长很快（§D 实测 ~4.5GB/晚） |
+
+§A 原有 1–8 项维持不变。
