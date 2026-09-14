@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -130,3 +132,54 @@ func heartbeatRequest(t *testing.T, nodeID, workspaceID, version string) *http.R
 	}))
 	return req
 }
+
+// Concurrent heartbeats from many nodes must not crash the process — the
+// drift-dedupe map is written from concurrent HTTP handlers (GPT review
+// P0-2). Run under -race: every goroutine writes a distinct node id (map
+// growth) and hammers the shared map, which a lost mutex turns into
+// `concurrent map writes` deterministically enough for the race detector.
+func TestRuntimeNodeHeartbeatConcurrentDriftCheckIsRaceFree(t *testing.T) {
+	s, _ := newConnectionGrantPolicyServer(t)
+	s.SetVersion("v1.0.0")
+
+	const nodes = 16
+	const rounds = 40
+	var wg sync.WaitGroup
+	for n := 0; n < nodes; n++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			nodeID := workspaceIDForDriftNodes + "-drift-" + strconv.Itoa(n)
+			for i := 0; i < rounds; i++ {
+				version := "v0.1." + strconv.Itoa(i%3)
+				s.handleRuntimeNodeHeartbeat(httptest.NewRecorder(), heartbeatRequest(t, nodeID, workspaceIDForDriftNodes, version))
+			}
+		}(n)
+	}
+	wg.Wait()
+}
+
+// Deleting a node drops its drift entry so a re-registered node starts a
+// clean episode and the map cannot grow without bound across node churn.
+func TestForgetRuntimeNodeDriftState(t *testing.T) {
+	s, _ := newConnectionGrantPolicyServer(t)
+	s.SetVersion("v1.0.0")
+	node := controldb.RuntimeNode{ID: "rtn-forget", WorkspaceID: "ws"}
+	s.handleRuntimeNodeHeartbeat(httptest.NewRecorder(), heartbeatRequest(t, node.ID, "ws", "v0.9.0"))
+	s.driftWarnedMu.Lock()
+	_, present := s.driftWarnedNodes[node.ID]
+	s.driftWarnedMu.Unlock()
+	if !present {
+		t.Fatal("drift entry missing after warning")
+	}
+
+	s.forgetRuntimeNodeDriftState(node.ID)
+	s.driftWarnedMu.Lock()
+	_, present = s.driftWarnedNodes[node.ID]
+	s.driftWarnedMu.Unlock()
+	if present {
+		t.Fatal("drift entry survived forgetRuntimeNodeDriftState")
+	}
+}
+
+const workspaceIDForDriftNodes = "ws"

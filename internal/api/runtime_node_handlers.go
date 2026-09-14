@@ -944,6 +944,7 @@ func (s *Server) handleDeleteRuntimeNode(w http.ResponseWriter, r *http.Request)
 		s.serverError(w, err)
 		return
 	}
+	s.forgetRuntimeNodeDriftState(id)
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
 
@@ -1668,11 +1669,15 @@ func runtimeNodeFromRequest(r *http.Request) (runtimeNodePrincipal, bool) {
 // confusing claim/lease behavior days later. Warn-only by design: a node
 // actively running a job must never have its heartbeat rejected mid-flight —
 // that would starve lease renewal and get the live run reaped.
+// Heartbeats arrive concurrently (one per node, plus claim/lease traffic on
+// the same server), so every access to driftWarnedNodes holds driftWarnedMu.
 func (s *Server) warnRuntimeNodeVersionDrift(node controldb.RuntimeNode) {
 	nodeVersion := strings.TrimSpace(node.Version)
 	if nodeVersion == "" || s.version == "" {
 		return
 	}
+	s.driftWarnedMu.Lock()
+	defer s.driftWarnedMu.Unlock()
 	if s.driftWarnedNodes == nil {
 		s.driftWarnedNodes = map[string]string{}
 	}
@@ -1693,6 +1698,19 @@ func (s *Server) warnRuntimeNodeVersionDrift(node controldb.RuntimeNode) {
 		"node_version", nodeVersion,
 		"console_version", s.version,
 	)
+}
+
+// forgetRuntimeNodeDriftState drops the node's drift-dedupe entry — called
+// when the node row is deleted so a re-registered node with the same id (or
+// a fresh node after fleet cleanup) starts a clean episode, and so the map
+// cannot grow without bound across node churn (GPT review Q4 follow-up).
+func (s *Server) forgetRuntimeNodeDriftState(nodeID string) {
+	if s == nil || strings.TrimSpace(nodeID) == "" {
+		return
+	}
+	s.driftWarnedMu.Lock()
+	defer s.driftWarnedMu.Unlock()
+	delete(s.driftWarnedNodes, nodeID)
 }
 
 func runtimeNodeResponse(node controldb.RuntimeNode) map[string]any {

@@ -118,9 +118,10 @@ type Server struct {
 	agentStartGates map[string]*uint32
 	// agentStartTestHook is nil in production; tests swap the gate body.
 	agentStartTestHook     func(key string) func()
-	// driftWarnedNodes dedupes runtime-node version-drift warnings: nodeID →
-	// last warned node version. Re-warn only when the node reports a
-	// different version again (upgrade), not on every heartbeat.
+	// driftWarnedMu guards driftWarnedNodes: heartbeat handlers run
+	// concurrently per node, and a bare map write under that concurrency is
+	// a fatal `concurrent map writes` crash (GPT review P0-2).
+	driftWarnedMu    sync.Mutex
 	driftWarnedNodes map[string]string
 	connectorSetupMu       sync.Mutex
 	connectorSetupSessions map[string]connectorDeviceAuthSession
