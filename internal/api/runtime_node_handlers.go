@@ -535,31 +535,43 @@ func (s *Server) enqueueRuntimeTaskRun(workspaceID, project, agent string, task 
 		TaskID:               task.ID,
 		ForkSessionID:        forkSessionID,
 		DesiredRuntimeNodeID: strings.TrimSpace(meta.RuntimeNodeID),
-		Status:               "queued",
-		Priority:             task.Priority,
-		SpecJSON:             string(specBody),
-		ResultJSON:           "{}",
-		CreatedAt:            now,
-		UpdatedAt:            now,
-		RunKey:               runKey,
+		// Q1 stamp-race contract: task runs land as 'preparing' (unclaimable)
+		// and are promoted to 'queued' only after the task token stamp
+		// succeeds below. This run's own token is issued here and does not
+		// depend on the task fence, so the initial status is safe.
+		Status:     "preparing",
+		Priority:   task.Priority,
+		SpecJSON:   string(specBody),
+		ResultJSON: "{}",
+		CreatedAt:  now,
+		UpdatedAt:  now,
+		RunKey:     runKey,
 	}
 	// Idempotent enqueue: a concurrent dispatch of the same intent (double
 	// click, scheduler tick racing a manual start, recovery scan racing a
 	// trigger) returns the already-queued run instead of a duplicate.
-	stored, _, err := s.controlDB.UpsertRuntimeRunIdempotent(run)
+	stored, inserted, err := s.controlDB.UpsertRuntimeRunIdempotent(run)
 	if err != nil {
 		return controldb.RuntimeRun{}, err
 	}
+	if !inserted {
+		// Converged on an existing active (preparing/queued/running) run for
+		// this intent — return it unchanged. Its own enqueue owns the stamp
+		// and promote; stamping again here would race that enqueue's token
+		// clear-and-restamp cycle for no benefit.
+		return stored, nil
+	}
 	run = stored
-	// Execution token (Q0 D5 + GPT 收口 6-1): stamp the task AFTER the run
-	// insert succeeds. The stamp is the run's dispatch ticket — if the task
-	// write fails, the run is force-failed here so it never reaches a node:
-	// a node-finishing an unstamped task would be dropped by the fence
-	// (NotOurs cannot fire on an empty token — the finish would wedge the
-	// task in_progress with no recovery replay). run_key dedup still applies
-	// to a terminal run, so the caller may simply re-enqueue.
+	// Q1 stamp-race contract: the run was inserted as 'preparing' — visible
+	// to dedupe (ActiveRuntimeRunByKey includes preparing) but invisible to
+	// ClaimRuntimeRun (which selects status='queued' only). Stamp the task
+	// NOW, while no node can claim the run; the stamp is the run's dispatch
+	// ticket (Q0 D5 + GPT 收口 6-1). Only after the stamp succeeds does the
+	// promote below make the run claimable, so the old window — queued run
+	// claimed by a node before its token landed, executing work whose finish
+	// the fence would drop — is closed by construction.
 	if err := s.setTaskActiveRuntimeRun(project, agent, task.ID, run.ID); err != nil {
-		slog.Warn("runtime task token stamp failed; failing the run so it never dispatches", "run", run.ID, "task", task.ID, "error", err)
+		slog.Warn("runtime task token stamp failed; failing the preparing run so it never dispatches", "run", run.ID, "task", task.ID, "error", err)
 		if failed, _, ferr := s.controlDB.FailQueuedRuntimeRun(workspaceID, run.ID, "token_stamp_failed", "task execution token stamp failed; run never dispatched"); ferr == nil && failed.ID != "" {
 			run = failed
 		} else if ferr != nil {
@@ -569,6 +581,54 @@ func (s *Server) enqueueRuntimeTaskRun(workspaceID, project, agent string, task 
 		}
 		return run, fmt.Errorf("queue task run failed: %w", err)
 	}
+	_, promoted, perr := s.controlDB.PromotePreparingRuntimeRun(workspaceID, run.ID)
+	if perr != nil && isPromoteKeyCollision(perr) {
+		// Another active run with the same run_key already exists (the
+		// unique index rejected the promote) — the textbook idempotent-join
+		// case: our preparing row is redundant. Converge on the winner and
+		// retire ours so the key stays with the surviving run.
+		// The winner lookup must exclude our own row IN SQL: created_at has
+		// second precision (time.RFC3339) and ids are random hex, so a
+		// same-second duplicate enqueue ties on created_at and the random
+		// tie-break can order OUR preparing row first — a caller-side filter
+		// would spin forever while the real winner sits behind it.
+		if winner, found, gerr := s.controlDB.OtherActiveRuntimeRunByKey(workspaceID, run.RunKey, run.ID); gerr == nil && found {
+			slog.Info("runtime run promote collided with an existing active run for the same intent; joining it", "run", run.ID, "winner", winner.ID, "task", task.ID)
+			// The stamp above moved this task's token to OUR run — point it
+			// back at the winner BEFORE retiring ours, or the fence would
+			// drop the winner's finish.
+			if restampErr := s.setTaskActiveRuntimeRun(project, agent, task.ID, winner.ID); restampErr != nil {
+				// Fail-closed: without a correct token the winner's finish
+				// would be dropped by the fence, so retire our duplicate and
+				// surface the failure — the caller may re-enqueue cleanly.
+				_, _, _ = s.controlDB.FailQueuedRuntimeRun(workspaceID, winner.ID, "token_repoint_failed", "enqueue join could not restamp the task token to the surviving run")
+				return winner, fmt.Errorf("queue task run failed: token repoint to winning run: %w", restampErr)
+			}
+			// Retire the duplicate outright: a preparing row was never
+			// claimable, so deleting it keeps one row per dispatch intent
+			// (a failed row would linger in listings and look like real
+			// dispatch history).
+			if _, derr := s.controlDB.DeleteUnclaimedRuntimeRun(workspaceID, run.ID); derr != nil {
+				slog.Warn("superseded preparing run delete failed; it stays failed-and-unclaimable", "run", run.ID, "error", derr)
+				_, _, _ = s.controlDB.FailQueuedRuntimeRun(workspaceID, run.ID, "superseded", "another active run for the same intent already exists")
+			}
+			return winner, nil
+		}
+	}
+	if perr != nil || !promoted {
+		// The stamp landed but the promote failed — the run is stranded in
+		// preparing, where it is harmless (unclaimable, invisible to nodes).
+		// Fail it so the run_key frees up for the next dispatch attempt.
+		if perr != nil {
+			slog.Warn("runtime run promote failed after stamp; failing the preparing run", "run", run.ID, "task", task.ID, "error", perr)
+			if failed, _, ferr := s.controlDB.FailQueuedRuntimeRun(workspaceID, run.ID, "promote_failed", "run promote to queued failed after token stamp"); ferr == nil && failed.ID != "" {
+				run = failed
+			}
+			return run, fmt.Errorf("queue task run failed: %w", perr)
+		}
+		return run, fmt.Errorf("queue task run failed: run %s no longer preparing (status=%s)", run.ID, run.Status)
+	}
+	run.Status = "queued"
 	s.markForkSessionRunQueued(workspaceID, forkSessionID, workerID, run.ID, task, project, membershipID)
 	s.auditLog(auditLogInput{
 		WorkspaceID:  workspaceID,
@@ -585,6 +645,17 @@ func (s *Server) enqueueRuntimeTaskRun(workspaceID, project, agent string, task 
 		},
 	})
 	return run, nil
+}
+
+// isPromoteKeyCollision reports whether err is the partial unique index
+// (workspace_id, run_key) rejecting a promote because another ACTIVE run
+// with the same key already exists — the idempotent-join case, not a fault.
+func isPromoteKeyCollision(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "UNIQUE constraint failed") || strings.Contains(msg, "constraint failed: UNIQUE")
 }
 
 func runtimeForkSessionIDFromTask(task *entity.Task) string {

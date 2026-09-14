@@ -640,11 +640,21 @@ func (db *SQLiteStore) migrate() error {
 		// guards only ACTIVE runs (queued/running) AND only rows with a
 		// non-empty key — legacy rows with run_key='' (and fork/exec runs that
 		// intentionally have no key) must never collide or be constrained.
+		// 'preparing' (Q1 stamp-race fix) is deliberately OUTSIDE the unique
+		// index and the claim query: a preparing run is not yet dispatchable
+		// (its task token stamp is still in flight), and a second enqueue of
+		// the same intent must converge on the preparing row via
+		// UpsertRuntimeRunIdempotent's key lookup instead.
 		`ALTER TABLE runtime_runs ADD COLUMN run_key TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE runtime_runs ADD COLUMN slot_class TEXT NOT NULL DEFAULT 'normal'`,
 		`ALTER TABLE runtime_runs ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_runs_active_key ON runtime_runs(workspace_id, run_key) WHERE status IN ('queued','running') AND run_key <> ''`,
 		`CREATE INDEX IF NOT EXISTS idx_runtime_runs_lease ON runtime_runs(workspace_id, status, lease_expires_at)`,
+		// Q1 stamp-race fix: enqueue inserts a run as 'preparing' (invisible
+		// to claim) and promotes it to 'queued' only after the task token
+		// stamp succeeded. The lookup index lets the idempotent enqueue and
+		// the dedupe checks find preparing rows by key quickly.
+		`CREATE INDEX IF NOT EXISTS idx_runtime_runs_preparing_key ON runtime_runs(workspace_id, run_key) WHERE status = 'preparing' AND run_key <> ''`,
 		`CREATE TABLE IF NOT EXISTS runtime_events (
 	id TEXT PRIMARY KEY,
 	workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,

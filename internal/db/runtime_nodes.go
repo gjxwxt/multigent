@@ -147,6 +147,10 @@ func (db *SQLiteStore) UpsertRuntimeRun(run RuntimeRun) error {
 	if run.Status == "" {
 		run.Status = "queued"
 	}
+	// The empty-status default above (and any blank caller default) must
+	// never bypass the Q1 preparing gate for task runs — but blank-status
+	// rows here are legacy/fork/exec callers that pass an explicit status,
+	// so no normalization is added beyond the historical default.
 	_, err := db.sql.Exec(`INSERT INTO runtime_runs (
 	id, workspace_id, agent_worker_id, project_membership_id, project_id, agent_id, task_id, workflow_instance_id, workflow_step_id, fork_session_id, desired_runtime_node_id, runtime_node_id,
 	status, priority, spec_json, result_json, lease_expires_at, claimed_at, started_at, finished_at,
@@ -183,6 +187,9 @@ ON CONFLICT(id) DO UPDATE SET
 // returns the already-existing active run instead of an error. Empty RunKey
 // rows bypass the unique index entirely (legacy rows, fork sessions, exec
 // prompts without a caller key) and behave exactly like UpsertRuntimeRun.
+// Active here includes 'preparing' (Q1): a concurrent enqueue of the same
+// intent must converge on the preparing row so it can never mint a second
+// run for the same step/task while the first one's stamp is still in flight.
 func (db *SQLiteStore) UpsertRuntimeRunIdempotent(run RuntimeRun) (RuntimeRun, bool, error) {
 	if strings.TrimSpace(run.RunKey) == "" {
 		if err := db.UpsertRuntimeRun(run); err != nil {
@@ -204,16 +211,17 @@ func (db *SQLiteStore) UpsertRuntimeRunIdempotent(run RuntimeRun) (RuntimeRun, b
 	return run, true, nil
 }
 
-// FailQueuedRuntimeRun force-fails a still-queued run before any node claims
-// it (Q0 收口 6-1: an enqueue whose task-token stamp failed must never reach a
-// node — the run would execute work whose finish the task fence would drop).
-// The UPDATE is conditioned on status='queued' so a concurrently claimed run
-// is left untouched (its node already owns it; the stale-token sweep covers
-// the residue).
+// FailQueuedRuntimeRun force-fails a still-unclaimable run before any node
+// claims it (Q0 收口 6-1: an enqueue whose task-token stamp failed must never
+// reach a node — the run would execute work whose finish the task fence would
+// drop). The UPDATE is conditioned on status IN (queued, preparing) so a
+// concurrently claimed run is left untouched (its node already owns it; the
+// stale-token sweep covers the residue). 'preparing' is the Q1 stamp-race
+// state: not yet claimable, so failing it here is always safe.
 func (db *SQLiteStore) FailQueuedRuntimeRun(workspaceID, runID, errorCode, errorMessage string) (RuntimeRun, bool, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	res, err := db.sql.Exec(`UPDATE runtime_runs SET status = 'failed', error_code = ?, error_message = ?, finished_at = ?, updated_at = ?
-WHERE workspace_id = ? AND id = ? AND status = 'queued'`,
+WHERE workspace_id = ? AND id = ? AND status IN ('queued','preparing')`,
 		strings.TrimSpace(errorCode), strings.TrimSpace(errorMessage), now, now, workspaceID, runID)
 	if err != nil {
 		return RuntimeRun{}, false, err
@@ -232,6 +240,53 @@ WHERE workspace_id = ? AND id = ? AND status = 'queued'`,
 	return run, true, nil
 }
 
+// PromotePreparingRuntimeRun atomically moves a run from 'preparing' to
+// 'queued' — the Q1 stamp-race contract's release step. The enqueue path
+// inserts a run as 'preparing' (invisible to ClaimRuntimeRun, which only
+// selects status='queued'), stamps the task's execution token, and THEN calls
+// this; only a successful stamp can make the run dispatchable. The UPDATE is
+// conditioned on status='preparing' so a concurrent FailQueuedRuntimeRun (or
+// any other transition) wins cleanly and the promote reports false. Returns
+// the row as seen after the transition.
+func (db *SQLiteStore) PromotePreparingRuntimeRun(workspaceID, runID string) (RuntimeRun, bool, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := db.sql.Exec(`UPDATE runtime_runs SET status = 'queued', updated_at = ?
+WHERE workspace_id = ? AND id = ? AND status = 'preparing'`, now, workspaceID, runID)
+	if err != nil {
+		return RuntimeRun{}, false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return RuntimeRun{}, false, err
+	}
+	if affected == 0 {
+		return RuntimeRun{}, false, nil
+	}
+	run, found, err := db.RuntimeRunByID(workspaceID, runID)
+	if err != nil || !found {
+		return RuntimeRun{}, false, err
+	}
+	return run, true, nil
+}
+
+// DeleteUnclaimedRuntimeRun removes a run row outright — used by the Q1
+// enqueue-join path to retire a superseded 'preparing' duplicate so the
+// audit trail keeps one row per dispatch intent. Deletion (rather than a
+// failed status) is safe ONLY for rows no node can have claimed: a preparing
+// run is invisible to ClaimRuntimeRun, so an affected row here was never
+// dispatched. Runs in any other status are refused.
+func (db *SQLiteStore) DeleteUnclaimedRuntimeRun(workspaceID, runID string) (bool, error) {
+	res, err := db.sql.Exec(`DELETE FROM runtime_runs WHERE workspace_id = ? AND id = ? AND status = 'preparing'`, workspaceID, runID)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
 // ActiveRuntimeRunByKey returns the single active (queued/running) run for a
 // run key, if any.
 func (db *SQLiteStore) ActiveRuntimeRunByKey(workspaceID, runKey string) (RuntimeRun, bool, error) {
@@ -239,7 +294,30 @@ func (db *SQLiteStore) ActiveRuntimeRunByKey(workspaceID, runKey string) (Runtim
 	if runKey == "" {
 		return RuntimeRun{}, false, nil
 	}
-	row := db.sql.QueryRow(runtimeRunSelectSQL()+` WHERE workspace_id = ? AND run_key = ? AND status IN ('queued','running') ORDER BY created_at ASC, id ASC LIMIT 1`, workspaceID, runKey)
+	row := db.sql.QueryRow(runtimeRunSelectSQL()+` WHERE workspace_id = ? AND run_key = ? AND status IN ('preparing','queued','running') ORDER BY created_at ASC, id ASC LIMIT 1`, workspaceID, runKey)
+	run, err := scanRuntimeRun(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RuntimeRun{}, false, nil
+	}
+	if err != nil {
+		return RuntimeRun{}, false, err
+	}
+	return run, true, nil
+}
+
+// OtherActiveRuntimeRunByKey returns the single active run for a run key
+// EXCLUDING excludeRunID — the Q1 enqueue-join winner lookup. Exclusion must
+// happen in SQL, not in the caller: created_at has second precision
+// (time.RFC3339) and ids are random hex, so a same-second duplicate enqueue
+// ties on created_at and the random id tie-break can order OUR preparing row
+// first on every retry — a caller-side filter would loop forever while the
+// real queued winner sits behind it.
+func (db *SQLiteStore) OtherActiveRuntimeRunByKey(workspaceID, runKey, excludeRunID string) (RuntimeRun, bool, error) {
+	runKey = strings.TrimSpace(runKey)
+	if runKey == "" {
+		return RuntimeRun{}, false, nil
+	}
+	row := db.sql.QueryRow(runtimeRunSelectSQL()+` WHERE workspace_id = ? AND run_key = ? AND id != ? AND status IN ('preparing','queued','running') ORDER BY created_at ASC, id ASC LIMIT 1`, workspaceID, runKey, excludeRunID)
 	run, err := scanRuntimeRun(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RuntimeRun{}, false, nil
