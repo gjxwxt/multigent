@@ -198,38 +198,48 @@ runtime_runs.runtime_node_id），再按记录去对应主机找进程；不要�
 
 §A 原有 1–8 项维持不变。
 
-### F10. 触发器双写竞态面的核实结论（2026-09-15 通宵第三轮收口）
+### F10. 触发器双写竞态面的核实（2026-09-15 第三轮；**初版结论被 GPT 审查推翻，见 F14**）
 
 针对「poller × 手动 start × workflow followup × attention wakeup 并发命中同一任务」的
-竞态面做了完整核实，结论是**数据库层双保险已闭合，进程内 gate 只是延迟优化**：
+竞态面做了核实。**初版写下"数据库层双保险已闭合"的结论，经 GPT 外部审查证伪**：
+去重层（见下）只覆盖"重复 run"，完全没覆盖"run 与 task token stamp 的交错"——
+run 先以 `queued` 入库、之后才写任务的 `ActiveRuntimeRunID`，两步之间 node 可直接
+claim；stamp 失败时 `FailQueuedRuntimeRun` 只能处理仍为 queued 的 run，**已被 claim
+的 run 会继续执行、最终结果被 task fence 丢弃**。详见 F14 与 HANDOFF §20。
+教训：核实"去重"≠核实"安全发布"；声称"闭合"前必须把 insert→stamp→claim 的全时序
+画出来，最好有 barrier 测试，而不是只看每条路径是否"过了闸"。
 
-- **第一层：`hasActiveRuntimeRunForTarget`**（入队前检查）——queued run 恒阻塞；
-  running run 在租约未过期且非只读槽位时阻塞。
-- **第二层：`run_key` 部分唯一索引**（`idx_runtime_runs_active_key`，
-  migrations.go:646）——并发入队同一 intent 时，唯一约束冲突方经
-  `UpsertRuntimeRunIdempotent` 收敛到已存在的 active run（返回 false），不会重复入队。
-- **run_key 派生优先级**（run_key_service.go）：workflow step >
-  attention 信号 > scheduled wakeup > plain task；空 key 完全绕过去重（legacy 行），
-  即"空 key 绝不静默吞掉真重复"的设计方向是对的。
+初版记录的去重层事实仍然成立（供后续修复引用）：
 
-核实过的具体路径：
+- **`hasActiveRuntimeRunForTarget`**（scheduler_manager.go:1699）：queued 恒阻塞；
+  running 在租约未过期且非只读槽位时阻塞。
+- **`run_key` 部分唯一索引**（migrations.go:646）+ `UpsertRuntimeRunIdempotent`
+  （runtime_nodes.go:186）：并发入队同一 intent 收敛到同一条 run。只防重复，不保证
+  "可执行 run 一定已持有 task token"。
+- **run_key 派生优先级**（run_key_service.go）：workflow step > attention 信号 >
+  scheduled wakeup > plain task；空 key 完全绕过去重（legacy 行）。
+- 四条派发路径（poller trigger.go:140 / 手动 start scheduler_manager.go:829 /
+  followup scheduler_attention.go:590 / node hook trigger.go:344）都过上述闸。
 
-1. **poller**（trigger.go:140）：本地 inflight map 先查一轮（防抖），随后 Fire()
-   → nodeTaskDispatch hook → `fireTaskTriggerOrQueueRuntime` 内再过一次
-   hasActiveRuntimeRun + run_key 幂等。poller 每轮之间不存在去重窗口缺口。
-2. **手动 start**（scheduler_manager.go:829 `startProjectTaskDirect`）：
-   `acquireAgentStartGate` 按 AgentWorker 粒度串行化两个并发 autoStart，
-   输方走 queue-join（入队被 run_key 收敛为同一条 run）；手动 start 注释明确
-   "Q0 收口 5: manual start JOINS the queue instead of 409ing"。
-3. **workflow followup**（scheduler_attention.go:590）：advanceTaskWorkflow 后
-   先查 hasActiveRuntimeRun，再 fireTaskTriggerOrQueueRuntime。
-4. **节点 hook 路径绕过进程内 inflight map**（trigger.go:344 nodeTaskDispatch
-   hook 在 inflight 检查**之前**执行）：这是设计使然——inflight/queued map 只保护
-   本地 wakeup 路径；node 路径的安全性完全由 DB 两层兜底。**不要**误以为是漏网。
+### F14. GPT 外审推翻初版结论的两处 P0（2026-09-15 第四轮，修复中）
 
-遗留的唯一真实缺口（维持 F13/优先级表 #13 的判断）：poller 20s 周期里"派发走了
-哪条路"没有 debug 日志，冒烟验证全靠 audit `runtime_run.enqueue` 的 reason 字段
-反推。这是可观测性缺口，不是正确性缺口。
+1. **Q1（P0）stamp 前 run 可被 claim**：`enqueueRuntimeTaskRun` 先 insert queued run
+   再写 task 的 ActiveRuntimeRunID（runtime_node_handlers.go:549），窗口内 node claim
+   （runtime_nodes.go:207 一带）即可拿走未 stamp 的 run。修复方向：初始写
+   `preparing`（不可 claim），stamp 成功后原子提升 queued；补 barrier 测试
+   （卡在 insert 与 stamp 之间并发真实 claim，断言 node 永远拿不到）。
+2. **Q4（P0）driftWarnedNodes 并发 map 写**：heartbeat 是并发 HTTP，map 无锁，
+   `concurrent map writes` 可致进程崩溃（runtime_node_handlers.go:1600）。修复：
+   专用 mutex + 节点删除时清理 + -race 并发测试。
+3. **Q2（工作流正确性阻断）**：`CompleteAndAdvance`（store.go:2042/2184）是多次
+   独立 SaveStepInstance/SaveStepEvent/SaveRun，**无事务无 CAS**——"状态转换有
+   DB 事务边界"是我的错误认定。重复推进虽大概率因同旧值算出同新值而收敛，但会
+   产生重复 event、重复下游派发、重试结果互相覆盖。修复方向：持久化幂等
+   completion key，并发断言"一次成功一次 stale、单 event、单 next step、round +1"。
+4. **Q5**：admin-token 明知 missing DB never legitimate，警告后仍调用会创建库的
+   OpenDefault——"少报无害"不成立，缺库应硬失败且不创建文件。
+5. **Q3**：超时"全覆盖"不成立，preview_handlers.go:151 / init_remote_binding.go:150 /
+   skill_handlers.go:1291 等仍有未限时 git 调用；90s 是否适配内网未验证。
 
 ### F11. 本轮（通宵第三轮）落地清单
 
