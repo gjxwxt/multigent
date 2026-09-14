@@ -989,6 +989,7 @@ func (s *Server) handleRuntimeNodeHeartbeat(w http.ResponseWriter, r *http.Reque
 	if strings.TrimSpace(body.Version) != "" {
 		node.Version = strings.TrimSpace(body.Version)
 	}
+	s.warnRuntimeNodeVersionDrift(node)
 	if body.Capabilities != nil {
 		node.CapabilitiesJSON = marshalRuntimeObject(body.Capabilities)
 	}
@@ -1587,6 +1588,40 @@ func (s *Server) withRuntimeNodeAuth(next http.Handler) http.Handler {
 func runtimeNodeFromRequest(r *http.Request) (runtimeNodePrincipal, bool) {
 	principal, ok := r.Context().Value(ctxRuntimeNodeKey).(runtimeNodePrincipal)
 	return principal, ok
+}
+
+// warnRuntimeNodeVersionDrift logs once per node when a heartbeat reports a
+// build version different from the console's own. Mixed-version fleets are
+// unsupported (lease-generation renewals fail closed for pre-Q0 nodes), and a
+// node left behind after a console upgrade otherwise surfaces only as
+// confusing claim/lease behavior days later. Warn-only by design: a node
+// actively running a job must never have its heartbeat rejected mid-flight —
+// that would starve lease renewal and get the live run reaped.
+func (s *Server) warnRuntimeNodeVersionDrift(node controldb.RuntimeNode) {
+	nodeVersion := strings.TrimSpace(node.Version)
+	if nodeVersion == "" || s.version == "" {
+		return
+	}
+	if s.driftWarnedNodes == nil {
+		s.driftWarnedNodes = map[string]string{}
+	}
+	if nodeVersion == s.version {
+		// Back in alignment: end the drift episode so a future mismatch
+		// warns again instead of being silenced by the stale entry.
+		delete(s.driftWarnedNodes, node.ID)
+		return
+	}
+	if s.driftWarnedNodes[node.ID] == nodeVersion {
+		return
+	}
+	s.driftWarnedNodes[node.ID] = nodeVersion
+	slog.Warn("runtime node version drift: console and node run different builds (mixed-version operation is unsupported; upgrade the node to match)",
+		"node_id", node.ID,
+		"node_name", node.Name,
+		"hostname", node.Hostname,
+		"node_version", nodeVersion,
+		"console_version", s.version,
+	)
 }
 
 func runtimeNodeResponse(node controldb.RuntimeNode) map[string]any {
