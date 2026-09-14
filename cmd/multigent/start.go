@@ -107,6 +107,17 @@ remote server. For local development with hot-reload, use
 			handler := newSPAHandler(srv.Handler())
 
 			url := fmt.Sprintf("http://%s", addr)
+			// Deployment verification starts here: after an upgrade, the first
+			// thing an operator (or a following agent) checks is which build is
+			// actually running. Print commit explicitly — a version of "dev"
+			// with commit "none" means ldflags were skipped and the binary is
+			// NOT traceable to a source revision; call that out loudly so it
+			// gets rebuilt before anyone chases ghosts against the wrong code.
+			if strings.TrimSpace(commit) == "" || commit == "none" {
+				log.Printf("multigent build: version=%s commit=NONE (ldflags not injected; binary is not traceable to a source revision — rebuild via make build or with -X main.commit)", version)
+			} else {
+				log.Printf("multigent build: version=%s commit=%s built=%s", version, commit, buildDate)
+			}
 			log.Printf("multigent web console: %s (workspace %s)", url, root)
 			if err := daemon.SaveWebRuntimeMeta(&daemon.WebRuntimeMeta{
 				WorkDir:   root,
