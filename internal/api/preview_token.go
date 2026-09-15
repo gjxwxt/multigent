@@ -30,15 +30,17 @@ type previewTokenClaims struct {
 	Exp     int64  `json:"exp"`
 	// Cap carries the token's capability set (space-separated). Current
 	// capability: "preview.view" (read-only browsing of the preview surface).
-	// Legacy tokens minted before this field existed carry no Cap and are
-	// treated as view-only (backward-compatible fail-closed): old share links
-	// keep working read-only without a re-mint, and no legacy token can write.
+	// BREAKING MIGRATION (round-13): tokens minted before this field existed
+	// carry no Cap and are REJECTED on all surfaces, including reads — the
+	// proxy enforces preview.view on every request. Pre-existing share links
+	// (12h TTL) stop working at deploy time and must be re-minted from the
+	// task panel; there is no legacy read grace path.
 	Cap string `json:"cap,omitempty"`
 }
 
 // previewTokenHasCapability reports whether the token carries the capability.
-// A token without any Cap field is legacy and gets view-only treatment —
-// never write capability (fail-closed for old tokens).
+// A token without any Cap field is legacy and carries nothing — it is
+// rejected on reads and writes alike (fail-closed, breaking migration).
 func previewTokenHasCapability(claims previewTokenClaims, capability string) bool {
 	for _, c := range strings.Fields(claims.Cap) {
 		if c == capability {

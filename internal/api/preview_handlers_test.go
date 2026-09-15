@@ -53,8 +53,10 @@ func TestPreviewHandlers(t *testing.T) {
 		t.Fatalf("expected status 200, got %d", stopW.Code)
 	}
 
-	// 3. Test Proxy returns 503 when preview is stopped
+	// 3. Test Proxy returns 503 when preview is stopped (token gate passes
+	// first — round-13 ordering puts authorization before runtime state).
 	proxyReq := httptest.NewRequest(http.MethodGet, "/preview/t-123/", nil)
+	proxyReq.Header.Set(previewTokenHeader, s.signPreviewToken("t-123", "testproj"))
 	proxyW := httptest.NewRecorder()
 	s.handleTaskPreviewProxy(proxyW, proxyReq)
 	if proxyW.Code != http.StatusServiceUnavailable {

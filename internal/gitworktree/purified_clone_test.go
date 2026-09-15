@@ -208,6 +208,37 @@ func TestPurifiedGitEnvStripsHomeAndXDG(t *testing.T) {
 	}
 }
 
+// Round-13 P1: caller-provided extras cannot re-inject protected keys — the
+// scrub filter applies to them too, and GIT_CONFIG_NOSYSTEM=1 is forced last
+// so it cannot be weakened.
+func TestPurifiedGitEnvExtraCannotReinjectProtectedKeys(t *testing.T) {
+	t.Setenv("HOME", "/host/home")
+
+	env := purifiedGitEnv([]string{
+		"HOME=/attacker/home",
+		"GIT_DIR=/attacker/.git",
+		"GIT_CONFIG_NOSYSTEM=0",
+		"LEGIT_VAR=fine",
+	})
+	seen := map[string]string{}
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		seen[k] = v
+	}
+	if _, ok := seen["HOME"]; ok {
+		t.Fatal("extra must not re-inject HOME")
+	}
+	if _, ok := seen["GIT_DIR"]; ok {
+		t.Fatal("extra must not re-inject GIT_DIR")
+	}
+	if seen["GIT_CONFIG_NOSYSTEM"] != "1" {
+		t.Fatalf("GIT_CONFIG_NOSYSTEM must stay forced to 1, got %q", seen["GIT_CONFIG_NOSYSTEM"])
+	}
+	if seen["LEGIT_VAR"] != "fine" {
+		t.Fatal("legitimate extra vars must pass through")
+	}
+}
+
 func TestAcquireProjectLockExportedSerialization(t *testing.T) {
 	base := t.TempDir()
 	unlock1, err := AcquireProjectLock(base)

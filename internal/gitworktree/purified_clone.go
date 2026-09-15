@@ -218,6 +218,9 @@ func listRemotes(dir string, env []string) ([]string, error) {
 // could redirect Git into the host checkout, read host global config, or leak
 // credentials — plus GIT_CONFIG_NOSYSTEM=1 (round-11: HOME/XDG stripping alone
 // leaves /etc/gitconfig readable) and any caller-provided additions.
+// Round-13 P1: caller-provided extras are filtered against the same protected
+// key set AND against the forced key, so a caller cannot re-inject HOME,
+// GIT_DIR, or GIT_CONFIG_NOSYSTEM=0 behind the scrub.
 func purifiedGitEnv(extra []string) []string {
 	keep := os.Environ()
 	env := make([]string, 0, len(keep)+len(extra)+1)
@@ -234,11 +237,32 @@ func purifiedGitEnv(extra []string) []string {
 			env = append(env, kv)
 		}
 	}
-	// Ignore system-level git config (/etc/gitconfig) inside the purified
-	// clone: config authority starts from the clone itself.
-	env = append(env, "GIT_CONFIG_NOSYSTEM=1")
-	return append(env, extra...)
+	// Caller additions last-partial-wins per normal env semantics, but
+	// protected keys never survive the filter.
+	for _, kv := range extra {
+		key, _, _ := strings.Cut(kv, "=")
+		if key == forcedConfigNosystemKey {
+			continue // forced below; callers cannot weaken it
+		}
+		banned := false
+		for _, b := range envScrubKeys {
+			if key == b {
+				banned = true
+				break
+			}
+		}
+		if !banned && strings.Contains(kv, "=") {
+			env = append(env, kv)
+		}
+	}
+	// Forced LAST so it wins over any same-named entry from the base
+	// environment: config authority starts from the clone itself.
+	return append(env, forcedConfigNosystemKey+"=1")
 }
+
+// forcedConfigNosystemKey is the single env key the purification contract
+// always forces to "1", regardless of caller extras.
+const forcedConfigNosystemKey = "GIT_CONFIG_NOSYSTEM"
 
 // SanitizedDiffArgs returns the git arguments for extracting a diff from an
 // untrusted clone (round-10 P0): disable external diff drivers and textconv

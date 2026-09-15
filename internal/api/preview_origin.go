@@ -79,33 +79,18 @@ func (s *Server) PreviewOrigin() string { return s.previewOrigin }
 func (s *Server) previewOriginDisabled() bool { return s.previewOrigin == "" }
 
 // requestOnPreviewOrigin reports whether the request arrived on the
-// configured preview origin. The configured origin is the only input to the
-// decision — the request Host is compared, never consulted as configuration.
-// The scheme is compared by RESOLVED request scheme; see previewHostMatches
-// for the Host-only comparison the origin gate uses before scheme checks.
+// configured preview origin (full scheme + host comparison). The configured
+// origin is the only input to the decision — the request Host is compared,
+// never consulted as configuration. This is the gate condition for ALL
+// /preview/* traffic (round-13 P0): header tokens and hand-made cookies
+// reach the proxy without passing through setPreviewCookie, so scheme
+// fidelity must be enforced here, not only at the cookie boundary.
 func (s *Server) requestOnPreviewOrigin(r *http.Request) bool {
 	if s.previewOriginDisabled() {
 		return false
 	}
 	u := &url.URL{Scheme: requestScheme(r), Host: r.Host}
 	return u.String() == s.previewOrigin
-}
-
-// previewHostOnConfiguredOrigin compares only the Host against the
-// configured preview origin's host. The origin gate uses this so that a
-// dropped X-Forwarded-Proto (misconfigured proxy) does not 404 legitimate
-// preview traffic; scheme fidelity is enforced at the cookie boundary
-// (setPreviewCookie) instead, where the Secure flag is also decided by the
-// configured scheme.
-func (s *Server) previewHostOnConfiguredOrigin(r *http.Request) bool {
-	if s.previewOriginDisabled() {
-		return false
-	}
-	u, err := url.Parse(s.previewOrigin)
-	if err != nil {
-		return false
-	}
-	return strings.EqualFold(r.Host, u.Host)
 }
 
 // requestScheme resolves the request scheme, honoring the proxy header set by
@@ -127,19 +112,24 @@ func requestScheme(r *http.Request) string {
 // handled (rejection or redirect written) and the caller must stop.
 //
 //   - Preview not configured -> 404 on every origin (fail-closed).
-//   - Request Host == configured preview host -> pass (scheme fidelity is
-//     enforced at the cookie boundary, so a dropped X-Forwarded-Proto on a
-//     misconfigured proxy degrades to a cookie refusal, not a 404).
+//   - Full scheme+host match -> pass. A dropped or forged X-Forwarded-Proto
+//     resolves to a different scheme and the whole preview is rejected
+//     (round-13 P0: header tokens / existing cookies would otherwise reach
+//     the proxy over the wrong scheme without ever touching the cookie
+//     boundary).
 //   - Request on the configured console origin -> 302 to the equivalent
 //     preview-origin URL so pre-split console links keep working.
 //   - Any other Host -> 404; the response never echoes request input.
+//
+// Deployment contract: the reverse proxy MUST overwrite any client-supplied
+// X-Forwarded-Proto, and the backend must not be directly reachable.
 func (s *Server) enforcePreviewOriginGate(w http.ResponseWriter, r *http.Request) bool {
 	if s.previewOriginDisabled() {
 		s.jsonErrorCode(w, http.StatusNotFound, ErrCodeNotFound,
 			"preview origin not configured; set "+PreviewOriginEnv+" to enable preview sharing")
 		return true
 	}
-	if s.previewHostOnConfiguredOrigin(r) {
+	if s.requestOnPreviewOrigin(r) {
 		return false
 	}
 	if s.requestOnConsoleOrigin(r) {

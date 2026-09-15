@@ -247,11 +247,52 @@ func TestPreviewProxyExchangeServesCleanDocument(t *testing.T) {
 	}
 }
 
+// Round-13 P0: ALL /preview/* requests must pass the full scheme+host gate
+// before reaching the exchange or the proxy. Header tokens and hand-made
+// cookies never pass through setPreviewCookie, so scheme fidelity cannot be
+// deferred to the cookie boundary — a wrong-scheme request is rejected
+// outright, whatever credential channel it carries.
+func TestPreviewGateRejectsWrongSchemeWithHeaderToken(t *testing.T) {
+	s := newPreviewOriginServer(t, "https://preview.example.com", "")
+	token := s.signPreviewToken("t-hdr", "proj")
+
+	// HTTPS configured, XFP dropped (resolves http): even a VALID header
+	// token must not reach the proxy — 404 from the gate.
+	req := httptest.NewRequest(http.MethodGet, "/preview/t-hdr/", nil)
+	req.Host = "preview.example.com"
+	req.Header.Set(previewTokenHeader, token)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("wrong-scheme request with header token must be rejected by the gate, got %d: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "not running") {
+		t.Fatal("request must not reach the proxy instance check")
+	}
+}
+
+func TestPreviewGateRejectsWrongSchemeWithHandMadeCookie(t *testing.T) {
+	s := newPreviewOriginServer(t, "https://preview.example.com", "")
+	token := s.signPreviewToken("t-cook", "proj")
+
+	// HTTPS configured, XFP forged to http: a hand-made token cookie must
+	// not reach the proxy — 404 from the gate.
+	req := httptest.NewRequest(http.MethodGet, "/preview/t-cook/", nil)
+	req.Host = "preview.example.com"
+	req.Header.Set("X-Forwarded-Proto", "http")
+	req.AddCookie(&http.Cookie{Name: previewTokenCookiePrefix + "t-cook", Value: token})
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("wrong-scheme request with hand-made cookie must be rejected by the gate, got %d: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "not running") {
+		t.Fatal("request must not reach the proxy instance check")
+	}
+}
+
 // Round-11 P0: the cookie Secure flag and the scheme check derive from the
 // CONFIGURED preview origin — never from the request's X-Forwarded-Proto.
-// When the resolved request scheme contradicts the configured scheme, the
-// exchange fails closed: no token cookie is issued at all (the response is a
-// token-free redirect, never a document).
 func TestPreviewCookieSecureDecidedByConfiguredOriginScheme(t *testing.T) {
 	s := newPreviewOriginServer(t, "https://preview.example.com", "")
 	token := s.signPreviewToken("t-sec", "proj")
@@ -275,11 +316,15 @@ func TestPreviewCookieSecureDecidedByConfiguredOriginScheme(t *testing.T) {
 	}
 
 	// Proxy DROPS X-Forwarded-Proto (scheme resolves to http != configured
-	// https): fail-closed — no token cookie, response is a token-free 302.
+	// https): the whole preview is rejected at the gate — no cookie, no
+	// exchange, no proxy access.
 	req = httptest.NewRequest(http.MethodGet, "/preview/t-sec/?pvt="+token, nil)
 	req.Host = "preview.example.com"
 	w = httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("scheme-mismatched request must be rejected at the gate, got %d", w.Code)
+	}
 	for _, c := range w.Result().Cookies() {
 		if c.Name == previewTokenCookiePrefix+"t-sec" {
 			t.Fatalf("scheme-mismatched request must not receive the token cookie, got %+v", c)
@@ -291,31 +336,29 @@ func TestPreviewCookieSecureDecidedByConfiguredOriginScheme(t *testing.T) {
 }
 
 // Round-11 P0: a request whose resolved scheme contradicts the configured
-// preview origin never receives a token cookie (fail-closed).
+// preview origin is rejected outright (round-13: at the gate, before any
+// credential channel is consulted).
 func TestPreviewCookieRefusedOnSchemeMismatch(t *testing.T) {
 	s := newPreviewOriginServer(t, "https://preview.example.com", "")
 	token := s.signPreviewToken("t-mix", "proj")
 
 	// Attacker or misdirected traffic hits the backend directly over http
-	// while the deployment declares https — forged XFP or not, no cookie.
+	// while the deployment declares https — forged XFP or not, rejected.
 	req := httptest.NewRequest(http.MethodGet, "/preview/t-mix/?pvt="+token, nil)
 	req.Host = "preview.example.com"
 	req.Header.Set("X-Forwarded-Proto", "http")
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("scheme mismatch must be rejected at the gate with 404, got %d", w.Code)
+	}
 	for _, c := range w.Result().Cookies() {
 		if c.Name == previewTokenCookiePrefix+"t-mix" {
 			t.Fatalf("scheme mismatch must refuse the token cookie, got %+v", c)
 		}
 	}
-	// The exchange must fail closed on scheme mismatch: any rejection is
-	// acceptable (404 from the cookie boundary or 302), but never a document,
-	// never a cookie, never a token echo.
 	if strings.Contains(w.Header().Get("Location"), "pvt=") || strings.Contains(w.Body.String(), token) {
 		t.Fatalf("mismatch must reject without echoing the token, got %d body=%.100s", w.Code, w.Body.String())
-	}
-	if w.Code == http.StatusOK {
-		t.Fatalf("scheme mismatch must not render the document, got %d", w.Code)
 	}
 }
 

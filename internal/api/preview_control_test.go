@@ -201,18 +201,36 @@ func TestPreviewProxyStillAcceptsTokenRead(t *testing.T) {
 	}
 }
 
-func TestLegacyTokenWithoutCapVerifiesViewOnly(t *testing.T) {
+// Round-13: the no-Cap migration is BREAKING — legacy tokens are rejected on
+// reads too (the proxy enforces preview.view on every request). Pre-existing
+// share links stop working at deploy time and must be re-minted.
+func TestLegacyTokenWithoutCapRejectedEverywhere(t *testing.T) {
 	s := newPreviewControlServer(t)
 	// Hand-mint a legacy token with no Cap field (pre-Task-1.1 share link).
 	legacyClaims := previewTokenClaims{TaskID: "t-1", Project: "proj", Exp: time.Now().Add(time.Hour).Unix()}
 	legacy := s.signPreviewTokenClaims(legacyClaims)
+
+	// The MAC still verifies (signature is fine), but the claims carry no
+	// capability — callers must treat that as no access.
 	if _, ok := s.verifyPreviewToken(legacy, "t-1"); !ok {
-		t.Fatal("legacy token (no Cap) must still verify for reads (backward compatible)")
+		t.Fatal("legacy token MAC must still verify; rejection happens at the capability check")
 	}
 	if previewTokenHasCapability(legacyClaims, previewCapabilityView) {
 		t.Fatal("legacy claims without Cap must not carry any capability")
 	}
-	// Fresh mints carry the view capability explicitly.
+
+	// Proxy read with the legacy token: uniform 403 capability denial — the
+	// token gate sits before the instance check, so the rejection does not
+	// depend on runtime state (breaking migration, round-13).
+	req := httptest.NewRequest(http.MethodGet, "/preview/t-1/", nil)
+	req.Header.Set(previewTokenHeader, legacy)
+	w := httptest.NewRecorder()
+	s.handleTaskPreviewProxy(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("legacy token on proxy read must get 403 capability denial, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Fresh mints carry the view capability explicitly and read fine.
 	freshClaims, ok := s.verifyPreviewToken(s.signPreviewToken("t-1", "proj"), "t-1")
 	if !ok || !previewTokenHasCapability(freshClaims, previewCapabilityView) {
 		t.Fatalf("fresh tokens must mint with %s capability", previewCapabilityView)

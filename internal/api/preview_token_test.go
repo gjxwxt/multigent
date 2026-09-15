@@ -96,9 +96,21 @@ func TestAllowPreviewChatRateLimit(t *testing.T) {
 func TestPreviewProxyRequiresToken(t *testing.T) {
 	s, _ := newConnectionGrantPolicyServer(t)
 
-	// Stopped preview keeps its actionable 503 (no token gate before it).
+	// Anonymous request: the token gate now runs BEFORE the instance check
+	// (round-13 ordering — authorization must not depend on runtime state).
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/preview/t-404/", nil)
+	s.handleTaskPreviewProxy(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for tokenless request, got %d", w.Code)
+	}
+
+	// Stopped preview with a valid view-capable token keeps its actionable
+	// 503 ("launch it from the task review panel").
+	token := s.signPreviewToken("t-404", "current")
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/preview/t-404/", nil)
+	req.Header.Set(previewTokenHeader, token)
 	s.handleTaskPreviewProxy(w, req)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 for stopped preview, got %d", w.Code)

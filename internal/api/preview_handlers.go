@@ -859,12 +859,9 @@ func (s *Server) handleTaskPreviewProxy(w http.ResponseWriter, r *http.Request) 
 		s.previewEngine = preview.NewEngine()
 	}
 
-	inst, ok := s.previewEngine.GetInstance(taskID)
-	if !ok || inst.Status != "running" || inst.Port <= 0 {
-		http.Error(w, fmt.Sprintf("Preview environment for task %q is not running. Please launch it from the task review panel.", taskID), http.StatusServiceUnavailable)
-		return
-	}
-
+	// Token gate BEFORE the instance check: authorization failures must not
+	// depend on runtime state, and legacy no-Cap tokens get a fast, uniform
+	// 403 (round-13: breaking migration — pre-Cap share links are dead).
 	previewToken := previewRequestToken(r, taskID)
 	claims, tokOK := s.verifyPreviewToken(previewToken, taskID)
 	if !tokOK {
@@ -882,6 +879,12 @@ func (s *Server) handleTaskPreviewProxy(w http.ResponseWriter, r *http.Request) 
 	// pvt-carrying GETs were already exchanged to the HttpOnly cookie by the
 	// origin-routing wrapper before reaching this handler (§2.0.3) — no
 	// document request ever renders with the token in location.search.
+
+	inst, ok := s.previewEngine.GetInstance(taskID)
+	if !ok || inst.Status != "running" || inst.Port <= 0 {
+		http.Error(w, fmt.Sprintf("Preview environment for task %q is not running. Please launch it from the task review panel.", taskID), http.StatusServiceUnavailable)
+		return
+	}
 
 	targetURL, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", inst.Port))
 	if err != nil {
