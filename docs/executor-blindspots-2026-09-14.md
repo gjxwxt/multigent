@@ -221,25 +221,33 @@ claim；stamp 失败时 `FailQueuedRuntimeRun` 只能处理仍为 queued 的 run
 - 四条派发路径（poller trigger.go:140 / 手动 start scheduler_manager.go:829 /
   followup scheduler_attention.go:590 / node hook trigger.go:344）都过上述闸。
 
-### F14. GPT 外审推翻初版结论的两处 P0（2026-09-15 第四轮，修复中）
+### F14. GPT 外审推翻初版结论的五项（2026-09-15 第四轮；**当夜全部修复完毕**）
 
-1. **Q1（P0）stamp 前 run 可被 claim**：`enqueueRuntimeTaskRun` 先 insert queued run
+1. **Q1（P0）stamp 前 run 可被 claim ✅（04efc269）**：`enqueueRuntimeTaskRun` 先 insert queued run
    再写 task 的 ActiveRuntimeRunID（runtime_node_handlers.go:549），窗口内 node claim
-   （runtime_nodes.go:207 一带）即可拿走未 stamp 的 run。修复方向：初始写
-   `preparing`（不可 claim），stamp 成功后原子提升 queued；补 barrier 测试
-   （卡在 insert 与 stamp 之间并发真实 claim，断言 node 永远拿不到）。
-2. **Q4（P0）driftWarnedNodes 并发 map 写**：heartbeat 是并发 HTTP，map 无锁，
-   `concurrent map writes` 可致进程崩溃（runtime_node_handlers.go:1600）。修复：
-   专用 mutex + 节点删除时清理 + -race 并发测试。
-3. **Q2（工作流正确性阻断）**：`CompleteAndAdvance`（store.go:2042/2184）是多次
+   （runtime_nodes.go:207 一带）即可拿走未 stamp 的 run。已修：初始写
+   `preparing`（不可 claim），stamp 成功后原子提升 queued（promote 唯一冲突 =
+   幂等 join，token 改指 winner 后删自己未 claim 的 preparing 行）；barrier 测试
+   runtime_run_stamp_race_test.go ×4 断言 node 永远拿不到。关键坑：winner 查找必须
+   SQL 级自排除（created_at 秒精度平局 + 随机 id，调用方侧比较会死循环）。
+2. **Q4（P0）driftWarnedNodes 并发 map 写 ✅（aefa69ab）**：heartbeat 是并发 HTTP，map 无锁，
+   `concurrent map writes` 可致进程崩溃（runtime_node_handlers.go:1600）。已修：
+   `driftWarnedMu` 专用 mutex + 节点删除清理 + -race 下 16 goroutine × 40 轮并发测试。
+3. **Q2（工作流正确性阻断）✅（acfe39ae）**：`CompleteAndAdvance`（store.go:2042/2184）是多次
    独立 SaveStepInstance/SaveStepEvent/SaveRun，**无事务无 CAS**——"状态转换有
-   DB 事务边界"是我的错误认定。重复推进虽大概率因同旧值算出同新值而收敛，但会
-   产生重复 event、重复下游派发、重试结果互相覆盖。修复方向：持久化幂等
-   completion key，并发断言"一次成功一次 stale、单 event、单 next step、round +1"。
-4. **Q5**：admin-token 明知 missing DB never legitimate，警告后仍调用会创建库的
-   OpenDefault——"少报无害"不成立，缺库应硬失败且不创建文件。
-5. **Q3**：超时"全覆盖"不成立，preview_handlers.go:151 / init_remote_binding.go:150 /
-   skill_handlers.go:1291 等仍有未限时 git 调用；90s 是否适配内网未验证。
+   DB 事务边界"是我的错误认定。已修：kv_records payload+revision 双见证 CAS
+   （仅 revision 见证有洞：marker→marker swap 会赢）+ transition-claim 闸门
+   （fresh 拒绝 / >5min TTL 抢占 / terminal 拒绝重入）+ 首写前 abort 全部释放
+   claim（route-mismatch 重跑测试暴露 normalize 校验失败路径原先不释放）。
+   并发断言全过：一次成功一次 stale 零写入、单 event、单 pending next、rounds 只 +1。
+4. **Q5 ✅（2ddf0ae7）**：admin-token 缺库硬失败且不创建文件/父目录（取代本文件
+   F11 的 warn-only 方案——GPT 正确：少报无害不成立，警告后创建空库仍是事故）。
+5. **Q3 ✅（7dfca9c1）**：三处漏网 git 调用统一 boundedGitOutput 5s；90s 网络预算
+   改 `MULTIGENT_GIT_NETWORK_TIMEOUT` 可配置（无效值回退默认，永不无界）。
+6. **Q6 ✅（HANDOFF §20.2）**：内网清单补齐 8 项（私有 CA 四类运行时端到端、
+   secret key 分发轮换、GitLab 认证、TLS/NO_PROXY、SQLite 备份、镜像 digest/架构、
+   Docker socket 最小权限、容量 GC）；两项标 unknown（多节点 key 一致性校验、
+   备份命令未内置）。
 
 ### F11. 本轮（通宵第三轮）落地清单
 
