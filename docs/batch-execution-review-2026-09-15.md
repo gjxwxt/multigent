@@ -28,6 +28,18 @@
 > `preview.view`（旧 token 只读兼容）。status 在泄露审计前要求登录。
 > 剩余：§2.2 运行时收尾验证、E2E 探测脚本、部署 runbook 更新。
 >
+> **执行进度（2026-09-15，Task 2.2 Phase 1 落地，commits 1a0d1653 + 38fd88ef）**：
+> 前置 Task 0 与沙盒核心已实现——`internal/fixturesandbox`（契约加载/校验、
+> kv_records lease 状态机 + payload+revision CAS、内容寻址 artifact 目录、
+> schema 漂移 fail-closed 闸门、task-private db provision、CAS 化 reset/
+> reclaim、孤儿目录清扫、容器内 generator）；preview engine 增加
+> provision/release 钩子（provision 失败 = 预览启动失败，先于 docker；成功
+> 注入 APP_DB_PATH env）；API server 每分钟租期回收。模板
+> react_go_fullstack 升 1.2.0（SQLite + 确定性 seed + fixtures.json）。验证：
+> make test 36 包全绿；确定性 digest 跨库 5 次一致；并发 reset 恰一成功。
+> Phase 1 未含：场景选择 UI（Phase 2）、generator 网络白名单收口（已知妥协）、
+> 预冻结运维入口。
+>
 > **执行进度（2026-09-15，commit 7a29ae3d，batch1-rc1 部署 E2E）**：Batch 1
 > 代码级验收通过（GPT 14 轮，round-13 全部 P0/P1 关闭）。部署 E2E 在 VM 完成：
 > 同一二进制监听 ：27892（console origin），preview origin :27893 由边缘反代
