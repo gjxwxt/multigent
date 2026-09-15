@@ -2,7 +2,13 @@
 
 ## 1. 状态与前置条件
 
-**状态：已设计，暂不实施。**
+**状态：Batch A 已实施（2026-09-15，commit 8b428c69）；Batch B/C 未开始。**
+
+Batch A 交付（§7 Batch A 全部条目）：`acceptance_test_design` 节点 + 字段 + 边映射；研发/初审/QA 节点双语 Prompt 契约（含 `test_implementation_evidence` 映射要求与 spec-vs-diff-vs-evidence 对账要求）；manifest 最小结构校验（`internal/workflow/testspec.go`，含占位词拒绝）；CompleteAndAdvance 内的 manifest 闸门（拒绝即释放 claim、步骤保持 pending）；§8 全部三类测试（模板结构 / manifest 校验矩阵 / 工作流端到端含 QA 打回断言）。E2E 测试抓出并修复了 happy path 的 spec 转发断链（QA 必填输入原先不可达），新增 `TestGreenfieldHappyPathForwardsTestSpec` 锁边。直接实例化模板（不建 vNext 副本）：`DefinitionFromTemplate("greenfield-delivery-pipeline", ...)` 即得到 12 步 vNext 形态，存量运行实例不受影响（run 使用定义快照）。
+
+Batch A 边界：返工可追溯工件聚合（§5.1）、QA 测试 checkpoint 权限（§8 第 4 条）属 Batch B；真实项目试点属 Batch C。
+
+以下为原设计约束（仍有效）：
 
 本方案排在当前“内网运行时与依赖治理”任务完成、复验并形成可追溯部署证据之后执行。实施前必须确认：
 
