@@ -150,6 +150,36 @@ func TestSanitizedDiffArgsDisableExecutableConfig(t *testing.T) {
 	}
 }
 
+// Batch 3: the exported SanitizedGitEnv wraps purifiedGitEnv for host-side
+// callers touching agent-writable trees. Same contract: scrubbed keys cannot
+// re-enter through extras, GIT_CONFIG_NOSYSTEM=1 is forced last.
+func TestSanitizedGitEnvExportedContract(t *testing.T) {
+	t.Setenv("GIT_DIR", "/host/.git")
+	t.Setenv("HOME", "/host/home")
+
+	env := SanitizedGitEnv("HOME=/attacker/home", "GIT_CONFIG_COUNT=9", "CUSTOM=ok")
+	seen := map[string]string{}
+	order := []string{}
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		if _, dup := seen[k]; !dup {
+			order = append(order, k)
+		}
+		seen[k] = v
+	}
+	for _, banned := range []string{"GIT_DIR", "HOME", "GIT_CONFIG_COUNT"} {
+		if _, ok := seen[banned]; ok {
+			t.Fatalf("SanitizedGitEnv must drop %s (re-injection attempt included)", banned)
+		}
+	}
+	if seen["CUSTOM"] != "ok" {
+		t.Fatal("legitimate extra must pass through")
+	}
+	if last := order[len(order)-1]; last != forcedConfigNosystemKey || seen[last] != "1" {
+		t.Fatalf("GIT_CONFIG_NOSYSTEM=1 must be forced last, got %s=%s", last, seen[order[len(order)-1]])
+	}
+}
+
 // Round-11: the clone is checked out at the baseline commit and the working
 // tree HEAD is verified — the agent receives a real tree, not a
 // --no-checkout shell.

@@ -125,12 +125,20 @@ func AcquireProjectLock(projectRoot string) (func(), error) {
 	}
 }
 
-func projectRootForWorktree(path string) string {
+// ProjectRootForWorktree maps a worktree path back to its project root (the
+// directory holding .multigent/), so callers that only have a worktree can
+// still acquire the cross-process project lock. Paths outside a worktree
+// layout are returned unchanged — they are their own project root.
+func ProjectRootForWorktree(path string) string {
 	path = filepath.Clean(strings.TrimSpace(path))
 	if filepath.Base(filepath.Dir(path)) == "worktrees" && filepath.Base(filepath.Dir(filepath.Dir(path))) == ".multigent" {
 		return filepath.Dir(filepath.Dir(filepath.Dir(path)))
 	}
 	return path
+}
+
+func projectRootForWorktree(path string) string {
+	return ProjectRootForWorktree(path)
 }
 
 // WorktreeDir returns the absolute path for a task's worktree.

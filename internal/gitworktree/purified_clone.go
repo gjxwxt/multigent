@@ -276,3 +276,16 @@ func SanitizedDiffArgs(args ...string) []string {
 	}
 	return append(base, args...)
 }
+
+// SanitizedGitEnv returns the environment for git subprocesses that run
+// against a repository whose config/hooks an agent (or preview copilot) may
+// have influenced. It strips every variable that redirects Git into a host
+// checkout or attacker-controlled object store (GIT_DIR, GIT_*_OBJECT_*,
+// global config pointers, credential surfaces, editors) and forces
+// GIT_CONFIG_NOSYSTEM=1 — the same scrub the purified clone uses, exported
+// for the review-commit path and other host-side git calls touching
+// agent-writable trees (Batch 3 wiring, round-14). Caller extras are filtered
+// against the protected key set and cannot re-inject anything scrubbed.
+func SanitizedGitEnv(extra ...string) []string {
+	return purifiedGitEnv(extra)
+}

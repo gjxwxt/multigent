@@ -18,6 +18,7 @@ import (
 	"github.com/multigent/multigent/internal/codehost"
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
+	"github.com/multigent/multigent/internal/gitworktree"
 	"github.com/multigent/multigent/internal/store"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
@@ -1038,6 +1039,29 @@ func enrichQARejectionComments(outputs map[string]string, currentStep entity.Wor
 	}
 }
 
+// reviewCommitGit builds a bounded, sanitized git command for the
+// review-commit path (Batch 3 wiring, round-14): the working tree may carry
+// agent-written .git/config (diff.external, fsmonitor, hooksPath), so every
+// invocation runs with (a) SanitizedDiffArgs' config neutralization —
+// core.fsmonitor/core.hooksPath cleared — and (b) SanitizedGitEnv, which
+// strips GIT_* redirection, global config pointers, and credential surfaces.
+// Without this, a preview copilot could plant config that executes arbitrary
+// programs on the host the moment the platform commits its work.
+type reviewCommitGit struct{ root string }
+
+func (g reviewCommitGit) run(timeout time.Duration, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	full := append([]string{
+		"-c", "core.fsmonitor=",
+		"-c", "core.hooksPath=",
+	}, args...)
+	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd.Dir = g.root
+	cmd.Env = gitworktree.SanitizedGitEnv()
+	return cmd.CombinedOutput()
+}
+
 func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Task) {
 	if t == nil {
 		return
@@ -1051,35 +1075,37 @@ func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Tas
 	if _, err := os.Stat(filepath.Join(gitRoot, ".git")); err != nil {
 		return
 	}
+	git := reviewCommitGit{root: gitRoot}
+
+	// Hold the cross-process project Git lock for the whole status → commit →
+	// push window: the worktree manager's worktree setup, snapshot capture,
+	// and cleanup serialize on the same lock, so a review commit can no longer
+	// interleave with a concurrent CaptureSnapshot or CleanupWorktree
+	// (Batch 3: AcquireProjectLock wired into the Change Run commit path).
+	projectRoot := gitworktree.ProjectRootForWorktree(gitRoot)
+	unlock, err := gitworktree.AcquireProjectLock(projectRoot)
+	if err != nil {
+		log.Printf("[review-commit] project lock unavailable for task %s (project %s): %v", t.ID, project, err)
+		return
+	}
+	defer unlock()
 
 	// 1. Check for uncommitted working tree changes from in-context preview copilot
 	// (all git calls bounded — this runs on the approve request path)
-	statusCtx, statusCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	statusCmd := exec.CommandContext(statusCtx, "git", "status", "--porcelain")
-	statusCmd.Dir = gitRoot
-	statusOut, err := statusCmd.Output()
-	statusCancel()
+	statusOut, err := git.run(10*time.Second, "status", "--porcelain")
 	if err != nil || len(bytes.TrimSpace(statusOut)) == 0 {
 		return // working tree is clean
 	}
 
 	// 2. Stage and commit
-	addCtx, addCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	addCmd := exec.CommandContext(addCtx, "git", "add", "-A")
-	addCmd.Dir = gitRoot
-	addOut, addErr := addCmd.CombinedOutput()
-	addCancel()
+	addOut, addErr := git.run(30*time.Second, "add", "-A")
 	if addErr != nil {
 		log.Printf("[review-commit] git add failed for task %s (project %s): %v (%s)", t.ID, project, addErr, strings.TrimSpace(string(addOut)))
 		return
 	}
 
 	commitMsg := "chore(review): user in-context preview feedback fixes"
-	commitCtx, commitCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	commitCmd := exec.CommandContext(commitCtx, "git", "commit", "-m", commitMsg)
-	commitCmd.Dir = gitRoot
-	commitOut, commitErr := commitCmd.CombinedOutput()
-	commitCancel()
+	commitOut, commitErr := git.run(30*time.Second, "commit", "-m", commitMsg)
 	if commitErr != nil {
 		log.Printf("[review-commit] git commit failed for task %s (project %s): %v (%s)", t.ID, project, commitErr, strings.TrimSpace(string(commitOut)))
 		return
@@ -1097,14 +1123,15 @@ func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Tas
 		branchName = "main"
 	}
 
-	remoteCtx, remoteCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	remoteCmd := exec.CommandContext(remoteCtx, "git", "remote", "get-url", "origin")
-	remoteCmd.Dir = gitRoot
-	remoteOut, remoteErr := remoteCmd.Output()
-	remoteCancel()
+	remoteOut, remoteErr := git.run(5*time.Second, "remote", "get-url", "origin")
 	if remoteErr == nil && len(bytes.TrimSpace(remoteOut)) > 0 {
+		// Push needs the standard credential surface (credential helpers,
+		// SSH agent) — the sanitized baseline would strip them, so this one
+		// command keeps the host environment but still neutralizes config
+		// via the -c flags and credentials never land in stored output
+		// (redactGitOutput contract).
 		pushCtx, pushCancel := context.WithTimeout(context.Background(), 90*time.Second)
-		pushCmd := exec.CommandContext(pushCtx, "git", "push", "origin", branchName)
+		pushCmd := exec.CommandContext(pushCtx, "git", "-c", "core.fsmonitor=", "-c", "core.hooksPath=", "push", "origin", branchName)
 		pushCmd.Dir = gitRoot
 		pushOut, pushErr := pushCmd.CombinedOutput()
 		pushCancel()
