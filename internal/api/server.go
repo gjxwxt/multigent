@@ -644,6 +644,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/projects/{name}/remote/verify", s.handleProjectRemoteVerify)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{id}/merge", s.handleMergeTaskMR)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview/live", s.handleGetTaskPreviewLive)
+	// ── Change Run (Task 3.1): proposals against a task worktree. Main mux
+	// only (token auth); state-changing routes additionally require project
+	// operator inside the handlers.
+	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/change-runs", s.handleListChangeRunProposals)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/change-runs", s.handleCreateChangeRunProposal)
+	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/change-runs/{proposalId}", s.handleGetChangeRunProposal)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/change-runs/{proposalId}/apply", s.handleApplyChangeRunProposal)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/change-runs/{proposalId}/rollback", s.handleRollbackChangeRunProposal)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/change-runs/{proposalId}/reject", s.handleRejectChangeRunProposal)
 	mux.HandleFunc("/preview/", s.handleTaskPreviewProxy)
 	mux.HandleFunc("POST /api/v1/workspaces/{workspaceId}/workflow/triggers/{notificationId}/callback", s.handlePostWorkflowTriggerCallback)
 	mux.HandleFunc("GET /api/v1/prompts/agency", s.handleGetAgencyPrompt)
