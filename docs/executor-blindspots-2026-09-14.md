@@ -249,6 +249,55 @@ claim；stamp 失败时 `FailQueuedRuntimeRun` 只能处理仍为 queued 的 run
    Docker socket 最小权限、容量 GC）；两项标 unknown（多节点 key 一致性校验、
    备份命令未内置）。
 
+### F15. GPT 二轮复审推翻 Q1/Q2 修复（2026-09-15 第五轮；**当夜再修复完毕**）
+
+二轮复审：Q4/Q5/Q3 方向认可，但 Q1、Q2 各留下一个新的 P0 并发缺口，已逐项再修：
+
+1. **Q1 二轮 P0：preparing 不在唯一索引内 ✅（5d4a2fd4）**。一轮修复把 preparing
+   放在 `idx_runtime_runs_active_key` 之外（"靠 UpsertRuntimeRunIdempotent 的 key
+   查找收敛"）——但查找与插入之间仍有窗口，第二个 enqueue 可以插入自己的 preparing
+   行并走到第二次 stamp。已修：唯一索引扩为 `('preparing','queued','running')`，
+   第二个 enqueue 在**初始 INSERT 就被拒**，绝无第二次 stamp；promote 因此构造上
+   无碰撞。配套：
+   - **迁移** `migrateRuntimeRunPreparingUniqueIndex`：单事务内先去重遗留重复行
+     （幸存者 = 最先进状态 running > queued > preparing，再按 id 决胜——确定性可
+     重放），被挤掉的 preparing 行**删除**（从未可 claim），queued/running 行标
+     failed/superseded_migration（task token 留给 stale-token sweep 对账），然后
+     drop/recreate 新索引。幂等（检测到新形状索引即退出）。
+   - **卡死 preparing 懒救援**：索引化后 enqueue 进程在 INSERT 与 promote 之间
+     崩溃会永久堵死该 intent 的重派。reaper 新增 `reapStuckPreparingRuns`：
+     created_at 超过 2 分钟的 preparing 行强制 fail（合法 preparing 只活毫秒级）。
+   - **barrier 测试走真实 `enqueueRuntimeTaskRun`**（runtime_enqueue_join_barrier_
+     test.go）：A promote 后 node 真实 claim A，同时 B enqueue——断言 B 返回 A 的
+     run、库里该 key 恰一行（B 的 insert 没留残渣）、task token 仍指向 A（B 从未
+     写自己的 token）、A 走正常 lease 完成且 fence 接受。另测 stamp 失败腿：失败
+     run 释放 key，B 重试干净入队并持有 token。
+   - 一轮的 promote-collision join 路径（OtherActiveRuntimeRunByKey）保留为兜底，
+     其 SQL 级自排除语义测试改写为断言"第二个 insert 不产生行"。
+
+2. **Q2 二轮 P0：TTL 用错时钟 + revision 秒精度 ✅（bde408c5）**。一轮的 claim
+   marker 把 run 的业务 UpdatedAt 当 TTL 时钟、把 kv_records.updated_at 当 CAS
+   revision——两个都是错的：步骤合法驻留 >5min 会让 fresh claim 看起来过期；秒精度
+   让同一秒内两次 CAS 写共享 revision，旧 claimant 可能赢。已修：
+   - **claim 信封** `transition-claim:<len>:<claimID><claimedAtUnixNano>:<runJSON>`：
+     claimID = CAS 成功时现造的 16 字节随机 hex（进程重启不可复用）；claimedAt =
+     claim 时刻（信封自带时钟，与 run 行无关）；framing 用长度前缀 + 固定宽整数
+     （RFC3339 时间戳本身含冒号，朴素 split 会碎——一轮实现当场被 round-trip 测试
+     抓住）。release/steal 按**完整信封**匹配：旧 claimID 的释放 CAS 落空，永远
+     清不掉新 claimant 的 marker。
+   - **kv_records 单调 revision 计数器**（ALTER TABLE 加列，每条写路径递增：
+     UpsertRecord 插入置 1/冲突 +1，两个 CAS 原语成功 +1）。RecordRevision 返回
+     计数器；updated_at 退化为展示字段。回归测试钉死：同一秒内连写 revision 严格
+     递增、旧 revision CAS 拒绝、payload+revision 双见证语义保持。
+   - 新测试按 GPT 原文：驻留 >5min 的步骤（run 行回拨 2h）fresh claim 仍互斥、
+     持有者仍能完成；B 抢占过期 claim 后，A 的旧 claimID 释放是无操作、C 仍被
+     拒、B 用自己的 claimID 才能释放。
+
+本轮教训（并入 F10 的教训集）：**修复一轮审查发现时，新引入的机制本身要按同样的
+标准再审一遍**——preparing 状态的"不可 claim"只挡了 node，没挡第二个 enqueue；
+claim TTL 借用了手边的时间戳而不是定义"claim 年龄"该有的时钟。两个 P0 都是修复
+代码里的新缺口，不是原缺陷的残留。
+
 ### F11. 本轮（通宵第三轮）落地清单
 
 - **F10**：触发器双写竞态面核实结论（DB 双保险闭合，见上）。
