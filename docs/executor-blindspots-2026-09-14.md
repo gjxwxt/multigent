@@ -293,6 +293,42 @@ claim；stamp 失败时 `FailQueuedRuntimeRun` 只能处理仍为 queued 的 run
      持有者仍能完成；B 抢占过期 claim 后，A 的旧 claimID 释放是无操作、C 仍被
      拒、B 用自己的 claimID 才能释放。
 
+### F16. GPT 三轮复审：claim 闸门只护住了 abort，没护住成功路径（2026-09-15 第六轮；**当夜修复完毕**）
+
+三轮复审判定 Q1 通过；Q2 剩最后一个 P0：**claim owner 只在"失败前释放"路径被验证，
+成功提交路径没有**。A 的 claim 过期被 B 抢占后，A 恢复并走成功路径——它的 step
+instance、completion event、run 状态三类写入各自独立落库，没有任何一处检查
+"我还是不是 claim 持有者"，会层层叠在 B 的结果上。且不能只给 SaveRun 加判断：
+A 在 SaveRun 之前已经写完 instance 与 event。
+
+已修（27f5ee0c，采纳 GPT 的"前者更可靠"方案：带 claimID 的事务化 transition writer）：
+
+- **db 层 `CommitTransitionGuarded`**：整个提交在一个 `BEGIN IMMEDIATE` 事务内——
+  先取写锁（避免 deferred 事务在 claim 检查与首写之间被其他提交者插队、到 COMMIT
+  才发现 BUSY），事务内重读 workflow_runs payload 并要求它**仍是调用者自己的
+  claim marker**（前缀 + 内嵌 claimID 匹配）；否则 `ErrTransitionClaimLost`，
+  批内全部写入随事务回滚——instance/event/run **要么全落要么全不落**。
+  db 层测试：owner 提交成功且 marker 被替换释放；被抢后的整批原子拒绝（run 行
+  保持 B 的 marker、A 的 instance/event 均被回滚）；普通 payload（转换已完成）
+  拒绝；空批拒绝。
+- **workflow 层 `commitTransitionBatch`**：CompleteAndAdvance 的三个持久化块
+  （init 失败 / failed 终态 / 成功 + 下一 inst 重置）改为"先准备好全部变更，
+  最后一次性走 guarded 事务提交"；run 写排在批内最后，成功即替换 marker 释放
+  闸门。claim-lost 以 `ErrStaleWorkflowTransition` 包裹返回（写包装 helper 时
+  犯了 `fmt.Errorf("%w: "+format, args...)` 的错误——args 被并进动词位置，被
+  errors.Is 断言当场抓住，改为两段式 Sprintf + %w）。
+- **真实交错测试**（GPT 指定的四步）：A 经真实 gate 拿 claim 后暂停 → claim
+  过期 B 抢占并**完整走完转换** → A 恢复、用它内存里的旧视图与旧 claimID 尝试
+  成功路径提交 → 断言 A 的 instance/event/run 三类写入**全部被拒**（被抢 claim
+  的整批回滚）、B 的结果完整保留（该 step 恰一个 completion event、completed
+  instance 的 summary 是 B 的、下一 inst 是 B 建的、run 的 UpdatedAt 是 B 的
+  提交），且 A 对已前进步骤的迟到重放被拒。
+
+教训（续 F15）：**幂等闸门覆盖的是"路径"还是"提交点"必须分开验证**。claim 闸门
+第一版护住的是"进入转换"与"放弃转换"，成功提交点裸奔——而提交点才是副作用真正
+落库的地方。评审直指的"要么事务化 writer，要么每类写入同事务内验证"，本质是
+把 ownership 检查从"路径入口"挪到"提交点"，且原子化到与写入同事务。
+
 本轮教训（并入 F10 的教训集）：**修复一轮审查发现时，新引入的机制本身要按同样的
 标准再审一遍**——preparing 状态的"不可 claim"只挡了 node，没挡第二个 enqueue；
 claim TTL 借用了手边的时间戳而不是定义"claim 年龄"该有的时钟。两个 P0 都是修复
