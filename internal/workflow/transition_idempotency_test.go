@@ -11,6 +11,7 @@ import (
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
 )
+
 func dbOpenForTransitionTests(t *testing.T) (controldb.Store, error) {
 	t.Helper()
 	controlDB, err := controldb.Open(filepath.Join(t.TempDir(), "control.db"))
@@ -477,8 +478,15 @@ func TestStaleReleaseDoesNotClearStolenClaim(t *testing.T) {
 		// marker exists with a fresh claim by checking after a successful
 		// claim — simplest deterministic path: run the full completion in a
 		// goroutine and read the marker payload mid-flight is racy, so
-		// instead drive the claim directly via the gate function.
-		id, err := store.claimWorkflowTransition(&run)
+		// instead drive the claim directly via the gate function. B's
+		// snapshot is its own initial read (the row still carries A's expired
+		// marker at this instant, so the steal CAS matches).
+		snap, snapErr := store.readTransitionClaimSnapshot(run.Project, run.TaskID, run.ID)
+		if snapErr != nil {
+			claimCh <- ""
+			return
+		}
+		id, err := store.claimWorkflowTransition(&run, snap)
 		if err != nil {
 			claimCh <- ""
 			return
@@ -497,15 +505,154 @@ func TestStaleReleaseDoesNotClearStolenClaim(t *testing.T) {
 	store.releaseWorkflowTransitionClaim(&run, claimIDA)
 
 	// B's marker must still be in place: a third racer C is still refused.
-	if _, err := store.claimWorkflowTransition(&run); !errors.Is(err, ErrStaleWorkflowTransition) {
+	// C reads a fresh snapshot (the row now holds B's marker), but a fresh
+	// claim within the TTL is refused regardless.
+	snapC, err := store.readTransitionClaimSnapshot(run.Project, run.TaskID, run.ID)
+	if err != nil {
+		t.Fatalf("read snapshot for C: %v", err)
+	}
+	if _, err := store.claimWorkflowTransition(&run, snapC); !errors.Is(err, ErrStaleWorkflowTransition) {
 		t.Fatalf("C must be refused while B holds the claim, got %v", err)
 	}
 
 	// B releases with its OWN claimID — the marker clears, C can claim.
 	store.releaseWorkflowTransitionClaim(&run, claimIDB)
-	if _, err := store.claimWorkflowTransition(&run); err != nil {
+	snapC, err = store.readTransitionClaimSnapshot(run.Project, run.TaskID, run.ID)
+	if err != nil {
+		t.Fatalf("read snapshot for C after release: %v", err)
+	}
+	if _, err := store.claimWorkflowTransition(&run, snapC); err != nil {
 		t.Fatalf("after B releases with its own claimID, C must claim: %v", err)
 	}
+}
+
+// GPT re-review round 4 P0: the claim must bind the CALLER'S INITIAL READ of
+// the run row. A that reads the run, pauses, and resumes AFTER B fully
+// completed the transition must NOT be able to claim — under the old gate A
+// re-read the row at claim time, CASed against B's NEW plain payload (which
+// matched nothing A had seen), won the swap, planted a marker carrying A's
+// STALE ActiveStepID, and replayed the already-consumed step with duplicate
+// event/round writes. The exact interleaving, end to end:
+//  1. A reads the run (snapshot bound) and pauses — nothing persisted.
+//  2. B runs the FULL CompleteAndAdvance and completes the step.
+//  3. A resumes and attempts to claim from its stale snapshot.
+//  4. Assert: A's claim is refused, and the store carries ZERO writes from A
+//     — event count unchanged beyond B's completion, run state is B's.
+func TestClaimBindsInitialReadSnapshotAfterConcurrentAdvance(t *testing.T) {
+	store := startUnifiedSelfReviewRun(t)
+	driveToSelfReview(t, store)
+	stepID := ""
+	eventsBefore := 0
+
+	// Step 1: A's initial read — run state AND snapshot from one instant.
+	runA, snapA, ok, err := store.RunForTaskWithSnapshot("project", "task-self-review")
+	if err != nil || !ok {
+		t.Fatalf("A initial read: %v", err)
+	}
+	stepID = runA.ActiveStepID
+	eventsBefore = countStepEvents(t, store, runA.ID, stepID)
+
+	// Sanity: the snapshot's payload must be the plain run payload A decoded.
+	if strings.HasPrefix(snapA.payload, transitionClaimPrefix) {
+		t.Fatal("A's snapshot must hold the plain run payload before any claim")
+	}
+
+	// Step 2: B completes the FULL transition while A is paused.
+	bTransition, err := store.CompleteAndAdvance("project", "task-self-review", "reviewed by B — winner", "", map[string]string{
+		"self_review":         "B's report: pass with evidence",
+		"self_review_verdict": "pass",
+		"review_rounds":       "1",
+	}, "completed")
+	if err != nil {
+		t.Fatalf("B's full transition must succeed: %v", err)
+	}
+	if bTransition.Next == nil || bTransition.Next.ID != "ci_ready_gate" {
+		t.Fatalf("B routed to %v, want ci_ready_gate", bTransition.Next)
+	}
+
+	// Step 3: A resumes and claims FROM ITS STALE SNAPSHOT — the same shape
+	// CompleteAndAdvance produces when the caller's initial read predates
+	// another transitioner's commit. A's in-memory run still names the OLD
+	// active step; the row now holds B's advanced payload. The claim must
+	// lose the CAS (payload+revision witness) and surface stale.
+	runAAfterPause := runA // unchanged in-memory view
+	if _, err := store.claimWorkflowTransition(&runAAfterPause, snapA); !errors.Is(err, ErrStaleWorkflowTransition) {
+		t.Fatalf("A's stale claim must be refused after B's commit, got %v", err)
+	}
+
+	// Step 4a: ZERO writes from A — the row must still be B's plain payload
+	// (no claim marker planted by A, no clobber of B's advanced state).
+	recs, err := store.db.ListRecordsWithRevision("workflow_runs", store.workspaceID, []string{"project", "task-self-review"})
+	if err != nil {
+		t.Fatalf("list runs after A's refused claim: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("workflow_runs rows = %d, want 1", len(recs))
+	}
+	if strings.HasPrefix(recs[0].Payload, transitionClaimPrefix) {
+		t.Fatal("A's refused claim must not plant a claim marker")
+	}
+	runAfterA, err := decodeWorkflowRunPayload(recs[0].Payload, "project", "task-self-review")
+	if err != nil {
+		t.Fatalf("decode run after A's refused claim: %v", err)
+	}
+	if runAfterA.ActiveStepID != "ci_ready_gate" || runAfterA.Status != "active" {
+		t.Fatalf("run after A's refused claim = status=%s activeStep=%s, want B's advanced state (active/ci_ready_gate)", runAfterA.Status, runAfterA.ActiveStepID)
+	}
+	// Step 4b: ZERO duplicate events — exactly B's one completion event.
+	if got := countStepEvents(t, store, runA.ID, stepID); got != eventsBefore+1 {
+		t.Fatalf("completion events for step %s = %d, want exactly %d+1 (A's refused claim must write none)", stepID, got, eventsBefore)
+	}
+	// Step 4c: B's next-step instance is untouched — exactly one pending
+	// ci_ready_gate instance (A replaying the old step would have created a
+	// second reset or duplicated the instance).
+	insts, err := store.ListStepInstances(runA.ID)
+	if err != nil {
+		t.Fatalf("list instances: %v", err)
+	}
+	pendingNext := 0
+	for _, inst := range insts {
+		if inst.StepID == "ci_ready_gate" && inst.Status == "pending" {
+			pendingNext++
+		}
+	}
+	if pendingNext != 1 {
+		t.Fatalf("pending ci_ready_gate instances = %d, want exactly 1 (A's refused claim must not duplicate)", pendingNext)
+	}
+
+	// A's recovery path: a FRESH read (new snapshot, B's advanced state) makes
+	// A's next transition attempt behave like any new caller — the old step
+	// completion is now rejected by normal routing/normalization, not by a
+	// half-claimed state. The run must remain fully functional.
+	_, snapFresh, ok, err := store.RunForTaskWithSnapshot("project", "task-self-review")
+	if err != nil || !ok {
+		t.Fatalf("fresh read after A's refused claim: %v", err)
+	}
+	lateRun, ok, err := store.RunForTask("project", "task-self-review")
+	if err != nil || !ok {
+		t.Fatalf("reload run: %v", err)
+	}
+	if _, err := store.claimWorkflowTransition(&lateRun, snapFresh); err != nil {
+		t.Fatalf("a fresh snapshot after B's commit must claim cleanly (run stays functional), got %v", err)
+	}
+	// Release the probe claim so the run is left unclaimed for later steps.
+	freshClaimID := ""
+	// (claimID from the probe is not needed; release via full-marker match.)
+	recs, err = store.db.ListRecordsWithRevision("workflow_runs", store.workspaceID, []string{"project", "task-self-review"})
+	if err != nil {
+		t.Fatalf("list runs after probe claim: %v", err)
+	}
+	if !strings.HasPrefix(recs[0].Payload, transitionClaimPrefix) {
+		t.Fatal("probe claim must have planted a marker")
+	}
+	if claimed, ok := decodeTransitionClaimMarker(recs[0].Payload); ok {
+		freshClaimID = claimed.ClaimID
+	}
+	if freshClaimID == "" {
+		t.Fatal("probe claim marker must decode")
+	}
+	probeRun := lateRun
+	store.releaseWorkflowTransitionClaim(&probeRun, freshClaimID)
 }
 
 // startMinimalTwoStepRun seeds a tiny two-step definition: gate (human,

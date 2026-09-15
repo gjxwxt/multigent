@@ -38,6 +38,7 @@ type Store interface {
 	UpdateRecordIfRevision(table, workspaceID string, key []string, newPayload, expectRevision string) (bool, error)
 	UpdateRecordIfPayloadAndRevision(table, workspaceID string, key []string, newPayload, expectPayload, expectRevision string) (bool, error)
 	RecordRevision(table, workspaceID string, key []string) (string, bool, error)
+	ListRecordsWithRevision(table string, workspaceID string, keyPrefix []string) ([]RecordWithRevision, error)
 	CommitTransitionGuarded(workspaceID string, runKey []string, expectClaimID string, writes []KVWrite) error
 	ListRecords(table string, workspaceID string, keyPrefix []string) ([]Record, error)
 	DeleteRecord(table string, workspaceID string, key []string) error
@@ -1006,7 +1007,7 @@ func Open(path string) (*SQLiteStore, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	uri := "file:" + filepath.ToSlash(path) + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"
+	uri := "file:" + filepath.ToSlash(path) + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_txlock=immediate"
 	sqlDB, err := sql.Open("sqlite", uri)
 	if err != nil {
 		return nil, err

@@ -1504,33 +1504,59 @@ func (s *Store) SaveRun(run *entity.WorkflowRun) error {
 	return s.db.UpsertRecord("workflow_runs", s.workspaceID, []string{run.Project, run.TaskID, run.ID}, string(raw))
 }
 
+// decodeWorkflowRunPayload unwraps a stored workflow_runs payload into the
+// run entity. A mid-transition claim marker replaces the run payload for the
+// transition's duration (Q2 gate); readers must see through it: unwrap the
+// embedded run state from the envelope (claimID:claimedAt:<runJSON>),
+// otherwise every reader between claim and release parses garbage
+// ("invalid character 't' in literal true").
+func decodeWorkflowRunPayload(payload, project, taskID string) (entity.WorkflowRun, error) {
+	var run entity.WorkflowRun
+	if strings.HasPrefix(payload, transitionClaimPrefix) {
+		claimed, ok := decodeTransitionClaimMarker(payload)
+		if !ok {
+			return entity.WorkflowRun{}, fmt.Errorf("workflow run claim marker for task %s/%s is malformed", project, taskID)
+		}
+		run = claimed.Run
+		return run, nil
+	}
+	if err := json.Unmarshal([]byte(payload), &run); err != nil {
+		return entity.WorkflowRun{}, err
+	}
+	return run, nil
+}
+
 func (s *Store) RunForTask(project, taskID string) (entity.WorkflowRun, bool, error) {
 	recs, err := s.db.ListRecords("workflow_runs", s.workspaceID, []string{project, taskID})
 	if err != nil || len(recs) == 0 {
 		return entity.WorkflowRun{}, false, err
 	}
-	var run entity.WorkflowRun
-	payload := recs[0].Payload
-	// A mid-transition claim marker replaces the run payload for the
-	// transition's duration (Q2 gate). Readers must see through it: unwrap
-	// the embedded run state from the envelope (claimID:claimedAt:<runJSON>),
-	// otherwise every reader between claim and release parses garbage
-	// ("invalid character 't' in literal true").
-	if strings.HasPrefix(payload, transitionClaimPrefix) {
-		claimed, ok := decodeTransitionClaimMarker(payload)
-		if !ok {
-			return entity.WorkflowRun{}, false, fmt.Errorf("workflow run claim marker for task %s/%s is malformed", project, taskID)
-		}
-		unwrapped, err := json.Marshal(claimed.Run)
-		if err != nil {
-			return entity.WorkflowRun{}, false, err
-		}
-		payload = string(unwrapped)
-	}
-	if err := json.Unmarshal([]byte(payload), &run); err != nil {
+	run, err := decodeWorkflowRunPayload(recs[0].Payload, project, taskID)
+	if err != nil {
 		return entity.WorkflowRun{}, false, err
 	}
 	return run, true, nil
+}
+
+// RunForTaskWithSnapshot is RunForTask plus the raw claim witness: the
+// stored payload (marker or plain run JSON) and the monotonic revision, read
+// in the SAME SELECT as the payload. CompleteAndAdvance passes the snapshot
+// to claimWorkflowTransition so the claim CAS can only fire while the row
+// still holds exactly the state the caller transitioned from (GPT re-review
+// round 4 P0: without this binding, a caller that read the run before
+// another transitioner committed could win the claim against the winner's
+// NEW payload and replay an already-consumed step).
+func (s *Store) RunForTaskWithSnapshot(project, taskID string) (entity.WorkflowRun, transitionClaimSnapshot, bool, error) {
+	recs, err := s.db.ListRecordsWithRevision("workflow_runs", s.workspaceID, []string{project, taskID})
+	if err != nil || len(recs) == 0 {
+		return entity.WorkflowRun{}, transitionClaimSnapshot{}, false, err
+	}
+	rec := recs[0]
+	run, err := decodeWorkflowRunPayload(rec.Payload, project, taskID)
+	if err != nil {
+		return entity.WorkflowRun{}, transitionClaimSnapshot{}, false, err
+	}
+	return run, transitionClaimSnapshot{payload: rec.Payload, revision: rec.Revision}, true, nil
 }
 
 // WillComplete reports whether completing the current step with the supplied
@@ -2091,8 +2117,8 @@ const transitionClaimPrefix = "transition-claim:"
 // claimant observed. Release and steal decisions match on the full envelope;
 // a caller can only unwind a claim whose claimID it holds.
 type transitionClaimEnvelope struct {
-	ClaimID   string    `json:"claimId"`
-	ClaimedAt time.Time `json:"claimedAt"`
+	ClaimID   string             `json:"claimId"`
+	ClaimedAt time.Time          `json:"claimedAt"`
 	Run       entity.WorkflowRun `json:"run"`
 }
 
@@ -2155,6 +2181,31 @@ func decodeTransitionClaimMarker(payload string) (transitionClaimEnvelope, bool)
 	return transitionClaimEnvelope{ClaimID: claimID, ClaimedAt: time.Unix(0, claimedAtNano).UTC(), Run: run}, true
 }
 
+// transitionClaimSnapshot is the caller's INITIAL read of the run row: the
+// exact stored payload (possibly a claim marker) and the monotonic revision
+// read in the same SELECT. The claim CAS binds to this snapshot — a caller
+// whose view predates another transitioner's commit must NEVER win the swap,
+// because its whole transition would replay an already-consumed step.
+type transitionClaimSnapshot struct {
+	payload  string
+	revision string
+}
+
+// readTransitionClaimSnapshot loads the run row's raw payload + revision in
+// one SELECT (GPT re-review round 4 P0: payload and revision MUST come from
+// the same read — a payload from one instant and a revision from a later one
+// could let a CAS fire against a state that never existed).
+func (s *Store) readTransitionClaimSnapshot(project, taskID, runID string) (transitionClaimSnapshot, error) {
+	recs, err := s.db.ListRecordsWithRevision("workflow_runs", s.workspaceID, []string{project, taskID, runID})
+	if err != nil {
+		return transitionClaimSnapshot{}, err
+	}
+	if len(recs) == 0 {
+		return transitionClaimSnapshot{}, fmt.Errorf("workflow run %s record missing", runID)
+	}
+	return transitionClaimSnapshot{payload: recs[0].Payload, revision: recs[0].Revision}, nil
+}
+
 // claimWorkflowTransition serializes state-machine transitions on a workflow
 // run. The run row is the natural lock: every transition reads it first and
 // writes it last, and the kv_records row carries a MONOTONIC revision counter
@@ -2163,33 +2214,42 @@ func decodeTransitionClaimMarker(payload string) (transitionClaimEnvelope, bool)
 // win) that the CAS primitives compare on.
 //
 // Claim protocol:
-//  1. Read the current payload + monotonic revision. A terminal run
-//     (completed/failed/cancelled) refuses re-entry — completing a completed
-//     run is the duplicate-dispatch bug this gate exists to prevent.
-//  2. CAS the payload to a claim marker whose envelope (claimID + claimedAt)
-//     is generated by THIS caller for THIS swap. Winning the swap means no
-//     other transitioner observed the same payload+revision. The claimedAt
-//     used for the TTL is minted here, at claim time, never derived from the
-//     run row's business UpdatedAt (GPT re-review P0: the two are unrelated —
-//     an old run UpdatedAt must not make a fresh claim look expired).
-//  3. The caller proceeds, holding its claimID; its subsequent SaveRun (run
-//     status/step updates) overwrites the claim marker, releasing the gate
-//     for the NEXT step. Pre-persistence aborts release via
-//     releaseWorkflowTransitionClaim, which matches the caller's OWN claimID
-//     against the stored marker — a stale release can never unwind a newer
-//     claimant's marker.
+//  1. The CALLER reads the run row (payload + revision in one SELECT) and
+//     decodes its run state from that payload. That snapshot is the claim
+//     witness: the CAS fires only while the row still holds EXACTLY the
+//     payload and revision the caller transitioned from. A caller whose view
+//     predates another transitioner's completed commit (stale plain payload)
+//     or whose view predates a still-held claim marker loses the swap and is
+//     told ErrStaleWorkflowTransition — it can never replay an
+//     already-consumed step (GPT re-review round 4 P0).
+//  2. The claim marker's envelope Run field is decoded FROM THE STORED
+//     payload, never from the caller's in-memory run object: the marker must
+//     describe the persisted state the claim covers, not a caller's local
+//     (possibly stale) copy.
+//  3. The claimedAt used for the TTL is minted here, at claim time, never
+//     derived from the run row's business UpdatedAt (GPT re-review P0: the
+//     two are unrelated — an old run UpdatedAt must not make a fresh claim
+//     look expired).
+//  4. The caller proceeds, holding its claimID; its guarded
+//     commitTransitionBatch (or releaseWorkflowTransitionClaim on abort)
+//     overwrites the claim marker, releasing the gate for the NEXT step.
+//     Both match the caller's OWN claimID against the stored marker — a
+//     stale release can never unwind a newer claimant's marker.
 //
 // A crashed transitioner leaves a claim marker behind. The next claimant
 // detects the marker: if its claimedAt is younger than transitionClaimTTL the
 // claim is refused (someone may legitimately be mid-transition, however long
 // the run has sat on this step); if older, the claim is considered abandoned
-// and is stolen via the CAS (the marker payload is the witness, so the steal
-// is atomic). The TTL measures claim AGE, not step dwell time: a step parked
-// for hours then completed still claims cleanly, and the first claim still
-// excludes the second completion (GPT re-review test 4a).
-func (s *Store) claimWorkflowTransition(run *entity.WorkflowRun) (string, error) {
+// and is stolen via the CAS (the snapshot payload is the witness, so the
+// steal is atomic). The TTL measures claim AGE, not step dwell time: a step
+// parked for hours then completed still claims cleanly, and the first claim
+// still excludes the second completion (GPT re-review test 4a).
+func (s *Store) claimWorkflowTransition(run *entity.WorkflowRun, snapshot transitionClaimSnapshot) (string, error) {
 	if run == nil {
 		return "", fmt.Errorf("workflow run is nil")
+	}
+	if strings.TrimSpace(snapshot.payload) == "" || strings.TrimSpace(snapshot.revision) == "" {
+		return "", fmt.Errorf("%w: run %s claim requires a payload+revision snapshot of the row being claimed", ErrStaleWorkflowTransition, run.ID)
 	}
 	switch strings.TrimSpace(run.Status) {
 	case "completed", "failed", "cancelled":
@@ -2197,57 +2257,59 @@ func (s *Store) claimWorkflowTransition(run *entity.WorkflowRun) (string, error)
 		return "", fmt.Errorf("%w: run %s is already %s", ErrStaleWorkflowTransition, run.ID, run.Status)
 	}
 	key := []string{run.Project, run.TaskID, run.ID}
-	// The claim witness is BOTH payload and revision: the CAS must fire only
-	// when the row still holds the exact payload this caller observed. A
-	// revision-only witness has a fatal hole — a claimant whose swap lands
-	// after another claimant's marker write would refresh the marker instead
-	// of losing (marker→marker swap against a same-row revision), letting two
-	// transitions run concurrently, which is the exact bug this gate exists
-	// to prevent.
-	current, found, err := s.db.GetRecord("workflow_runs", s.workspaceID, key)
-	if err != nil {
-		return "", err
-	}
-	if !found {
-		return "", fmt.Errorf("workflow run %s record missing", run.ID)
-	}
-	revision, found, err := s.db.RecordRevision("workflow_runs", s.workspaceID, key)
-	if err != nil || !found {
-		return "", fmt.Errorf("workflow run %s revision unavailable: found=%v err=%v", run.ID, found, err)
-	}
-	// A fresh claim marker already present means another transitioner holds
-	// an unexpired claim — refuse before any CAS. The TTL keys on the
-	// envelope's claimedAt (claim age), never on the run's UpdatedAt (step
-	// dwell time — unrelated quantities).
-	if strings.HasPrefix(current, transitionClaimPrefix) {
-		if claimed, ok := decodeTransitionClaimMarker(current); ok && time.Since(claimed.ClaimedAt) < transitionClaimTTL {
+	// The claim witness is BOTH payload and revision — and BOTH come from the
+	// CALLER'S INITIAL READ, not from a fresh read here. A fresh-read witness
+	// has a fatal hole (GPT re-review round 4): a caller that read the run
+	// before another transitioner fully committed would CAS against the
+	// WINNER'S new payload, win the swap, plant a marker over an
+	// already-advanced run, and replay the consumed step. Binding the swap to
+	// the initial snapshot makes that path fail closed.
+	//
+	// A fresh claim marker inside the snapshot means another transitioner
+	// already held an unexpired claim when the caller read the row: refuse
+	// before any CAS. The TTL keys on the envelope's claimedAt (claim age),
+	// never on the run's UpdatedAt (step dwell time — unrelated quantities).
+	if strings.HasPrefix(snapshot.payload, transitionClaimPrefix) {
+		if claimed, ok := decodeTransitionClaimMarker(snapshot.payload); ok && time.Since(claimed.ClaimedAt) < transitionClaimTTL {
 			return "", fmt.Errorf("%w: run %s step %s is already transitioning", ErrStaleWorkflowTransition, run.ID, run.ActiveStepID)
 		}
 		// Expired marker: fall through and steal it via the CAS below (the
-		// marker payload is the CAS witness, so the steal is atomic).
+		// snapshot payload is the CAS witness, so the steal is atomic).
 	}
-	claim := entity.WorkflowRun{
-		ID: run.ID, DefinitionID: run.DefinitionID, DefinitionSnapshot: run.DefinitionSnapshot,
-		Project: run.Project, TaskID: run.TaskID,
-		Status: run.Status, ActiveStepID: run.ActiveStepID,
-		CurrentAssigneeType: run.CurrentAssigneeType, CurrentAssigneeID: run.CurrentAssigneeID,
-		CurrentAssigneeMembershipID: run.CurrentAssigneeMembershipID,
-		ActorBindings:               run.ActorBindings,
-		StartedAt:                   run.StartedAt, UpdatedAt: run.UpdatedAt, FinishedAt: run.FinishedAt,
-	}
-	runJSON, err := json.Marshal(claim)
-	if err != nil {
-		return "", err
+	// The marker's Run field is decoded from the PERSISTED payload — the
+	// exact state this claim covers — never from the caller's in-memory run
+	// object, whose ActiveStepID/UpdatedAt may predate the row being claimed.
+	var claimFrom entity.WorkflowRun
+	var claimJSON []byte
+	if strings.HasPrefix(snapshot.payload, transitionClaimPrefix) {
+		stored, ok := decodeTransitionClaimMarker(snapshot.payload)
+		if !ok {
+			return "", fmt.Errorf("%w: run %s claim marker is malformed", ErrStaleWorkflowTransition, run.ID)
+		}
+		claimFrom = stored.Run
+		raw, err := json.Marshal(claimFrom)
+		if err != nil {
+			return "", err
+		}
+		claimJSON = raw
+	} else {
+		// Plain run payload: the snapshot payload IS the canonical run JSON.
+		// Reuse it verbatim as the marker's run JSON so the marker describes
+		// exactly the persisted bytes (and decode it to validate shape).
+		if err := json.Unmarshal([]byte(snapshot.payload), &claimFrom); err != nil {
+			return "", fmt.Errorf("workflow run %s payload is not a run: %w", run.ID, err)
+		}
+		claimJSON = []byte(snapshot.payload)
 	}
 	// The envelope identity is minted NOW, inside the successful-CAS path:
 	// claimID and claimedAt describe THIS swap, not a prior read.
 	env := transitionClaimEnvelope{
 		ClaimID:   newTransitionClaimID(),
 		ClaimedAt: time.Now().UTC(),
-		Run:       claim,
+		Run:       claimFrom,
 	}
-	marker := encodeTransitionClaimMarker(env, runJSON)
-	swapped, err := s.db.UpdateRecordIfPayloadAndRevision("workflow_runs", s.workspaceID, key, marker, current, revision)
+	marker := encodeTransitionClaimMarker(env, claimJSON)
+	swapped, err := s.db.UpdateRecordIfPayloadAndRevision("workflow_runs", s.workspaceID, key, marker, snapshot.payload, snapshot.revision)
 	if err != nil {
 		return "", err
 	}
@@ -2255,7 +2317,8 @@ func (s *Store) claimWorkflowTransition(run *entity.WorkflowRun) (string, error)
 		return env.ClaimID, nil
 	}
 	// Lost the swap: either a concurrent transitioner holds the claim, or the
-	// run advanced past our view. Distinguish via a fresh read.
+	// run advanced past the caller's initial read. Distinguish via a fresh
+	// read for the error message only — the decision is already made.
 	fresh, ok, err := s.RunForTask(run.Project, run.TaskID)
 	if err != nil {
 		return "", err
@@ -2392,7 +2455,13 @@ func (s *Store) commitTransitionBatch(run *entity.WorkflowRun, claimID string, c
 
 func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outputValues map[string]string, status string) (TransitionResult, error) {
 	var result TransitionResult
-	run, ok, err := s.RunForTask(project, taskID)
+	// The INITIAL read binds the whole transition: run state, stored payload,
+	// and monotonic revision come from ONE SELECT, and the claim CAS below
+	// fires only while the row still holds exactly this payload+revision.
+	// A caller whose view predates another transitioner's commit therefore
+	// loses the claim instead of replaying an already-consumed step (GPT
+	// re-review round 4 P0).
+	run, snapshot, ok, err := s.RunForTaskWithSnapshot(project, taskID)
 	if err != nil || !ok {
 		return result, err
 	}
@@ -2403,12 +2472,12 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 	// retry after timeout) would each persist a completion event, a next-step
 	// reset, and a review_rounds increment, then overwrite each other's run
 	// state. The gate claims the transition with a CAS on the run record's
-	// payload+monotonic revision: only ONE caller may drive a given
+	// initial payload+monotonic revision: only ONE caller may drive a given
 	// (run, activeStep) forward; every other caller gets
 	// ErrStaleWorkflowTransition and leaves zero writes behind. A
 	// completed/failed/cancelled run also refuses re-entry (the old code
 	// would happily double-complete a run whose status write raced ahead).
-	claimID, err := s.claimWorkflowTransition(&run)
+	claimID, err := s.claimWorkflowTransition(&run, snapshot)
 	if err != nil {
 		return result, err
 	}

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -388,6 +389,54 @@ WHERE table_name = ? AND workspace_id = ? AND k1 = ? AND k2 = ? AND k3 = ? AND r
 	return affected > 0, nil
 }
 
+// RecordWithRevision is one kv_records row together with its monotonic
+// revision counter, read in a single SELECT — the atomic snapshot primitive
+// the workflow transition claim binds to (payload AND revision observed at
+// the same instant, so the later CAS witnesses an exact historical state).
+type RecordWithRevision struct {
+	Key      []string
+	Payload  string
+	Revision string
+}
+
+// ListRecordsWithRevision is ListRecords with the monotonic revision included,
+// read in the same SELECT as the payload. A prefix shorter than the full key
+// matches all rows under it (same semantics as ListRecords).
+func (db *SQLiteStore) ListRecordsWithRevision(table string, workspaceID string, keyPrefix []string) ([]RecordWithRevision, error) {
+	if len(keyPrefix) > 3 {
+		return nil, fmt.Errorf("record key prefix too long")
+	}
+	query := `SELECT k1, k2, k3, payload, revision FROM kv_records WHERE table_name = ? AND workspace_id = ?`
+	args := []any{table, workspaceID}
+	if len(keyPrefix) >= 1 {
+		query += ` AND k1 = ?`
+		args = append(args, keyPrefix[0])
+	}
+	if len(keyPrefix) >= 2 {
+		query += ` AND k2 = ?`
+		args = append(args, keyPrefix[1])
+	}
+	if len(keyPrefix) >= 3 {
+		query += ` AND k3 = ?`
+		args = append(args, keyPrefix[2])
+	}
+	query += ` ORDER BY k1 ASC, k2 ASC, k3 ASC`
+	rows, err := db.sql.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RecordWithRevision
+	for rows.Next() {
+		var k1, k2, k3, payload, revision string
+		if err := rows.Scan(&k1, &k2, &k3, &payload, &revision); err != nil {
+			return nil, err
+		}
+		out = append(out, RecordWithRevision{Key: []string{k1, k2, k3}, Payload: payload, Revision: revision})
+	}
+	return out, rows.Err()
+}
+
 // RecordRevision returns the current revision token of a kv_records row —
 // the monotonic revision counter, bumped on every write — for use with
 // UpdateRecordIfRevision. A missing row yields found=false.
@@ -449,45 +498,108 @@ func (db *SQLiteStore) CommitTransitionGuarded(workspaceID string, runKey []stri
 	if len(writes) == 0 {
 		return fmt.Errorf("transition commit requires at least one write")
 	}
-	// BEGIN IMMEDIATE: acquire the RESERVED lock before the claim read. With
-	// a deferred transaction another writer could commit between our claim
-	// check and our first write and we would only find out at COMMIT time
-	// (SQLITE_BUSY) — with IMMEDIATE the check-then-write sequence is atomic.
-	tx, err := db.sql.Begin()
+	// BEGIN IMMEDIATE (P1, GPT re-review round 4): db.sql.Begin() would issue
+	// a plain deferred BEGIN — the driver's beginMode only applies to its own
+	// Tx wrapper, and a deferred transaction takes no lock until the first
+	// statement, so the comment's "write lock acquired before the claim read"
+	// was not actually guaranteed. Run the transaction on a dedicated
+	// connection with an explicit "BEGIN IMMEDIATE" so the RESERVED lock is
+	// truly held from before the claim read through COMMIT: the check-then-
+	// write sequence is serialized against every other writer, including
+	// writers from other processes sharing the database file.
+	conn, err := db.sql.Conn(context.Background())
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer conn.Close()
 
-	k1, k2, k3 := normalizeKey(runKey)
-	var payload string
-	err = tx.QueryRow(`SELECT payload FROM kv_records WHERE table_name = 'workflow_runs' AND workspace_id = ? AND k1 = ? AND k2 = ? AND k3 = ?`,
-		workspaceID, k1, k2, k3).Scan(&payload)
-	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("%w: run record missing", ErrTransitionClaimLost)
-	}
-	if err != nil {
-		return err
-	}
-	if !verifyClaimOwner(payload, expectClaimID) {
-		return ErrTransitionClaimLost
-	}
-	now := nowUTC()
-	for _, w := range writes {
-		wk1, wk2, wk3 := normalizeKey(w.Key)
-		ws := w.Workspace
-		if ws == "" {
-			ws = workspaceID
+	err = runImmediateTx(conn, func(tx *immediateTx) error {
+		k1, k2, k3 := normalizeKey(runKey)
+		var payload string
+		err := tx.QueryRow(`SELECT payload FROM kv_records WHERE table_name = 'workflow_runs' AND workspace_id = ? AND k1 = ? AND k2 = ? AND k3 = ?`,
+			workspaceID, k1, k2, k3).Scan(&payload)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: run record missing", ErrTransitionClaimLost)
 		}
-		_, err := tx.Exec(`INSERT INTO kv_records (table_name, workspace_id, k1, k2, k3, payload, updated_at, revision)
-VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-ON CONFLICT(table_name, workspace_id, k1, k2, k3) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, revision = kv_records.revision + 1`,
-			w.Table, ws, wk1, wk2, wk3, w.Payload, now)
 		if err != nil {
 			return err
 		}
+		if !verifyClaimOwner(payload, expectClaimID) {
+			return ErrTransitionClaimLost
+		}
+		now := nowUTC()
+		for _, w := range writes {
+			wk1, wk2, wk3 := normalizeKey(w.Key)
+			ws := w.Workspace
+			if ws == "" {
+				ws = workspaceID
+			}
+			_, err := tx.Exec(`INSERT INTO kv_records (table_name, workspace_id, k1, k2, k3, payload, updated_at, revision)
+VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+ON CONFLICT(table_name, workspace_id, k1, k2, k3) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, revision = kv_records.revision + 1`,
+				w.Table, ws, wk1, wk2, wk3, w.Payload, now)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
-	return tx.Commit()
+	return nil
+}
+
+// runImmediateTx executes fn inside one explicit "BEGIN IMMEDIATE"
+// transaction on conn, committing on success and rolling back on error. The
+// driver is configured with _txlock=immediate as a belt-and-suspenders
+// default, but the statement here is spelled out so the guarantee does not
+// depend on connection-string plumbing.
+func runImmediateTx(conn *sql.Conn, fn func(tx *immediateTx) error) error {
+	ctx := context.Background()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return err
+	}
+	// With the manual BEGIN already issued, BeginTx must not send another
+	// BEGIN: driver Tx wrappers would, so bind the transaction via the raw
+	// driver conn instead. The modernc driver's conn implements driver.Conn
+	// Begin/Commit/Rollback, which operate on the already-open transaction.
+	if _, err := conn.ExecContext(ctx, "SAVEPOINT multigent_guarded"); err != nil {
+		_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		return err
+	}
+	if err := fn(&immediateTx{conn: conn}); err != nil {
+		_, _ = conn.ExecContext(ctx, "ROLLBACK TO SAVEPOINT multigent_guarded")
+		_, _ = conn.ExecContext(ctx, "RELEASE SAVEPOINT multigent_guarded")
+		_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		return err
+	}
+	// RELEASE the savepoint, then COMMIT the surrounding IMMEDIATE
+	// transaction.
+	if _, err := conn.ExecContext(ctx, "RELEASE SAVEPOINT multigent_guarded"); err != nil {
+		_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// immediateTx adapts the manually-begun connection into the *sql.Tx-shaped
+// API CommitTransitionGuarded's write loop needs (Exec on the transactional
+// connection). All statements run on the same connection holding the
+// RESERVED lock.
+type immediateTx struct {
+	conn *sql.Conn
+}
+
+func (tx *immediateTx) Exec(query string, args ...any) (sql.Result, error) {
+	return tx.conn.ExecContext(context.Background(), query, args...)
+}
+
+func (tx *immediateTx) QueryRow(query string, args ...any) *sql.Row {
+	return tx.conn.QueryRowContext(context.Background(), query, args...)
 }
 
 // verifyClaimOwner reports whether payload is a transition-claim marker whose

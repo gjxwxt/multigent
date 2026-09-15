@@ -2,10 +2,12 @@ package db
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // GPT re-review round 3 P0: the claim gate must also guard the SUCCESS path.
@@ -20,6 +22,22 @@ func guardedTestStore(t *testing.T) *SQLiteStore {
 	s, err := Open(filepath.Join(t.TempDir(), "guarded.db"))
 	if err != nil {
 		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.UpsertWorkspace(Workspace{ID: "ws", Name: "ws"}); err != nil {
+		t.Fatalf("ws: %v", err)
+	}
+	return s
+}
+
+// guardedTestStoreAt opens a store at an explicit path so a second handle can
+// open the same file (the cross-connection lock test needs two connections to
+// one database).
+func guardedTestStoreAt(t *testing.T, path string) *SQLiteStore {
+	t.Helper()
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	if err := s.UpsertWorkspace(Workspace{ID: "ws", Name: "ws"}); err != nil {
@@ -116,4 +134,88 @@ func TestCommitTransitionGuardedEmptyBatchRefused(t *testing.T) {
 	if err := s.CommitTransitionGuarded("ws", []string{"p", "t", "r"}, "claim-A", nil); err == nil {
 		t.Fatal("empty batch must be refused")
 	}
+}
+
+// GPT re-review round 4 P1: the guarded commit's comment promised BEGIN
+// IMMEDIATE, but db.sql.Begin() issues a plain deferred BEGIN (the driver's
+// _txlock only applies to its own Tx wrapper) — no RESERVED lock until the
+// first statement, so "the claim check and every write are serialized against
+// any other transition commit" was not actually guaranteed across processes.
+// The fix runs the transaction on a dedicated connection with an explicit
+// "BEGIN IMMEDIATE" (plus _txlock=immediate in the URI as a default).
+//
+// Behavioral proof: while a guarded commit is in flight, a SECOND independent
+// connection must be blocked from writing (SQLITE_BUSY) — the RESERVED lock
+// is held from BEGIN IMMEDIATE, before any row is touched. A deferred
+// transaction would let the second connection write right up until the
+// guarded commit's first statement. We drive the guarded commit on a raw
+// connection with a blocker row inserted mid-transaction to hold it open,
+// then attempt the contending write.
+func TestCommitTransitionGuardedHoldsWriteLockAcrossConnections(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "guarded-shared.db")
+	s := guardedTestStoreAt(t, dbPath)
+	runKey := []string{"p", "t", "run-1"}
+	if err := s.UpsertRecord("workflow_runs", "ws", runKey, guardedClaimMarker("claim-A")); err != nil {
+		t.Fatalf("seed claim: %v", err)
+	}
+	if err := s.UpsertRecord("workflow_step_instances", "ws", []string{"run-1", "s1", "wfsi-1"}, `{"status":"pending"}`); err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+
+	// A SECOND independent handle to the SAME database file — the
+	// cross-process shape the IMMEDIATE guarantee is about.
+	s2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open second handle: %v", err)
+	}
+	defer s2.Close()
+
+	// Begin an explicit IMMEDIATE transaction on the store's OWN connection
+	// machinery (runImmediateTx is the code under test): hold it open by
+	// running one write inside it, then — while it is still open — attempt a
+	// write from the second handle. The second write must fail busy (or block
+	// past busy_timeout): the RESERVED lock is genuinely held.
+	conn, err := s.sql.Conn(t.Context())
+	if err != nil {
+		t.Fatalf("conn: %v", err)
+	}
+	defer conn.Close()
+	locked := make(chan error, 1)
+	go func() {
+		locked <- runImmediateTx(conn, func(tx *immediateTx) error {
+			if _, err := tx.Exec(`INSERT INTO kv_records (table_name, workspace_id, k1, k2, k3, payload, updated_at, revision) VALUES ('workflow_runs','ws','p','t','run-2','{}','2026-01-01T00:00:00Z',1)`); err != nil {
+				return err
+			}
+			// While the IMMEDIATE transaction is open, the second handle
+			// must not be able to write. Give the lock a moment, then probe.
+			time.Sleep(50 * time.Millisecond)
+			if err := func() error {
+				_, err := s2.sql.Exec(`UPDATE kv_records SET payload = '{"b":1}' WHERE table_name = 'workflow_runs' AND workspace_id = 'ws' AND k1 = 'p' AND k2 = 't' AND k3 = 'run-1'`)
+				return err
+			}(); err == nil {
+				return fmt.Errorf("second-handle write succeeded while an IMMEDIATE transaction held the RESERVED lock — deferred BEGIN regression")
+			} else if !isSQLiteBusyErr(err) {
+				return fmt.Errorf("second-handle write failed with an unexpected error (want busy): %w", err)
+			}
+			return nil
+		})
+	}()
+	if err := <-locked; err != nil {
+		t.Fatalf("IMMEDIATE lock behavior: %v", err)
+	}
+	// After the IMMEDIATE transaction commits, the second handle writes fine.
+	if _, err := s2.sql.Exec(`UPDATE kv_records SET payload = '{"b":1}' WHERE table_name = 'workflow_runs' AND workspace_id = 'ws' AND k1 = 'p' AND k2 = 't' AND k3 = 'run-1'`); err != nil {
+		t.Fatalf("second-handle write after the IMMEDIATE transaction committed must succeed: %v", err)
+	}
+}
+
+// isSQLiteBusyErr reports whether err is SQLite's database-locked/busy error
+// (modernc wraps SQLITE_BUSY as "database is locked" (5) / "database table is
+// locked" (6)).
+func isSQLiteBusyErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "database is locked") || strings.Contains(msg, "database table is locked") || strings.Contains(msg, "SQLITE_BUSY")
 }
