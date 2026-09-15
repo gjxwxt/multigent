@@ -1,0 +1,66 @@
+// dbseed applies the deterministic fixture baseline or a named scenario to
+// the app database. Entry points:
+//
+//	go run ./cmd/dbseed baseline
+//	go run ./cmd/dbseed scenario --name edge_cases
+//	go run ./cmd/dbseed digest   (print the logical-export digest)
+//
+// The database location follows APP_DB_PATH (same resolution as the server).
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+
+	"example.com/multigent-fullstack/store"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		usage()
+	}
+	subcommand := os.Args[1]
+	// Flags belong to the subcommand (os.Args[1] is the verb, not a flag), so
+	// parse from index 2 — flag.CommandLine.Parse(os.Args[1:]) would stop at
+	// the first non-flag argument and silently keep the -name default.
+	fs := flag.NewFlagSet(subcommand, flag.ExitOnError)
+	scenarioName := fs.String("name", "default", "scenario name from .multigent/fixtures.json")
+	_ = fs.Parse(os.Args[2:])
+
+	db, path, err := store.Open()
+	must(err, "open db")
+	defer db.Close()
+	must(store.Migrate(db, "migrations"), "migrate")
+
+	switch subcommand {
+	case "baseline":
+		must(store.SeedBaseline(db), "seed baseline")
+		digest, err := store.ExportDigest(db)
+		must(err, "digest")
+		fmt.Printf("baseline seeded: %s\ndigest: %s\n", path, digest)
+	case "scenario":
+		must(store.SeedScenario(db, *scenarioName), "seed scenario")
+		digest, err := store.ExportDigest(db)
+		must(err, "digest")
+		fmt.Printf("scenario %q applied: %s\ndigest: %s\n", *scenarioName, path, digest)
+	case "digest":
+		digest, err := store.ExportDigest(db)
+		must(err, "digest")
+		fmt.Println(digest)
+	default:
+		usage()
+	}
+}
+
+func usage() {
+	fmt.Fprintln(os.Stderr, "usage: dbseed baseline | scenario --name <name> | digest")
+	os.Exit(2)
+}
+
+func must(err error, what string) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dbseed: %s: %v\n", what, err)
+		os.Exit(1)
+	}
+}

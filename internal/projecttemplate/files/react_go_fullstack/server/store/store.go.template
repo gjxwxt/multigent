@@ -1,0 +1,100 @@
+// Package store owns the app database: relocatable path (APP_DB_PATH),
+// startup migrations and deterministic logical export used by the test-data
+// sandbox to compare seeded states.
+package store
+
+import (
+	"database/sql"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	_ "modernc.org/sqlite"
+)
+
+// DefaultPath is where the app database lives when APP_DB_PATH is unset.
+// The test-data sandbox relocates it per task via APP_DB_PATH, so this value
+// must stay in sync with .multigent/fixtures.json (storage field).
+const DefaultPath = "server/data/app.db"
+
+// Open resolves the database path (APP_DB_PATH wins over the default), makes
+// sure the parent directory exists and opens the connection.
+func Open() (*sql.DB, string, error) {
+	path := strings.TrimSpace(os.Getenv("APP_DB_PATH"))
+	if path == "" {
+		path = DefaultPath
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, "", fmt.Errorf("create db directory: %w", err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, "", fmt.Errorf("open %s: %w", path, err)
+	}
+	// Single-writer workloads (preview + seeds); busy_timeout keeps rare
+	// concurrent reads/writes from failing with SQLITE_BUSY.
+	for _, pragma := range []string{"busy_timeout=5000", "journal_mode=WAL", "foreign_keys=ON"} {
+		if _, err := db.Exec("PRAGMA " + pragma); err != nil {
+			db.Close()
+			return nil, "", fmt.Errorf("pragma %s: %w", pragma, err)
+		}
+	}
+	return db, path, nil
+}
+
+// Migrate applies every .sql file in migrations/ in lexical order, tracking
+// applied files in schema_migrations. Idempotent: re-running is a no-op.
+func Migrate(db *sql.DB, migrationsDir string) error {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+name TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))) `); err != nil {
+		return fmt.Errorf("create schema_migrations: %w", err)
+	}
+	entries, err := os.ReadDir(migrationsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read migrations dir: %w", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		var applied int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, name).Scan(&applied); err != nil {
+			return fmt.Errorf("check migration %s: %w", name, err)
+		}
+		if applied > 0 {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(migrationsDir, name))
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", name, err)
+		}
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin migration %s: %w", name, err)
+		}
+		if _, err := tx.Exec(string(raw)); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("apply migration %s: %w", name, err)
+		}
+		if _, err := tx.Exec(`INSERT INTO schema_migrations (name) VALUES (?)`, name); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("record migration %s: %w", name, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %s: %w", name, err)
+		}
+	}
+	return nil
+}

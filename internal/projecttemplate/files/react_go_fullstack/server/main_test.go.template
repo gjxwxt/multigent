@@ -22,3 +22,15 @@ func TestHealth(t *testing.T) {
 		t.Fatalf("unexpected health response: %#v", body)
 	}
 }
+
+func TestOrdersEmptyBeforeSeed(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/orders", nil)
+	res := httptest.NewRecorder()
+	newHandler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status=%d", res.Code)
+	}
+	if body := res.Body.String(); body != "[]" {
+		t.Fatalf("expected empty array before seeding, got %q", body)
+	}
+}

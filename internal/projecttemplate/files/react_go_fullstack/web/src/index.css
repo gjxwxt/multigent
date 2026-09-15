@@ -20,3 +20,8 @@ h1 { margin: 0; font-size: clamp(32px, 6vw, 54px); line-height: 1.05; }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
 .hint { margin: 28px 0 0; color: #8390a3; font-size: 14px; }
 code { padding: 2px 6px; border-radius: 6px; background: #f0f3f7; color: #46536a; }
+h2 { margin: 32px 0 12px; font-size: 18px; color: #172033; }
+.orders { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 14px; }
+.orders th { text-align: left; padding: 8px 10px; border-bottom: 2px solid #d9e2ec; color: #617087; font-size: 12px; letter-spacing: .06em; }
+.orders td { padding: 8px 10px; border-bottom: 1px solid #eef3f8; color: #33415c; }
+.orders tbody tr:hover { background: #f7fafd; }

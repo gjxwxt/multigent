@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "db:seed:baseline": "cd server && go run ./cmd/dbseed baseline",
+    "db:seed:scenario": "cd server && go run ./cmd/dbseed scenario"
   },
   "dependencies": {
     "react": "19.2.4",

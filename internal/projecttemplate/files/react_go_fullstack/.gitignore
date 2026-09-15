@@ -14,3 +14,6 @@ server/app
 server/multigent-fullstack
 # Nested node_modules copies are build residue.
 **/node_modules/
+# App database: schema lives in server/migrations, data is never committed.
+# The test-data sandbox provisions task-private copies from frozen artifacts.
+server/data/

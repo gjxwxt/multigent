@@ -1,0 +1,246 @@
+// Deterministic seed data. Same binary + same target DB => byte-identical
+// logical content on every run (fixed IDs, fixed timestamps, fixed order).
+// The test-data sandbox contract (.multigent/fixtures.json) points at these
+// entry points via `npm run db:seed:baseline` / `db:seed:scenario`.
+package store
+
+import (
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"fmt"
+	"sort"
+	"strings"
+)
+
+const baselineFixtureVersion = "1.0.0"
+
+// SeedBaseline wipes the business tables and reloads the deterministic
+// baseline dataset. Wipe-then-load keeps re-runs idempotent regardless of
+// prior sandbox state.
+func SeedBaseline(db *sql.DB) error {
+	if _, err := db.Exec(`DELETE FROM payments; DELETE FROM orders; DELETE FROM customers;`); err != nil {
+		return fmt.Errorf("wipe tables: %w", err)
+	}
+	customers := []struct {
+		id    int64
+		name  string
+		email string
+		tier  string
+	}{
+		{1, "Aurora Labs", "aurora@example.test", "enterprise"},
+		{2, "Borealis GmbH", "borealis@example.test", "standard"},
+		{3, "Cascade Co", "cascade@example.test", "standard"},
+		{4, "Driftwood Ltd", "driftwood@example.test", "premium"},
+		{5, "Ember Works", "ember@example.test", "standard"},
+	}
+	for _, c := range customers {
+		if _, err := db.Exec(`INSERT INTO customers (id, name, email, tier, created_at) VALUES (?,?,?,?,?)`,
+			c.id, c.name, c.email, c.tier, "2026-01-06T09:00:00Z"); err != nil {
+			return fmt.Errorf("seed customer %d: %w", c.id, err)
+		}
+	}
+	orders := []struct {
+		id       int64
+		cust     int64
+		title    string
+		amount   int64
+		status   string
+		note     string
+		created  string
+		hasPay   bool
+		payState string // "" none | "open" unpaid row | paid_at timestamp
+	}{
+		{1001, 1, "Platform rollout", 1_500_00, "delivered", "", "2026-01-07T10:00:00Z", true, "2026-01-08T11:00:00Z"},
+		{1002, 1, "Support retainer Q1", 300_00, "paid", "", "2026-01-09T10:00:00Z", true, "2026-01-09T12:30:00Z"},
+		{1003, 2, "Sensor batch #1", 42_50, "shipped", "fragile", "2026-01-10T08:15:00Z", true, "2026-01-10T09:00:00Z"},
+		{1004, 2, "Sensor batch #2", 42_50, "placed", "", "2026-01-11T08:15:00Z", true, ""},
+		{1005, 3, "Consulting day", 90_00, "draft", "", "2026-01-12T14:00:00Z", false, ""},
+		{1006, 4, "Custom firmware", 12_000_00, "paid", "priority", "2026-01-13T09:30:00Z", true, "2026-01-14T10:00:00Z"},
+		{1007, 4, "Maintenance plan", 150_00, "cancelled", "duplicate of 1006", "2026-01-13T16:45:00Z", false, ""},
+		{1008, 5, "Prototype run", 7_25, "placed", "", "2026-01-14T11:20:00Z", false, ""},
+		{1009, 5, "Prototype run B", 7_25, "delivered", "", "2026-01-15T11:20:00Z", true, "2026-01-16T08:00:00Z"},
+		{1010, 3, "Dashboard licence", 600_00, "paid", "", "2026-01-16T13:00:00Z", true, "2026-01-17T13:00:00Z"},
+	}
+	for _, o := range orders {
+		if _, err := db.Exec(`INSERT INTO orders (id, customer_id, title, amount_cents, status, note, created_at) VALUES (?,?,?,?,?,?,?)`,
+			o.id, o.cust, o.title, o.amount, o.status, o.note, o.created); err != nil {
+			return fmt.Errorf("seed order %d: %w", o.id, err)
+		}
+		switch {
+		case !o.hasPay:
+		case o.payState == "":
+			if _, err := db.Exec(`INSERT INTO payments (id, order_id, method, amount_cents, paid_at) VALUES (?,?,?,?,NULL)`,
+				o.id, o.id, "card", o.amount); err != nil {
+				return fmt.Errorf("seed open payment %d: %w", o.id, err)
+			}
+		default:
+			if _, err := db.Exec(`INSERT INTO payments (id, order_id, method, amount_cents, paid_at) VALUES (?,?,?,?,?)`,
+				o.id, o.id, "card", o.amount, o.payState); err != nil {
+				return fmt.Errorf("seed payment %d: %w", o.id, err)
+			}
+		}
+	}
+	if err := SetMeta(db, "fixture_version", baselineFixtureVersion); err != nil {
+		return err
+	}
+	return nil
+}
+
+// SeedScenario applies the named scenario on top of the current baseline.
+// Scenarios are deterministic deltas: fixed rows, fixed timestamps. Re-runs
+// are idempotent — a scenario run first restores the baseline, then applies
+// its delta, so any prior partial state converges to the same result.
+func SeedScenario(db *sql.DB, name string) error {
+	if name == "default" {
+		// Baseline already IS the default business demo package; still
+		// re-baseline so re-runs converge after any prior delta.
+		return SeedBaseline(db)
+	}
+	if err := SeedBaseline(db); err != nil {
+		return err
+	}
+	switch name {
+	case "edge_cases":
+		longTitle := strings.Repeat("超长标题边界测试", 40) // 320 chars, CJK
+		extra := []struct {
+			id     int64
+			cust   int64
+			title  string
+			amount int64
+			status string
+			note   string
+		}{
+			{9001, 2, longTitle, 1, "draft", "length boundary"},
+			{9002, 2, "'; DROP TABLE orders;--", 2, "draft", "sql-ish text must stay inert"},
+			{9003, 2, "emoji 🚀🎉 state", 3, "placed", "unicode boundary"},
+			{9004, 2, "zero", 0, "cancelled", "amount boundary"},
+		}
+		for _, o := range extra {
+			if _, err := db.Exec(`INSERT INTO orders (id, customer_id, title, amount_cents, status, note, created_at) VALUES (?,?,?,?,?,?,?)`,
+				o.id, o.cust, o.title, o.amount, o.status, o.note, "2026-02-01T00:00:00Z"); err != nil {
+				return fmt.Errorf("seed edge order %d: %w", o.id, err)
+			}
+		}
+		// Pagination volume: 200 additional rows, deterministic content.
+		for i := int64(9100); i < 9300; i++ {
+			if _, err := db.Exec(`INSERT INTO orders (id, customer_id, title, amount_cents, status, note, created_at) VALUES (?,?,?,?,?,?,?)`,
+				i, 5, fmt.Sprintf("bulk %03d", i-9100), i%97, "placed", "", "2026-02-02T00:00:00Z"); err != nil {
+				return fmt.Errorf("seed bulk order %d: %w", i, err)
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown scenario %q (available: default, edge_cases)", name)
+	}
+}
+
+// LogicalExport renders every business table as canonical text: fixed table
+// list, fixed column order, rows ordered by primary key. The sandbox compares
+// THIS hash (never the raw SQLite file — page layout and WAL bytes are not
+// stable identity).
+func LogicalExport(db *sql.DB) (string, error) {
+	tables := []string{"customers", "orders", "payments"}
+	var b strings.Builder
+	for _, table := range tables {
+		rows, err := db.Query(`SELECT * FROM ` + table + ` ORDER BY 1`)
+		if err != nil {
+			return "", fmt.Errorf("export %s: %w", table, err)
+		}
+		cols, err := rows.Columns()
+		if err != nil {
+			rows.Close()
+			return "", fmt.Errorf("columns %s: %w", table, err)
+		}
+		b.WriteString("## " + table + "\n")
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		for rows.Next() {
+			if err := rows.Scan(ptrs...); err != nil {
+				rows.Close()
+				return "", fmt.Errorf("scan %s: %w", table, err)
+			}
+			parts := make([]string, len(vals))
+			for i, v := range vals {
+				switch t := v.(type) {
+				case []byte:
+					parts[i] = string(t)
+				case nil:
+					parts[i] = "␀"
+				default:
+					parts[i] = fmt.Sprintf("%v", t)
+				}
+			}
+			b.WriteString(strings.Join(parts, "\x1f") + "\n")
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return "", fmt.Errorf("iterate %s: %w", table, err)
+		}
+	}
+	return b.String(), nil
+}
+
+// ExportDigest is the canonical SHA-256 of a logical export; the deterministic
+// acceptance criterion (same baseline => same digest, any machine, any time).
+func ExportDigest(db *sql.DB) (string, error) {
+	export, err := LogicalExport(db)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(export))
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// SetMeta records a key in the fixture metadata table (created on demand).
+func SetMeta(db *sql.DB, key, value string) error {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS fixture_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`); err != nil {
+		return fmt.Errorf("create fixture_meta: %w", err)
+	}
+	if _, err := db.Exec(`INSERT INTO fixture_meta (key, value) VALUES (?,?)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value); err != nil {
+		return fmt.Errorf("set fixture meta %s: %w", key, err)
+	}
+	return nil
+}
+
+// GetMeta reads a fixture metadata key; ok=false when absent.
+func GetMeta(db *sql.DB, key string) (string, bool, error) {
+	var value string
+	err := db.QueryRow(`SELECT value FROM fixture_meta WHERE key = ?`, key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return value, true, nil
+}
+
+// SchemaFingerprint hashes the applied migration names — a cheap deterministic
+// proxy the sandbox uses to detect schema drift between an artifact and the
+// current worktree.
+func SchemaFingerprint(db *sql.DB) (string, error) {
+	rows, err := db.Query(`SELECT name FROM schema_migrations ORDER BY name`)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return "", err
+		}
+		names = append(names, n)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	sort.Strings(names)
+	sum := sha256.Sum256([]byte(strings.Join(names, "\n")))
+	return hex.EncodeToString(sum[:]), nil
+}

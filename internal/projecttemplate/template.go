@@ -15,8 +15,13 @@ import (
 )
 
 const (
-	ReactGoFullstackID      = "react_go_fullstack"
-	ReactGoFullstackVersion = "1.1.0"
+	ReactGoFullstackID = "react_go_fullstack"
+
+	// ReactGoFullstackVersion tracks template content: any change to
+	// files/react_go_fullstack bumps it (1.2.0 added the SQLite data layer +
+	// .multigent/fixtures.json contract). Existing projects seeded from an
+	// older version keep their files — Seed only fills missing files.
+	ReactGoFullstackVersion = "1.2.0"
 
 	ReactSpringBootID      = "react_spring_boot"
 	ReactSpringBootVersion = "1.0.0"
