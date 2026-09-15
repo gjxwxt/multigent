@@ -116,15 +116,44 @@ func TestPilotGreenfieldDeliveryPipelineFullLifecycle(t *testing.T) {
 	}
 
 	run, found, err = wfStore.RunForTask("resproj", task.ID)
-	if err != nil || !found || run.ActiveStepID != "implementation" {
-		t.Fatalf("expected active step implementation, got found=%v step=%s err=%v", found, run.ActiveStepID, err)
+	if err != nil || !found || run.ActiveStepID != "acceptance_test_design" {
+		t.Fatalf("expected active step acceptance_test_design, got found=%v step=%s err=%v", found, run.ActiveStepID, err)
+	}
+
+	// 5b-2. acceptance_test_design (QA agent task) produces the test spec.
+	// An invalid manifest must be rejected by the workflow gate with the step
+	// left pending for a corrected re-run.
+	invalidSpec := map[string]string{
+		"test_spec_doc":      "spec v1",
+		"test_spec_manifest": `[{"case_id":"","risk_level":"unknown","expected_result":"待观察"}]`,
+		"test_spec_summary":  "1 case",
+	}
+	if _, err := wfStore.CompleteAndAdvance("resproj", task.ID, "spec draft", "", invalidSpec, "completed"); err == nil {
+		t.Fatal("expected invalid test_spec_manifest to be rejected by the workflow gate")
+	}
+	run, found, err = wfStore.RunForTask("resproj", task.ID)
+	if err != nil || !found || run.ActiveStepID != "acceptance_test_design" {
+		t.Fatalf("gate rejection must keep acceptance_test_design pending: found=%v step=%s err=%v", found, run.ActiveStepID, err)
+	}
+	specOutputs := map[string]string{
+		"test_spec_doc":      "spec v1: auth cases with Given/When/Then",
+		"test_spec_manifest": `[{"case_id":"AC-AUTH-1","ac_id":"AC-AUTH-1","risk_level":"high","automation_level":"api_integration","execution_type":"auto","expected_result":"JWT issued on valid login and rejected with 401 when expired"},{"case_id":"AC-AUTH-2","ac_id":"AC-AUTH-2","risk_level":"high","automation_level":"api_integration","execution_type":"environment_blocked","expected_result":"SMS OTP delivered and verified within 60s"}]`,
+		"test_spec_summary":  "2 cases, both high risk; AC-AUTH-2 needs the SMS gateway environment",
+	}
+	trans3, err := wfStore.CompleteAndAdvance("resproj", task.ID, "Acceptance test spec produced", "", specOutputs, "completed")
+	if err != nil {
+		t.Fatalf("complete acceptance_test_design: %v", err)
+	}
+	if trans3.Next == nil || trans3.Next.ID != "implementation" {
+		t.Fatalf("expected next step implementation, got %v", trans3.Next)
 	}
 
 	// 6. Step 4: implementation (Owner engineer agent task) completes
 	implOutputs := map[string]string{
-		"pr":        "feat: auth and profile backend implementation with unit tests",
-		"tests_run": "18 unit tests passed in 0.4s",
-		"risks":     "Low risk; isolated database migrations",
+		"pr":                           "feat: auth and profile backend implementation with unit tests",
+		"tests_run":                    "18 unit tests passed in 0.4s",
+		"risks":                        "Low risk; isolated database migrations",
+		"test_implementation_evidence": `{"AC-AUTH-1":{"test":"TestLoginIssuesJWT","file":"auth_test.go","result":"pass"},"AC-AUTH-2":{"test":"TestSmsOtpDelivery","file":"otp_test.go","result":"blocked","reason":"SMS gateway unreachable in sandbox"}}`,
 	}
 	trans4, err := wfStore.CompleteAndAdvance("resproj", task.ID, "Implementation completed", "", implOutputs, "completed")
 	if err != nil {

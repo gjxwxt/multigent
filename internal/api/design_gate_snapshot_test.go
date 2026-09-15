@@ -91,26 +91,28 @@ func TestReviewFreezesDesignSnapshot(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("run: %v", err)
 	}
-	if run.ActiveStepID != "implementation" {
-		t.Fatalf("expected run to advance to implementation, at %s", run.ActiveStepID)
+	// vNext pipeline: design_review approve routes to acceptance_test_design,
+	// which forwards the frozen design artifacts into implementation.
+	if run.ActiveStepID != "acceptance_test_design" {
+		t.Fatalf("expected run to advance to acceptance_test_design, at %s", run.ActiveStepID)
 	}
 	instances, err := wfStore.ListStepInstances(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var impl *entity.WorkflowStepInstance
+	var atd *entity.WorkflowStepInstance
 	for i := range instances {
-		if instances[i].StepID == "implementation" {
-			impl = &instances[i]
+		if instances[i].StepID == "acceptance_test_design" {
+			atd = &instances[i]
 		}
 	}
-	if impl == nil {
-		t.Fatal("implementation instance missing")
+	if atd == nil {
+		t.Fatal("acceptance_test_design instance missing")
 	}
-	if got := impl.InputValues["approved_design_html"]; !strings.Contains(got, "approved design v1") {
-		t.Fatalf("frozen html not carried into implementation inputs: %q", got)
+	if got := atd.InputValues["approved_design_html"]; !strings.Contains(got, "approved design v1") {
+		t.Fatalf("frozen html not carried into acceptance_test_design inputs: %q", got)
 	}
-	if got := impl.InputValues["approved_design_snapshot_path"]; !strings.Contains(got, task.ID+"/manifest.json") {
+	if got := atd.InputValues["approved_design_snapshot_path"]; !strings.Contains(got, task.ID+"/manifest.json") {
 		t.Fatalf("snapshot path not carried: %q", got)
 	}
 
@@ -170,27 +172,29 @@ func TestReviewDesignSnapshotAtomicFailureRequiresWaiver(t *testing.T) {
 
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
 	run, found, err := wfStore.RunForTask("resproj", task.ID)
-	if err != nil || !found || run.ActiveStepID != "implementation" {
-		t.Fatalf("run should advance to implementation: found=%v active=%s err=%v", found, run.ActiveStepID, err)
+	if err != nil || !found || run.ActiveStepID != "acceptance_test_design" {
+		t.Fatalf("run should advance to acceptance_test_design: found=%v active=%s err=%v", found, run.ActiveStepID, err)
 	}
 	instances, err := wfStore.ListStepInstances(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var impl *entity.WorkflowStepInstance
+	// vNext pipeline: the waiver lands in acceptance_test_design first, which
+	// forwards it into implementation together with the spec.
+	var atd *entity.WorkflowStepInstance
 	for i := range instances {
-		if instances[i].StepID == "implementation" {
-			impl = &instances[i]
+		if instances[i].StepID == "acceptance_test_design" {
+			atd = &instances[i]
 		}
 	}
-	if impl == nil {
-		t.Fatal("implementation instance missing")
+	if atd == nil {
+		t.Fatal("acceptance_test_design instance missing")
 	}
-	if got := impl.InputValues["design_waived"]; got != "true" {
-		t.Fatalf("expected design_waived=true in implementation inputs, got %q", got)
+	if got := atd.InputValues["design_waived"]; got != "true" {
+		t.Fatalf("expected design_waived=true in acceptance_test_design inputs, got %q", got)
 	}
-	if got := impl.InputValues["design_waiver_reason"]; !strings.Contains(got, "OD unreachable") {
-		t.Fatalf("expected design_waiver_reason in implementation inputs, got %q", got)
+	if got := atd.InputValues["design_waiver_reason"]; !strings.Contains(got, "OD unreachable") {
+		t.Fatalf("expected design_waiver_reason in acceptance_test_design inputs, got %q", got)
 	}
 }
 

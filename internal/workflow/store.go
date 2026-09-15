@@ -2618,6 +2618,19 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 	// so a corrected re-run can drive it forward. Persisting first would leave
 	// a completed instance under an active run — a state the startup recovery
 	// cannot re-dispatch (it only resumes pending/running instances).
+	// Deterministic manifest gate (acceptance-test-design-plan §6.1): an
+	// acceptance_test_design step must complete with a structurally valid
+	// test_spec_manifest — non-empty JSON array, unique case IDs, every case
+	// carrying ac_id/risk/automation/execution/expected_result. Structural
+	// only; business judgment stays with QA and the human sign-off. This
+	// abort releases the claim (no writes), so the QA agent can correct and
+	// re-complete the step.
+	if currentStep.ID == "acceptance_test_design" {
+		if _, err := ValidateTestSpecManifest(values["test_spec_manifest"]); err != nil {
+			s.releaseWorkflowTransitionClaim(&run, claimID)
+			return result, fmt.Errorf("workflow step %q output rejected: %w", currentStep.Title, err)
+		}
+	}
 	edge, hasNext := chooseNextEdge(def.Edges, currentStep.ID, values, output)
 	if !hasNext && workflowHasOutgoingEdges(def.Edges, currentStep.ID) && !isTerminalReviewApproval(currentStep, def.Edges, values) {
 		// Release the transition claim: this abort happens BEFORE any

@@ -32,8 +32,8 @@ func TestGreenfieldTemplateShape(t *testing.T) {
 	if !ok {
 		t.Fatal("greenfield template not registered")
 	}
-	if len(tmpl.Steps) != 11 {
-		t.Fatalf("expected 11 steps, got %d", len(tmpl.Steps))
+	if len(tmpl.Steps) != 12 {
+		t.Fatalf("expected 12 steps (incl. acceptance_test_design), got %d", len(tmpl.Steps))
 	}
 	if tmpl.StartStepID != "requirement_draft" {
 		t.Fatalf("start step = %q", tmpl.StartStepID)
@@ -298,8 +298,11 @@ func TestGreenfieldDesignContractAndQAPreMergeFlow(t *testing.T) {
 					"approved_design_preview_url",
 					"approved_design_html",
 					"approved_design_snapshot_path",
-					"design_waiver_reason",
-					"design_waived",
+					// vNext (acceptance-test-design plan §5.2): rework must never
+					// lose the acceptance baseline.
+					"test_spec_doc",
+					"test_spec_manifest",
+					"test_spec_summary",
 				} {
 					if mapping[requiredKey] != "$input."+requiredKey {
 						t.Fatalf("rework edge %s missing mapping for %s: got %v", edgeID, requiredKey, mapping)
