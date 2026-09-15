@@ -1,7 +1,8 @@
-# 后续批次执行方案（Batch 1-4 评审与落地细化，v2）
+# 后续批次执行方案（Batch 1-4 评审与落地细化，v3）
 
 > 日期：2026-09-15。输入：GPT 四批执行计划 + 仓库既有设计文档 + GPT 对本方案
-> v1 的六轮评审修正（9 项全部吸收，见各节标注）。
+> 的六、七两轮评审修正（v2 吸收六轮 9 项；v3 吸收七轮：同源窃取 P0、live
+> 升级、widget 迁移、dirty-worktree 与回滚语义）。
 > 本方案对计划逐批评审（含与代码现状的核对结论），并给出可直接开工的落地设计。
 > 对应关系：Task 1.2 ← `intranet-runtime-plan.md` 收尾清单；Task 2.1 ←
 > `acceptance-test-design-plan.md`；Task 2.2 ← `test-data-fixture-sandbox-plan.md`
@@ -10,31 +11,45 @@
 > 3.1（Change Run）与 3.2（Skill Profiles）在 docs/ 下**没有已提交的设计文档**
 >（"质量方案 Phase 2/3"出处缺失），§6/§7 是补充设计，评审通过后应回填正式文档。
 >
-> **v2 修订说明**：v1 的止血范围不完整（漏 preview/feedback、preview/stop）、
-> 认证主体传递设计有误、权限语义用错（checkProjectAccess 是读访问）；Batch 2/3
-> 的 QA-only lease、generator 执行环境、确定性判据、Change Run 机制、黑名单
-> 覆盖面、Skill Profile 来源六处契约按 GPT 六轮评审收紧。在途依赖已更新：
-> 竞态面五轮复审**已通过**（范围：workflow 状态转换，不含外部副作用 exactly-once）。
+> **v3 修订说明**：七轮指出 v2 仍漏一个**更上游的 P0**——预览应用与控制台共享
+> 同一 origin，控制台 Bearer token 存 `localStorage["multigent-token"]`
+> （web/src/lib/auth.tsx:3,69,139），被代理的项目应用（其代码可被 Agent 修改）
+> 的任何脚本都能读走真实用户 Bearer 直接调控制台 API——此时 preview 端点的
+> capability 校验被真实凭据绕过。v3 新增 §2.0 origin 隔离决策（Batch 1 的
+> 第一个任务，先于一切端点封门）；`preview/live` 升级为登录主体（SSE 原样转发
+> Agent 会话输出，无脱敏）；`previewWritePrincipal` 补 widget 迁移语义；Batch 3
+> 补 dirty-worktree 基线与原子回滚契约。
 
 ---
 
 ## 1. 总体评审结论
 
 方向与顺序正确：Batch 1 先封安全洞是对的——**已核实代码确认该洞真实存在，且
-比 v1 认定的更大**：
+分两层**：
 
-- `preview/chat`（server.go:816）、`preview/feedback`（815）、`preview/stop`
-  （818）、`preview/status`（819）、`preview/live`（817）**全部挂在 publicMux**；
-  `previewTokenClaims` 只有 `t/p/exp`（preview_token.go:25-29），无任何能力位。
-- **feedback 与 chat 同级危险**：feedback handler 写任务评论后调用
-  `requestTaskAttentionWakeup`（preview_handlers.go:455 一带）唤醒 Agent 修改
-  代码——外部分享链接持有人虽不能直接驱动 Copilot，却能间接触发代码修改。
-  **stop 则可让持 token 者停止任意会话**。止血范围必须覆盖全部 preview 控制
-  端点，不能只封 chat。
-- `previewRequestAuthorized` 自行认证时（preview_token.go:115-128），新 context
-  只传给内部 `authorizePreviewProject`，**原 handler 拿到的 `r` 没有认证主体**——
-  两个 handler 的评论作者因此退化为 `"user"` 字面量（preview_handlers.go:452、
-  550 一带）。授权、审计、评论作者必须拿到显式 principal。
+- **上游层（七轮新指出的 P0，先于一切端点封门）**：预览应用与控制台共享同一
+  origin——`handleTaskPreviewProxy` 把项目应用反代在同 origin 的
+  `/preview/{task}/...`（server.go:773 publicMux；preview_handlers.go:798-840），
+  而控制台 Bearer token 存 `localStorage["multigent-token"]`（auth.tsx）。被
+  预览应用的代码可被 Agent/任务修改，其页面脚本能读走真实用户 Bearer 直接调
+  控制台 API——端点级 capability 校验对**真实凭据**无效。必须先做 §2.0 的
+  origin 隔离决策。
+- **端点层（六轮已核实）**：`preview/chat`（816）、`feedback`（815）、`stop`
+  （818）、`status`（819）、`live`（817）全部挂在 publicMux；
+  `previewTokenClaims` 只有 `t/p/exp`（preview_token.go:25-29），无能力位。
+  feedback 写评论后 `requestTaskAttentionWakeup` 唤醒 Agent 改代码；**live 的
+  SSE 把 Agent 会话输出（stdout/stderr 行）原样转发给持分享 token 者**，无
+  任何脱敏（preview_handlers.go:706-740）——与 feedback/chat/stop 同级，要求
+  登录主体。
+- **主体传递缺陷（六轮已核实）**：`previewRequestAuthorized` 自行认证时新
+  context 只传内部 `authorizePreviewProject`，handler 手里的 `r` 无认证主体，
+  评论作者退化为 `"user"` 字面量。
+- **widget 注入面（七轮补充核实）**：preview 代理向被预览应用的 HTML 注入
+  `/_multigent_preview/feedback.js` 与 `window.__MG_PREVIEW_TOKEN__`
+  （preview_handlers.go:844,1024-1032）；feedback.js 对 live/status/stop/chat
+  的 fetch **自动附带 pvt**（feedback.js:33-38,1245,1300,1444）。因此写端点
+  "见 pvt 即拒"会把现有登录用户一并 403——必须与 widget 迁移同步设计（§2.1
+  第三步）。
 
 需要修正与补充的六点（v1 观点，v2 保留）：
 
@@ -53,18 +68,47 @@
 
 ---
 
-## 2. Batch 1：安全止血（2 天；范围按六轮评审扩大）
+## 2. Batch 1：安全止血（2.5-3 天；§2.0 是第一任务，先于端点封门）
 
-### 2.1 Task 1.1 预览控制面权限封门（范围 = 全部 preview 控制端点）
+### 2.0 Task 1.0 预览 origin 隔离（P0，七轮新增；决定 §2.1 的落地形态）
+
+**威胁**：被预览应用与控制台同 origin（`/preview/{task}/...` 反代），应用脚本
+可读 `localStorage["multigent-token"]` 拿到真实用户 Bearer，直接调控制台
+API——任何端点级校验都被真实凭据绕过。
+
+**决策（推荐顺序）**：
+
+1. **独立 origin/subdomain（推荐目标态）**：Preview 以独立 origin 提供
+   （如 `preview.<console-host>` 或独立端口）；分享 token 仅在 preview origin
+   生效；控制台 cookie/localStorage 天然对 preview 文档不可见。落地：
+   preview 代理改写为按 Host/子域路由（部署面 + server 路由判断），分享链接
+   生成改为 preview origin 绝对 URL。控制台与 preview 的 API 仍同进程。
+2. **Copilot 控制 UI 迁出被预览文档**：chat/feedback/stop 的 UI 放在**认证后的
+   控制台父页面**（现有 AssistantWidget 组件体系），以 Bearer 经控制台自身
+   origin 调用；**不再向被预览应用的 document 注入 feedback.js 与
+   `__MG_PREVIEW_TOKEN__`**（删除 preview_handlers.go:844,1024-1032 注入点，
+   `/_multigent_preview/feedback.js` 退役）。
+3. **短期过渡（若独立 origin 暂不可行）**：预览 iframe 使用**不带
+   `allow-same-origin` 的 sandbox 属性**——应用文档落入 opaque origin，
+   读不到控制台 localStorage。**必须专项验证应用能力损失**（应用自身
+   localStorage/cookie/Service Worker 失效、同源 fetch 凭据语义变化），对
+   不兼容的应用在任务面板明示降级原因；验证结论记录在案后才可作为过渡态。
+
+**完成定义**：三选一落地 + 测试证明——preview 文档内执行脚本无法读到控制台
+token（E2E：向预览页注入探测脚本，断言 `localStorage.getItem('multigent-token')`
+不可达）；分享 token 仅绑定 preview 面。
+
+### 2.1 Task 1.1 预览控制面权限封门（依赖 §2.0 的形态决策）
 
 **改动位置**：`internal/api/preview_token.go`、`internal/api/preview_handlers.go`。
 
-**第一步：preview 端点能力矩阵**（先盘点后动手，防再漏）：
+**第一步：preview 端点能力矩阵**（先盘点后动手，防再漏；`live` 按七轮升级）：
 
 | 端点（均现挂 publicMux） | 现状 | 目标：分享 token | 目标：登录用户 |
 | --- | --- | --- | --- |
-| 应用代理/静态资源/`preview/live` | token 或登录均可读 | 仅 `preview.view`（只读浏览） | 可读 |
+| 应用代理/静态资源 | token 或登录均可读 | 仅 `preview.view`（只读浏览） | 可读 |
 | `preview/status` | token 可读 | **默认不开放**——先审计响应体是否泄露 Agent 输出/内部路径，确认无泄露再决定；审计前一律要求登录 | 可读 |
+| `preview/live` | token 可读，**SSE 原样转发 Agent 会话输出，无脱敏**（handlers.go:706-740） | **403**（同 feedback/chat/stop：要求登录主体——Agent 输出含路径、命令、可能的凭据回显，比 status 更危险） | 可读 |
 | `preview/feedback` | token 即可写评论 + **唤醒 Agent 改代码** | **403** | 登录 + operator 权限 + 审批人校验 |
 | `preview/chat` | token 即可驱动 Copilot | **403** | 同上 |
 | `preview/stop` | token 即可停会话 | **403** | 登录 + operator 权限 |
@@ -84,7 +128,17 @@
 func (s *Server) previewWritePrincipal(w http.ResponseWriter, r *http.Request, project, taskID string) (*http.Request, previewPrincipal, bool)
 ```
 
-- 拒绝携带 preview token 的请求（写端点不认分享 token，403）；
+- **"拒绝携带 preview token 的请求"须与 widget 迁移同步**（七轮修正）：现状
+  `feedback.js` 对 chat/live/status/stop 的 fetch **自动附带 pvt**（1245/
+  1300/1444 行），若直接"见 pvt 即 403"，现有**已登录用户**也会被拒。因此
+  本 helper 的拒绝语义必须分两种：
+  - 请求**仅凭** preview token 可认证（无 Bearer/会话）→ 403（分享面无写权）；
+  - 请求同时带 preview token **和**有效登录态（widget 迁移过渡期）→ 认登录态，
+    放行到 operator 校验。
+  配套迁移（§2.0 第 2 项落地后自然收敛）：共享预览不注入 Copilot widget；
+  认证控制台的控制面请求走**控制台自身 origin + Bearer**（AssistantWidget
+  体系），不再依赖注入的 feedback.js。迁移完成前的过渡期内，两种主体并存
+  以登录态优先；迁移完成（feedback.js 退役）后删除 pvt 旁路。
 - 自行认证后构造 `r = r.WithContext(ctx)` **返回给 handler**——授权判定、
   审计记录、评论作者全部使用返回的 principal（username），不再有 fallback；
 - principal 缺失（username 为空）→ fail-closed 拒绝。
@@ -104,13 +158,16 @@ func (s *Server) previewWritePrincipal(w http.ResponseWriter, r *http.Request, p
 
 **测试**（单元 + httptest 集成，覆盖矩阵每一格）：
 
-- feedback/chat/stop × {匿名、仅分享 token、登录无 operator、登录 operator
-  非审批人、审批人登录} 五态断言（401/403/200）；
-- 回归：带 preview token 的代理/静态资源/`preview/live` 仍 200；旧格式 token
+- feedback/chat/stop/**live** × {匿名、仅分享 token、登录无 operator、登录
+  operator 非审批人、审批人登录} 五态断言（401/403/200）；
+- **过渡期双主体**：带 pvt + 有效登录态的请求（现状 widget 形态）必须按登录态
+  放行到 operator 校验，不因 pvt 存在而 403；仅 pvt 无登录态 → 403；
+- 回归：带 preview token 的代理/静态资源仍 200；旧格式 token
   （无 Cap）读 200、写 403；409 执行锁与限流行为不变；
 - principal 贯穿：feedback/chat 的评论作者 = 登录名（不再出现 `"user"`）；
 - `preview/status` 审计结论记录在案（泄露 → 保持登录制；无泄露 → 可放宽，
-  单独 commit 说明）。
+  单独 commit 说明）；
+- **origin 隔离 E2E**（§2.0）：预览文档内探测脚本读不到控制台 token。
 
 ### 2.2 Task 1.2 内网运行时 P0 审计收尾（验证任务，非开发）
 
@@ -227,16 +284,37 @@ Proposed → AwaitingApproval → Applying(验证) → Applied
   proposal**（V1 不做并行）。
 - **隔离产出 = shadow worktree 机制，不是 Prompt 约束**（六轮修正）：当前
   Agent 对 worktree 有真实写权限，靠 Prompt 说"别写"不可验证。机制：为 proposal
-  创建 **shadow worktree**（同一 baseCommit 的临时 worktree，或 `git worktree`
-  + 临时分支），Copilot 在 shadow 内产出改动；平台对 shadow 做
-  `git diff` 提取 patch。用户在预览抽屉看的是 **shadow 的 Diff**，主 worktree
-  在批准前不被触碰。
-- **Apply 机制**：确认后申请写锁（`isTaskAtHumanReviewStep` fail-closed +
-  `previewSessions` 互斥）→ 校验 **preimage hash**（patch 基于的文件内容哈希
-  与主 worktree 当前内容一致，不一致 = worktree 已漂移，拒绝并要求重新生成）→
-  在**主 worktree** 应用 patch → 按 runtime.json 契约跑 lint/build（超时封顶）。
-  失败回滚：worktree 快照回退（快照失败必须阻断——沿用 gitworktree 防丢未推送
-  工作的既有约定）。
+  创建 **shadow worktree**（`git worktree add` 临时分支），Copilot 在 shadow
+  内产出改动；平台对 shadow 做 `git diff` 提取 patch。用户在预览抽屉看的是
+  **shadow 的 Diff**，主 worktree 在批准前不被触碰。
+- **proposal 基线 = 主 worktree 的真实状态，dirty 必须显式建模**（七轮修正）：
+  shadow 以 `baseCommit` 创建时看不到主 worktree 的未提交变更——而 Copilot 要
+  改的往往正是这些状态。契约二选一，按序尝试：
+  1. **主 worktree 必须 clean**（`git status --porcelain` 为空）才接受
+     proposal；不 clean 时向用户明确报"请先提交或暂存当前变更"，不静默继续；
+  2. 用户显式选择"以当前未提交状态为基线"时：先创建**受控临时快照**
+     （`git add -A` + `git write-tree` 的**只写对象、不动 HEAD/分支/索引**的
+     临时树），把该树 SHA 记为 proposal 的 `baselineCommit`，shadow 从它创建；
+     patch 基线、preimage 校验、Diff 展示全部以 `baselineCommit` 为准。该快照
+     属 proposal 私有，随 proposal 生命周期回收，绝不移动主 worktree 的任何
+     Git 状态。
+- **Apply 机制（原子实现）**：确认后申请写锁（`isTaskAtHumanReviewStep`
+  fail-closed + `previewSessions` 互斥）→ 校验 **preimage hash**（patch 基于
+  `baselineCommit` 的文件内容哈希 == 主 worktree 当前内容哈希；不一致 = 已漂移，
+  拒绝并要求重新生成）→ 在**主 worktree** `git apply --index` 应用 patch →
+  按 runtime.json 契约跑 lint/build（超时封顶）。
+- **验证语义与回滚 = 受控 preimage/patch 逆向，不是"快照回退"一词**（七轮
+  修正）：
+  - **验证不改主 worktree 源码**：验证命令若可能写源码（lint --fix 一类），
+    一律先在 **shadow worktree** 内对 patch 验证；主 worktree 只在 shadow 验证
+    通过后才 apply——主 worktree 的 apply 路径本身不产生"验证失败要回滚源码"
+    的情形；
+  - 主 worktree apply 后的残余失败（构建环境差异等）：用 **`git apply -R` 对
+    原 patch 精确逆向**（preimage 已在 apply 前锁定），回滚后按 worktree 既有
+    快照约定做完整性核验（**快照失败必须阻断**——沿用 gitworktree 防丢未推送
+    工作的约定）；禁止 `git checkout -- .` / `git reset --hard` 一类无差别
+    回退（会吞掉用户与 Agent 的并行未提交工作）；
+  - 回滚动作与结果（成功/失败/核验输出）记入 proposal 记录。
 - **收编触发点与人工审核显式对齐**（六轮修正）：Apply 成功**不做**泛化
   `git add -A` 自动 checkpoint/push。改动以未提交工作区状态存在，收编
   （checkpoint commit / 收入审核提交）只发生在既有的人工审核 approve 链路
@@ -255,7 +333,10 @@ Proposed → AwaitingApproval → Applying(验证) → Applied
 - **UI**：预览抽屉展示 shadow Diff + 确认/拒绝；流式进度复用现有
   previewSessions SSE 通道。
 - **测试**：黑名单各形态（新增/删除/重命名/symlink/二进制/路径穿越规范化）、
-  preimage 漂移拒绝、无锁 Apply 拒绝、验证失败回滚完整性、proposal 串行化、
+  **dirty-worktree 两条路径**（clean 强制、显式 baselineCommit 快照——断言主
+  worktree HEAD/分支/索引零移动）、preimage 漂移拒绝、无锁 Apply 拒绝、
+  **shadow 先行验证**（可写源码的验证命令不触碰主 worktree）、回滚 =
+  `git apply -R` 精确逆向且不吞并行未提交工作、proposal 串行化、
   1.1 权限矩阵在入口同样生效、apply 后收编仍只由审核链路触发。
 
 ### 4.2 Task 3.2 Skill Profiles 受控挂载（约 1.5 天）
@@ -293,9 +374,9 @@ Proposed → AwaitingApproval → Applying(验证) → Applied
 
 | 批次 | 内容 | 修正后工期 | 前置 |
 | --- | --- | --- | --- |
-| 1 | 1.1 preview 控制面封门 + 1.2 运行时收尾 | 2 天 | 无（立即开工） |
-| 2 | 2.1 验收测试 Agent + 2.2 数据沙盒 | 5-6 天 | Batch 1；§3.2 的 3/4/5/7 项契约（lease 模型、CAS、容器执行、fail-closed 漂移）确认 |
-| 3 | 3.1 Change Run + 3.2 Skill Profiles | 4-5 天 | Batch 1；§4 的 shadow worktree、preimage、黑名单、Skill 来源契约确认 |
+| 1 | **1.0 origin 隔离** + 1.1 控制面封门 + 1.2 运行时收尾 | 2.5-3 天 | 1.0 形态决策（独立 origin vs sandbox iframe）确认后开工 |
+| 2 | 2.1 验收测试 Agent + 2.2 数据沙盒 | 5-6 天 | Batch 1；lease/generator 契约（§3.2 第 3/4/5/7 项）已按七轮确认 |
+| 3 | 3.1 Change Run + 3.2 Skill Profiles | 4-5 天 | Batch 1；dirty-worktree 与回滚语义（§4.1）确认 |
 | 4 | 双人终验 / Brownfield / 自愈 | 验收类，穿插 | 对应批次完成 |
 
 在途：竞态面整改 **GPT 五轮复审已通过**（范围：workflow claim → guarded
@@ -313,4 +394,7 @@ commit 状态写入不重复；不等同于外部副作用 exactly-once——引
   `isTaskAtHumanReviewStep` fail-closed；任务派生基于不可变 baseCommit。
 - 项目提供的脚本/命令一律在无生产凭据、网络受限的沙箱容器内执行，禁止 Go
   主机进程直接 exec 项目契约给出的 argv。
+- **预览面与控制台凭据必须 origin 隔离**：被预览应用的文档不可见控制台
+  token 存储（localStorage/cookie）；预览面禁止注入携带凭据的脚本（widget
+  走认证后的控制台父页面）。
 - 不 rebase、不 force push；work/、dist/ 产物不入库；正式文档不含部署细节。
