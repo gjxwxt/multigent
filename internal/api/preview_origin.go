@@ -32,8 +32,9 @@ const (
 )
 
 // previewCapabilityView is the only capability preview share tokens carry
-// (Task 1.1). Tokens minted before the Cap field existed verify without a Cap
-// and are treated as read-only by callers that require it.
+// (Task 1.1). Tokens without a Cap field (pre-Cap legacy share links) carry
+// NO capability and are rejected on all surfaces — breaking migration, old
+// links must be re-minted (round-13).
 const previewCapabilityView = "preview.view"
 
 const previewTokenCookiePrefix = "mg_pvt_"
