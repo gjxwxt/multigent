@@ -28,6 +28,23 @@
 > `preview.view`（旧 token 只读兼容）。status 在泄露审计前要求登录。
 > 剩余：§2.2 运行时收尾验证、E2E 探测脚本、部署 runbook 更新。
 >
+> **执行进度（2026-09-15，commit 7a29ae3d，batch1-rc1 部署 E2E）**：Batch 1
+> 代码级验收通过（GPT 14 轮，round-13 全部 P0/P1 关闭）。部署 E2E 在 VM 完成：
+> 同一二进制监听 ：27892（console origin），preview origin :27893 由边缘反代
+> 转发至后端并**从 socket 重建 X-Forwarded-\***（`httputil.ReverseProxy`
+> `Rewrite`+`SetXForwarded`，客户端伪造 XFP 被抹除——伪造 `XFP: https` 的请求
+> 通过 gate（若后端信任伪造值会 404），手工伪造 cookie 被 token 校验拒绝
+> （401），证明覆盖行为真实生效）。服务端验证结果：console origin
+> `/preview/` 302 → preview origin；preview origin 无 token 401；外来 Host
+> 404（响应含配置 origin 提示）；CORS 预检 allowlist 命中 → 204+ACAO、
+> preview origin → 无 ACAO；真实 share token 兑换 → 302 + Location 无 token
+> + `no-store`/`no-referrer` + cookie（`Path=/preview/{task}/; Max-Age=43200;
+> HttpOnly; SameSite=Lax`）；兑换 cookie 访问干净 URL → gate 放行、token 校验
+> 通过、到达代理后 503 "not running"（预览实例未启动，预期行为）。浏览器侧
+> HttpOnly/localStorage 探测未执行（需启动真实预览容器）；HttpOnly 属性已在
+> Set-Cookie 字节级确证，localStorage 隔离由 origin 分离保证。遗留：预览
+> surface 依赖 Docker 沙箱启动后的完整渲染验证。
+>
 > **九轮定案（仍然有效）**：Batch 1 采用独立 preview origin（sandbox iframe
 > 仅降级开关）；preview origin 来自显式部署配置；CORS allowlist **默认不含
 > preview origin**；写端点 Bearer-only；URL token 兑换 HttpOnly cookie（含
