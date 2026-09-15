@@ -256,6 +256,10 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 					field("risk_coverage_matrix", "riskMatrixField"),
 					field("touched_paths", "qaTouchedPathsField"),
 					field("test_report", "testReportField"),
+					// QA's own probe evidence (including regression cases QA
+					// added) replaces/stale-marks the developer mapping when
+					// reconciled — qa_signoff and rework read it from here.
+					optionalField("test_implementation_evidence", "testReportField"),
 				}),
 			tmplStep("qa_signoff", "human_review", text["qaSignoffTitle"], text["qaSignoffDesc"], "qa-owner", "amber", 2040,
 				[]entity.WorkflowField{
@@ -316,6 +320,8 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"approved_design_preview_url":   "$input.approved_design_preview_url",
 				"approved_design_html":          "$input.approved_design_html",
 				"approved_design_snapshot_path": "$input.approved_design_snapshot_path",
+				"design_waiver_reason":          "$input.design_waiver_reason",
+				"design_waived":                 "$input.design_waived",
 				"test_spec_doc":                 "$output.test_spec_doc",
 				"test_spec_manifest":            "$output.test_spec_manifest",
 				"test_spec_summary":             "$output.test_spec_summary",
