@@ -293,6 +293,49 @@ claim；stamp 失败时 `FailQueuedRuntimeRun` 只能处理仍为 queued 的 run
      持有者仍能完成；B 抢占过期 claim 后，A 的旧 claimID 释放是无操作、C 仍被
      拒、B 用自己的 claimID 才能释放。
 
+### F17. GPT 四轮复审：claim 入口没绑定调用者初读快照 + "BEGIN IMMEDIATE"是假的（2026-09-15 第七轮；**当夜修复完毕**）
+
+四轮复审判定三轮的成功路径闸门成立，但指出 claim **入口**还有一个新 P0 与一个 P1：
+
+- **P0（claim 未绑定初读快照）**：`claimWorkflowTransition` 在函数内部**自己重读**
+  DB 作为 CAS 见证，调用者初读的 run 快照完全不参与。交错形态：A 初读旧 run 后
+  暂停 → B 完整推进工作流（run 变为新 plain payload）→ A 恢复并 claim——A 对
+  **B 的新 payload** 做 CAS（旧 payload 见证已不在比较对象里），反而必中；marker
+  的 Run 字段又由 A 的**内存旧对象**构造，旧 ActiveStepID 被写进新 claim。随后
+  guarded commit 也会认可这个新 claim——旧步骤被重复推进、event/round 重复写。
+  本质：CAS 保护了"DB 当前 payload"，却没校验"调用者读到的快照是否仍是持久化状态"。
+- **P1（假 BEGIN IMMEDIATE）**：`db.sql.Begin()` 在 modernc 驱动下发的是普通
+  deferred BEGIN（`_txlock` 只作用于驱动自己的 Tx 包装），注释承诺的"先拿
+  RESERVED 锁"不成立。单进程单连接影响有限，但多进程/多 console 时不能当作
+  已拿写锁的保证。
+
+已修（8fbdcc47）：
+
+- **claim 绑定初读快照**：新增 `ListRecordsWithRevision`（payload + revision 在
+  同一条 SELECT 读出，杜绝"payload 一个时刻、revision 另一时刻"的幽灵状态）；
+  `RunForTaskWithSnapshot` 把 run 实体 + 原始 payload + revision 一次性交给
+  `CompleteAndAdvance`；`claimWorkflowTransition` 改收快照参数，CAS 的
+  payload+revision 见证就是调用者初读的那一对——B 推进后 A 的旧快照必失配，
+  `ErrStaleWorkflowTransition` 且零写入。**marker 的 Run 字段只从持久化 payload
+  解码构造**（plain payload 原文复用作 marker 的 runJSON；过期 marker 则解码其
+  信封内的 run），绝不取调用者内存对象。
+- **真实 BEGIN IMMEDIATE**：`CommitTransitionGuarded` 改在专用连接上手动
+  `BEGIN IMMEDIATE`（`runImmediateTx`——绕开 database/sql 的 Tx 包装，因为
+  BeginTx 会再发一条 BEGIN；SAVEPOINT 做嵌套回滚边界），URI 加
+  `_txlock=immediate` 兜底。**跨连接行为测试**：IMMEDIATE 事务持锁期间，第二个
+  独立句柄写同一行必须收到 SQLITE_BUSY（deferred 回归则写入会成功），事务提交后
+  立即恢复可写。
+- **GPT 指定的交错测试**：A 初读（快照绑定）后暂停 → B 完整走完转换 → A 用旧
+  快照再 claim 必须被拒；断言 A **零写入**（run 行仍是 B 的 plain payload、无
+  marker、event 恰好多 B 的一个、下一 inst 不重复），且 run 用新快照仍可正常
+  claim——失败模式是 fail-closed 而非卡死。
+
+教训（续 F16）：**"CAS 见证"必须来自调用者声明的那次读取，不能是修复代码里顺手
+的第二次读**。三轮把 ownership 检查挪到了提交点，四轮暴露的是入口处还有第二个
+未受控的读取点——两处读取点只有都绑定调用者的显式快照，check→write 链才闭合。
+另一条：注释里写的事务语义（BEGIN IMMEDIATE）与驱动实际行为（deferred BEGIN）要
+用行为测试钉住，不能只靠代码读起来对。
+
 ### F16. GPT 三轮复审：claim 闸门只护住了 abort，没护住成功路径（2026-09-15 第六轮；**当夜修复完毕**）
 
 三轮复审判定 Q1 通过；Q2 剩最后一个 P0：**claim owner 只在"失败前释放"路径被验证，
