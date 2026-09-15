@@ -10,18 +10,44 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
 )
 
-// GeneratorImage is the disposable image the generator runs in. It carries
-// node/go toolchains so contract commands like `npm run db:seed:baseline`
-// or `go run ./cmd/dbseed baseline` work out of the box.
-const GeneratorImage = "ghcr.io/multigent/multigent/runtime-base:latest"
-
 // GeneratorMaxOutput caps the generator's captured output (abuse bound).
 const GeneratorMaxOutput = 1 << 20
+
+// generatorImageEnv / generatorImageRegionEnv mirror the sandbox package's
+// runtime image selection (MULTIGENT_RUNTIME_IMAGE explicit override,
+// MULTIGENT_RUNTIME_REGION=cn selects the mainland mirror) without importing
+// internal/sandbox. Intranet deployments re-point these at a private registry;
+// a hardcoded GHCR constant would break fixture generation the moment GHCR is
+// unreachable (migration checkpoint 2026-09-15).
+const (
+	generatorImageEnv       = "MULTIGENT_RUNTIME_IMAGE"
+	generatorImageRegionEnv = "MULTIGENT_RUNTIME_REGION"
+	generatorImageDefault   = "ghcr.io/multigent/multigent/runtime-base:latest"
+	generatorImageCN        = "crpi-fu3b7e7lggtmh7za.cn-hangzhou.personal.cr.aliyuncs.com/multigent/runtime-base:latest"
+)
+
+// GeneratorImage resolves the disposable image the generator runs in. It
+// carries node/go toolchains so contract commands like
+// `npm run db:seed:baseline` or `go run ./cmd/dbseed baseline` work out of
+// the box. Resolution matches sandbox.DefaultBaseImage: explicit override,
+// then region mirror, then the published GHCR default.
+func GeneratorImage() string {
+	if image := strings.TrimSpace(os.Getenv(generatorImageEnv)); image != "" {
+		return image
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(generatorImageRegionEnv))) {
+	case "cn", "china", "zh-cn", "mainland", "mainland-china":
+		return generatorImageCN
+	default:
+		return generatorImageDefault
+	}
+}
 
 // DefaultContainerGenerator implements ContainerGenerator with docker run.
 func DefaultContainerGenerator(ctx context.Context, worktreeDir, argv string, timeout time.Duration) (string, error) {
@@ -34,7 +60,7 @@ func DefaultContainerGenerator(ctx context.Context, worktreeDir, argv string, ti
 		"-v", worktreeDir + ":/workspace",
 		"-w", "/workspace",
 		"-e", "APP_DB_PATH=/workspace/server/data/app.db",
-		GeneratorImage,
+		GeneratorImage(),
 		"sh", "-c", argv,
 	}
 	cmd := exec.CommandContext(runCtx, "docker", args...)

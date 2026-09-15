@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -571,5 +572,28 @@ func TestDigestHelperStability(t *testing.T) {
 	h := sha256.Sum256([]byte("x"))
 	if len(hex.EncodeToString(h[:])) != 64 {
 		t.Fatal("sanity")
+	}
+}
+
+// Intranet migration checkpoint: the generator image must follow the same
+// env contract as the agent sandbox (explicit override > region mirror >
+// GHCR default), or fixture generation breaks the moment GHCR is
+// unreachable behind an air-gapped network.
+func TestGeneratorImageFollowsRuntimeImageEnv(t *testing.T) {
+	t.Setenv("MULTIGENT_RUNTIME_IMAGE", "registry.internal:5000/multigent/runtime-base:2026.09")
+	if got := GeneratorImage(); got != "registry.internal:5000/multigent/runtime-base:2026.09" {
+		t.Fatalf("explicit override must win, got %s", got)
+	}
+
+	t.Setenv("MULTIGENT_RUNTIME_IMAGE", "")
+	t.Setenv("MULTIGENT_RUNTIME_REGION", "cn")
+	got := GeneratorImage()
+	if !strings.Contains(got, "cn-hangzhou.personal.cr.aliyuncs.com") {
+		t.Fatalf("cn region must select the mainland mirror, got %s", got)
+	}
+
+	os.Unsetenv("MULTIGENT_RUNTIME_REGION")
+	if got := GeneratorImage(); got != "ghcr.io/multigent/multigent/runtime-base:latest" {
+		t.Fatalf("default must be the published GHCR image, got %s", got)
 	}
 }
