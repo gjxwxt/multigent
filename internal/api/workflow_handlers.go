@@ -1039,27 +1039,65 @@ func enrichQARejectionComments(outputs map[string]string, currentStep entity.Wor
 	}
 }
 
+// Platform git identity for commits the server itself makes (review commits,
+// checkpoint commits). The sanitized environment strips HOME, so any host
+// global user.name/user.email is gone; a worktree whose repo config carries
+// no identity makes `git commit` exit 128 ("identity unknown") and the review
+// commit would silently skip. Repo-local config still wins: these are -c
+// fallbacks, only consulted when nothing else defines the identity.
+const (
+	platformGitUserName  = "Multigent Review Commit"
+	platformGitUserEmail = "review-commit@multigent.invalid"
+)
+
 // reviewCommitGit builds a bounded, sanitized git command for the
 // review-commit path (Batch 3 wiring, round-14): the working tree may carry
 // agent-written .git/config (diff.external, fsmonitor, hooksPath), so every
-// invocation runs with (a) SanitizedDiffArgs' config neutralization —
-// core.fsmonitor/core.hooksPath cleared — and (b) SanitizedGitEnv, which
-// strips GIT_* redirection, global config pointers, and credential surfaces.
-// Without this, a preview copilot could plant config that executes arbitrary
+// invocation runs with (a) config neutralization — core.fsmonitor and
+// core.hooksPath cleared — and (b) SanitizedGitEnv, which strips GIT_*
+// redirection, global config pointers, and credential surfaces. Without
+// this, a preview copilot could plant config that executes arbitrary
 // programs on the host the moment the platform commits its work.
 type reviewCommitGit struct{ root string }
+
+// neutralizedBaseArgs are the git arguments every platform-side invocation
+// against an agent-writable tree must carry. Shared with the push path (which
+// adds them manually because it needs the host credential surface) and
+// mirroring gitworktree.SanitizedDiffArgs's fsmonitor/hooks entries.
+func neutralizedBaseArgs(args ...string) []string {
+	return append([]string{
+		"-c", "core.fsmonitor=",
+		"-c", "core.hooksPath=",
+	}, args...)
+}
 
 func (g reviewCommitGit) run(timeout time.Duration, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	full := append([]string{
-		"-c", "core.fsmonitor=",
-		"-c", "core.hooksPath=",
-	}, args...)
+	full := neutralizedBaseArgs(args...)
+	// Identity fallbacks go AFTER the neutralization entries and BEFORE the
+	// subcommand; repo-local user.* config still takes precedence over -c.
+	full = append(full[:2], append([]string{
+		"-c", "user.name=" + platformGitUserName,
+		"-c", "user.email=" + platformGitUserEmail,
+	}, full[2:]...)...)
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.Dir = g.root
 	cmd.Env = gitworktree.SanitizedGitEnv()
 	return cmd.CombinedOutput()
+}
+
+// runStdout captures stdout only — for commands whose output is parsed
+// mechanically (status --porcelain) where stderr noise would corrupt the
+// parse.
+func (g reviewCommitGit) runStdout(timeout time.Duration, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	full := neutralizedBaseArgs(args...)
+	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd.Dir = g.root
+	cmd.Env = gitworktree.SanitizedGitEnv()
+	return cmd.Output()
 }
 
 func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Task) {
@@ -1092,9 +1130,12 @@ func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Tas
 
 	// 1. Check for uncommitted working tree changes from in-context preview copilot
 	// (all git calls bounded — this runs on the approve request path)
-	statusOut, err := git.run(10*time.Second, "status", "--porcelain")
-	if err != nil || len(bytes.TrimSpace(statusOut)) == 0 {
-		return // working tree is clean
+	// status must read stdout only: CombinedOutput would fold stderr warnings
+	// (dubious ownership, CRLF notice) into the porcelain stream and make a
+	// clean tree look dirty → a phantom commit with no changes.
+	statusOut, statusErr := git.runStdout(10*time.Second, "status", "--porcelain")
+	if statusErr != nil || len(bytes.TrimSpace(statusOut)) == 0 {
+		return // working tree is clean (or unreadable — do not guess-commit)
 	}
 
 	// 2. Stage and commit
@@ -1131,7 +1172,7 @@ func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Tas
 		// via the -c flags and credentials never land in stored output
 		// (redactGitOutput contract).
 		pushCtx, pushCancel := context.WithTimeout(context.Background(), 90*time.Second)
-		pushCmd := exec.CommandContext(pushCtx, "git", "-c", "core.fsmonitor=", "-c", "core.hooksPath=", "push", "origin", branchName)
+		pushCmd := exec.CommandContext(pushCtx, "git", neutralizedBaseArgs("push", "origin", branchName)...)
 		pushCmd.Dir = gitRoot
 		pushOut, pushErr := pushCmd.CombinedOutput()
 		pushCancel()
