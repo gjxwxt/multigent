@@ -21,10 +21,28 @@ import (
 // (and, for the manager mutex, across all projects). Local operations answer
 // in milliseconds; network operations get a larger budget that still caps a
 // wedged remote or credential-helper prompt.
+//
+// The network budget is overridable with MULTIGENT_GIT_NETWORK_TIMEOUT (Go
+// duration, e.g. 300s): intranet GitLab deployments behind saturated uplinks
+// or cold runners can legitimately exceed 90s, while the default stays tight
+// so a wedged remote fails promptly. Read once at first use; resolution
+// failure falls back to the default (fail-open to the safe value, never to
+// zero/unbounded).
 const (
-	gitLocalTimeout   = 15 * time.Second
-	gitNetworkTimeout = 90 * time.Second
+	gitLocalTimeout = 15 * time.Second
+	// gitNetworkTimeoutEnv lets a deployment widen the network git budget.
+	gitNetworkTimeoutEnv = "MULTIGENT_GIT_NETWORK_TIMEOUT"
 )
+
+func gitNetworkTimeout() time.Duration {
+	if v := strings.TrimSpace(os.Getenv(gitNetworkTimeoutEnv)); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+		log.Printf("[gitworktree] invalid %s=%q, falling back to 90s", gitNetworkTimeoutEnv, v)
+	}
+	return 90 * time.Second
+}
 
 // gitLocal runs a local, metadata-only git command (rev-parse, status,
 // show-ref, worktree add/prune) with a hard timeout. Callers must invoke the
@@ -39,7 +57,7 @@ func gitLocal(dir string, args ...string) (*exec.Cmd, context.CancelFunc) {
 // caller should see promptly. Callers must invoke the returned cancel after
 // Wait to release the timer.
 func gitRemote(dir string, args ...string) (*exec.Cmd, context.CancelFunc) {
-	return gitTimed(gitNetworkTimeout, dir, args...)
+	return gitTimed(gitNetworkTimeout(), dir, args...)
 }
 
 func gitTimed(timeout time.Duration, dir string, args ...string) (*exec.Cmd, context.CancelFunc) {

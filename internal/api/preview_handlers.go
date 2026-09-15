@@ -148,7 +148,7 @@ func (s *Server) buildPreviewEnvSnapshot(project, taskID, worktreeDir string) st
 		if branch, err := gitworktree.NewManager().CheckedOutBranch(worktreeDir); err == nil && strings.TrimSpace(branch) != "" {
 			b.WriteString(fmt.Sprintf("- 当前分支: %s\n", branch))
 		}
-		if out, err := exec.Command("git", "-C", worktreeDir, "status", "--porcelain").Output(); err == nil {
+		if out, err := boundedGitOutput(worktreeDir, 5*time.Second, "status", "--porcelain"); err == nil {
 			lines := nonEmptyLines(string(out))
 			if len(lines) == 0 {
 				b.WriteString("- 未提交改动: 无(工作区干净)\n")

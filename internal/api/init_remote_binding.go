@@ -4,7 +4,6 @@ import (
 	"context"
 	"log"
 	"net/url"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -147,7 +146,7 @@ func (s *Server) initWorktreeOriginURL(project string, t *entity.Task) string {
 		if dir == "" {
 			continue
 		}
-		out, err := exec.Command("git", "-C", dir, "remote", "get-url", "origin").Output()
+		out, err := boundedGitOutput(dir, 5*time.Second, "remote", "get-url", "origin")
 		if err != nil {
 			continue
 		}

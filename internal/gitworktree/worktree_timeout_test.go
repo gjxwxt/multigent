@@ -72,8 +72,35 @@ func TestGitTimeoutConstants(t *testing.T) {
 	if gitLocalTimeout != 15*time.Second {
 		t.Fatalf("gitLocalTimeout = %v, want 15s", gitLocalTimeout)
 	}
-	if gitNetworkTimeout != 90*time.Second {
-		t.Fatalf("gitNetworkTimeout = %v, want 90s", gitNetworkTimeout)
+	if got := gitNetworkTimeout(); got != 90*time.Second {
+		t.Fatalf("default gitNetworkTimeout = %v, want 90s", got)
+	}
+}
+
+// TestGitNetworkTimeoutEnvOverride proves the configurable budget (GPT Q3:
+// the 90s default is unverified for slow intranets) resolves from the env,
+// ignores junk, and never returns zero.
+func TestGitNetworkTimeoutEnvOverride(t *testing.T) {
+	cases := []struct {
+		env  string
+		want time.Duration
+	}{
+		{"", 90 * time.Second},
+		{"300s", 300 * time.Second},
+		{"5m", 5 * time.Minute},
+		{"junk", 90 * time.Second},
+		{"-10s", 90 * time.Second},
+		{"0", 90 * time.Second},
+	}
+	for _, tc := range cases {
+		if tc.env == "" {
+			t.Setenv("MULTIGENT_GIT_NETWORK_TIMEOUT", "")
+		} else {
+			t.Setenv("MULTIGENT_GIT_NETWORK_TIMEOUT", tc.env)
+		}
+		if got := gitNetworkTimeout(); got != tc.want {
+			t.Fatalf("gitNetworkTimeout() with env %q = %v, want %v", tc.env, got, tc.want)
+		}
 	}
 }
 

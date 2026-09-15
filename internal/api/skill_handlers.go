@@ -1288,11 +1288,25 @@ func cloneSkillSource(source, dst string) error {
 }
 
 func gitHead(dir string) string {
-	out, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	out, err := boundedGitOutput(dir, 5*time.Second, "rev-parse", "HEAD")
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// boundedGitOutput runs a read-only git metadata command with a hard timeout.
+// These calls answer in milliseconds on a healthy repo, but a repo on a stale
+// NFS mount or a wedged worktree can hang the requesting HTTP handler
+// indefinitely — GPT review Q3 named the unbounded call sites. 5s covers
+// healthy paths with margin; a timeout reads as "metadata unavailable", the
+// same as any git failure, so callers degrade gracefully.
+func boundedGitOutput(dir string, timeout time.Duration, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	return cmd.Output()
 }
 
 func resolveSkillInstallSource(srcDir, overrideName, overrideDescription string) (string, string, string, error) {
