@@ -96,6 +96,13 @@ type Server struct {
 	updateCheck            UpdateChecker
 	daemonStatus           DaemonStatusFunc
 	localRuntimeAPIURL     string
+	// previewOrigin is the explicit deployment-configured origin that serves
+	// preview surfaces (§2.0 origin isolation). Empty = previews disabled
+	// (fail-closed); preview never falls back to the console origin.
+	previewOrigin string
+	// consoleOrigin is the deployment-configured console origin; when set it
+	// is the only Origin allowed by the CORS layer (allowlist, no reflection).
+	consoleOrigin string
 	execMu                 sync.Mutex
 	execProcs              map[string]*execProcess // key = "project/agent"
 	interactions           *interaction.Manager
@@ -879,7 +886,32 @@ func (s *Server) Handler() http.Handler {
 	// (the "/" catch-all at the top of the design block falls through to
 	// withTokenAuth(mux) for non-design traffic — no second registration.)
 
-	return withCORS(withJSONHeaders(publicMux))
+	return s.withOriginRouting(s.withCORS(withJSONHeaders(publicMux)))
+}
+
+// withOriginRouting splits preview surfaces off the console origin (§2.0).
+// When MULTIGENT_PREVIEW_ORIGIN is configured, /preview/* requests are only
+// served on that origin; console-origin requests are redirected there and
+// other Hosts 404. Preview control endpoints under /api/v1/.../preview/*
+// are console-authenticated (Bearer) once Task 1.1 lands, so they follow the
+// console origin like every other API route. When no preview origin is
+// configured everything fails closed: /preview/* 404s on every origin.
+func (s *Server) withOriginRouting(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/preview/") {
+			if s.enforcePreviewOriginGate(w, r) {
+				return
+			}
+			// The token-exchange hop must happen before any document is
+			// served: a pvt in the URL would otherwise leak via history,
+			// Referer, and location.search reads by project scripts.
+			if previewShareTokenExchanged(r) {
+				s.handlePreviewTokenExchange(w, r)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) withContextIngestAuth(next http.Handler) http.Handler {
@@ -925,24 +957,33 @@ func containsString(values []string, wanted string) bool {
 	return false
 }
 
-func withCORS(next http.Handler) http.Handler {
+// withCORS implements the console CORS allowlist (§2.0.2). The previous
+// behavior reflected any request Origin back into Access-Control-Allow-Origin,
+// which — once previews move to their own origin — would hand every site (and
+// the previewed app) cross-origin access to the console API. The allowlist
+// holds exactly the configured console origin (MULTIGENT_CONSOLE_ORIGIN); the
+// preview origin is deliberately NOT included: preview has no legitimate need
+// to call console control-plane APIs. Non-allowlisted (or absent-console-
+// config) browser Origins get no CORS headers, keeping the browser's
+// same-origin default denial.
+func (s *Server) withCORS(next http.Handler) http.Handler {
+	allowedOrigin := s.consoleOrigin
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if origin != "" {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
-		} else {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-		}
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		if reqHeaders := r.Header.Get("Access-Control-Request-Headers"); reqHeaders != "" {
-			w.Header().Set("Access-Control-Allow-Headers", reqHeaders)
-		} else {
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept")
-		}
-		if r.Method == http.MethodOptions {
+		if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
+			// Preflight: only the allowlisted origin receives CORS headers.
+			if allowedOrigin != "" && r.Header.Get("Origin") == allowedOrigin {
+				w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+				w.Header().Set("Vary", "Origin")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept")
+				w.Header().Set("Access-Control-Max-Age", "600")
+			}
 			w.WriteHeader(http.StatusNoContent)
 			return
+		}
+		if allowedOrigin != "" && r.Header.Get("Origin") == allowedOrigin {
+			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+			w.Header().Set("Vary", "Origin")
 		}
 		next.ServeHTTP(w, r)
 	})

@@ -306,6 +306,10 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
     { silentStatuses: silentNotFound },
   )
   const preview = previewState.status === 'ok' ? previewState.data : null
+  // §2.0: when the share URL is still console-relative the deployment has no
+  // preview origin configured — the origin gate would 404 any open, so the UI
+  // says so instead of pretending the preview works.
+  const isPreviewOriginConfigured = Boolean(preview?.url && !preview.url.startsWith('/'))
   const usersState = useApiJson<SafeUser[]>('/api/v1/users', 0)
   const membersState = useApiJson<ProjectMember[]>(`/api/v1/projects/${encodeURIComponent(task.project)}/agents`, 0)
   const actorLabels = useMemo(() => {
@@ -514,7 +518,7 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
               <div className="flex items-center">
                 {preview.status === 'running' ? (
                   <a
-                    href={preview.previewToken ? `${preview.url}?pvt=${encodeURIComponent(preview.previewToken)}` : preview.url}
+                    href={preview.url}
                     target="_blank"
                     rel="noreferrer"
                     className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-950/40 dark:text-emerald-300"
@@ -522,22 +526,39 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
                     <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />
                     {t('tasks.openPreview', { defaultValue: '打开实时预览 ↗' })}
                   </a>
+                ) : preview.url && !preview.url.startsWith('/') ? (
+                  <a
+                    href={`${preview.url}?pvt=${encodeURIComponent(preview.previewToken ?? '')}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-950/40 dark:text-emerald-300"
+                  >
+                    <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />
+                    {t('tasks.openPreview', { defaultValue: '打开实时预览 ↗' })}
+                  </a>
+                ) : preview.url.startsWith('/') && !isPreviewOriginConfigured ? (
+                  <span
+                    className="inline-flex max-w-[260px] items-center gap-1 rounded-md border border-amber-500/40 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700 dark:border-amber-500/30 dark:bg-amber-950/40 dark:text-amber-300"
+                    title={t('tasks.previewUnavailable', { defaultValue: 'Preview sharing is not configured on this deployment (set MULTIGENT_PREVIEW_ORIGIN).' })}
+                  >
+                    {t('tasks.previewUnavailable', { defaultValue: 'Preview sharing is not configured on this deployment (set MULTIGENT_PREVIEW_ORIGIN).' })}
+                  </span>
                 ) : (
                   <button
                     type="button"
                     onClick={async () => {
                       setPreviewStarting(true)
                       try {
-                        const inst = await apiPost<{ previewToken?: string }>(`/api/v1/projects/${encodeURIComponent(task.project)}/tasks/${encodeURIComponent(task.id)}/preview/start`, {})
-                        const tokenQS = inst?.previewToken ? `?pvt=${encodeURIComponent(inst.previewToken)}` : ''
-                        window.open(`/preview/${encodeURIComponent(task.id)}/${tokenQS}`, '_blank')
+                        const inst = await apiPost<{ previewToken?: string; url?: string }>(`/api/v1/projects/${encodeURIComponent(task.project)}/tasks/${encodeURIComponent(task.id)}/preview/start`, {})
+                        const target = inst?.url && !inst.url.startsWith('/') ? `${inst.url}?pvt=${encodeURIComponent(inst?.previewToken ?? '')}` : `/preview/${encodeURIComponent(task.id)}/?pvt=${encodeURIComponent(inst?.previewToken ?? '')}`
+                        window.open(target, '_blank')
                         setWorkflowVersion((v) => v + 1)
                       } finally {
                         setPreviewStarting(false)
                       }
                     }}
                     disabled={previewStarting}
-                    className="inline-flex items-center gap-1 rounded-md border border-sky-600/30 bg-sky-50 px-2 py-1 text-xs font-semibold text-sky-700 transition hover:bg-sky-100 dark:border-sky-500/30 dark:bg-sky-950/40 dark:text-sky-300"
+                    className="inline-flex items-center gap-1 rounded-md border border-sky-600/30 bg-sky-50 px-2 py-1 text-xs font-semibold text-sky-700 transition hover:bg-sky-100 dark:border-sky-600/30 dark:bg-sky-950/40 dark:text-sky-300"
                   >
                     <Globe className={cn('size-3.5', previewStarting && 'animate-spin')} />
                     {previewStarting ? t('tasks.startingPreview', { defaultValue: '启动中…' }) : t('tasks.startPreview', { defaultValue: '启动实时预览' })}

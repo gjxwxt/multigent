@@ -1321,6 +1321,7 @@
     "openPreview": "Open live preview ↗",
     "startingPreview": "Starting…",
     "startPreview": "Start live preview",
+    "previewUnavailable": "Preview sharing is not configured on this deployment (set MULTIGENT_PREVIEW_ORIGIN).",
     "resources": {
       "title": "Task resources",
       "loading": "Loading…",

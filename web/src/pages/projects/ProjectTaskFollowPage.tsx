@@ -465,7 +465,7 @@ export default function ProjectTaskFollowPage() {
             <div className="flex items-center">
               {preview.status === 'running' ? (
                 <a
-                  href={preview.previewToken ? `${preview.url}?pvt=${encodeURIComponent(preview.previewToken)}` : preview.url}
+                  href={preview.url}
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-50 px-2.5 py-1.5 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-950/40 dark:text-emerald-300"
@@ -473,15 +473,32 @@ export default function ProjectTaskFollowPage() {
                   <span className="size-2 animate-pulse rounded-full bg-emerald-500" />
                   打开实时预览 ↗
                 </a>
+              ) : preview.url && !preview.url.startsWith('/') ? (
+                <a
+                  href={`${preview.url}?pvt=${encodeURIComponent(preview.previewToken ?? '')}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-50 px-2.5 py-1.5 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-950/40 dark:text-emerald-300"
+                >
+                  <span className="size-2 animate-pulse rounded-full bg-emerald-500" />
+                  打开实时预览 ↗
+                </a>
+              ) : preview.url.startsWith('/') ? (
+                <span
+                  className="inline-flex max-w-[280px] items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-50 px-2.5 py-1.5 text-xs font-medium text-amber-700 dark:border-amber-500/30 dark:bg-amber-950/40 dark:text-amber-300"
+                  title="当前部署未配置预览 origin（需设置 MULTIGENT_PREVIEW_ORIGIN），分享预览不可用。"
+                >
+                  预览未配置：需设置 MULTIGENT_PREVIEW_ORIGIN
+                </span>
               ) : (
                 <button
                   type="button"
                   onClick={async () => {
                     setPreviewStarting(true)
                     try {
-                      const inst = await apiPost<{ previewToken?: string }>(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/preview/start`, {})
-                      const tokenQS = inst?.previewToken ? `?pvt=${encodeURIComponent(inst.previewToken)}` : ''
-                      window.open(`/preview/${encodeURIComponent(taskId)}/${tokenQS}`, '_blank')
+                      const inst = await apiPost<{ previewToken?: string; url?: string }>(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/preview/start`, {})
+                      const target = inst?.url && !inst.url.startsWith('/') ? `${inst.url}?pvt=${encodeURIComponent(inst?.previewToken ?? '')}` : `/preview/${encodeURIComponent(taskId)}/?pvt=${encodeURIComponent(inst?.previewToken ?? '')}`
+                      window.open(target, '_blank')
                     } finally {
                       setPreviewStarting(false)
                     }

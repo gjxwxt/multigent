@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	htmllib "html"
 	"io"
 	"net/http"
 	"net/http/httputil"
@@ -318,7 +317,7 @@ func (s *Server) handleGetTaskPreview(w http.ResponseWriter, r *http.Request) {
 			"project":      project,
 			"type":         string(projType),
 			"status":       "stopped",
-			"url":          fmt.Sprintf("/preview/%s/", taskID),
+			"url":          s.previewSurfaceURL(taskID),
 			"worktreeDir":  worktreeDir,
 			"previewToken": s.signPreviewToken(taskID, project),
 		})
@@ -330,6 +329,18 @@ func (s *Server) handleGetTaskPreview(w http.ResponseWriter, r *http.Request) {
 		*preview.PreviewInstance
 		PreviewToken string `json:"previewToken,omitempty"`
 	}{inst, s.signPreviewToken(taskID, inst.Project)})
+}
+
+// previewSurfaceURL returns the shareable preview URL for a task. When the
+// preview origin is configured (§2.0) it points at that origin so the share
+// link lands on the isolated surface; otherwise it is the legacy relative
+// path, which the origin gate now rejects — the UI communicates the
+// misconfiguration instead of silently serving a same-origin preview.
+func (s *Server) previewSurfaceURL(taskID string) string {
+	if s.previewOrigin != "" {
+		return s.previewOrigin + "/preview/" + taskID + "/"
+	}
+	return fmt.Sprintf("/preview/%s/", taskID)
 }
 
 func (s *Server) handlePostTaskPreviewStart(w http.ResponseWriter, r *http.Request) {
@@ -379,6 +390,10 @@ func (s *Server) handlePostTaskPreviewStart(w http.ResponseWriter, r *http.Reque
 		s.jsonError(w, http.StatusInternalServerError, fmt.Sprintf("start preview failed: %v", err))
 		return
 	}
+	// The share URL must land on the isolated preview origin (§2.0). The
+	// engine only knows the relative path; rewrite it here where the
+	// deployment config lives.
+	inst.URL = s.previewSurfaceURL(taskID)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
@@ -401,9 +416,13 @@ func (s *Server) handlePostTaskPreviewFeedback(w http.ResponseWriter, r *http.Re
 			project = inst.Project
 		}
 	}
-	if !s.previewRequestAuthorized(w, r, project, taskID) {
+	// Task 1.1: write surface — Bearer-only principal, operator + approver
+	// gates; share tokens are view-only and get 403 here.
+	authReq, principal, ok := s.previewWritePrincipal(w, r, project, taskID)
+	if !ok {
 		return
 	}
+	r = authReq
 	if s.previewInstanceReadOnly(taskID) {
 		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "completed-task snapshot is read-only; create a follow-up task to modify it")
 		return
@@ -438,10 +457,9 @@ func (s *Server) handlePostTaskPreviewFeedback(w http.ResponseWriter, r *http.Re
 		feedback,
 	)
 
-	author := "user"
-	if cur := s.currentUser(r); cur != nil && strings.TrimSpace(cur.Username) != "" {
-		author = cur.Username
-	}
+	// Comment authorship carries the authenticated principal — no fallback
+	// literal (Task 1.1 principal-threading requirement).
+	author := principal.Username
 
 	// Append feedback to task comments
 	_ = s.ts.AddComment(project, agentName, &entity.TaskComment{
@@ -474,9 +492,13 @@ func (s *Server) handlePostTaskPreviewChat(w http.ResponseWriter, r *http.Reques
 			project = inst.Project
 		}
 	}
-	if !s.previewRequestAuthorized(w, r, project, taskID) {
+	// Task 1.1: write surface — Bearer-only principal, operator + approver
+	// gates; share tokens are view-only and get 403 here.
+	authReq, principal, ok := s.previewWritePrincipal(w, r, project, taskID)
+	if !ok {
 		return
 	}
+	r = authReq
 	if !s.allowPreviewChat(taskID) {
 		s.jsonErrorCode(w, http.StatusTooManyRequests, ErrCodeConflict, "preview chat rate limit exceeded; retry shortly")
 		return
@@ -546,11 +568,9 @@ func (s *Server) handlePostTaskPreviewChat(w http.ResponseWriter, r *http.Reques
 	s.previewSessions[taskID] = session
 	s.previewMu.Unlock()
 
-	// 2. Record user comment
-	author := "user"
-	if cur := s.currentUser(r); cur != nil && strings.TrimSpace(cur.Username) != "" {
-		author = cur.Username
-	}
+	// 2. Record user comment — author is the authenticated principal returned
+	// by previewWritePrincipal (no "user" fallback, Task 1.1).
+	author := principal.Username
 	_ = s.ts.AddComment(project, agentName, &entity.TaskComment{
 		ID:        entity.NewCommentID(),
 		TaskID:    taskID,
@@ -690,7 +710,11 @@ func (s *Server) handlePostTaskPreviewChat(w http.ResponseWriter, r *http.Reques
 
 func (s *Server) handleGetTaskPreviewLive(w http.ResponseWriter, r *http.Request) {
 	taskID := strings.TrimSpace(r.PathValue("taskId"))
-	if !s.previewRequestAuthorized(w, r, r.PathValue("name"), taskID) {
+	// Task 1.1: live SSE forwards raw agent session output (paths, commands,
+	// potential credential echoes) — share tokens are excluded, real users
+	// only. The principal is still bound for downstream audit.
+	_, _, ok := s.previewWritePrincipal(w, r, r.PathValue("name"), taskID)
+	if !ok {
 		return
 	}
 	s.previewMu.Lock()
@@ -747,7 +771,9 @@ func (s *Server) handleGetTaskPreviewLive(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handlePostTaskPreviewStop(w http.ResponseWriter, r *http.Request) {
 	taskID := strings.TrimSpace(r.PathValue("taskId"))
-	if !s.previewRequestAuthorized(w, r, r.PathValue("name"), taskID) {
+	// Task 1.1: stop kills a running Copilot session — a real principal with
+	// operator rights only; share tokens are view-only (403 here).
+	if _, _, ok := s.previewWritePrincipal(w, r, r.PathValue("name"), taskID); !ok {
 		return
 	}
 	s.previewMu.Lock()
@@ -771,7 +797,10 @@ func (s *Server) handlePostTaskPreviewStop(w http.ResponseWriter, r *http.Reques
 
 func (s *Server) handleGetTaskPreviewStatus(w http.ResponseWriter, r *http.Request) {
 	taskID := strings.TrimSpace(r.PathValue("taskId"))
-	if !s.previewRequestAuthorized(w, r, r.PathValue("name"), taskID) {
+	// Task 1.1: status stays login-required (any authenticated user, not
+	// operator-gated) until its response body is audited for agent-output
+	// leakage (round 7 matrix); share tokens get 401.
+	if _, _, ok := s.previewLoginPrincipal(w, r, taskID); !ok {
 		return
 	}
 	s.previewMu.Lock()
@@ -826,6 +855,9 @@ func (s *Server) handleTaskPreviewProxy(w http.ResponseWriter, r *http.Request) 
 		s.jsonErrorCode(w, http.StatusUnauthorized, ErrCodeUnauthorized, "preview token required")
 		return
 	}
+	// pvt-carrying GETs were already exchanged to the HttpOnly cookie by the
+	// origin-routing wrapper before reaching this handler (§2.0.3) — no
+	// document request ever renders with the token in location.search.
 
 	targetURL, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", inst.Port))
 	if err != nil {
@@ -865,20 +897,7 @@ func (s *Server) handleTaskPreviewProxy(w http.ResponseWriter, r *http.Request) 
 		}
 		_ = resp.Body.Close()
 
-		html := rewriteHTML(string(bodyBytes), taskID, inst.Project, previewToken)
-
-		// Persist the validated token as a path-scoped cookie so subsequent
-		// sub-resource requests (which never propagate ?pvt=) still
-		// authenticate, while remaining invisible to other origins.
-		previewCookie := &http.Cookie{
-			Name:     "mg_pvt_" + taskID,
-			Value:    previewToken,
-			Path:     fmt.Sprintf("/preview/%s/", taskID),
-			MaxAge:   int(previewTokenTTL.Seconds()),
-			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
-		}
-		resp.Header.Add("Set-Cookie", previewCookie.String())
+		html := rewriteHTML(string(bodyBytes), taskID, inst.Project)
 
 		newBodyBytes := []byte(html)
 		if isGzip {
@@ -900,18 +919,19 @@ func (s *Server) handleTaskPreviewProxy(w http.ResponseWriter, r *http.Request) 
 
 var htmlAttrRe = regexp.MustCompile(`(?i)\b(href|src|action)\s*=\s*(["'])/([^"']*)(["'])`)
 
-func rewriteHTML(html, taskID, projectName, previewToken string) string {
+func rewriteHTML(html, taskID, projectName string) string {
 	previewPrefix := fmt.Sprintf("/preview/%s/", taskID)
 
-	// Interceptor script to handle dynamic fetches, XMLHttpRequest, WebSocket, and SPA History Navigation
+	// Interceptor script to handle dynamic fetches, XMLHttpRequest, WebSocket,
+	// and SPA History Navigation. §2.0.4: no credential is ever injected into
+	// the shared preview document — no __MG_PREVIEW_TOKEN__, no Copilot
+	// widget. The previewed app has zero ties to console identity.
 	patchScript := fmt.Sprintf(`<base href=%q><script>
 (function(){
   var prefix = %q;
   window.__MG_PREVIEW_TASK_ID__ = %q;
   window.__MG_PREVIEW_PROJECT__ = %q;
-  window.__MG_PREVIEW_TOKEN__ = %q;
   window.__MG_PREVIEW_BASE__ = prefix.replace(/\/$/, '');
-  var controlPrefix = '/api/v1/projects/' + encodeURIComponent(%q) + '/tasks/' + encodeURIComponent(%q) + '/preview/';
   try {
     sessionStorage.setItem('__mg_preview_task_id', %q);
     sessionStorage.setItem('__mg_preview_project', %q);
@@ -996,7 +1016,7 @@ func rewriteHTML(html, taskID, projectName, previewToken string) string {
     window.WebSocket.prototype = origWS.prototype;
   }
 })();
-</script>`, previewPrefix, previewPrefix, taskID, projectName, previewToken, projectName, taskID, taskID, projectName)
+</script>`, previewPrefix, previewPrefix, taskID, projectName, taskID, projectName)
 
 	// Rewrite static HTML attributes: href="/...", src="/...", action="/..."
 	html = htmlAttrRe.ReplaceAllStringFunc(html, func(match string) string {
@@ -1021,16 +1041,9 @@ func rewriteHTML(html, taskID, projectName, previewToken string) string {
 		html = patchScript + html
 	}
 
-	widgetTag := fmt.Sprintf(
-		`<script src="/_multigent_preview/feedback.js" data-task-id="%s" data-project="%s"></script>`,
-		htmllib.EscapeString(taskID), htmllib.EscapeString(projectName),
-	)
-
-	if strings.Contains(html, "</body>") {
-		html = strings.Replace(html, "</body>", widgetTag+"</body>", 1)
-	} else {
-		html += widgetTag
-	}
+	// §2.0.4: the Copilot widget is never injected into shared preview
+	// documents — its UI lives in the authenticated console parent surface,
+	// and control endpoints no longer accept preview tokens (Task 1.1).
 
 	return html
 }

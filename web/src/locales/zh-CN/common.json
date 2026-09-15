@@ -1321,6 +1321,7 @@
     "openPreview": "打开实时预览 ↗",
     "startingPreview": "启动中…",
     "startPreview": "启动实时预览",
+    "previewUnavailable": "当前部署未配置预览 origin（需设置 MULTIGENT_PREVIEW_ORIGIN），分享预览不可用。",
     "resources": {
       "title": "任务资源",
       "loading": "加载中…",

@@ -93,13 +93,18 @@ func TestResolveTaskWorktreeDir(t *testing.T) {
 	}
 }
 
+// §2.0.4: the injected interceptor keeps rewriting app subresource URLs under
+// the /preview/ prefix, but carries no credentials and no Copilot plumbing.
 func TestRewriteHTMLKeepsControlPlanePreviewAPIOutsideProjectPrefix(t *testing.T) {
-	html := rewriteHTML(`<html><head></head><body><script>fetch('/api/v1/projects/testproj/tasks/t-123/preview/chat')</script><script>fetch('/api/data')</script></body></html>`, "t-123", "testproj", "tok-abc")
+	html := rewriteHTML(`<html><head></head><body><script>fetch('/api/v1/projects/testproj/tasks/t-123/preview/chat')</script><script>fetch('/api/data')</script></body></html>`, "t-123", "testproj")
 	if !strings.Contains(html, "window.__MG_PREVIEW_BASE__") {
 		t.Fatal("expected preview base marker in injected script")
 	}
-	if !strings.Contains(html, "var controlPrefix = '/api/v1/projects/'") {
-		t.Fatal("expected control-plane URL guard in injected script")
+	if strings.Contains(html, "__MG_PREVIEW_TOKEN__") {
+		t.Fatal("preview documents must not carry the share token (origin isolation)")
+	}
+	if strings.Contains(html, "feedback.js") {
+		t.Fatal("preview documents must not inject the Copilot widget (origin isolation)")
 	}
 	if strings.Contains(html, "prefix + u.slice(1)") == false {
 		t.Fatal("expected project URL rewriting to remain enabled")
