@@ -224,6 +224,16 @@ func (s *Store) MarkVerificationFailed(id string, verification map[string]string
 	})
 }
 
+// AbortApply unwinds an apply that failed before touching the worktree
+// (environment errors, moved baseline): back to awaiting_approval with the
+// abort reason recorded, so a stranded `applying` row can never block the
+// task's single-active-proposal slot forever.
+func (s *Store) AbortApply(id string, detail map[string]string) (*Proposal, error) {
+	return s.transition(id, StateApplying, StateAwaitingApproval, func(p *Proposal) {
+		p.Verification = detail
+	})
+}
+
 // Reject terminates a proposal without applying.
 func (s *Store) Reject(id, actor string) (*Proposal, error) {
 	return s.transition(id, StateAwaitingApproval, StateRejected, func(p *Proposal) {
