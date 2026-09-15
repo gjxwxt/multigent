@@ -1,7 +1,7 @@
-# 后续批次执行方案（Batch 1-4 评审与落地细化，v5）
+# 后续批次执行方案（Batch 1-4 评审与落地细化，v6）
 
 > 日期：2026-09-15。输入：GPT 四批执行计划 + 仓库既有设计文档 + GPT 六/七/八/
-> 九四轮评审修正。
+> 九/十五轮评审修正。
 > 本方案对计划逐批评审（含与代码现状的核对结论），并给出可直接开工的落地设计。
 > 对应关系：Task 1.2 ← `intranet-runtime-plan.md` 收尾清单；Task 2.1 ←
 > `acceptance-test-design-plan.md`；Task 2.2 ← `test-data-fixture-sandbox-plan.md`
@@ -10,18 +10,19 @@
 > 3.1（Change Run）与 3.2（Skill Profiles）在 docs/ 下**没有已提交的设计文档**
 >（"质量方案 Phase 2/3"出处缺失），§6/§7 是补充设计，评审通过后应回填正式文档。
 >
-> **九轮状态**：Batch 1（独立 preview origin）与 Batch 2（lease/generator
-> 契约）**批准开工**；Batch 3 **未通过**——v4 的 shadow worktree 仍是 linked
-> worktree，与主仓库共享 Git common dir，Agent 可经
-> `git rev-parse --git-common-dir`、`update-ref`、Git config 或 worktree 管理
-> 命令影响主仓库引用与元数据，并非真隔离。v5 按 §4.1 重写为"独立 `.git` 的
-> 临时 clone"执行环境 + 私有 ref 保活 + postimage 回滚校验，待复审。
+> **十轮状态**：Batch 1（独立 preview origin）与 Batch 2（lease/generator
+> 契约）**批准开工**；Batch 3 **未放行**——v5 的"独立 `.git` clone"仍缺两道
+> 隔离闸门（十轮 P0×2）+ 锁语义与验证顺序两处矛盾（P1×2）。v6 按 §4.1 补齐：
+> clone 净化（`--no-local`/删 remote/拒 alternates/清 env/净化 diff 提取）、
+> Apply 复用 gitworktree **跨进程项目 Git 锁**（现 `acquireProjectLock`
+> 未导出，需公开）+ proposal 状态 revision-CAS、验证顺序唯一化、V1 明确拒绝
+> dirty、proposal 记录限额与脱敏。待复审。
 >
-> **八轮定案（仍然有效）**：Batch 1 采用独立 preview origin——sandbox iframe
-> 只是短期降级保护，不列入完成定义；preview origin 来自显式部署配置，不由
-> Host 推导；CORS allowlist（反射任意 Origin 已坐实于 server.go:930-933）；
-> "pvt + Bearer 过渡期双主体"废除，写端点 Bearer-only；URL token 兑换
-> HttpOnly cookie。Batch 2 契约全部确认。
+> **九轮定案（仍然有效）**：Batch 1 采用独立 preview origin（sandbox iframe
+> 仅降级开关）；preview origin 来自显式部署配置；CORS allowlist **默认不含
+> preview origin**；写端点 Bearer-only；URL token 兑换 HttpOnly cookie（含
+> no-store/no-referrer/日志脱敏/SameSite 复核）。九轮同时确认 live 要求登录
+> 主体、dirty baseline 需受控快照。
 
 ---
 
@@ -305,41 +306,52 @@ Proposed → AwaitingApproval → Applying(验证) → Applied
                     └→ Rejected
 ```
 
-- **提议持久化**：kv_records（`preview_change_proposals`，key
-  [project, taskID, proposalID]）：actor（显式 principal，同 Task 1.1）、
-  原始请求、补丁、Diff、状态、验证结果、时间戳。**同一任务同时至多一个活跃
-  proposal**（V1 不做并行）。
-- **隔离产出 = 独立 `.git` 的临时 clone，不是 linked worktree**（九轮推翻
-  v4 的 shadow worktree 形态）：`git worktree add` 创建的 linked worktree 与
-  主项目**共享 Git common dir**——Proposal Agent 若能在其中执行任意命令，即可
-  经 `git rev-parse --git-common-dir`、`git update-ref`、Git config 或 worktree
-  管理命令影响**主仓库的引用与元数据**，并没有被限制在 shadow diff 内。
-  v5 契约：
-  1. 平台**可以**在主仓库侧用 linked worktree/临时 ref 等 Git 操作**准备基线**
-     （这些操作由平台代码执行，不经 Agent）；
-  2. 用**私有临时 ref**（如 `refs/multigent/proposals/<proposalID>/baseline`）
-     固定 baseline commit——同时解决保活问题：临时 commit 在 clone 完成前
-     **必须由私有 ref 保活，不能裸挂等 GC**（九轮修正：无 ref 的 commit 在
-     `git gc` 后可能消失，clone 中途失败不可重现）；
-  3. 从该 ref 创建**独立 `.git` 的临时 clone**：无 remote 凭据、无父仓库
-     bind mount、无 Docker socket、无宿主 secrets 挂载；
-  4. **Agent 只拿到该 clone**（工作目录即执行环境边界）；
-  5. 平台从 clone 提取 `git diff` patch，随后**删除私有 ref 与 clone**（清理
-     幂等，失败可重试）；
-  6. 验收测试：在 clone 内以 Agent 视角执行
-     `rev-parse --git-common-dir`/`update-ref`/`config` 写操作/`worktree list`
-     等，断言主仓库引用、config、worktree 元数据**零变化**。
-- **proposal 基线 = 主 worktree 的真实状态，dirty 必须显式建模**（七轮提出、
-  八轮修正 Git 语义）：clone 只含 `baseCommit`，看不到主 worktree 的未提交
-  变更——而 Copilot 要改的往往正是这些状态。契约按序：
-  1. **主 worktree 必须 clean**（`git status --porcelain` 为空）才接受
-     proposal；不 clean 时向用户明确报"请先提交或暂存当前变更"，不静默继续。
-     **这是 V1 的默认与推荐形态**（与第 5 点的 index 语义收敛一致）；
-  2. dirty 模式（V1 若支持，必须先单独立项设计）用户显式选择"以当前未提交
-     状态为基线"时：临时快照**不得触碰真实 index**——`git add -A` 会直接改写
-     真实 index（v3 草案的语义错误），且 `write-tree` 产出的是 tree 不是
-     commit，`git worktree add` 无法稳定使用。正确实现用**临时
-     `GIT_INDEX_FILE`**：
+- **提议持久化（含限额与脱敏，十轮补充）**：kv_records（
+  `preview_change_proposals`，key [project, taskID, proposalID]）：actor
+  （显式 principal，同 Task 1.1）、原始请求、补丁、Diff、状态、验证结果、
+  时间戳。**同一任务同时至多一个活跃 proposal**（V1 不做并行）。**记录内容
+  约束**：
+  - 原始请求/patch/diff 各设大小上限（建议请求 16KB、patch/diff 256KB，超限
+    截断并标记 truncated，完整内容不落 kv_records）；
+  - **敏感信息脱敏后才入库**：用户粘贴的内容可能含 token/凭据/内网地址——
+    入库前跑与 git 输出 redact 同级的扫描（key=value 模式、常见 token 前缀、
+    `Authorization`/`Bearer` 头），命中即打码；kv_records 是持久层，不能把
+    凭据原样永久写入；
+  - 状态字段迁移走 revision-CAS（见 Apply 锁语义）。
+- **隔离产出 = 净化后的独立 clone，不是普通 `git clone`**（九轮推翻 linked
+  worktree；十轮补两道真实隔离闸门）：`git worktree add` 的 linked worktree
+  共享 common dir（九轮）；而**普通本地 `git clone` 也不安全**（十轮实测）——
+  它硬链接源仓库对象并保留指向源仓库的 `origin`，Agent 在 clone 内
+  `git push origin ...` 就能在源仓库创建 ref；"无 remote 凭据"不等于
+  "无可写 remote"。v6 净化契约：
+  1. **clone 方式**：`git clone --no-local <src> <dst>`（禁用硬链接/对象共享；
+     备选 bundle 导出再解包），clone 参数里拒绝任何 alternates 引用
+     （`--shared`/objects/info/alternates 出现即拒）；
+  2. **交给 Agent 前删除全部 remote**（`git remote remove` 逐个删，断言
+     `git remote` 为空——从根上消除 push 到源仓库的通道）；
+  3. **运行环境净化**：Agent 执行环境的 env 清空 `GIT_DIR`、`GIT_COMMON_DIR`、
+     `GIT_INDEX_FILE`、`GIT_OBJECT_DIRECTORY`、`GIT_ALTERNATE_OBJECT_DIRECTORIES`
+     等 Git 指针变量（防经环境变量重定向到父仓库）；
+  4. **平台从不可信 clone 提取 diff 必须净化 Git 配置**：Agent 可写 clone 的
+     `.git/config`，配置里的 `diff.external`/`textconv` 驱动会在宿主执行
+     **任意程序**。平台提取 diff 时使用 `git -c core.fsmonitor= -c core.hooksPath=/dev/null
+     diff --no-ext-diff --no-textconv ...`（禁外部 diff 驱动与 textconv、禁
+     hooks；且 `HOME`/`GIT_CONFIG_*` 指向空配置目录），绝不用裸 `git diff`；
+  5. 私有临时 ref 保活 baseline（同 v5）；Agent 只拿 clone；平台提取 patch 后
+     删除 ref 与 clone（幂等）；
+  6. 验收测试新增：clone 内 `git remote` 为空且 `git push` 无处可去；源仓库
+     对象无硬链接共享（对 clone 内新建对象 `stat` nlink 校验或用
+     `--no-local` 后对象计数差断言）；clone config 被写入恶意
+     `diff.external` 后，平台提取 diff 不执行外部程序（用探针脚本断言未触发）。
+- **proposal 基线：V1 只接受 clean 主 worktree**（七轮提出 dirty 建模；十轮
+  定案拒绝 dirty，见"验证顺序唯一化"一节）：clone 只含 `baseCommit`，看不到
+  主 worktree 的未提交变更。**V1 契约：`git status --porcelain` 非空 → 明确
+  报"请先提交或暂存当前变更"，不静默继续，只测试拒绝路径**。以下
+  alternate-index 协议**仅作为未来 dirty 模式的独立设计评审输入**（V1 不实施、
+  不测试）：
+  1. 临时快照**不得触碰真实 index**——`git add -A` 会直接改写真实 index
+     （v3 草案的语义错误），且 `write-tree` 产出的是 tree 不是 commit，
+     `git worktree add` 无法稳定使用。正确实现用**临时 `GIT_INDEX_FILE`**：
      a. 以 alternate index 执行 `GIT_INDEX_FILE=<tmp> git read-tree <base>`；
      b. `GIT_INDEX_FILE=<tmp> git add -A`（只写 alternate index，真实 index
         不动）；
@@ -352,35 +364,54 @@ Proposed → AwaitingApproval → Applying(验证) → Applied
         patch 基线、preimage 校验、Diff 展示全部以 `baselineCommit` 为准；
      g. proposal 终态后删除私有 ref 与 clone（对象由 gc 自然回收）；全程真实
         HEAD、分支、index 零移动（测试断言）。
-- **Apply 机制**：确认后申请写锁（`isTaskAtHumanReviewStep`
-  fail-closed + `previewSessions` 互斥）→ 校验 **preimage hash**（patch 基于
-  `baselineCommit` 的文件内容哈希 == 主 worktree 当前内容哈希；不一致 = 已漂移，
-  拒绝并要求重新生成）→ 在**主 worktree** 应用 patch（clean 形态下
-  `git apply`；dirty 形态见第 5 点）→ 按 runtime.json 契约跑 lint/build
-  （超时封顶）。
-- **验证语义与回滚 = 不触碰 index 的受控协议，不是"快照回退"一词**（七轮
-  提出、八轮修正 index 语义、九轮补 postimage 校验）：
-  - **验证不改主 worktree 源码**：验证命令若可能写源码（lint --fix 一类），
-    一律先在**隔离 clone** 内对 patch 验证；主 worktree 只在 clone 验证通过
-    后才 apply——主 worktree 的 apply 路径本身不产生"验证失败要回滚源码"
-    的情形；
-  - **V1 收敛：只接受 clean 主 worktree**（第 1 点）。clean 形态下
-    `git apply` 不经 index、回滚 `git apply -R` 对称还原工作区文件，再按
-    worktree 既有快照约定做完整性核验（**快照失败必须阻断**——沿用
-    gitworktree 防丢未推送工作的约定），无 index 不一致问题；
-  - **回滚前校验 postimage**（九轮修正）：`git apply -R` 假设文件仍处于
-    apply 后状态——若人工/其他流程在 apply 与回滚之间改过文件，反向 patch
-    会把**别人的修改一起覆盖**。回滚前逐 touched path 校验当前内容仍等于
-    **postimage**（apply 时记录的文件哈希）；不等于 → 该路径拒绝自动回滚，
-    proposal 标记"需人工介入"，不静默覆盖；
-  - dirty 形态（若支持）**不能**用"`git apply --index` 失败再
-    `git apply -R`"——失败瞬间 index 与工作区可能已部分更新，逆向既不还原
-    index 也不原子。必须单独设计不触碰真实 index 的 apply/reverse 协议：
-    对每个 touched path 逐文件应用（工作区 + 独立临时 index 同步更新）、
-    校验 preimage/postimage/stage 状态三者一致后提交该文件，任一文件失败即
-    对已应用文件逐一逆向（同样先过 postimage 校验）——该协议先评审再实施；
+- **Apply 锁语义 = gitworktree 跨进程项目 Git 锁 + proposal revision-CAS**
+  （十轮推翻 v5 的锁设计）：v5 写的"申请写锁（isTaskAtHumanReviewStep +
+  previewSessions 互斥）"不成立——`isTaskAtHumanReviewStep` 只是一次只读查询
+  （preview_handlers.go:1072），`previewSessions` 只是单进程、按 task 的聊天
+  会话 map（preview_handlers.go:517），两者都不能与既有审核链路的
+  `git add/commit/push`（workflow_handlers.go:899，受 `acquireProjectLock`
+  保护）串行。v6 契约：
+  1. **复用 gitworktree 的跨进程项目锁**：公开 `acquireProjectLock`
+     （worktree.go:88 现为小写未导出，改为导出的 `AcquireProjectLock` 或提供
+     包装方法），覆盖 Change Run 的**全部** Git 触及区间——临时 ref 创建、
+     preimage 检查、apply、postimage 记录、回滚、与审核提交（审核链路已在锁内，
+     两者天然互斥串行）；
+  2. **proposal 状态迁移 revision-CAS**：`AwaitingApproval → Applying` 用
+     kv_records 的 payload+revision CAS（transition-claim 同款原语）——防双击
+     与跨控制台并发确认；CAS 失败即"已被其他操作者接管"；
+  3. **拿锁后复核**：进入锁内第一步重查 human-review 状态与 proposal 当前态
+     （CAS 只保证状态机独占，不替代锁内业务复核）；不满足即释放锁并返回冲突。
+  4. 验收测试：并发两个 Apply 请求（跨 goroutine 模拟跨控制台）恰一个成功；
+     Apply 与审核 approve 并发时严格串行（锁序无死锁）；双击确认只产生一次
+     状态迁移。
+- **验证顺序唯一化（十轮 P1）**：v4 曾一处写"主 worktree apply 后跑
+  lint/build"、另一处要求写源码的验证先在 clone——自相矛盾。V1 定为**唯一
+  顺序**：
+  ```text
+  clone 内 apply → clone 内全部验证（lint/build/测试，含可写源码的）
+    → 拿项目锁 + 状态复核（CAS+锁内）
+    → 主 worktree apply（纯 apply，无任何验证步骤）
+    → 记录 postimage → 完成
+  ```
+  主工作区**只允许纯 apply**——任何失败都发生在主工作区之外，永远不落入
+  主工作区回滚路径；主工作区的 `git apply -R` 仅用于人工触发的撤销（见下）。
+- **回滚 = 受控逆向 + postimage 校验**（七轮提出、八轮 index 语义、九轮
+  postimage、十轮维持）：
+  - **回滚前校验 postimage**：`git apply -R` 假设文件仍处于 apply 后状态——
+    若人工/其他流程在 apply 与回滚之间改过文件，反向 patch 会把**别人的修改
+    一起覆盖**。回滚前逐 touched path 校验当前内容仍等于 **postimage**
+    （apply 时在锁内记录的文件哈希）；不等于 → 该路径拒绝自动回滚，proposal
+    标记"需人工介入"，不静默覆盖；
+  - clean 形态下 `git apply` 不经 index、`git apply -R` 对称还原工作区文件，
+    回滚后按 worktree 既有快照约定做完整性核验（**快照失败必须阻断**）；
   - 禁止 `git checkout -- .` / `git reset --hard` 一类无差别回退（会吞掉
     用户与 Agent 的并行未提交工作）；回滚动作与结果记入 proposal 记录。
+- **V1 明确拒绝 dirty baseline（十轮 P1 二选一）**：v4/v5 同时写"只接受
+  clean"与"dirty 用 alternate-index 建基线"，两头都要。V1 定案：**只接受
+  clean 主 worktree**（`git status --porcelain` 非空 → 明确报"请先提交或
+  暂存当前变更"，不静默继续）；**只测试拒绝路径**；alternate-index +
+  `commit-tree` 的 dirty 基线协议（前述 a-e 步骤保留在文档中作为未来设计
+  输入）留到独立设计评审后再启用。
 - **收编触发点与人工审核显式对齐**（六轮修正）：Apply 成功**不做**泛化
   `git add -A` 自动 checkpoint/push。改动以未提交工作区状态存在，收编
   （checkpoint commit / 收入审核提交）只发生在既有的人工审核 approve 链路
@@ -399,13 +430,15 @@ Proposed → AwaitingApproval → Applying(验证) → Applied
 - **UI**：预览抽屉展示隔离 clone 产出的 Diff + 确认/拒绝；流式进度复用现有
   previewSessions SSE 通道。
 - **测试**：黑名单各形态（新增/删除/重命名/symlink/二进制/路径穿越规范化）、
-  **隔离边界**（Agent 视角在 clone 内执行 update-ref/config 写/worktree 管理，
-  断言主仓库引用与元数据零变化）、**dirty-worktree 两条路径**（clean 强制；
-  显式 baseline 时断言真实 HEAD/分支/index 零移动、私有 ref 保活生效、终态后
-  ref/clone 清理幂等）、preimage 漂移拒绝、无锁 Apply 拒绝、**clone 先行验证**
-  （可写源码的验证命令不触碰主 worktree）、**回滚 postimage 校验**（apply 后
-  文件被人工改动 → 拒绝自动回滚并标记人工介入，不静默覆盖）、clean 回滚 =
-  `git apply -R` 对称还原且不吞并行未提交工作、proposal 串行化、1.1 权限矩阵
+  **clone 净化**（`git remote` 为空且 push 无处可去、无 alternates/硬链接
+  共享、恶意 `diff.external` 下平台提取 diff 不执行外部程序、env Git 指针
+  变量清空）、**隔离边界**（Agent 视角在 clone 内执行 update-ref/worktree
+  管理，断言主仓库引用与元数据零变化）、**dirty 拒绝**（porcelain 非空 →
+  明确报错、零写入）、**锁与状态机**（并发两 Apply 恰一成功、Apply 与审核
+  approve 严格串行、双击只迁移一次、锁内复核失败即释放）、preimage 漂移拒绝、
+  **clone 先行验证**（可写源码的验证命令不触碰主 worktree，主工作区只有纯
+  apply）、**回滚 postimage 校验**（apply 后文件被人工改动 → 拒绝自动回滚
+  并标记人工介入）、proposal 记录脱敏与限额、proposal 串行化、1.1 权限矩阵
   在入口同样生效、apply 后收编仍只由审核链路触发。
 
 ### 4.2 Task 3.2 Skill Profiles 受控挂载（约 1.5 天）
@@ -443,9 +476,9 @@ Proposed → AwaitingApproval → Applying(验证) → Applied
 
 | 批次 | 内容 | 修正后工期 | 前置 |
 | --- | --- | --- | --- |
-| 1 | **1.0 独立 preview origin**（CORS allowlist 默认不含 preview origin + cookie 兑换含 no-store/no-referrer/日志脱敏 + SameSite 复核）+ 1.1 控制面封门 + 1.2 运行时收尾 | 3 天 | **九轮批准开工** |
-| 2 | 2.1 验收测试 Agent + 2.2 数据沙盒 | 5-6 天 | **九轮批准，与 Batch 1 并行开工** |
-| 3 | 3.1 Change Run + 3.2 Skill Profiles | 4-5 天 | **九轮未通过，待复审**：§4.1 已改写为独立 clone Agent 执行环境 + 私有 ref 保活 + postimage 回滚校验，复审通过后开工 |
+| 1 | **1.0 独立 preview origin**（CORS allowlist 默认不含 preview origin + cookie 兑换含 no-store/no-referrer/日志脱敏/SameSite 复核）+ 1.1 控制面封门 + 1.2 运行时收尾 | 3 天 | **十轮维持批准开工** |
+| 2 | 2.1 验收测试 Agent + 2.2 数据沙盒 | 5-6 天 | **十轮维持批准，与 Batch 1 并行开工** |
+| 3 | 3.1 Change Run + 3.2 Skill Profiles | 4-5 天 | **十轮未放行，待复审**：§4.1 已按两项 P0（clone 净化、跨进程锁 + CAS）与三项 P1（验证顺序唯一化、V1 拒绝 dirty、记录脱敏限额）改写完毕，复审通过后开工 |
 | 4 | 双人终验 / Brownfield / 自愈 | 验收类，穿插 | 对应批次完成 |
 
 在途：竞态面整改 **GPT 五轮复审已通过**（范围：workflow claim → guarded
