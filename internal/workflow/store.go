@@ -2813,6 +2813,15 @@ func normalizeWorkflowOutputValues(step entity.WorkflowStep, values map[string]s
 			}
 		}
 	}
+	// Batch B-a: qa_rework_items is platform-derived (the review handler
+	// aggregates the failed matrix items before persisting), so a qa_signoff
+	// step whose definition predates the field must still accept it — same
+	// compatibility reasoning as the design-gate audit outputs above.
+	if stepID := strings.ToLower(strings.TrimSpace(step.ID)); stepID == "qa_signoff" || strings.Contains(stepID, "qa_signoff") {
+		if _, ok := allowed["qa_rework_items"]; !ok {
+			allowed["qa_rework_items"] = entity.WorkflowField{Name: "qa_rework_items", Optional: true}
+		}
+	}
 	if len(out) == 0 && !failed {
 		return nil, fmt.Errorf("workflow step %q requires structured outputs: %s", step.Title, strings.Join(workflowFieldNames(step.OutputFields), ", "))
 	}

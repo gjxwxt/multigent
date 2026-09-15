@@ -187,10 +187,11 @@ func TestGreenfieldE2EWithAcceptanceTestDesign(t *testing.T) {
 	}
 	// 10. qa_signoff requests rework — implementation must receive BOTH the
 	// failed-item context and the original spec reference.
-	if _, err := store.CompleteAndAdvance(project, taskID, "rework", "", map[string]string{
+	signoffOutputs := map[string]string{
 		"decision": "request_changes",
 		"comments": "AUTH-001 failed: expired token must yield 401",
-	}, "completed"); err != nil {
+	}
+	if _, err := store.CompleteAndAdvance(project, taskID, "rework", "", signoffOutputs, "completed"); err != nil {
 		t.Fatalf("qa signoff rework: %v", err)
 	}
 	inst = gfStepInstance(t, store, taskID, "implementation")
@@ -206,4 +207,5 @@ func TestGreenfieldE2EWithAcceptanceTestDesign(t *testing.T) {
 	if !strings.Contains(inst.InputValues["review_comments"], "AUTH-001 failed") {
 		t.Fatalf("reworked implementation lost the failed-item context: %q", inst.InputValues["review_comments"])
 	}
+	_ = signoffOutputs
 }

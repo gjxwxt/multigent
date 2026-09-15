@@ -979,6 +979,23 @@ func isRejectionDecision(decision string) bool {
 	}
 }
 
+// qaTestSpecManifestForRun fetches the acceptance_test_design manifest from
+// the run's step instances (Batch B-a rework-traceability context). Empty
+// when the run has no manifest — the rework list still stands on its own.
+func qaTestSpecManifestForRun(run entity.WorkflowRun, wfStore *workflowstore.Store) string {
+	if wfStore == nil {
+		return ""
+	}
+	instances, err := wfStore.ListStepInstances(run.ID)
+	if err != nil {
+		return ""
+	}
+	if inst, ok := workflowStepInstanceByStepID(instances, "acceptance_test_design"); ok {
+		return strings.TrimSpace(inst.OutputValues["test_spec_manifest"])
+	}
+	return ""
+}
+
 func enrichQARejectionComments(outputs map[string]string, currentStep entity.WorkflowStep, run entity.WorkflowRun, wfStore *workflowstore.Store) {
 	matrixRaw := strings.TrimSpace(outputs["risk_coverage_matrix"])
 	if matrixRaw == "" {
@@ -1011,6 +1028,20 @@ func enrichQARejectionComments(outputs map[string]string, currentStep entity.Wor
 	}
 
 	var failedLines []string
+	// Batch B-a: the same failed/blocked/unexecuted items also aggregate into
+	// a structured JSON artifact (qa_rework_items) so the reworked
+	// implementation receives machine-readable fix targets, not only the
+	// human-readable comment block below.
+	type qaReworkItem struct {
+		ItemID             string `json:"item_id"`
+		RiskLevel          string `json:"risk_level"`
+		Status             string `json:"status"`
+		AcceptanceCriteria string `json:"acceptance_criteria,omitempty"`
+		Evidence           string `json:"evidence,omitempty"`
+		UncoveredReason    string `json:"uncovered_reason,omitempty"`
+		ExpectedResult     string `json:"expected_result,omitempty"`
+	}
+	reworkItems := make([]qaReworkItem, 0)
 	for _, item := range items {
 		st := strings.ToLower(strings.TrimSpace(item.Status))
 		if st != "passed" && st != "covered" && st != "ok" && st != "waived" {
@@ -1023,6 +1054,37 @@ func enrichQARejectionComments(outputs map[string]string, currentStep entity.Wor
 				line += fmt.Sprintf(" | 证据: %s", item.Evidence)
 			}
 			failedLines = append(failedLines, line)
+			reworkItems = append(reworkItems, qaReworkItem{
+				ItemID:             item.ItemID,
+				RiskLevel:          strings.ToLower(strings.TrimSpace(item.RiskLevel)),
+				Status:             st,
+				AcceptanceCriteria: item.AcceptanceCriteria,
+				Evidence:           item.Evidence,
+				UncoveredReason:    item.UncoveredReason,
+			})
+		}
+	}
+	if len(reworkItems) > 0 {
+		// Enrich with the acceptance baseline: the test spec manifest maps
+		// case_id → expected_result, giving the developer the observable
+		// outcome each failed item was supposed to produce.
+		if manifest := qaTestSpecManifestForRun(run, wfStore); manifest != "" {
+			var cases []struct {
+				CaseID         string `json:"case_id"`
+				ExpectedResult string `json:"expected_result"`
+			}
+			if err := json.Unmarshal([]byte(manifest), &cases); err == nil {
+				byID := make(map[string]string, len(cases))
+				for _, c := range cases {
+					byID[c.CaseID] = strings.TrimSpace(c.ExpectedResult)
+				}
+				for i := range reworkItems {
+					reworkItems[i].ExpectedResult = byID[reworkItems[i].ItemID]
+				}
+			}
+		}
+		if raw, err := json.Marshal(reworkItems); err == nil {
+			outputs["qa_rework_items"] = string(raw)
 		}
 	}
 

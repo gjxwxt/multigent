@@ -125,6 +125,13 @@ func TestGreenfieldQAConsumesSpec(t *testing.T) {
 				t.Fatal("code_review -> qa must forward the developer evidence mapping")
 			}
 		}
+		// Batch B-a: the QA rework edge must carry the platform-aggregated
+		// structured rework list into implementation.
+		if e.ID == "e-qa-rework" {
+			if e.InputMapping["qa_rework_items"] != "$output.qa_rework_items" {
+				t.Fatal("qa_signoff rework must forward qa_rework_items to implementation")
+			}
+		}
 	}
 	desc := qa.Description
 	if !strings.Contains(desc, "test_implementation_evidence") {
