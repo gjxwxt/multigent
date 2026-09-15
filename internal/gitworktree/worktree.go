@@ -86,6 +86,15 @@ func NewManager() *Manager {
 // instances and processes. The directory creation is atomic on the supported
 // filesystems; stale locks are recoverable after a crashed process.
 func acquireProjectLock(projectRoot string) (func(), error) {
+	return AcquireProjectLock(projectRoot)
+}
+
+// AcquireProjectLock is the exported cross-process project Git lock. Change
+// Run apply spans (and any other flow that touches the project's Git state)
+// must hold it for their entire git-touching window — the same lock the
+// worktree manager uses, so review commits, worktree setup, and controlled
+// applies serialize instead of interleaving.
+func AcquireProjectLock(projectRoot string) (func(), error) {
 	projectRoot = strings.TrimSpace(projectRoot)
 	if projectRoot == "" {
 		return nil, fmt.Errorf("project root is required")
