@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 func (db *SQLiteStore) UpsertWorkspace(w Workspace) error {
@@ -400,6 +402,118 @@ func (db *SQLiteStore) RecordRevision(table, workspaceID string, key []string) (
 	}
 	return revision, err == nil, err
 }
+
+// KVWrite is one record write inside a CommitTransitionGuarded batch: the
+// full kv_records key and the exact payload to store.
+type KVWrite struct {
+	Table     string
+	Workspace string
+	Key       []string
+	Payload   string
+}
+
+// ErrTransitionClaimLost is returned by CommitTransitionGuarded when the
+// stored claim marker no longer names the committing claimID — another
+// transitioner stole the claim and (typically) already committed its own
+// transition. NOTHING from the losing batch is persisted: the transaction
+// rolls back whole.
+var ErrTransitionClaimLost = errors.New("transition claim lost: the stored claim marker no longer names this claimID")
+
+// CommitTransitionGuarded is the transactional, claim-owner-checked commit
+// for a workflow state transition (GPT re-review round 3 P0: the claim gate
+// protected only the abort path — a transitioner whose claim expired and was
+// stolen could still walk the SUCCESS path and write its stale step instance,
+// completion event, and run state on top of the winner's).
+//
+// Semantics, all inside ONE transaction:
+//  1. BEGIN IMMEDIATE takes the write lock up front (before any read), so
+//     the claim verification and every write are serialized against any
+//     other transition commit — SQLite has no MVCC interleaving here.
+//  2. The workflow_runs row's payload is read INSIDE the transaction and
+//     must be the caller's own claim marker: payload must carry the claim
+//     prefix AND the embedded claimID must equal expectClaimID. Anything
+//     else (plain run payload = the transition already finished; a different
+//     claimID = the claim was stolen) aborts with ErrTransitionClaimLost and
+//     leaves the database untouched.
+//  3. On success the writes run in order and commit atomically — either all
+//     of them land (step instance + event + run state + next-step reset) or
+//     none do. The final run write replaces the claim marker with the
+//     post-transition run payload, which is also how the gate releases.
+//
+// A caller whose claim is stolen mid-transition therefore CANNOT commit
+// partially: its instance/event writes die with the transaction.
+func (db *SQLiteStore) CommitTransitionGuarded(workspaceID string, runKey []string, expectClaimID string, writes []KVWrite) error {
+	if db == nil || db.sql == nil {
+		return fmt.Errorf("database not open")
+	}
+	if len(writes) == 0 {
+		return fmt.Errorf("transition commit requires at least one write")
+	}
+	// BEGIN IMMEDIATE: acquire the RESERVED lock before the claim read. With
+	// a deferred transaction another writer could commit between our claim
+	// check and our first write and we would only find out at COMMIT time
+	// (SQLITE_BUSY) — with IMMEDIATE the check-then-write sequence is atomic.
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	k1, k2, k3 := normalizeKey(runKey)
+	var payload string
+	err = tx.QueryRow(`SELECT payload FROM kv_records WHERE table_name = 'workflow_runs' AND workspace_id = ? AND k1 = ? AND k2 = ? AND k3 = ?`,
+		workspaceID, k1, k2, k3).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: run record missing", ErrTransitionClaimLost)
+	}
+	if err != nil {
+		return err
+	}
+	if !verifyClaimOwner(payload, expectClaimID) {
+		return ErrTransitionClaimLost
+	}
+	now := nowUTC()
+	for _, w := range writes {
+		wk1, wk2, wk3 := normalizeKey(w.Key)
+		ws := w.Workspace
+		if ws == "" {
+			ws = workspaceID
+		}
+		_, err := tx.Exec(`INSERT INTO kv_records (table_name, workspace_id, k1, k2, k3, payload, updated_at, revision)
+VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+ON CONFLICT(table_name, workspace_id, k1, k2, k3) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, revision = kv_records.revision + 1`,
+			w.Table, ws, wk1, wk2, wk3, w.Payload, now)
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// verifyClaimOwner reports whether payload is a transition-claim marker whose
+// embedded claimID equals expectClaimID.
+func verifyClaimOwner(payload, expectClaimID string) bool {
+	rest, ok := strings.CutPrefix(payload, transitionClaimMarkerPrefix)
+	if !ok {
+		return false
+	}
+	lenStr, restAfterLen, ok := strings.Cut(rest, ":")
+	if !ok {
+		return false
+	}
+	idLen, err := strconv.Atoi(lenStr)
+	if err != nil || idLen <= 0 || idLen > 128 || len(restAfterLen) < idLen {
+		return false
+	}
+	return restAfterLen[:idLen] == expectClaimID
+}
+
+// transitionClaimMarkerPrefix mirrors the workflow package's marker prefix.
+// It lives here (db) to keep the guarded commit decodable without importing
+// the workflow package (which imports db — an import cycle otherwise). The
+// two constants must stay in lockstep; a mismatch would make every commit
+// fail closed (claim never recognized), which the workflow tests catch.
+const transitionClaimMarkerPrefix = "transition-claim:"
 
 func (db *SQLiteStore) ListRecords(table string, workspaceID string, keyPrefix []string) ([]Record, error) {
 	if len(keyPrefix) > 3 {

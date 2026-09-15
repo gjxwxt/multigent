@@ -2068,6 +2068,12 @@ func sameWorkflowIdentity(a, b string) bool {
 // downstream side effect (events, next-step dispatch, review_rounds).
 var ErrStaleWorkflowTransition = errors.New("workflow transition stale: the run has already advanced past this step")
 
+// errStaleWorkflowTransitionf renders an ErrStaleWorkflowTransition-wrapped
+// message (wrapped, not replaced — errors.Is matches through it).
+func errStaleWorkflowTransitionf(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrStaleWorkflowTransition, fmt.Sprintf(format, args...))
+}
+
 // transitionClaimPrefix marks a workflow_runs payload that is mid-transition:
 // "<prefix><claimID>:<claimedAt>: <run JSON>". The claim envelope carries an
 // ID generated at CAS-success time and its own claimedAt stamp (NOT the run's
@@ -2311,6 +2317,79 @@ func (s *Store) releaseWorkflowTransitionClaim(run *entity.WorkflowRun, claimID 
 	_, _ = s.db.UpdateRecordIfPayloadAndRevision("workflow_runs", s.workspaceID, key, string(raw), payload, revision)
 }
 
+// commitTransitionBatch is the SUCCESS-path commit for a claimed transition
+// (GPT re-review round 3 P0): the claim gate previously guarded only the
+// abort path, so a transitioner whose claim expired and was stolen could
+// still walk the success path and write its stale step instance, completion
+// event, and run state on top of the winner's — each write landing
+// individually with no ownership check.
+//
+// This wraps ALL of the transition's writes (completed step instance +
+// completion event + final run state + next-step reset) in one
+// CommitTransitionGuarded transaction: the claim marker is re-verified
+// INSIDE the transaction (BEGIN IMMEDIATE serializes against any other
+// commit) and either the whole batch lands or nothing does. A stale owner's
+// commit fails with ErrTransitionClaimLost → surfaced as
+// ErrStaleWorkflowTransition, its partial writes never persist.
+//
+// The final run write (with the claim prefix stripped by marshalling the
+// plain run entity) replaces the marker, releasing the gate.
+func (s *Store) commitTransitionBatch(run *entity.WorkflowRun, claimID string, current *entity.WorkflowStepInstance, event *entity.WorkflowStepEvent, nextInst *entity.WorkflowStepInstance) error {
+	if run == nil || strings.TrimSpace(claimID) == "" {
+		return fmt.Errorf("transition commit requires a run and a claimID")
+	}
+	runKey := []string{run.Project, run.TaskID, run.ID}
+	writes := make([]controldb.KVWrite, 0, 4)
+	if current != nil {
+		raw, err := json.Marshal(current)
+		if err != nil {
+			return err
+		}
+		writes = append(writes, controldb.KVWrite{
+			Table: "workflow_step_instances", Workspace: s.workspaceID,
+			Key: []string{current.RunID, current.StepID, current.ID}, Payload: string(raw),
+		})
+	}
+	if event != nil {
+		if strings.TrimSpace(event.ID) == "" {
+			event.ID = entity.NewWorkflowStepEventID()
+		}
+		if event.CreatedAt.IsZero() {
+			event.CreatedAt = time.Now().UTC()
+		}
+		raw, err := json.Marshal(event)
+		if err != nil {
+			return err
+		}
+		writes = append(writes, controldb.KVWrite{
+			Table: "workflow_step_events", Workspace: s.workspaceID,
+			Key: []string{event.RunID, event.ID}, Payload: string(raw),
+		})
+	}
+	// The run write is LAST in the batch and carries the plain (post-
+	// transition) run payload: on success it replaces the claim marker,
+	// releasing the gate for the next transition. Order matters only
+	// semantically — the transaction makes the batch atomic regardless.
+	runJSON, err := json.Marshal(*run)
+	if err != nil {
+		return err
+	}
+	writes = append(writes, controldb.KVWrite{
+		Table: "workflow_runs", Workspace: s.workspaceID, Key: runKey, Payload: string(runJSON),
+	})
+	if nextInst != nil {
+		raw, err := json.Marshal(nextInst)
+		if err != nil {
+			return err
+		}
+		writes = append(writes, controldb.KVWrite{
+			Table: "workflow_step_instances", Workspace: s.workspaceID,
+			Key: []string{nextInst.RunID, nextInst.StepID, nextInst.ID}, Payload: string(raw),
+		})
+	}
+	return s.db.CommitTransitionGuarded(s.workspaceID, runKey, claimID, writes)
+}
+
 func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outputValues map[string]string, status string) (TransitionResult, error) {
 	var result TransitionResult
 	run, ok, err := s.RunForTask(project, taskID)
@@ -2363,6 +2442,8 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 		// failures. Keep the active step and the workflow run addressable so a
 		// later manual start resumes this exact stage instead of skipping it.
 		now := time.Now().UTC()
+		var current *entity.WorkflowStepInstance
+		var event *entity.WorkflowStepEvent
 		for i := range instances {
 			if instances[i].StepID != run.ActiveStepID {
 				continue
@@ -2373,17 +2454,15 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 			instances[i].Status = "failed"
 			instances[i].FinishedAt = now
 			instances[i].UpdatedAt = now
-			if err := s.SaveStepInstance(&instances[i]); err != nil {
-				return result, err
-			}
-			_ = s.SaveStepEvent(&entity.WorkflowStepEvent{
+			current = &instances[i]
+			event = &entity.WorkflowStepEvent{
 				RunID: instances[i].RunID, StepID: instances[i].StepID, Status: "failed",
 				ActorType: instances[i].ActorType, ActorID: instances[i].ActorID,
 				Summary: instances[i].Summary, StartedAt: instances[i].StartedAt,
 				FinishedAt: now, InputArtifact: instances[i].InputArtifact,
 				OutputArtifact: instances[i].OutputArtifact, InputValues: instances[i].InputValues,
 				OutputValues: instances[i].OutputValues, CreatedAt: now,
-			})
+			}
 			result.Current = instances[i]
 			result.Next = &currentStep
 			result.NextInst = &instances[i]
@@ -2391,7 +2470,13 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 		}
 		run.Status = "failed"
 		run.UpdatedAt = now
-		if err := s.SaveRun(&run); err != nil {
+		// Guarded success-path commit (GPT round 3): the claim owner is
+		// re-verified inside the transaction; a stolen claim rejects the
+		// whole batch (instance + event + run) atomically.
+		if err := s.commitTransitionBatch(&run, claimID, current, event, nil); err != nil {
+			if errors.Is(err, controldb.ErrTransitionClaimLost) {
+				return result, errStaleWorkflowTransitionf("run %s step %s (claim lost before commit)", run.ID, run.ActiveStepID)
+			}
 			return result, err
 		}
 		result.Run = run
@@ -2407,6 +2492,8 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 	// before routing so a failed completion with empty outputs is not
 	// rejected by the route partition.
 	if strings.TrimSpace(status) == "failed" {
+		var current *entity.WorkflowStepInstance
+		var event *entity.WorkflowStepEvent
 		for i := range instances {
 			if instances[i].StepID != run.ActiveStepID {
 				continue
@@ -2417,10 +2504,8 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 			instances[i].Status = "failed"
 			instances[i].FinishedAt = now
 			instances[i].UpdatedAt = now
-			if err := s.SaveStepInstance(&instances[i]); err != nil {
-				return result, err
-			}
-			_ = s.SaveStepEvent(&entity.WorkflowStepEvent{
+			current = &instances[i]
+			event = &entity.WorkflowStepEvent{
 				RunID:          instances[i].RunID,
 				StepID:         instances[i].StepID,
 				Status:         "failed",
@@ -2434,7 +2519,7 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 				InputValues:    instances[i].InputValues,
 				OutputValues:   instances[i].OutputValues,
 				CreatedAt:      now,
-			})
+			}
 			result.Current = instances[i]
 			break
 		}
@@ -2445,7 +2530,12 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 		run.CurrentAssigneeMembershipID = ""
 		run.UpdatedAt = now
 		run.FinishedAt = now
-		if err := s.SaveRun(&run); err != nil {
+		// Guarded success-path commit (GPT round 3): see the init-failure
+		// branch above.
+		if err := s.commitTransitionBatch(&run, claimID, current, event, nil); err != nil {
+			if errors.Is(err, controldb.ErrTransitionClaimLost) {
+				return result, errStaleWorkflowTransitionf("run %s step %s (claim lost before commit)", run.ID, run.ActiveStepID)
+			}
 			return result, err
 		}
 		result.Run = run
@@ -2468,6 +2558,8 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 		return result, fmt.Errorf("workflow step %q output did not match any outgoing route", currentStep.Title)
 	}
 	nextStep, nextFound := stepByID(def.Steps, edge.To)
+	var current *entity.WorkflowStepInstance
+	var event *entity.WorkflowStepEvent
 	for i := range instances {
 		if instances[i].StepID != run.ActiveStepID {
 			continue
@@ -2481,10 +2573,8 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 		}
 		instances[i].FinishedAt = now
 		instances[i].UpdatedAt = now
-		if err := s.SaveStepInstance(&instances[i]); err != nil {
-			return result, err
-		}
-		_ = s.SaveStepEvent(&entity.WorkflowStepEvent{
+		current = &instances[i]
+		event = &entity.WorkflowStepEvent{
 			RunID:          instances[i].RunID,
 			StepID:         instances[i].StepID,
 			Status:         instances[i].Status,
@@ -2498,7 +2588,7 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 			InputValues:    instances[i].InputValues,
 			OutputValues:   instances[i].OutputValues,
 			CreatedAt:      now,
-		})
+		}
 		result.Current = instances[i]
 		break
 	}
@@ -2510,7 +2600,13 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 		run.CurrentAssigneeMembershipID = ""
 		run.UpdatedAt = now
 		run.FinishedAt = now
-		if err := s.SaveRun(&run); err != nil {
+		// Guarded success-path commit (GPT round 3): the claim owner is
+		// re-verified inside the transaction; a stolen claim rejects the
+		// whole batch (instance + event + run) atomically.
+		if err := s.commitTransitionBatch(&run, claimID, current, event, nil); err != nil {
+			if errors.Is(err, controldb.ErrTransitionClaimLost) {
+				return result, errStaleWorkflowTransitionf("run %s step %s (claim lost before commit)", run.ID, currentStep.ID)
+			}
 			return result, err
 		}
 		result.Run = run
@@ -2531,9 +2627,7 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 	run.Status = "active"
 	s.annotateRunCurrentAssignee(&run, nextStep)
 	run.UpdatedAt = now
-	if err := s.SaveRun(&run); err != nil {
-		return result, err
-	}
+	var nextInst *entity.WorkflowStepInstance
 	for i := range instances {
 		if instances[i].StepID != nextStep.ID {
 			continue
@@ -2551,11 +2645,20 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 			instances[i].ActorType = binding.Type
 			instances[i].ActorID = binding.ID
 		}
-		if err := s.SaveStepInstance(&instances[i]); err != nil {
-			return result, err
-		}
+		nextInst = &instances[i]
 		result.NextInst = &instances[i]
 		break
+	}
+	// Guarded success-path commit (GPT round 3): current instance + completion
+	// event + advanced run + next-step reset, all inside one transaction whose
+	// claim-owner check runs under BEGIN IMMEDIATE. A transitioner whose claim
+	// was stolen while it prepared this batch gets ErrTransitionClaimLost →
+	// ErrStaleWorkflowTransition and NOTHING of its batch persists.
+	if err := s.commitTransitionBatch(&run, claimID, current, event, nextInst); err != nil {
+		if errors.Is(err, controldb.ErrTransitionClaimLost) {
+			return result, errStaleWorkflowTransitionf("run %s step %s (claim lost before commit)", run.ID, currentStep.ID)
+		}
+		return result, err
 	}
 	result.Run = run
 	result.Next = &nextStep

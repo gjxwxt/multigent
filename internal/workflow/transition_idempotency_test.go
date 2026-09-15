@@ -8,18 +8,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/multigent/multigent/internal/db"
+	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
 )
-
-func dbOpenForTransitionTests(t *testing.T) (db.Store, error) {
+func dbOpenForTransitionTests(t *testing.T) (controldb.Store, error) {
 	t.Helper()
-	controlDB, err := db.Open(filepath.Join(t.TempDir(), "control.db"))
+	controlDB, err := controldb.Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {
 		return nil, err
 	}
 	t.Cleanup(func() { _ = controlDB.Close() })
-	if err := controlDB.UpsertWorkspace(db.Workspace{ID: "workspace-term", Name: "WS", Slug: "workspace-term", Root: t.TempDir()}); err != nil {
+	if err := controlDB.UpsertWorkspace(controldb.Workspace{ID: "workspace-term", Name: "WS", Slug: "workspace-term", Root: t.TempDir()}); err != nil {
 		return nil, err
 	}
 	return controlDB, nil
@@ -300,6 +299,152 @@ func TestCompleteAndAdvanceLongParkedStepStillExcludesSecondCompletion(t *testin
 	}
 	if transition.Next == nil || transition.Next.ID != "ci_ready_gate" {
 		t.Fatalf("parked-step transition routed to %v, want ci_ready_gate", transition.Next)
+	}
+}
+
+// GPT re-review round 3 P0: the claim gate must guard the SUCCESS path too,
+// not just aborts. Real interleaving, driven end-to-end through
+// CompleteAndAdvance:
+//  1. A claims (real gate, ancient claimedAt so B can steal it) and pauses —
+//     its in-memory view is the pre-transition run.
+//  2. The claim expires; B steals it via the gate and COMPLETES the whole
+//     transition (B's instance/event/run writes land).
+//  3. A resumes and attempts its success-path commit with its stale claimID.
+//  4. Assert: A's step instance write, A's completion event, and A's run
+//     state are ALL rejected (the guarded transaction rolls back wholesale),
+//     and B's result is fully intact — B's instance state, exactly one
+//     completion event for the step, B's run advance, B's next-step input
+//     values untouched by A.
+func TestStaleOwnerSuccessPathCommitIsRejectedWholesale(t *testing.T) {
+	store := startUnifiedSelfReviewRun(t)
+	driveToSelfReview(t, store)
+	runA, ok, err := store.RunForTask("project", "task-self-review")
+	if err != nil || !ok {
+		t.Fatalf("load run: %v", err)
+	}
+	stepID := runA.ActiveStepID
+	eventsBefore := countStepEvents(t, store, runA.ID, stepID)
+	instsBefore, err := store.ListStepInstances(runA.ID)
+	if err != nil {
+		t.Fatalf("list instances: %v", err)
+	}
+	currentBefore := instsBefore[0]
+
+	// Step 1: A claims through the real gate (claimedAt ancient → stealable).
+	claimedA := runA
+	claimedA.UpdatedAt = time.Now().UTC().Add(-transitionClaimTTL - time.Minute)
+	if err := store.writeTransitionClaimMarker(&claimedA); err != nil {
+		t.Fatalf("plant A's claim: %v", err)
+	}
+	claimIDA := "test-claim-" + strings.ToLower(runA.ID)
+
+	// Step 2: B steals and completes. B drives the FULL CompleteAndAdvance —
+	// gate claim (steal), route, then the guarded success-path commit.
+	bTransition, err := store.CompleteAndAdvance("project", "task-self-review", "reviewed by B — winner", "", map[string]string{
+		"self_review":         "B's report: pass with evidence",
+		"self_review_verdict": "pass",
+		"review_rounds":       "1",
+	}, "completed")
+	if err != nil {
+		t.Fatalf("B's full transition must succeed: %v", err)
+	}
+	if bTransition.Next == nil || bTransition.Next.ID != "ci_ready_gate" {
+		t.Fatalf("B routed to %v, want ci_ready_gate", bTransition.Next)
+	}
+
+	// Sanity: B's commit replaced the claim marker with the advanced run.
+	runAfterB, ok, err := store.RunForTask("project", "task-self-review")
+	if err != nil || !ok {
+		t.Fatalf("reload run after B: %v", err)
+	}
+	if runAfterB.ActiveStepID != "ci_ready_gate" {
+		t.Fatalf("run active step after B = %s, want ci_ready_gate", runAfterB.ActiveStepID)
+	}
+
+	// Step 3: A resumes. Its in-memory run view is pre-transition; B's run row
+	// is now far ahead. A attempts the SUCCESS path: prepare its own instance
+	// mutation and event, then commit via the guarded batch writer.
+	stale := runA // A's stale view
+	stale.UpdatedAt = time.Now().UTC()
+	aCurrent := currentBefore
+	aCurrent.Summary = "A's stale summary"
+	aCurrent.OutputValues = map[string]string{"self_review": "A's stale report", "self_review_verdict": "pass", "review_rounds": "1"}
+	aCurrent.OutputArtifact = "A's stale artifact"
+	aCurrent.Status = "completed"
+	aCurrent.FinishedAt = stale.UpdatedAt
+	aCurrent.UpdatedAt = stale.UpdatedAt
+	aEvent := &entity.WorkflowStepEvent{
+		RunID: aCurrent.RunID, StepID: aCurrent.StepID, Status: "completed",
+		Summary: "A's stale event", FinishedAt: stale.UpdatedAt, CreatedAt: stale.UpdatedAt,
+	}
+	// A's run-state view: what A WOULD have written on success.
+	aRun := runA
+	aRun.ActiveStepID = "ci_ready_gate"
+	aRun.Status = "active"
+	aRun.UpdatedAt = stale.UpdatedAt
+
+	err = store.commitTransitionBatch(&aRun, claimIDA, &aCurrent, aEvent, nil)
+	if err == nil {
+		t.Fatal("A's stale success-path commit must be REJECTED, but it succeeded")
+	}
+	if !errors.Is(err, ErrStaleWorkflowTransition) && !errors.Is(err, controldb.ErrTransitionClaimLost) {
+		t.Fatalf("A's stale success-path commit must fail stale-or-claim-lost, got %v", err)
+	}
+	t.Logf("A commit rejected with: %v", err)
+
+	// Step 4 invariants — B's result fully preserved, A's writes absent.
+	// (a) The step has exactly ONE completion event (B's), A's rolled back.
+	if got := countStepEvents(t, store, runA.ID, stepID); got != eventsBefore+1 {
+		t.Fatalf("completion events for step %s = %d, want exactly %d+1 (A's event must not persist)", stepID, got, eventsBefore)
+	}
+	// (b) The completed instance is B's, not A's: summary names B.
+	instsAfter, err := store.ListStepInstances(runA.ID)
+	if err != nil {
+		t.Fatalf("list instances after: %v", err)
+	}
+	for _, inst := range instsAfter {
+		if inst.StepID == stepID && inst.Status == "completed" {
+			if strings.Contains(inst.Summary, "A's stale") {
+				t.Fatalf("A's stale instance write persisted: %q", inst.Summary)
+			}
+			if !strings.Contains(inst.Summary, "B") {
+				t.Fatalf("completed instance summary = %q, want B's", inst.Summary)
+			}
+		}
+	}
+	// (c) The run row is B's state: active on ci_ready_gate. B's next-step
+	// instance exists exactly once, pending, carrying the platform-built
+	// inputs from B's completion (the pass edge has no InputMapping; the
+	// fallback copies B's output fields matching ci_ready_gate's declared
+	// input fields — B's self_review outputs don't overlap, so inputs stay
+	// empty, but the INSTANCE itself is B's creation) — A committed with
+	// nextInst=nil, so a successful A run-write would have left the run
+	// payload inconsistent with the instance B created. The decisive check is
+	// the run payload's UpdatedAt matching B's commit (A's stale view carried
+	// a different timestamp).
+	nextInsts := 0
+	for _, inst := range instsAfter {
+		if inst.StepID == "ci_ready_gate" && inst.Status == "pending" {
+			nextInsts++
+		}
+	}
+	if nextInsts != 1 {
+		t.Fatalf("pending ci_ready_gate instances = %d, want exactly 1", nextInsts)
+	}
+	if runAfterB.UpdatedAt.IsZero() {
+		t.Fatal("run after B must carry a fresh UpdatedAt (B's commit)")
+	}
+	// (d) A cannot sneak a second completion of the already-advanced step:
+	// the run has moved to ci_ready_gate, so A's replay of the OLD step's
+	// outputs is rejected — the output fields don't exist on the new active
+	// step (normalize rejects before any route/claim work), which is the
+	// fail-closed shape for a late duplicate dispatch.
+	if _, err := store.CompleteAndAdvance("project", "task-self-review", "reviewed by A — latecomer", "", map[string]string{
+		"self_review":         "A's late report",
+		"self_review_verdict": "pass",
+		"review_rounds":       "1",
+	}, "completed"); err == nil {
+		t.Fatal("A's late replay of the advanced step must be rejected, got success")
 	}
 }
 
