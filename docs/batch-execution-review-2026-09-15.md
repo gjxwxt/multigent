@@ -1,8 +1,7 @@
-# 后续批次执行方案（Batch 1-4 评审与落地细化，v3）
+# 后续批次执行方案（Batch 1-4 评审与落地细化，v4 终稿）
 
-> 日期：2026-09-15。输入：GPT 四批执行计划 + 仓库既有设计文档 + GPT 对本方案
-> 的六、七两轮评审修正（v2 吸收六轮 9 项；v3 吸收七轮：同源窃取 P0、live
-> 升级、widget 迁移、dirty-worktree 与回滚语义）。
+> 日期：2026-09-15。输入：GPT 四批执行计划 + 仓库既有设计文档 + GPT 六/七/八
+> 三轮评审修正。
 > 本方案对计划逐批评审（含与代码现状的核对结论），并给出可直接开工的落地设计。
 > 对应关系：Task 1.2 ← `intranet-runtime-plan.md` 收尾清单；Task 2.1 ←
 > `acceptance-test-design-plan.md`；Task 2.2 ← `test-data-fixture-sandbox-plan.md`
@@ -11,14 +10,18 @@
 > 3.1（Change Run）与 3.2（Skill Profiles）在 docs/ 下**没有已提交的设计文档**
 >（"质量方案 Phase 2/3"出处缺失），§6/§7 是补充设计，评审通过后应回填正式文档。
 >
-> **v3 修订说明**：七轮指出 v2 仍漏一个**更上游的 P0**——预览应用与控制台共享
-> 同一 origin，控制台 Bearer token 存 `localStorage["multigent-token"]`
-> （web/src/lib/auth.tsx:3,69,139），被代理的项目应用（其代码可被 Agent 修改）
-> 的任何脚本都能读走真实用户 Bearer 直接调控制台 API——此时 preview 端点的
-> capability 校验被真实凭据绕过。v3 新增 §2.0 origin 隔离决策（Batch 1 的
-> 第一个任务，先于一切端点封门）；`preview/live` 升级为登录主体（SSE 原样转发
-> Agent 会话输出，无脱敏）；`previewWritePrincipal` 补 widget 迁移语义；Batch 3
-> 补 dirty-worktree 基线与原子回滚契约。
+> **八轮决策（本文为准）**：Batch 1 采用**独立 preview origin**——sandbox
+> iframe 只是短期降级保护，**不列入完成定义**；preview origin 来自显式部署
+> 配置，不由请求 Host 推导；控制面 CORS 从反射任意 Origin 改为 allowlist
+> （server.go:930-933 现状反射坐实）。**"pvt + Bearer 过渡期双主体"废除**——
+> 同源时被预览应用能窃取 Bearer，允许它通过 operator 校验等于把上游 P0 的
+> 结果合法化；迁移顺序：先 origin 隔离 + 移除注入 widget，再启用写端点
+> Bearer-only 授权；共享预览永远没有 Copilot widget。URL token 兑换为
+> preview-origin 的 HttpOnly cookie。Batch 2 契约全部确认，**可进入实施**；
+> Batch 3 修正 alternate-index 临时 commit 与 apply/index 回滚契约后开工。
+>
+> v3 修订背景：同源窃取 P0（token 在 localStorage、预览代理同 origin、widget
+> 注入凭据脚本）；live SSE 原样转发 Agent 输出；feedback.js 自动附 pvt。
 
 ---
 
@@ -70,33 +73,51 @@
 
 ## 2. Batch 1：安全止血（2.5-3 天；§2.0 是第一任务，先于端点封门）
 
-### 2.0 Task 1.0 预览 origin 隔离（P0，七轮新增；决定 §2.1 的落地形态）
+### 2.0 Task 1.0 预览 origin 隔离（P0，七轮提出、八轮定案：独立 origin 单选）
 
 **威胁**：被预览应用与控制台同 origin（`/preview/{task}/...` 反代），应用脚本
 可读 `localStorage["multigent-token"]` 拿到真实用户 Bearer，直接调控制台
 API——任何端点级校验都被真实凭据绕过。
 
-**决策（推荐顺序）**：
+**已定决策：独立 preview origin（唯一长期方案；sandbox iframe 只是短期降级
+保护，不列入完成定义）**：
 
-1. **独立 origin/subdomain（推荐目标态）**：Preview 以独立 origin 提供
-   （如 `preview.<console-host>` 或独立端口）；分享 token 仅在 preview origin
-   生效；控制台 cookie/localStorage 天然对 preview 文档不可见。落地：
-   preview 代理改写为按 Host/子域路由（部署面 + server 路由判断），分享链接
-   生成改为 preview origin 绝对 URL。控制台与 preview 的 API 仍同进程。
-2. **Copilot 控制 UI 迁出被预览文档**：chat/feedback/stop 的 UI 放在**认证后的
-   控制台父页面**（现有 AssistantWidget 组件体系），以 Bearer 经控制台自身
-   origin 调用；**不再向被预览应用的 document 注入 feedback.js 与
-   `__MG_PREVIEW_TOKEN__`**（删除 preview_handlers.go:844,1024-1032 注入点，
-   `/_multigent_preview/feedback.js` 退役）。
-3. **短期过渡（若独立 origin 暂不可行）**：预览 iframe 使用**不带
-   `allow-same-origin` 的 sandbox 属性**——应用文档落入 opaque origin，
-   读不到控制台 localStorage。**必须专项验证应用能力损失**（应用自身
-   localStorage/cookie/Service Worker 失效、同源 fetch 凭据语义变化），对
-   不兼容的应用在任务面板明示降级原因；验证结论记录在案后才可作为过渡态。
+1. **preview origin 来自显式部署配置**，不由请求 `Host` 推导（Host 可被伪造
+   /配错）。新增部署配置项（如 `MULTIGENT_PREVIEW_ORIGIN`），未配置时预览功能
+   fail-closed（任务面板明示"未配置预览 origin"），绝不静默退回同源代理。
+2. **控制面 CORS 从反射改为 allowlist**：现状 `withCORS` 把任意请求 Origin
+   原样反射进 `Access-Control-Allow-Origin`（server.go:930-933）——独立 origin
+   后这会把控制台 API 跨域开放给 preview origin 之外的所有站点。改为：
+   allowlist = {控制台 origin（部署配置）} ∪ {preview origin（部署配置）}；
+   非名单 Origin 一律不回 CORS 头（保持浏览器同源默认拒绝）。反射逻辑删除，
+   `Access-Control-Request-Headers` 同步收敛为固定集合。
+3. **URL token 兑换 HttpOnly cookie（八轮第 3 点）**：即使删除
+   `__MG_PREVIEW_TOKEN__`，分享 URL 的 `?pvt=` 仍可被项目脚本从
+   `location.search` 读走外传。兑换流程：
+   `GET <preview-origin>/preview/{task}/?pvt=<token>` → 服务端校验 token →
+   `Set-Cookie: mg_pvt_<task>=<token>; HttpOnly; Secure; SameSite=Lax;
+   Path=/preview/{task}/` → **302 到去掉 pvt 的干净 URL**。此后页面与 JS
+   可见 URL 均无 token；JS 永远读不到凭据（HttpOnly）。`feedback.js` 的
+   `?pvt=` 附加逻辑随 widget 退役一并删除。
+4. **Copilot 控制 UI 迁出被预览文档**：chat/feedback/stop/live 的 UI 放在
+   **认证后的控制台父页面**（AssistantWidget 体系，Bearer 经控制台 origin）；
+   删除 preview 代理对 `/_multigent_preview/feedback.js` 与
+   `__MG_PREVIEW_TOKEN__` 的注入（preview_handlers.go:844,1024-1032）。
+   **共享预览永远没有 Copilot widget**——不是过渡形态，是终态约束。
+5. **sandbox iframe 的定位**：仅当部署方**暂时**无法配置独立 origin（如内网
+   反代未就绪）时的显式降级开关（单独配置项、启动日志 WARN、任务面板明示
+   降级与能力损失）；不在完成定义内，不作为等价交付。
 
-**完成定义**：三选一落地 + 测试证明——preview 文档内执行脚本无法读到控制台
-token（E2E：向预览页注入探测脚本，断言 `localStorage.getItem('multigent-token')`
-不可达）；分享 token 仅绑定 preview 面。
+**完成定义**：
+
+- 预览仅从配置的 preview origin 可达；控制台 origin 下访问
+  `/preview/{task}/...` 返回 404/重定向到 preview origin；
+- 分享 token 仅在 preview origin 生效；URL 中不残留 token（兑换 + 302）；
+- 预览文档内执行脚本无法读取任何控制台凭据（E2E：注入探测脚本，断言
+  `localStorage.getItem('multigent-token')` 不可达、无 token 于
+  location/cookie 可读面）；
+- CORS allowlist 生效：名单外 Origin 的跨域预检被拒；
+- 共享预览文档中无注入脚本、无 Copilot UI。
 
 ### 2.1 Task 1.1 预览控制面权限封门（依赖 §2.0 的形态决策）
 
@@ -128,17 +149,11 @@ token（E2E：向预览页注入探测脚本，断言 `localStorage.getItem('mul
 func (s *Server) previewWritePrincipal(w http.ResponseWriter, r *http.Request, project, taskID string) (*http.Request, previewPrincipal, bool)
 ```
 
-- **"拒绝携带 preview token 的请求"须与 widget 迁移同步**（七轮修正）：现状
-  `feedback.js` 对 chat/live/status/stop 的 fetch **自动附带 pvt**（1245/
-  1300/1444 行），若直接"见 pvt 即 403"，现有**已登录用户**也会被拒。因此
-  本 helper 的拒绝语义必须分两种：
-  - 请求**仅凭** preview token 可认证（无 Bearer/会话）→ 403（分享面无写权）；
-  - 请求同时带 preview token **和**有效登录态（widget 迁移过渡期）→ 认登录态，
-    放行到 operator 校验。
-  配套迁移（§2.0 第 2 项落地后自然收敛）：共享预览不注入 Copilot widget；
-  认证控制台的控制面请求走**控制台自身 origin + Bearer**（AssistantWidget
-  体系），不再依赖注入的 feedback.js。迁移完成前的过渡期内，两种主体并存
-  以登录态优先；迁移完成（feedback.js 退役）后删除 pvt 旁路。
+- **Bearer-only，无过渡双主体**（八轮定案）：v3 的"pvt + Bearer 并存时按
+  登录态放行"废除——同源阶段被预览应用可窃取 Bearer，允许窃取者经 operator
+  校验等于把上游 P0 结果合法化。迁移顺序强制串行：**先** §2.0 origin 隔离 +
+  移除注入 widget，**后**写端点启用 Bearer-only；上线路径上不存在
+  "同源 + 可写"窗口。分享 token 对写端点一律 403（无例外分支）；
 - 自行认证后构造 `r = r.WithContext(ctx)` **返回给 handler**——授权判定、
   审计记录、评论作者全部使用返回的 principal（username），不再有 fallback；
 - principal 缺失（username 为空）→ fail-closed 拒绝。
@@ -160,14 +175,16 @@ func (s *Server) previewWritePrincipal(w http.ResponseWriter, r *http.Request, p
 
 - feedback/chat/stop/**live** × {匿名、仅分享 token、登录无 operator、登录
   operator 非审批人、审批人登录} 五态断言（401/403/200）；
-- **过渡期双主体**：带 pvt + 有效登录态的请求（现状 widget 形态）必须按登录态
-  放行到 operator 校验，不因 pvt 存在而 403；仅 pvt 无登录态 → 403；
+- **Bearer-only**：任何"pvt + Bearer"组合按 Bearer-only 规则判定——仅 pvt
+  永远 403，不存在放行分支；
 - 回归：带 preview token 的代理/静态资源仍 200；旧格式 token
   （无 Cap）读 200、写 403；409 执行锁与限流行为不变；
 - principal 贯穿：feedback/chat 的评论作者 = 登录名（不再出现 `"user"`）；
 - `preview/status` 审计结论记录在案（泄露 → 保持登录制；无泄露 → 可放宽，
   单独 commit 说明）；
-- **origin 隔离 E2E**（§2.0）：预览文档内探测脚本读不到控制台 token。
+- **origin 隔离 E2E**（§2.0）：兑换 302 后 URL 无 token、cookie HttpOnly、
+  预览文档内探测脚本读不到控制台 token、CORS 名单外 Origin 预检被拒、
+  控制台 origin 下 `/preview/` 不可达。
 
 ### 2.2 Task 1.2 内网运行时 P0 审计收尾（验证任务，非开发）
 
@@ -287,34 +304,51 @@ Proposed → AwaitingApproval → Applying(验证) → Applied
   创建 **shadow worktree**（`git worktree add` 临时分支），Copilot 在 shadow
   内产出改动；平台对 shadow 做 `git diff` 提取 patch。用户在预览抽屉看的是
   **shadow 的 Diff**，主 worktree 在批准前不被触碰。
-- **proposal 基线 = 主 worktree 的真实状态，dirty 必须显式建模**（七轮修正）：
-  shadow 以 `baseCommit` 创建时看不到主 worktree 的未提交变更——而 Copilot 要
-  改的往往正是这些状态。契约二选一，按序尝试：
+- **proposal 基线 = 主 worktree 的真实状态，dirty 必须显式建模**（七轮提出、
+  八轮修正 Git 语义）：shadow 以 `baseCommit` 创建时看不到主 worktree 的未提交
+  变更——而 Copilot 要改的往往正是这些状态。契约按序：
   1. **主 worktree 必须 clean**（`git status --porcelain` 为空）才接受
-     proposal；不 clean 时向用户明确报"请先提交或暂存当前变更"，不静默继续；
-  2. 用户显式选择"以当前未提交状态为基线"时：先创建**受控临时快照**
-     （`git add -A` + `git write-tree` 的**只写对象、不动 HEAD/分支/索引**的
-     临时树），把该树 SHA 记为 proposal 的 `baselineCommit`，shadow 从它创建；
-     patch 基线、preimage 校验、Diff 展示全部以 `baselineCommit` 为准。该快照
-     属 proposal 私有，随 proposal 生命周期回收，绝不移动主 worktree 的任何
-     Git 状态。
-- **Apply 机制（原子实现）**：确认后申请写锁（`isTaskAtHumanReviewStep`
+     proposal；不 clean 时向用户明确报"请先提交或暂存当前变更"，不静默继续。
+     **这是 V1 的默认与推荐形态**（与第 5 点的 index 语义收敛一致）；
+  2. dirty 模式（V1 若支持，必须先单独立项设计）用户显式选择"以当前未提交
+     状态为基线"时：临时快照**不得触碰真实 index**——`git add -A` 会直接改写
+     真实 index（v3 草案的语义错误），且 `write-tree` 产出的是 tree 不是
+     commit，`git worktree add` 无法稳定使用。正确实现用**临时
+     `GIT_INDEX_FILE`**：
+     a. 以 alternate index 执行 `GIT_INDEX_FILE=<tmp> git read-tree <base>`；
+     b. `GIT_INDEX_FILE=<tmp> git add -A`（只写 alternate index，真实 index
+        不动）；
+     c. `GIT_INDEX_FILE=<tmp> git write-tree` 得到 tree；
+     d. `git commit-tree <tree> -p <base> -m "baseline"` 创建**无 ref 的临时
+        commit**，记为 proposal 的 `baselineCommit`；
+     e. shadow worktree 从该 commit 创建；patch 基线、preimage 校验、Diff
+        展示全部以 `baselineCommit` 为准；该对象随 proposal 回收
+        （`git gc` 可达，无 ref 悬空即弃）；全程真实 HEAD、分支、index 零移动
+        （测试断言）。
+- **Apply 机制**：确认后申请写锁（`isTaskAtHumanReviewStep`
   fail-closed + `previewSessions` 互斥）→ 校验 **preimage hash**（patch 基于
   `baselineCommit` 的文件内容哈希 == 主 worktree 当前内容哈希；不一致 = 已漂移，
-  拒绝并要求重新生成）→ 在**主 worktree** `git apply --index` 应用 patch →
-  按 runtime.json 契约跑 lint/build（超时封顶）。
-- **验证语义与回滚 = 受控 preimage/patch 逆向，不是"快照回退"一词**（七轮
-  修正）：
+  拒绝并要求重新生成）→ 在**主 worktree** 应用 patch（clean 形态下
+  `git apply`；dirty 形态见第 5 点）→ 按 runtime.json 契约跑 lint/build
+  （超时封顶）。
+- **验证语义与回滚 = 不触碰 index 的受控协议，不是"快照回退"一词**（七轮
+  提出、八轮修正 index 语义）：
   - **验证不改主 worktree 源码**：验证命令若可能写源码（lint --fix 一类），
     一律先在 **shadow worktree** 内对 patch 验证；主 worktree 只在 shadow 验证
     通过后才 apply——主 worktree 的 apply 路径本身不产生"验证失败要回滚源码"
     的情形；
-  - 主 worktree apply 后的残余失败（构建环境差异等）：用 **`git apply -R` 对
-    原 patch 精确逆向**（preimage 已在 apply 前锁定），回滚后按 worktree 既有
-    快照约定做完整性核验（**快照失败必须阻断**——沿用 gitworktree 防丢未推送
-    工作的约定）；禁止 `git checkout -- .` / `git reset --hard` 一类无差别
-    回退（会吞掉用户与 Agent 的并行未提交工作）；
-  - 回滚动作与结果（成功/失败/核验输出）记入 proposal 记录。
+  - **V1 收敛：只接受 clean 主 worktree**（第 1 点）。clean 形态下
+    `git apply` 不经 index、回滚 `git apply -R` 对称还原工作区文件，再按
+    worktree 既有快照约定做完整性核验（**快照失败必须阻断**——沿用
+    gitworktree 防丢未推送工作的约定），无 index 不一致问题；
+  - dirty 形态（若支持）**不能**用"`git apply --index` 失败再
+    `git apply -R`"——失败瞬间 index 与工作区可能已部分更新，逆向既不还原
+    index 也不原子。必须单独设计不触碰真实 index 的 apply/reverse 协议：
+    对每个 touched path 逐文件应用（工作区 + 独立临时 index 同步更新）、
+    校验 preimage/postimage/stage 状态三者一致后提交该文件，任一文件失败即
+    对已应用文件逐一逆向并校验 stage 复原——该协议先评审再实施；
+  - 禁止 `git checkout -- .` / `git reset --hard` 一类无差别回退（会吞掉
+    用户与 Agent 的并行未提交工作）；回滚动作与结果记入 proposal 记录。
 - **收编触发点与人工审核显式对齐**（六轮修正）：Apply 成功**不做**泛化
   `git add -A` 自动 checkpoint/push。改动以未提交工作区状态存在，收编
   （checkpoint commit / 收入审核提交）只发生在既有的人工审核 approve 链路
@@ -333,11 +367,12 @@ Proposed → AwaitingApproval → Applying(验证) → Applied
 - **UI**：预览抽屉展示 shadow Diff + 确认/拒绝；流式进度复用现有
   previewSessions SSE 通道。
 - **测试**：黑名单各形态（新增/删除/重命名/symlink/二进制/路径穿越规范化）、
-  **dirty-worktree 两条路径**（clean 强制、显式 baselineCommit 快照——断言主
-  worktree HEAD/分支/索引零移动）、preimage 漂移拒绝、无锁 Apply 拒绝、
-  **shadow 先行验证**（可写源码的验证命令不触碰主 worktree）、回滚 =
-  `git apply -R` 精确逆向且不吞并行未提交工作、proposal 串行化、
-  1.1 权限矩阵在入口同样生效、apply 后收编仍只由审核链路触发。
+  **dirty-worktree 两条路径**（clean 强制；显式 baseline 时断言真实
+  HEAD/分支/**index** 零移动——alternate index 的 add/write-tree 全程）、
+  preimage 漂移拒绝、无锁 Apply 拒绝、**shadow 先行验证**（可写源码的验证
+  命令不触碰主 worktree）、clean 回滚 = `git apply -R` 对称还原且不吞并行
+  未提交工作、proposal 串行化、1.1 权限矩阵在入口同样生效、apply 后收编仍只
+  由审核链路触发。
 
 ### 4.2 Task 3.2 Skill Profiles 受控挂载（约 1.5 天）
 
@@ -374,9 +409,9 @@ Proposed → AwaitingApproval → Applying(验证) → Applied
 
 | 批次 | 内容 | 修正后工期 | 前置 |
 | --- | --- | --- | --- |
-| 1 | **1.0 origin 隔离** + 1.1 控制面封门 + 1.2 运行时收尾 | 2.5-3 天 | 1.0 形态决策（独立 origin vs sandbox iframe）确认后开工 |
-| 2 | 2.1 验收测试 Agent + 2.2 数据沙盒 | 5-6 天 | Batch 1；lease/generator 契约（§3.2 第 3/4/5/7 项）已按七轮确认 |
-| 3 | 3.1 Change Run + 3.2 Skill Profiles | 4-5 天 | Batch 1；dirty-worktree 与回滚语义（§4.1）确认 |
+| 1 | **1.0 独立 preview origin**（含 CORS allowlist + cookie 兑换）+ 1.1 控制面封门 + 1.2 运行时收尾 | 3 天 | **八轮已定案**：独立 origin 单选，可直接开工 |
+| 2 | 2.1 验收测试 Agent + 2.2 数据沙盒 | 5-6 天 | **八轮已确认，可进入实施**（与 Batch 1 并行开工） |
+| 3 | 3.1 Change Run + 3.2 Skill Profiles | 4-5 天 | **八轮未确认**：先修正 alternate-index 临时 commit 与 apply/index 回滚契约（§4.1 第 2/5 点已按八轮意见改写，待复审）再开工 |
 | 4 | 双人终验 / Brownfield / 自愈 | 验收类，穿插 | 对应批次完成 |
 
 在途：竞态面整改 **GPT 五轮复审已通过**（范围：workflow claim → guarded
@@ -394,7 +429,9 @@ commit 状态写入不重复；不等同于外部副作用 exactly-once——引
   `isTaskAtHumanReviewStep` fail-closed；任务派生基于不可变 baseCommit。
 - 项目提供的脚本/命令一律在无生产凭据、网络受限的沙箱容器内执行，禁止 Go
   主机进程直接 exec 项目契约给出的 argv。
-- **预览面与控制台凭据必须 origin 隔离**：被预览应用的文档不可见控制台
-  token 存储（localStorage/cookie）；预览面禁止注入携带凭据的脚本（widget
-  走认证后的控制台父页面）。
+- **预览面与控制台凭据必须 origin 隔离（八轮定案）**：preview origin 来自
+  显式部署配置（不由 Host 推导，未配置 fail-closed）；CORS 只允许部署配置
+  名单（禁止反射任意 Origin）；分享 token 经 URL 兑换为 preview-origin
+  HttpOnly cookie 后从 URL 移除；预览面永不注入携带凭据的脚本、永不提供
+  Copilot widget；写端点 Bearer-only，不存在 token+登录双主体过渡态。
 - 不 rebase、不 force push；work/、dist/ 产物不入库；正式文档不含部署细节。
