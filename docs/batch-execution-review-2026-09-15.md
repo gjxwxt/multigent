@@ -547,3 +547,19 @@ commit 状态写入不重复；不等同于外部副作用 exactly-once——引
   HttpOnly cookie 后从 URL 移除；预览面永不注入携带凭据的脚本、永不提供
   Copilot widget；写端点 Bearer-only，不存在 token+登录双主体过渡态。
 - 不 rebase、不 force push；work/、dist/ 产物不入库；正式文档不含部署细节。
+
+---
+
+## 执行进度（2026-09-15，commit 4daec299，Batch 3 第一层收口）
+
+审核提交路径（`commitAndPushReviewChanges`）已全部收编：跨进程项目 Git 锁
+（`AcquireProjectLock`，与 worktree manager 同锁）覆盖 status→add→commit→push
+全窗口；除 push 外全部 git 调用以新增导出的 `SanitizedGitEnv` 运行（GIT_* 重
+定向/HOME/XDG/凭证面剥除 + GIT_CONFIG_NOSYSTEM=1 强制），且全部调用前置
+`-c core.fsmonitor= -c core.hooksPath=` 配置中和——Agent 可写 config 不再可能
+在宿主执行任意程序。新增导出 `ProjectRootForWorktree`。测试：毒化 config 探
+针不执行且 commit 落库、外部持锁期间审核提交被排除、并发提交串行无丢失、
+SanitizedGitEnv 再注入拒绝。make test 全绿。
+
+Task 3.1 完整 Change Run（proposal 状态机 + 隔离 clone 接入 agent 面 +
+SanitizedDiffArgs diff 提取 + 黑名单 + 回滚校验）仍未开工，待复审放行。
