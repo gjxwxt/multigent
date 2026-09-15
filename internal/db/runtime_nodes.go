@@ -188,8 +188,8 @@ ON CONFLICT(id) DO UPDATE SET
 // rows bypass the unique index entirely (legacy rows, fork sessions, exec
 // prompts without a caller key) and behave exactly like UpsertRuntimeRun.
 // Active here includes 'preparing' (Q1): a concurrent enqueue of the same
-// intent must converge on the preparing row so it can never mint a second
-// run for the same step/task while the first one's stamp is still in flight.
+// intent is rejected at its own INSERT by the index — it can never reach a
+// second token stamp — and converges on the first run via the key lookup.
 func (db *SQLiteStore) UpsertRuntimeRunIdempotent(run RuntimeRun) (RuntimeRun, bool, error) {
 	if strings.TrimSpace(run.RunKey) == "" {
 		if err := db.UpsertRuntimeRun(run); err != nil {
@@ -198,8 +198,9 @@ func (db *SQLiteStore) UpsertRuntimeRunIdempotent(run RuntimeRun) (RuntimeRun, b
 		return run, true, nil
 	}
 	if err := db.UpsertRuntimeRun(run); err != nil {
-		// The unique index only fires on a duplicate ACTIVE (queued/running)
-		// row with the same (workspace_id, run_key) — surface the winner.
+		// The unique index fires on ANY duplicate active (preparing/queued/
+		// running) row with the same (workspace_id, run_key) — surface the
+		// winner.
 		if isUniqueConstraintErr(err) {
 			existing, found, getErr := db.ActiveRuntimeRunByKey(run.WorkspaceID, run.RunKey)
 			if getErr == nil && found {
@@ -326,6 +327,32 @@ func (db *SQLiteStore) OtherActiveRuntimeRunByKey(workspaceID, runKey, excludeRu
 		return RuntimeRun{}, false, err
 	}
 	return run, true, nil
+}
+
+// ListStuckPreparingRuns returns 'preparing' rows created before the cutoff —
+// candidates for the reaper's stuck-preparing rescue. The cutoff compares
+// created_at (the row's birth), not updated_at: a stuck row is one whose
+// enqueue process died before promote, and no legitimate path touches a
+// preparing row after insert. A fresh row created milliseconds ago is never
+// listed even if its updated_at somehow predates the cutoff.
+func (db *SQLiteStore) ListStuckPreparingRuns(workspaceID, createdBefore string, limit int) ([]RuntimeRun, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := db.sql.Query(runtimeRunSelectSQL()+` WHERE workspace_id = ? AND status = 'preparing' AND created_at < ? ORDER BY created_at ASC LIMIT ?`, workspaceID, createdBefore, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []RuntimeRun{}
+	for rows.Next() {
+		run, err := scanRuntimeRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
 }
 
 // isUniqueConstraintErr reports whether err is a SQLite unique-constraint

@@ -637,24 +637,19 @@ func (db *SQLiteStore) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_runtime_runs_worker ON runtime_runs(workspace_id, agent_worker_id, status)`,
 		`CREATE INDEX IF NOT EXISTS idx_runtime_runs_fork_session ON runtime_runs(workspace_id, fork_session_id, status)`,
 		// Q0 queue: run_key makes enqueue idempotent. The partial unique index
-		// guards only ACTIVE runs (queued/running) AND only rows with a
-		// non-empty key — legacy rows with run_key='' (and fork/exec runs that
-		// intentionally have no key) must never collide or be constrained.
-		// 'preparing' (Q1 stamp-race fix) is deliberately OUTSIDE the unique
-		// index and the claim query: a preparing run is not yet dispatchable
-		// (its task token stamp is still in flight), and a second enqueue of
-		// the same intent must converge on the preparing row via
-		// UpsertRuntimeRunIdempotent's key lookup instead.
+		// guards only ACTIVE runs (preparing/queued/running — Q1 widened the
+		// set to include preparing) AND only rows with a non-empty key —
+		// legacy rows with run_key='' (and fork/exec runs that intentionally
+		// have no key) must never collide or be constrained. A preparing run
+		// IS inside the unique index: the second enqueue of the same intent
+		// must hit the constraint on its initial INSERT and converge on the
+		// first run (GPT re-review: letting a second preparing row in would
+		// re-open the double-stamp race the preparing state exists to close).
 		`ALTER TABLE runtime_runs ADD COLUMN run_key TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE runtime_runs ADD COLUMN slot_class TEXT NOT NULL DEFAULT 'normal'`,
 		`ALTER TABLE runtime_runs ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_runs_active_key ON runtime_runs(workspace_id, run_key) WHERE status IN ('queued','running') AND run_key <> ''`,
 		`CREATE INDEX IF NOT EXISTS idx_runtime_runs_lease ON runtime_runs(workspace_id, status, lease_expires_at)`,
-		// Q1 stamp-race fix: enqueue inserts a run as 'preparing' (invisible
-		// to claim) and promotes it to 'queued' only after the task token
-		// stamp succeeded. The lookup index lets the idempotent enqueue and
-		// the dedupe checks find preparing rows by key quickly.
-		`CREATE INDEX IF NOT EXISTS idx_runtime_runs_preparing_key ON runtime_runs(workspace_id, run_key) WHERE status = 'preparing' AND run_key <> ''`,
 		`CREATE TABLE IF NOT EXISTS runtime_events (
 	id TEXT PRIMARY KEY,
 	workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -733,6 +728,9 @@ func (db *SQLiteStore) migrate() error {
 			return err
 		}
 	}
+	if err := db.migrateRuntimeRunPreparingUniqueIndex(); err != nil {
+		return err
+	}
 	if err := db.migrateAgentToolBindingsSchema(); err != nil {
 		return err
 	}
@@ -740,6 +738,97 @@ func (db *SQLiteStore) migrate() error {
 		return err
 	}
 	return nil
+}
+
+// migrateRuntimeRunPreparingUniqueIndex drops the old queued/running-only
+// unique index and recreates it covering 'preparing' as well (GPT re-review
+// P0: a second enqueue of the same intent must be rejected at its initial
+// INSERT so it can never reach a second token stamp; a preparing row inside
+// the index also makes the promote a no-op against the constraint instead of
+// a second collision site). Databases created before the change may already
+// hold duplicate active rows for one key (the old schema allowed a preparing
+// row to coexist with a queued/running one), and CREATE UNIQUE INDEX fails on
+// existing duplicates — so dedupe FIRST, inside one transaction:
+//
+//   - at most ONE non-terminal row per (workspace_id, run_key) survives; the
+//     survivor is the most-advanced one (running > queued > preparing), then
+//     newest updated_at, then highest id — the run a node is most likely
+//     already executing;
+//   - losing 'preparing' rows are DELETED (never claimable, never stamped a
+//     node could act on);
+//   - losing queued/running rows are marked failed with a superseded error
+//     and their task tokens are left to the stale-token sweep (the console
+//     reconciles tokens whose run is terminal).
+//
+// Idempotent: when the new-shape index already exists the helper exits
+// without touching data.
+func (db *SQLiteStore) migrateRuntimeRunPreparingUniqueIndex() error {
+	const newIndexName = "idx_runtime_runs_active_key"
+	var indexSQL string
+	err := db.sql.QueryRow(`SELECT sql FROM sqlite_master WHERE type='index' AND name = ?`, newIndexName).Scan(&indexSQL)
+	if err == nil && strings.Contains(strings.ToUpper(indexSQL), "'PREPARING'") {
+		return nil
+	}
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return err
+	}
+	rollback := func() {
+		_ = tx.Rollback()
+	}
+	defer rollback()
+
+	// Delete superseded preparing duplicates: for every (workspace_id,
+	// run_key) group with more than one non-terminal row, remove preparing
+	// rows unless the group has NO more-advanced survivor.
+	if _, err := tx.Exec(`DELETE FROM runtime_runs WHERE status = 'preparing' AND run_key <> '' AND EXISTS (
+	SELECT 1 FROM runtime_runs keep
+	WHERE keep.workspace_id = runtime_runs.workspace_id
+	  AND keep.run_key = runtime_runs.run_key
+	  AND keep.id != runtime_runs.id
+	  AND keep.status IN ('preparing','queued','running')
+	  AND (
+		keep.status != 'preparing'
+		OR keep.updated_at > runtime_runs.updated_at
+		OR (keep.updated_at = runtime_runs.updated_at AND keep.id > runtime_runs.id)
+	  )
+)`); err != nil {
+		return err
+	}
+	// Fail superseded queued/running duplicates the same way: a row survives
+	// only if no other non-terminal row for the key is more advanced. The
+	// final id tie-break makes the SURVIVOR deterministic (lowest id wins a
+	// full tie) so re-runs converge on the same row.
+	if _, err := tx.Exec(`UPDATE runtime_runs SET status = 'failed', error_code = 'superseded_migration', error_message = 'duplicate active run for the same dispatch intent retired by the preparing-unique-index migration', finished_at = updated_at
+WHERE status IN ('queued','running') AND run_key <> '' AND EXISTS (
+	SELECT 1 FROM runtime_runs keep
+	WHERE keep.workspace_id = runtime_runs.workspace_id
+	  AND keep.run_key = runtime_runs.run_key
+	  AND keep.id != runtime_runs.id
+	  AND keep.status IN ('queued','running')
+	  AND (
+		keep.status = 'running' AND runtime_runs.status != 'running'
+		OR (keep.status = runtime_runs.status AND keep.updated_at > runtime_runs.updated_at)
+		OR (keep.status = runtime_runs.status AND keep.updated_at = runtime_runs.updated_at AND keep.id < runtime_runs.id)
+	  )
+)`); err != nil {
+		return err
+	}
+	// A failed duplicate's task token (stored in the task JSON inside
+	// kv_records — there is no relational tasks table to UPDATE here) would
+	// block the survivor's finish; the console-side stale-token sweep
+	// reconciles tokens whose run is terminal on its next pass, so the
+	// migration retires the run rows only.
+	if _, err := tx.Exec(`DROP INDEX IF EXISTS idx_runtime_runs_preparing_key`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DROP INDEX IF EXISTS idx_runtime_runs_active_key`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`CREATE UNIQUE INDEX idx_runtime_runs_active_key ON runtime_runs(workspace_id, run_key) WHERE status IN ('preparing','queued','running') AND run_key <> ''`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // migrateAgentToolBindingsSchema removes the former project/agent identity

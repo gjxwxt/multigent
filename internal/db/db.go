@@ -179,6 +179,7 @@ type Store interface {
 	FailQueuedRuntimeRun(workspaceID, runID, errorCode, errorMessage string) (RuntimeRun, bool, error)
 	PromotePreparingRuntimeRun(workspaceID, runID string) (RuntimeRun, bool, error)
 	DeleteUnclaimedRuntimeRun(workspaceID, runID string) (bool, error)
+	ListStuckPreparingRuns(workspaceID, createdBefore string, limit int) ([]RuntimeRun, error)
 	ExtendRuntimeRunLease(workspaceID, runID, nodeID string, leaseSeconds int) (RuntimeRun, bool, error)
 	ExtendRuntimeRunLeaseWithGeneration(workspaceID, runID, nodeID string, leaseGeneration, leaseSeconds int) (RuntimeRun, bool, error)
 	FinishRuntimeRun(workspaceID, runID, nodeID string, leaseGeneration int, status string, errorCode, errorMessage, resultJSON string) (RuntimeRun, bool, error)

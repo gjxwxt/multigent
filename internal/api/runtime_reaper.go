@@ -28,6 +28,16 @@ const runtimeReaperInterval = 60 * time.Second
 // 270s. Tune with that formula in mind.
 const runtimeReaperLeaseGrace = 180 * time.Second
 
+// preparingRescueGrace is how old a 'preparing' run must be before the reaper
+// force-fails it. A legitimate preparing row lives for milliseconds (stamp →
+// promote in one enqueue call); a crash anywhere in enqueue leaves the row
+// stuck. Since the preparing-unique index, one stuck row would block every
+// future enqueue of that intent forever (the second insert now hits the
+// constraint and joins the dead row), so the rescue is mandatory. 2 minutes
+// exceeds any legitimate prepare window by orders of magnitude while staying
+// well under the reaper's lease+grace latency for genuinely running work.
+const preparingRescueGrace = 2 * time.Minute
+
 // runOccupiesWorkerSlot is the single source of truth for "this run holds its
 // Worker's execution slot": running with an unexpired lease and a persisted
 // slot_class that is not readonly. Shared by the claim path, the scheduler's
@@ -671,6 +681,9 @@ func (s *Server) runtimeReaperLoop(ctx context.Context, done chan struct{}) {
 // renewal and heartbeat share one loop, so the lease IS the heartbeat). Every
 // kill is a conditional UPDATE re-checking lease + generation, so a run that
 // gets renewed, finished, or taken over mid-pass is left untouched.
+// The pass also rescues stuck 'preparing' rows (see
+// reapStuckPreparingRuns): since the preparing unique index, one abandoned
+// preparing row would block every future enqueue of its intent.
 func (s *Server) runtimeReaperPass() {
 	if s == nil || s.controlDB == nil {
 		return
@@ -687,11 +700,38 @@ func (s *Server) runtimeReaperPass() {
 			continue
 		}
 		s.runtimeReaperPassWorkspace(ws.ID, cutoff)
+		s.reapStuckPreparingRuns(ws.ID, now)
 	}
 }
 
-func (s *Server) runtimeReaperPassWorkspace(workspaceID string, cutoff time.Time) {
-	expired, err := s.controlDB.ListExpiredRunningRuns(workspaceID, cutoff, 100)
+// reapStuckPreparingRuns force-fails 'preparing' runs old enough that their
+// enqueuer must be dead. A preparing row is unclaimable by design, so failing
+// it can never race a node; the only legitimate owner is the enqueue call
+// between its INSERT and promote, which completes in milliseconds. The row's
+// task token (if the stamp landed before the crash) is reconciled by the
+// stale-token sweep on a later pass — the run being terminal is exactly the
+// sweep's trigger condition.
+func (s *Server) reapStuckPreparingRuns(workspaceID string, now time.Time) {
+	if s == nil || s.controlDB == nil {
+		return
+	}
+	cutoff := now.Add(-preparingRescueGrace).Format(time.RFC3339)
+	stuck, err := s.controlDB.ListStuckPreparingRuns(workspaceID, cutoff, 100)
+	if err != nil {
+		slog.Warn("stuck-preparing rescue skipped: listing failed", "workspace", workspaceID, "error", err)
+		return
+	}
+	for _, run := range stuck {
+		failed, ok, err := s.controlDB.FailQueuedRuntimeRun(workspaceID, run.ID, "preparing_rescued",
+			"run stuck in preparing past the rescue grace — its enqueuer crashed before promote; safe to fail because preparing is unclaimable")
+		if err != nil || !ok {
+			continue
+		}
+		slog.Warn("rescued a stuck preparing run", "run", failed.ID, "task", failed.TaskID, "created_at", run.CreatedAt)
+	}
+}
+
+func (s *Server) runtimeReaperPassWorkspace(workspaceID string, cutoff time.Time) {	expired, err := s.controlDB.ListExpiredRunningRuns(workspaceID, cutoff, 100)
 	if err != nil {
 		slog.Warn("runtime reaper pass skipped: listing expired runs failed", "workspace", workspaceID, "error", err)
 		return

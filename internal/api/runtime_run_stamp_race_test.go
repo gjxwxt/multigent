@@ -79,11 +79,12 @@ func TestFailQueuedRuntimeRunCoversPreparing(t *testing.T) {
 	}
 }
 
-// Idempotent join: a second enqueue whose promote collides with an existing
-// queued run converges on the winner via OtherActiveRuntimeRunByKey — the
-// SQL-level self-exclusion that a caller-side filter cannot provide (same-
-// second created_at ties are broken by RANDOM id, so a caller-side loop can
-// keep picking its own row forever).
+// Idempotent join at the DB layer: under the preparing-unique index a second
+// enqueue of the same intent is rejected at its own INSERT — it can never
+// mint a second run, let alone reach a second token stamp. The winner lookup
+// (OtherActiveRuntimeRunByKey) retains the SQL-level self-exclusion for the
+// legacy promote-collision path (same-second created_at ties are broken by
+// RANDOM id, so a caller-side loop can keep picking its own row forever).
 func TestOtherActiveRuntimeRunByKeyExcludesSelf(t *testing.T) {
 	store := newRuntimeRunsBarrierDB(t)
 	winner := seedingRun(controldb.RuntimeRun{
@@ -95,10 +96,28 @@ func TestOtherActiveRuntimeRunByKeyExcludesSelf(t *testing.T) {
 	dup := seedingRun(controldb.RuntimeRun{
 		ID: "rtrun-dup", RunKey: "k-join", Status: "preparing",
 	})
-	if err := store.UpsertRuntimeRun(dup); err != nil {
+	if _, inserted, err := store.UpsertRuntimeRunIdempotent(dup); err != nil {
 		t.Fatalf("insert dup: %v", err)
+	} else if inserted {
+		t.Fatal("second enqueue of the same intent must be REJECTED by the preparing-unique index, not inserted")
 	}
 
+	// The rejected insert returns the winner — the join happens before any
+	// stamp can fire.
+	stored, found, _ := store.ActiveRuntimeRunByKey("ws", "k-join")
+	if !found || stored.ID != "rtrun-winner" {
+		t.Fatalf("key lookup = %s, want the winner", stored.ID)
+	}
+	runs, _ := store.ListRuntimeRuns(controldb.RuntimeRunFilter{WorkspaceID: "ws"})
+	keyRuns := 0
+	for _, r := range runs {
+		if r.RunKey == "k-join" {
+			keyRuns++
+		}
+	}
+	if keyRuns != 1 {
+		t.Fatalf("runs for key = %d, want exactly 1 (second insert must not create a row)", keyRuns)
+	}
 	got, found, err := store.OtherActiveRuntimeRunByKey("ws", "k-join", "rtrun-dup")
 	if err != nil || !found {
 		t.Fatalf("other lookup: found=%v err=%v", found, err)
@@ -106,17 +125,9 @@ func TestOtherActiveRuntimeRunByKeyExcludesSelf(t *testing.T) {
 	if got.ID != "rtrun-winner" {
 		t.Fatalf("winner = %s, want rtrun-winner (self-exclusion failed)", got.ID)
 	}
-	// Excluding the winner leaves OUR preparing dup — which still counts as
-	// active by design (it is mid-enqueue). Only when the dup is gone does
-	// the lookup find nothing.
-	if got2, found, _ := store.OtherActiveRuntimeRunByKey("ws", "k-join", "rtrun-winner"); !found || got2.ID != "rtrun-dup" {
-		t.Fatalf("excluding winner must surface the preparing dup, got found=%v id=%s", found, got2.ID)
-	}
-	if _, err := store.DeleteUnclaimedRuntimeRun("ws", "rtrun-dup"); err != nil {
-		t.Fatalf("delete dup: %v", err)
-	}
+	// Excluding the winner finds nothing — no second row exists to find.
 	if _, found, _ := store.OtherActiveRuntimeRunByKey("ws", "k-join", "rtrun-winner"); found {
-		t.Fatal("with the dup deleted, excluding the winner must find nothing")
+		t.Fatal("excluding the winner must find nothing — the index guarantees one row per key")
 	}
 }
 
