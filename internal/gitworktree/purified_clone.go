@@ -35,6 +35,14 @@ var envScrubKeys = []string{
 	"GIT_CONFIG_PARAMETERS",
 	"GIT_CONFIG_SYSTEM",
 	"GIT_CONFIG_GLOBAL",
+	// Round-11: HOME / XDG_CONFIG_HOME select the host's global git config
+	// (~/.gitconfig, ~/.config/git/*, includeIf chains, global hooks,
+	// credential stores). The purified clone runs git with no host config at
+	// all — GIT_CONFIG_NOSYSTEM=1 plus stripped HOME/XDG.
+	"HOME",
+	"XDG_CONFIG_HOME",
+	"XDG_CACHE_HOME",
+	"XDG_DATA_HOME",
 	// Hook and diff execution redirection from the host checkout.
 	"EDITOR",
 	"VISUAL",
@@ -64,7 +72,8 @@ type PurifiedCloneOptions struct {
 }
 
 // EnsurePurifiedClone creates an isolated clone of SourceRepo at Dest,
-// containing exactly Commit, honoring the round-10 purification contract:
+// containing exactly Commit, honoring the round-10/round-11 purification
+// contract:
 //
 //  1. `git clone --no-local` — forces the pack transport so objects are
 //     copied, never hardlinked into the source object store.
@@ -73,9 +82,12 @@ type PurifiedCloneOptions struct {
 //     objects/info/alternates file would defeat --no-local).
 //  4. delete every remote before returning — the agent-facing clone has no
 //     push/fetch targets (push attempts fail with "No such remote").
-//  5. scrub GIT_* / credential / editor environment from every git
-//     subprocess this helper runs.
-//  6. verify Commit exists in the clone after purification.
+//  5. scrub GIT_* / credential / editor / HOME / XDG environment from every
+//     git subprocess this helper runs, so host-side global config
+//     (~/.gitconfig, includeIf, hooks, fsmonitors) cannot leak in.
+//  6. checkout the requested commit and VERIFY the working tree HEAD equals
+//     it — the agent must receive a real, correct working tree, not a
+//     --no-checkout shell (round-11 fix: cat-file alone is not enough).
 //
 // The returned cleanup removes the clone directory; callers own it from
 // creation to cleanup.
@@ -100,21 +112,24 @@ func EnsurePurifiedClone(opts PurifiedCloneOptions) (cleanup func(), err error) 
 	// runIn executes git with the given working directory (the clone step
 	// must run in the parent — Dest does not exist yet; post-clone steps run
 	// inside the clone).
-	runIn := func(dir string, args ...string) error {
+	runIn := func(dir string, args ...string) (string, error) {
 		cmd := exec.Command("git", args...)
 		cmd.Env = env
 		cmd.Dir = dir
 		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	run := func(args ...string) error {
+		_, err := runIn(dest, args...)
 		if err != nil {
-			return fmt.Errorf("git %s: %w (%s)", strings.Join(args, " "), err, RedactGitOutput(strings.TrimSpace(string(out))))
+			return fmt.Errorf("git %s: %w (%s)", strings.Join(args, " "), err, RedactGitOutput(strings.TrimSpace("")))
 		}
 		return nil
 	}
-	run := func(args ...string) error { return runIn(dest, args...) }
 
-	if err := runIn(filepath.Dir(dest), "clone", "--no-local", "--no-checkout", src, dest); err != nil {
+	if out, err := runIn(filepath.Dir(dest), "clone", "--no-local", "--no-checkout", src, dest); err != nil {
 		cleanup()
-		return nil, err
+		return nil, fmt.Errorf("git clone --no-local: %w (%s)", err, RedactGitOutput(strings.TrimSpace(out)))
 	}
 
 	// Round-10 P0 defense: alternates would silently re-share objects with
@@ -141,6 +156,23 @@ func EnsurePurifiedClone(opts PurifiedCloneOptions) (cleanup func(), err error) 
 	if err := run("cat-file", "-e", commit+"^{commit}"); err != nil {
 		cleanup()
 		return nil, fmt.Errorf("purified clone missing commit %s", commit)
+	}
+
+	// Round-11 fix: the agent must receive a REAL working tree at the exact
+	// baseline commit — checkout the commit and verify HEAD == commit.
+	// cat-file alone would hand over an empty --no-checkout shell.
+	if err := run("checkout", "--detach", commit); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("checkout baseline commit %s: %w", commit, err)
+	}
+	headOut, err := runIn(dest, "rev-parse", "HEAD")
+	if err != nil {
+		cleanup()
+		return nil, fmt.Errorf("verify clone HEAD: %w", err)
+	}
+	if head := strings.TrimSpace(headOut); head != commit {
+		cleanup()
+		return nil, fmt.Errorf("purified clone HEAD %s does not match baseline %s", head, commit)
 	}
 
 	return cleanup, nil
@@ -183,11 +215,12 @@ func listRemotes(dir string, env []string) ([]string, error) {
 
 // purifiedGitEnv builds a scrubbed environment for git subprocesses operating
 // inside the purified clone: the current environment minus everything that
-// could redirect Git into the host checkout or leak credentials, plus any
-// caller-provided additions.
+// could redirect Git into the host checkout, read host global config, or leak
+// credentials — plus GIT_CONFIG_NOSYSTEM=1 (round-11: HOME/XDG stripping alone
+// leaves /etc/gitconfig readable) and any caller-provided additions.
 func purifiedGitEnv(extra []string) []string {
 	keep := os.Environ()
-	env := make([]string, 0, len(keep)+len(extra))
+	env := make([]string, 0, len(keep)+len(extra)+1)
 	for _, kv := range keep {
 		key, _, _ := strings.Cut(kv, "=")
 		skip := false
@@ -201,6 +234,9 @@ func purifiedGitEnv(extra []string) []string {
 			env = append(env, kv)
 		}
 	}
+	// Ignore system-level git config (/etc/gitconfig) inside the purified
+	// clone: config authority starts from the clone itself.
+	env = append(env, "GIT_CONFIG_NOSYSTEM=1")
 	return append(env, extra...)
 }
 

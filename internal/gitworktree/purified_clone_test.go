@@ -150,6 +150,64 @@ func TestSanitizedDiffArgsDisableExecutableConfig(t *testing.T) {
 	}
 }
 
+// Round-11: the clone is checked out at the baseline commit and the working
+// tree HEAD is verified — the agent receives a real tree, not a
+// --no-checkout shell.
+func TestPurifiedCloneChecksOutBaselineCommit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	base := t.TempDir()
+	src := filepath.Join(base, "src")
+	commit := initRepo(t, src)
+	dest := filepath.Join(base, "agent-clone")
+
+	cleanup, err := EnsurePurifiedClone(PurifiedCloneOptions{SourceRepo: src, Commit: commit, Dest: dest})
+	if err != nil {
+		t.Fatalf("purified clone: %v", err)
+	}
+	defer cleanup()
+
+	// The seeded file must exist in the working tree (a --no-checkout shell
+	// would leave it absent).
+	if _, err := os.Stat(filepath.Join(dest, "file.txt")); err != nil {
+		t.Fatalf("baseline working tree must contain seeded files: %v", err)
+	}
+	head := exec.Command("git", "rev-parse", "HEAD")
+	head.Dir = dest
+	out, err := head.Output()
+	if err != nil {
+		t.Fatalf("rev-parse: %v", err)
+	}
+	if strings.TrimSpace(string(out)) != commit {
+		t.Fatalf("HEAD %q must equal baseline %q", strings.TrimSpace(string(out)), commit)
+	}
+}
+
+// Round-11: HOME / XDG_* are stripped so host global git config
+// (~/.gitconfig, includeIf, global hooks) cannot leak into the purified
+// clone's git operations; GIT_CONFIG_NOSYSTEM=1 is forced.
+func TestPurifiedGitEnvStripsHomeAndXDG(t *testing.T) {
+	t.Setenv("HOME", "/host/home")
+	t.Setenv("XDG_CONFIG_HOME", "/host/xdg-config")
+	t.Setenv("XDG_CACHE_HOME", "/host/xdg-cache")
+
+	env := purifiedGitEnv(nil)
+	seen := map[string]string{}
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		seen[k] = v
+	}
+	for _, banned := range []string{"HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"} {
+		if _, ok := seen[banned]; ok {
+			t.Fatalf("scrubbed env must not carry %s", banned)
+		}
+	}
+	if seen["GIT_CONFIG_NOSYSTEM"] != "1" {
+		t.Fatal("GIT_CONFIG_NOSYSTEM=1 must be forced in the purified env")
+	}
+}
+
 func TestAcquireProjectLockExportedSerialization(t *testing.T) {
 	base := t.TempDir()
 	unlock1, err := AcquireProjectLock(base)

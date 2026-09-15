@@ -81,12 +81,31 @@ func (s *Server) previewOriginDisabled() bool { return s.previewOrigin == "" }
 // requestOnPreviewOrigin reports whether the request arrived on the
 // configured preview origin. The configured origin is the only input to the
 // decision — the request Host is compared, never consulted as configuration.
+// The scheme is compared by RESOLVED request scheme; see previewHostMatches
+// for the Host-only comparison the origin gate uses before scheme checks.
 func (s *Server) requestOnPreviewOrigin(r *http.Request) bool {
 	if s.previewOriginDisabled() {
 		return false
 	}
 	u := &url.URL{Scheme: requestScheme(r), Host: r.Host}
 	return u.String() == s.previewOrigin
+}
+
+// previewHostOnConfiguredOrigin compares only the Host against the
+// configured preview origin's host. The origin gate uses this so that a
+// dropped X-Forwarded-Proto (misconfigured proxy) does not 404 legitimate
+// preview traffic; scheme fidelity is enforced at the cookie boundary
+// (setPreviewCookie) instead, where the Secure flag is also decided by the
+// configured scheme.
+func (s *Server) previewHostOnConfiguredOrigin(r *http.Request) bool {
+	if s.previewOriginDisabled() {
+		return false
+	}
+	u, err := url.Parse(s.previewOrigin)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(r.Host, u.Host)
 }
 
 // requestScheme resolves the request scheme, honoring the proxy header set by
@@ -108,6 +127,9 @@ func requestScheme(r *http.Request) string {
 // handled (rejection or redirect written) and the caller must stop.
 //
 //   - Preview not configured -> 404 on every origin (fail-closed).
+//   - Request Host == configured preview host -> pass (scheme fidelity is
+//     enforced at the cookie boundary, so a dropped X-Forwarded-Proto on a
+//     misconfigured proxy degrades to a cookie refusal, not a 404).
 //   - Request on the configured console origin -> 302 to the equivalent
 //     preview-origin URL so pre-split console links keep working.
 //   - Any other Host -> 404; the response never echoes request input.
@@ -117,13 +139,9 @@ func (s *Server) enforcePreviewOriginGate(w http.ResponseWriter, r *http.Request
 			"preview origin not configured; set "+PreviewOriginEnv+" to enable preview sharing")
 		return true
 	}
-	if s.requestOnPreviewOrigin(r) {
+	if s.previewHostOnConfiguredOrigin(r) {
 		return false
 	}
-	// Only the configured console origin earns a redirect; every other Host
-	// (including lookalike subdomains) gets a plain 404. The Location URL is
-	// always built from configured origins + the request path — never from
-	// attacker-chosen values.
 	if s.requestOnConsoleOrigin(r) {
 		if u, err := url.Parse(s.previewOrigin); err == nil {
 			target := *r.URL
@@ -181,7 +199,7 @@ func (s *Server) handlePreviewTokenExchange(w http.ResponseWriter, r *http.Reque
 		s.redirectCleanPreviewURL(w, r, taskID, http.StatusFound)
 		return
 	}
-	if !setPreviewCookie(w, r, taskID, token) {
+	if !s.setPreviewCookie(w, r, taskID, token) {
 		http.NotFound(w, r)
 		return
 	}
@@ -218,9 +236,24 @@ func (s *Server) redirectCleanPreviewURL(w http.ResponseWriter, r *http.Request,
 }
 
 // setPreviewCookie mints the path-scoped HttpOnly cookie for a validated
-// token. Returns false when the taskID is unusable in a cookie name.
-func setPreviewCookie(w http.ResponseWriter, r *http.Request, taskID, token string) bool {
+// token. The Secure flag is decided by the CONFIGURED preview origin's
+// scheme (round-11 P0 fix) — never by the request's X-Forwarded-Proto, which
+// a misconfigured or absent reverse proxy can drop or which an attacker can
+// forge on direct connections. Returns false when the taskID is unusable in
+// a cookie name or the request scheme contradicts the configured origin
+// (fail-closed: a token cookie must never be issued over a channel that does
+// not match the deployment's declared TLS posture).
+func (s *Server) setPreviewCookie(w http.ResponseWriter, r *http.Request, taskID, token string) bool {
 	if taskID == "" || strings.ContainsAny(taskID, " \t\r\n;,()<>@:\\\"[]?={}") {
+		return false
+	}
+	cfg, err := url.Parse(s.previewOrigin)
+	if err != nil || s.previewOrigin == "" || (cfg.Scheme != "http" && cfg.Scheme != "https") {
+		return false
+	}
+	// The deployment declares the preview origin's scheme; a request whose
+	// resolved scheme disagrees is not on the configured surface.
+	if requestScheme(r) != cfg.Scheme {
 		return false
 	}
 	http.SetCookie(w, &http.Cookie{
@@ -229,7 +262,7 @@ func setPreviewCookie(w http.ResponseWriter, r *http.Request, taskID, token stri
 		Path:     previewCookiePath(taskID),
 		MaxAge:   int(previewTokenTTL.Seconds()),
 		HttpOnly: true,
-		Secure:   requestScheme(r) == "https",
+		Secure:   cfg.Scheme == "https",
 		SameSite: http.SameSiteLaxMode,
 	})
 	return true

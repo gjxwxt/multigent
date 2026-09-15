@@ -155,13 +155,22 @@ func TestPreviewControlBearerOnlyStolenPvtDoesNotElevate(t *testing.T) {
 
 func TestPreviewControlStatusOpenToLoggedInMember(t *testing.T) {
 	s := newPreviewControlServer(t)
-	if err := s.users.CreateUser("member", "pass123", RoleMember, "", "", "", "", ""); err != nil {
-		t.Fatalf("create member: %v", err)
+	// Round-11 P0 fix: status needs login AND project read membership.
+	// A member without proj membership gets 403; a proj member gets 200.
+	if err := s.users.CreateUser("outsider", "pass123", RoleMember, "", "", "", "", ""); err != nil {
+		t.Fatalf("create outsider: %v", err)
 	}
 	w := httptest.NewRecorder()
-	dispatchPreviewControl(s, "status", w, previewAuthedRequest(s, http.MethodGet, "/api/v1/projects/proj/tasks/t-1/preview/status", "member", ""))
+	dispatchPreviewControl(s, "status", w, previewAuthedRequest(s, http.MethodGet, "/api/v1/projects/proj/tasks/t-1/preview/status", "outsider", ""))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status for logged-in user WITHOUT proj membership must be 403, got %d: %s", w.Code, w.Body.String())
+	}
+
+	newPreviewOperator(t, s, "projmember")
+	w = httptest.NewRecorder()
+	dispatchPreviewControl(s, "status", w, previewAuthedRequest(s, http.MethodGet, "/api/v1/projects/proj/tasks/t-1/preview/status", "projmember", ""))
 	if w.Code != http.StatusOK {
-		t.Fatalf("status for logged-in member must be 200, got %d: %s", w.Code, w.Body.String())
+		t.Fatalf("status for logged-in proj member must be 200, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

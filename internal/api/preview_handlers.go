@@ -452,6 +452,15 @@ func (s *Server) handlePostTaskPreviewFeedback(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Round-11: feedback wakes the agent to modify code — same execution lock
+	// as chat. While an agent is actively executing a background step, the
+	// wakeup write is refused instead of queueing a concurrent mutation
+	// (human_review steps and confirmation waits stay interactive).
+	if task.Status == entity.TaskStatusInProgress && !s.isTaskAtHumanReviewStep(workspaceID, project, taskID) {
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "当前节点正由智能体后台执行中。待流转至人工审核节点后即可提交修改反馈。")
+		return
+	}
+
 	feedbackPrompt := fmt.Sprintf(
 		"【预览界面即时修改反馈】用户在特性分支 (Worktree) 的实时预览环境中提出了以下修改要求：\n\n%s\n\n请严格在当前 Worktree 目录 (/workspace) 内完成代码修改，并确保本地服务热重载正常，严禁切换分支。",
 		feedback,
@@ -796,11 +805,17 @@ func (s *Server) handlePostTaskPreviewStop(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleGetTaskPreviewStatus(w http.ResponseWriter, r *http.Request) {
+	project := strings.TrimSpace(r.PathValue("name"))
 	taskID := strings.TrimSpace(r.PathValue("taskId"))
-	// Task 1.1: status stays login-required (any authenticated user, not
-	// operator-gated) until its response body is audited for agent-output
-	// leakage (round 7 matrix); share tokens get 401.
-	if _, _, ok := s.previewLoginPrincipal(w, r, taskID); !ok {
+	// Round-11 P0 fix: login-required AND project read access — the response
+	// (busy/agent/startedAt) is task metadata, so any authenticated user
+	// without project membership must be denied. Share tokens get 401 until
+	// the leakage audit concludes; members of other projects get 403.
+	authReq, _, ok := s.previewLoginPrincipal(w, r, taskID)
+	if !ok {
+		return
+	}
+	if !s.authorizePreviewProject(w, authReq, project) {
 		return
 	}
 	s.previewMu.Lock()
@@ -851,8 +866,17 @@ func (s *Server) handleTaskPreviewProxy(w http.ResponseWriter, r *http.Request) 
 	}
 
 	previewToken := previewRequestToken(r, taskID)
-	if _, tokOK := s.verifyPreviewToken(previewToken, taskID); !tokOK {
+	claims, tokOK := s.verifyPreviewToken(previewToken, taskID)
+	if !tokOK {
 		s.jsonErrorCode(w, http.StatusUnauthorized, ErrCodeUnauthorized, "preview token required")
+		return
+	}
+	// Round-11: the view capability minted into tokens is enforced on the
+	// proxy read path. Tokens without any Cap (pre-Task-1.1 legacy share
+	// links) are view-less and rejected — fail-closed for old tokens.
+	if !previewTokenHasCapability(claims, previewCapabilityView) {
+		s.jsonErrorCode(w, http.StatusForbidden, ErrCodeForbidden,
+			"preview share token lacks view capability; request a fresh link")
 		return
 	}
 	// pvt-carrying GETs were already exchanged to the HttpOnly cookie by the

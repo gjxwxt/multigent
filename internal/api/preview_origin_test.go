@@ -246,3 +246,100 @@ func TestPreviewProxyExchangeServesCleanDocument(t *testing.T) {
 		t.Fatal("proxy exchange must carry the hardened headers")
 	}
 }
+
+// Round-11 P0: the cookie Secure flag and the scheme check derive from the
+// CONFIGURED preview origin — never from the request's X-Forwarded-Proto.
+// When the resolved request scheme contradicts the configured scheme, the
+// exchange fails closed: no token cookie is issued at all (the response is a
+// token-free redirect, never a document).
+func TestPreviewCookieSecureDecidedByConfiguredOriginScheme(t *testing.T) {
+	s := newPreviewOriginServer(t, "https://preview.example.com", "")
+	token := s.signPreviewToken("t-sec", "proj")
+
+	// XFP present and consistent with the configured https origin: exchange
+	// succeeds and the cookie is Secure.
+	w := httptest.NewRecorder()
+	req := previewOriginRequest(http.MethodGet, "/preview/t-sec/?pvt="+token, "https://preview.example.com")
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusFound {
+		t.Fatalf("consistent-scheme exchange must 302, got %d", w.Code)
+	}
+	var secureCookie *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == previewTokenCookiePrefix+"t-sec" {
+			secureCookie = c
+		}
+	}
+	if secureCookie == nil || !secureCookie.Secure {
+		t.Fatalf("cookie must exist and be Secure on the https-configured origin, got %+v", secureCookie)
+	}
+
+	// Proxy DROPS X-Forwarded-Proto (scheme resolves to http != configured
+	// https): fail-closed — no token cookie, response is a token-free 302.
+	req = httptest.NewRequest(http.MethodGet, "/preview/t-sec/?pvt="+token, nil)
+	req.Host = "preview.example.com"
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	for _, c := range w.Result().Cookies() {
+		if c.Name == previewTokenCookiePrefix+"t-sec" {
+			t.Fatalf("scheme-mismatched request must not receive the token cookie, got %+v", c)
+		}
+	}
+	if strings.Contains(w.Header().Get("Location"), "pvt=") || strings.Contains(w.Body.String(), token) {
+		t.Fatal("scheme-mismatched exchange must never echo the token")
+	}
+}
+
+// Round-11 P0: a request whose resolved scheme contradicts the configured
+// preview origin never receives a token cookie (fail-closed).
+func TestPreviewCookieRefusedOnSchemeMismatch(t *testing.T) {
+	s := newPreviewOriginServer(t, "https://preview.example.com", "")
+	token := s.signPreviewToken("t-mix", "proj")
+
+	// Attacker or misdirected traffic hits the backend directly over http
+	// while the deployment declares https — forged XFP or not, no cookie.
+	req := httptest.NewRequest(http.MethodGet, "/preview/t-mix/?pvt="+token, nil)
+	req.Host = "preview.example.com"
+	req.Header.Set("X-Forwarded-Proto", "http")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	for _, c := range w.Result().Cookies() {
+		if c.Name == previewTokenCookiePrefix+"t-mix" {
+			t.Fatalf("scheme mismatch must refuse the token cookie, got %+v", c)
+		}
+	}
+	// The exchange must fail closed on scheme mismatch: any rejection is
+	// acceptable (404 from the cookie boundary or 302), but never a document,
+	// never a cookie, never a token echo.
+	if strings.Contains(w.Header().Get("Location"), "pvt=") || strings.Contains(w.Body.String(), token) {
+		t.Fatalf("mismatch must reject without echoing the token, got %d body=%.100s", w.Code, w.Body.String())
+	}
+	if w.Code == http.StatusOK {
+		t.Fatalf("scheme mismatch must not render the document, got %d", w.Code)
+	}
+}
+
+// Round-11 P0 companion: an http-configured preview origin (http deployments)
+// gets non-Secure cookies and accepts http-scheme requests.
+func TestPreviewCookieAllowsConfiguredHTTPOrigin(t *testing.T) {
+	s := newPreviewOriginServer(t, "http://preview.internal:8080", "")
+	token := s.signPreviewToken("t-http", "proj")
+
+	req := httptest.NewRequest(http.MethodGet, "/preview/t-http/?pvt="+token, nil)
+	req.Host = "preview.internal:8080"
+	req.Header.Set("X-Forwarded-Proto", "http")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	var cookie *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == previewTokenCookiePrefix+"t-http" {
+			cookie = c
+		}
+	}
+	if cookie == nil {
+		t.Fatal("http-configured origin must still issue the exchange cookie")
+	}
+	if cookie.Secure {
+		t.Fatal("Secure must be false when the configured origin is http")
+	}
+}
