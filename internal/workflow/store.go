@@ -2631,6 +2631,21 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 			return result, fmt.Errorf("workflow step %q output rejected: %w", currentStep.Title, err)
 		}
 	}
+	// QA test checkpoint (acceptance-test-design-plan §5.3, Batch B-b): a
+	// qa step that declares the touched_paths output has opted into the QA
+	// checkpoint contract — every declared path must be a test artifact.
+	// QA hardened a business file "while writing a regression test" is
+	// exactly the drift this gate exists to catch: the step stays pending
+	// and the QA agent must revert and re-declare. Opt-in via the declared
+	// output field keeps arbitrary user definitions with a step id "qa"
+	// unaffected; the gate is deterministic path matching, never model
+	// judgment.
+	if currentStep.ID == "qa" && workflowFieldDeclared(currentStep.OutputFields, "touched_paths") {
+		if err := ValidateQATouchedPaths(values["touched_paths"]); err != nil {
+			s.releaseWorkflowTransitionClaim(&run, claimID)
+			return result, fmt.Errorf("workflow step %q output rejected: %w", currentStep.Title, err)
+		}
+	}
 	edge, hasNext := chooseNextEdge(def.Edges, currentStep.ID, values, output)
 	if !hasNext && workflowHasOutgoingEdges(def.Edges, currentStep.ID) && !isTerminalReviewApproval(currentStep, def.Edges, values) {
 		// Release the transition claim: this abort happens BEFORE any

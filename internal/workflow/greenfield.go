@@ -68,6 +68,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"testReportField":        "Detailed execution logs, test outputs, and evidence links.",
 		"manualWaiversField":     "Optional JSON mapping of item_id to explicit waiver rationale for unexecuted or blocked high-risk items.",
 		"qaReworkItemsField":     "Platform-derived structured rework list (JSON array of failed/blocked/unexecuted items with item_id, risk_level, status, acceptance_criteria, evidence). Populated by the server on qa_signoff rejection; downstream implementation consumes it as fix targets.",
+		"qaTouchedPathsField":    "Newline-separated list of every file path the QA agent created or modified (tests, fixtures, probe scripts only — business code is forbidden and the platform gate rejects it).",
 		"designWaiverField":      "Explicit justification for approving when automated design snapshot capture failed.",
 		"designWaivedField":      "true if design verification was granted an explicit audited waiver.",
 		"designConformanceField": "Reviewer agent's structured assessment of implementation visual and interaction fidelity against the design prototype.",
@@ -128,6 +129,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"testReportField":        "详细测试执行日志、用例输出与证据链接。",
 		"manualWaiversField":     "可选的 JSON 映射：高风险项 item_id 到人工特批豁免理由的键值对。",
 		"qaReworkItemsField":     "平台聚合的结构化返工清单（JSON 数组：failed/blocked/unexecuted 项的 item_id、risk_level、status、acceptance_criteria、evidence）。qa_signoff 打回时由服务端自动生成，实现节点按此作为修复目标。",
+		"qaTouchedPathsField":    "QA Agent 新建或修改的全部文件路径（换行分隔，仅限测试文件/夹具/探测脚本——业务代码被平台闸门拒绝）。",
 		"designWaiverField":      "设计快照抓取异常时，人工特批放行的明确豁免理由。",
 		"designWaivedField":      "若本次交付经过设计特批豁免则为 true。",
 		"designConformanceField": "初审 Agent 对比实现产物与设计原型的结构化一致性评估与合理偏差说明。",
@@ -252,6 +254,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				},
 				[]entity.WorkflowField{
 					field("risk_coverage_matrix", "riskMatrixField"),
+					field("touched_paths", "qaTouchedPathsField"),
 					field("test_report", "testReportField"),
 				}),
 			tmplStep("qa_signoff", "human_review", text["qaSignoffTitle"], text["qaSignoffDesc"], "qa-owner", "amber", 2040,

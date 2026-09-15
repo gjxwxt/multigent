@@ -202,6 +202,22 @@ func TestPilotGreenfieldDeliveryPipelineFullLifecycle(t *testing.T) {
 	qaOutputs := map[string]string{
 		"risk_coverage_matrix": matrixJSON,
 		"test_report":          "QA Suite executed: 1 passed, 1 blocked on external SMS gateway",
+		"touched_paths":        "tests/qa_regression/auth_matrix_test.go\ntests/fixtures/sms_mock.json",
+	}
+	// Batch B-b: the touched-paths checkpoint gate must reject a QA run that
+	// (also) touched business code — the step stays pending for a corrected
+	// re-declaration, and a test-only declaration then passes.
+	badTouch := map[string]string{
+		"risk_coverage_matrix": matrixJSON,
+		"test_report":          "QA Suite executed",
+		"touched_paths":        "tests/qa_regression/auth_matrix_test.go\nserver/internal/auth/handler.go",
+	}
+	if _, err := wfStore.CompleteAndAdvance("resproj", task.ID, "QA evaluation complete", "", badTouch, "completed"); err == nil {
+		t.Fatal("expected the QA checkpoint gate to reject a business-code touch")
+	}
+	run, found, err = wfStore.RunForTask("resproj", task.ID)
+	if err != nil || !found || run.ActiveStepID != "qa" {
+		t.Fatalf("gate rejection must keep qa pending: found=%v step=%s err=%v", found, run.ActiveStepID, err)
 	}
 	trans7, err := wfStore.CompleteAndAdvance("resproj", task.ID, "QA evaluation complete", "", qaOutputs, "completed")
 	if err != nil {

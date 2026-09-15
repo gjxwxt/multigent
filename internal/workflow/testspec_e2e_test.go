@@ -177,11 +177,13 @@ func TestGreenfieldE2EWithAcceptanceTestDesign(t *testing.T) {
 	if !strings.Contains(inst.InputValues["test_implementation_evidence"], "TestExpiredToken") {
 		t.Fatalf("qa did not receive developer evidence: %q", inst.InputValues["test_implementation_evidence"])
 	}
-	// 9. qa produces the matrix.
+	// 9. qa produces the matrix and declares its touched paths (QA checkpoint
+	// gate, Batch B-b: only test artifacts).
 	matrix := `[{"item_id":"AUTH-001","acceptance_criteria":"AC-1","risk_level":"high","status":"failed","evidence":"expired token returned 200"}]`
 	if _, err := store.CompleteAndAdvance(project, taskID, "qa done", "", map[string]string{
 		"risk_coverage_matrix": matrix,
 		"test_report":          "AUTH-001 failed",
+		"touched_paths":        "server/store/store_test.go\nweb/e2e/auth.spec.ts",
 	}, "completed"); err != nil {
 		t.Fatalf("qa: %v", err)
 	}
