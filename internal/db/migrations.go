@@ -76,8 +76,15 @@ func (db *SQLiteStore) migrate() error {
 	k3 TEXT NOT NULL DEFAULT '',
 	payload TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
+	revision INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY (table_name, workspace_id, k1, k2, k3)
 )`,
+		// Monotonic revision counter (GPT re-review Q2): updated_at has second
+		// precision, so two CAS writes within the same second produce the same
+		// revision and a stale claimant's CAS can win against a fresher one.
+		// Every kv_records write path now bumps this counter; it is the only
+		// valid revision token for compare-and-swap.
+		`ALTER TABLE kv_records ADD COLUMN revision INTEGER NOT NULL DEFAULT 0`,
 		`CREATE INDEX IF NOT EXISTS idx_kv_records_lookup ON kv_records(table_name, workspace_id, k1, k2)`,
 		`CREATE TABLE IF NOT EXISTS audit_events (
 	id TEXT PRIMARY KEY,
