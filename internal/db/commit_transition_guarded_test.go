@@ -1,13 +1,13 @@
 package db
 
 import (
+	"context"
+	"database/sql"
 	"errors"
-	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 // GPT re-review round 3 P0: the claim gate must also guard the SUCCESS path.
@@ -142,70 +142,142 @@ func TestCommitTransitionGuardedEmptyBatchRefused(t *testing.T) {
 // first statement, so "the claim check and every write are serialized against
 // any other transition commit" was not actually guaranteed across processes.
 // The fix runs the transaction on a dedicated connection with an explicit
-// "BEGIN IMMEDIATE" (plus _txlock=immediate in the URI as a default).
+// "BEGIN IMMEDIATE" (runImmediateTx). No URI-level _txlock default: that
+// would be a global behavior change across every other Begin() call site
+// (GPT round 4.5).
 //
-// Behavioral proof: while a guarded commit is in flight, a SECOND independent
-// connection must be blocked from writing (SQLITE_BUSY) — the RESERVED lock
-// is held from BEGIN IMMEDIATE, before any row is touched. A deferred
-// transaction would let the second connection write right up until the
-// guarded commit's first statement. We drive the guarded commit on a raw
-// connection with a blocker row inserted mid-transaction to hold it open,
-// then attempt the contending write.
-func TestCommitTransitionGuardedHoldsWriteLockAcrossConnections(t *testing.T) {
+// The lock-acquisition proof must be DISCRIMINATING (GPT round 4.5 rejected
+// the first attempt: probing after the transaction body had already executed
+// an INSERT proves nothing — a deferred transaction also holds the write lock
+// from its first statement onward). Both tests below probe at the only
+// instant that separates the two modes: BEGIN has returned, ZERO statements
+// of the body have run. At that instant IMMEDIATE must block the second
+// handle (Busy) and deferred must let it through — so the first test fails
+// on any regression to deferred, and the second documents the control.
+
+// runDeferredTxForTest is the deferred control twin of runImmediateTxNotify:
+// plain BEGIN, same onBegun seam. Test-only — production code has exactly one
+// transaction wrapper and it is immediate.
+func runDeferredTxForTest(conn *sql.Conn, onBegun func(), fn func(tx *immediateTx) error) error {
+	ctx := context.Background()
+	if _, err := conn.ExecContext(ctx, "BEGIN"); err != nil {
+		return err
+	}
+	if onBegun != nil {
+		onBegun()
+	}
+	if err := fn(&immediateTx{conn: conn}); err != nil {
+		_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		return err
+	}
+	_, err := conn.ExecContext(ctx, "COMMIT")
+	return err
+}
+
+func TestImmediateTxHoldsWriteLockBeforeFirstStatement(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "guarded-shared.db")
 	s := guardedTestStoreAt(t, dbPath)
 	runKey := []string{"p", "t", "run-1"}
-	if err := s.UpsertRecord("workflow_runs", "ws", runKey, guardedClaimMarker("claim-A")); err != nil {
-		t.Fatalf("seed claim: %v", err)
-	}
-	if err := s.UpsertRecord("workflow_step_instances", "ws", []string{"run-1", "s1", "wfsi-1"}, `{"status":"pending"}`); err != nil {
-		t.Fatalf("seed instance: %v", err)
+	if err := s.UpsertRecord("workflow_runs", "ws", runKey, `{"id":"run-1"}`); err != nil {
+		t.Fatalf("seed row: %v", err)
 	}
 
-	// A SECOND independent handle to the SAME database file — the
-	// cross-process shape the IMMEDIATE guarantee is about.
-	s2, err := Open(dbPath)
+	// Second independent handle with a SHORT busy timeout: the probe must
+	// fail fast on the held lock, not queue behind the full 5s default.
+	probe, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=busy_timeout(100)&_pragma=journal_mode(WAL)")
 	if err != nil {
-		t.Fatalf("open second handle: %v", err)
+		t.Fatalf("open probe handle: %v", err)
 	}
-	defer s2.Close()
+	defer probe.Close()
 
-	// Begin an explicit IMMEDIATE transaction on the store's OWN connection
-	// machinery (runImmediateTx is the code under test): hold it open by
-	// running one write inside it, then — while it is still open — attempt a
-	// write from the second handle. The second write must fail busy (or block
-	// past busy_timeout): the RESERVED lock is genuinely held.
 	conn, err := s.sql.Conn(t.Context())
 	if err != nil {
 		t.Fatalf("conn: %v", err)
 	}
 	defer conn.Close()
-	locked := make(chan error, 1)
+
+	// beginGate closes the instant BEGIN IMMEDIATE returned and BEFORE the
+	// body executes any SQL; releaseGate unblocks the body.
+	beginGate := make(chan struct{})
+	releaseGate := make(chan struct{})
+	errCh := make(chan error, 1)
 	go func() {
-		locked <- runImmediateTx(conn, func(tx *immediateTx) error {
-			if _, err := tx.Exec(`INSERT INTO kv_records (table_name, workspace_id, k1, k2, k3, payload, updated_at, revision) VALUES ('workflow_runs','ws','p','t','run-2','{}','2026-01-01T00:00:00Z',1)`); err != nil {
-				return err
-			}
-			// While the IMMEDIATE transaction is open, the second handle
-			// must not be able to write. Give the lock a moment, then probe.
-			time.Sleep(50 * time.Millisecond)
-			if err := func() error {
-				_, err := s2.sql.Exec(`UPDATE kv_records SET payload = '{"b":1}' WHERE table_name = 'workflow_runs' AND workspace_id = 'ws' AND k1 = 'p' AND k2 = 't' AND k3 = 'run-1'`)
-				return err
-			}(); err == nil {
-				return fmt.Errorf("second-handle write succeeded while an IMMEDIATE transaction held the RESERVED lock — deferred BEGIN regression")
-			} else if !isSQLiteBusyErr(err) {
-				return fmt.Errorf("second-handle write failed with an unexpected error (want busy): %w", err)
-			}
-			return nil
+		errCh <- runImmediateTxNotify(conn, func() {
+			close(beginGate)
+			<-releaseGate
+		}, func(tx *immediateTx) error {
+			_, err := tx.Exec(`UPDATE kv_records SET payload = '{"touched":true}' WHERE table_name = 'workflow_runs' AND workspace_id = 'ws' AND k1 = 'p' AND k2 = 't' AND k3 = 'run-1'`)
+			return err
 		})
 	}()
-	if err := <-locked; err != nil {
-		t.Fatalf("IMMEDIATE lock behavior: %v", err)
+
+	<-beginGate
+	// PROBE at the BEGIN-done / zero-SQL instant: the RESERVED lock must
+	// already be held, so the probe write must fail Busy. If runImmediateTx
+	// ever regresses to a deferred BEGIN, this write SUCCEEDS and the test
+	// fails — that is the discriminating property GPT required.
+	_, err = probe.Exec(`UPDATE kv_records SET payload = '{"probe":1}' WHERE table_name = 'workflow_runs' AND workspace_id = 'ws' AND k1 = 'p' AND k2 = 't' AND k3 = 'run-1'`)
+	if err == nil {
+		t.Fatal("second handle wrote while an IMMEDIATE transaction was open with ZERO statements executed — BEGIN IMMEDIATE is not acquiring the write lock up front (deferred regression)")
 	}
-	// After the IMMEDIATE transaction commits, the second handle writes fine.
-	if _, err := s2.sql.Exec(`UPDATE kv_records SET payload = '{"b":1}' WHERE table_name = 'workflow_runs' AND workspace_id = 'ws' AND k1 = 'p' AND k2 = 't' AND k3 = 'run-1'`); err != nil {
-		t.Fatalf("second-handle write after the IMMEDIATE transaction committed must succeed: %v", err)
+	if !isSQLiteBusyErr(err) {
+		t.Fatalf("probe failed with an unexpected error (want busy): %v", err)
+	}
+	close(releaseGate)
+	if err := <-errCh; err != nil {
+		t.Fatalf("IMMEDIATE transaction must commit after the probe: %v", err)
+	}
+	// After the transaction committed, the probe handle writes normally.
+	if _, err := probe.Exec(`UPDATE kv_records SET payload = '{"probe":2}' WHERE table_name = 'workflow_runs' AND workspace_id = 'ws' AND k1 = 'p' AND k2 = 't' AND k3 = 'run-1'`); err != nil {
+		t.Fatalf("probe write after COMMIT must succeed: %v", err)
+	}
+}
+
+// Deferred control group (GPT round 4.5 item 3): at the SAME instant — BEGIN
+// returned, zero statements executed — a plain deferred transaction holds NO
+// write lock, so the second handle's write goes through. This is what makes
+// TestImmediateTxHoldsWriteLockBeforeFirstStatement meaningful: the two tests
+// differ ONLY in BEGIN vs BEGIN IMMEDIATE, and their outcomes must differ.
+func TestDeferredTxAllowsConcurrentWriteBeforeFirstStatement(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "guarded-shared.db")
+	s := guardedTestStoreAt(t, dbPath)
+	runKey := []string{"p", "t", "run-1"}
+	if err := s.UpsertRecord("workflow_runs", "ws", runKey, `{"id":"run-1"}`); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+
+	probe, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=busy_timeout(100)&_pragma=journal_mode(WAL)")
+	if err != nil {
+		t.Fatalf("open probe handle: %v", err)
+	}
+	defer probe.Close()
+
+	conn, err := s.sql.Conn(t.Context())
+	if err != nil {
+		t.Fatalf("conn: %v", err)
+	}
+	defer conn.Close()
+
+	beginGate := make(chan struct{})
+	releaseGate := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runDeferredTxForTest(conn, func() {
+			close(beginGate)
+			<-releaseGate
+		}, func(tx *immediateTx) error {
+			return nil // zero statements: the deferred tx holds no lock yet
+		})
+	}()
+
+	<-beginGate
+	// Deferred + no statements: the probe write must SUCCEED.
+	if _, err := probe.Exec(`UPDATE kv_records SET payload = '{"probe":1}' WHERE table_name = 'workflow_runs' AND workspace_id = 'ws' AND k1 = 'p' AND k2 = 't' AND k3 = 'run-1'`); err != nil {
+		t.Fatalf("probe write against an open DEFERRED transaction with zero statements must succeed, got: %v", err)
+	}
+	close(releaseGate)
+	if err := <-errCh; err != nil {
+		t.Fatalf("deferred control transaction must commit: %v", err)
 	}
 }
 

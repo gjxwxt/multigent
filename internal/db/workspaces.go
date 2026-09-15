@@ -552,13 +552,28 @@ ON CONFLICT(table_name, workspace_id, k1, k2, k3) DO UPDATE SET payload = exclud
 
 // runImmediateTx executes fn inside one explicit "BEGIN IMMEDIATE"
 // transaction on conn, committing on success and rolling back on error. The
-// driver is configured with _txlock=immediate as a belt-and-suspenders
-// default, but the statement here is spelled out so the guarantee does not
-// depend on connection-string plumbing.
+// statement is spelled out on a dedicated connection — NOT via the driver's
+// Tx wrapper or a URI-level _txlock default — so the write-lock guarantee
+// lives in exactly one auditable place (GPT re-review round 4.5: _txlock on
+// Open() would be a global behavior change across every Begin() call site).
 func runImmediateTx(conn *sql.Conn, fn func(tx *immediateTx) error) error {
+	return runImmediateTxNotify(conn, nil, fn)
+}
+
+// runImmediateTxNotify is runImmediateTx with an optional onBegun callback
+// invoked the instant BEGIN IMMEDIATE has succeeded and BEFORE any statement
+// of the transaction body runs. The lock-acquisition test uses this seam to
+// probe a second connection at exactly that moment — the only instant that
+// distinguishes immediate from deferred acquisition (a probe placed after the
+// body's first write proves nothing: a deferred transaction also holds the
+// write lock from its first statement onward).
+func runImmediateTxNotify(conn *sql.Conn, onBegun func(), fn func(tx *immediateTx) error) error {
 	ctx := context.Background()
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return err
+	}
+	if onBegun != nil {
+		onBegun()
 	}
 	// With the manual BEGIN already issued, BeginTx must not send another
 	// BEGIN: driver Tx wrappers would, so bind the transaction via the raw
