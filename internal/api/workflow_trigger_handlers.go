@@ -607,11 +607,12 @@ func workflowWebBaseURL(r *http.Request) string {
 	if v := strings.TrimSpace(r.Header.Get("X-Multigent-Web-Base-URL")); v != "" {
 		return v
 	}
-	base := requestBaseURL(r)
-	if strings.Contains(base, "://127.0.0.1:27893") || strings.Contains(base, "://localhost:27893") {
-		return strings.Replace(base, ":27893", ":27894", 1)
-	}
-	return base
+	// The historical 27893→27894 dev-topology rewrite (API used to default to
+	// :27893 and the Mattermost bridge status port was :27894) is gone: the
+	// daemon default is :27892, and behind a reverse proxy the request base is
+	// the public origin. Deployments needing a different public URL set
+	// MULTIGENT_WEB_BASE_URL.
+	return requestBaseURL(r)
 }
 
 func newWorkflowNotificationID() string {

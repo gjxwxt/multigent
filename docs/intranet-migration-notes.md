@@ -168,9 +168,13 @@ fail-closed**，而错误信息只说 "generator container failed"，不指向�
 
 ## 6. 待办（迁移相关的登记项，按优先级）
 
-1. **删除 27893→27894 化石端口替换**（`workflowWebBaseURL`）：
-   dev 拓扑化石，内网无影响，择期清理并补回归测试。
-2. **日志双键归一**：`MULTIGENT_LOG_MAX_SIZE` / `MULTIGENT_LOG_MAX_SIZE_MB`
-   收敛为单键 + 单位约定，保留旧键一个版本的兼容告警。
+1. ~~删除 27893→27894 化石端口替换~~（已完成 2026-09-15 夜间：`workflowWebBaseURL`
+   不再做 dev 拓扑端口改写，请求基址原样透传，公网 URL 由
+   `MULTIGENT_WEB_BASE_URL` 承担；回归测试锁定）。
+2. ~~日志双键归一~~（已定案 2026-09-15 夜间：**不收敛为单键**——`MULTIGENT_LOG_MAX_SIZE`
+   （字节，daemon systemd/launchd 安装器写入）与 `MULTIGENT_LOG_MAX_SIZE_MB`
+   （MB，runtime-node 安装器写入）都是**已装机 systemd 单元在用的键**，删任何
+   一个都会破坏存量安装。定案为"canonical=_MB 键，字节键为兼容回退"，优先级
+   由 `TestResolveServiceLogOptionsLogSizeKeys` 锁死，新部署一律写 `_MB` 键。
 3. **配置清单文档化**：把 40 个 env 键按 §3 的域分组写进正式文档
    （键名 + 语义 + fail-open/fail-closed 标注），作为 runbook 的配套。

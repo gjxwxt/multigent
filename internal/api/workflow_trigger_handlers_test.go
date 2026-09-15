@@ -15,9 +15,12 @@ func TestWorkflowWebBaseURLUsesConfiguredWebBase(t *testing.T) {
 	}
 }
 
+// The historical 27893→27894 dev-topology rewrite is removed (2026-09-15):
+// the request base passes through unchanged; deployments needing a public
+// URL set MULTIGENT_WEB_BASE_URL.
 func TestWorkflowWebBaseURLMapsLocalAPIPortToWebPort(t *testing.T) {
 	req := httptest.NewRequest("POST", "http://127.0.0.1:27893/api/v1/runtime", nil)
-	if got := workflowWebBaseURL(req); got != "http://127.0.0.1:27894" {
+	if got := workflowWebBaseURL(req); got != "http://127.0.0.1:27893" {
 		t.Fatalf("workflowWebBaseURL=%q", got)
 	}
 }
