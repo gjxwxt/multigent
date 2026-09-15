@@ -316,6 +316,84 @@ func (db *SQLiteStore) GetRecord(table string, workspaceID string, key []string)
 	return payload, err == nil, err
 }
 
+// UpdateRecordIfPayloadAndRevision is a payload-aware compare-and-swap over a
+// kv_records row: it writes newPayload only when the stored payload equals
+// expectPayload AND the revision (updated_at) equals expectRevision. The
+// workflow transition gate needs the payload witness — a claim gate must
+// distinguish "the row I observed" from "a claim marker someone else wrote",
+// and a revision-only witness cannot: two claimants observing revision R
+// serialize their swaps, and the second sees a DIFFERENT revision (caught),
+// but a marker→marker refresh by the marker's owner would otherwise succeed
+// against any same-length revision sequence.
+func (db *SQLiteStore) UpdateRecordIfPayloadAndRevision(table, workspaceID string, key []string, newPayload, expectPayload, expectRevision string) (swapped bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("sqlite cas panic recovered: %v", r)
+		}
+	}()
+	if db == nil || db.sql == nil {
+		return false, fmt.Errorf("database not open")
+	}
+	k1, k2, k3 := normalizeKey(key)
+	res, err := db.sql.Exec(`UPDATE kv_records SET payload = ?, updated_at = ?
+WHERE table_name = ? AND workspace_id = ? AND k1 = ? AND k2 = ? AND k3 = ? AND payload = ? AND updated_at = ?`,
+		newPayload, nowUTC(), table, workspaceID, k1, k2, k3, expectPayload, expectRevision)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
+// UpdateRecordIfRevision is a payload-blind CAS over a kv_records row,
+// conditioned only on the revision token returned by RecordRevision (the
+// row's updated_at column). A stale caller gets swapped=false and the row is
+// left untouched for the winner to proceed. The WHERE clause rides the same
+// connection as every other statement (SQLite serializes writers), so between
+// the revision read and this write no third-party update can slip through
+// unobserved: either the caller's revision is still current and the write
+// lands, or it isn't and nothing changes.
+func (db *SQLiteStore) UpdateRecordIfRevision(table, workspaceID string, key []string, newPayload, expectRevision string) (swapped bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("sqlite cas panic recovered: %v", r)
+		}
+	}()
+	if db == nil || db.sql == nil {
+		return false, fmt.Errorf("database not open")
+	}
+	k1, k2, k3 := normalizeKey(key)
+	res, err := db.sql.Exec(`UPDATE kv_records SET payload = ?, updated_at = ?
+WHERE table_name = ? AND workspace_id = ? AND k1 = ? AND k2 = ? AND k3 = ? AND updated_at = ?`,
+		newPayload, nowUTC(), table, workspaceID, k1, k2, k3, expectRevision)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
+// RecordRevision returns the current revision token (updated_at) of a
+// kv_records row, for use with UpdateRecordIfRevision. A missing row yields
+// found=false.
+func (db *SQLiteStore) RecordRevision(table, workspaceID string, key []string) (revision string, found bool, err error) {
+	if db == nil || db.sql == nil {
+		return "", false, fmt.Errorf("database not open")
+	}
+	k1, k2, k3 := normalizeKey(key)
+	err = db.sql.QueryRow(`SELECT updated_at FROM kv_records WHERE table_name = ? AND workspace_id = ? AND k1 = ? AND k2 = ? AND k3 = ?`, table, workspaceID, k1, k2, k3).Scan(&revision)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return revision, err == nil, err
+}
+
 func (db *SQLiteStore) ListRecords(table string, workspaceID string, keyPrefix []string) ([]Record, error) {
 	if len(keyPrefix) > 3 {
 		return nil, fmt.Errorf("record key prefix too long")

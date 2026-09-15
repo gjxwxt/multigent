@@ -35,6 +35,9 @@ type Store interface {
 
 	UpsertRecord(table string, workspaceID string, key []string, payload string) error
 	GetRecord(table string, workspaceID string, key []string) (string, bool, error)
+	UpdateRecordIfRevision(table, workspaceID string, key []string, newPayload, expectRevision string) (bool, error)
+	UpdateRecordIfPayloadAndRevision(table, workspaceID string, key []string, newPayload, expectPayload, expectRevision string) (bool, error)
+	RecordRevision(table, workspaceID string, key []string) (string, bool, error)
 	ListRecords(table string, workspaceID string, keyPrefix []string) ([]Record, error)
 	DeleteRecord(table string, workspaceID string, key []string) error
 

@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -1505,7 +1506,15 @@ func (s *Store) RunForTask(project, taskID string) (entity.WorkflowRun, bool, er
 		return entity.WorkflowRun{}, false, err
 	}
 	var run entity.WorkflowRun
-	if err := json.Unmarshal([]byte(recs[0].Payload), &run); err != nil {
+	payload := recs[0].Payload
+	// A mid-transition claim marker replaces the run payload for the
+	// transition's duration (Q2 gate). Readers must see through it: unwrap
+	// the embedded run state, otherwise every reader between claim and
+	// release parses garbage ("invalid character 't' in literal true").
+	if strings.HasPrefix(payload, transitionClaimPrefix) {
+		payload = strings.TrimPrefix(payload, transitionClaimPrefix)
+	}
+	if err := json.Unmarshal([]byte(payload), &run); err != nil {
 		return entity.WorkflowRun{}, false, err
 	}
 	return run, true, nil
@@ -2039,27 +2048,204 @@ func sameWorkflowIdentity(a, b string) bool {
 	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
 }
 
+// ErrStaleWorkflowTransition is returned when a workflow transition loses the
+// idempotency race: another caller already drove (or is driving) the run past
+// the caller's observed state. Callers should treat it as "the step is already
+// being handled" and NOT retry blindly — the winning caller owns every
+// downstream side effect (events, next-step dispatch, review_rounds).
+var ErrStaleWorkflowTransition = errors.New("workflow transition stale: the run has already advanced past this step")
+
+// transitionClaimPrefix marks a workflow_runs payload that is mid-transition:
+// "<prefix> JSON". The claim survives only for the duration of the transition
+// — the final SaveRun in CompleteAndAdvance overwrites the payload with the
+// terminal or advanced state, which releases the claim implicitly (a run that
+// never completes its transition is cleaned by the next claim attempt against
+// a stale marker; see claimWorkflowTransition).
+const transitionClaimPrefix = "transition-claim:"
+
+// claimWorkflowTransition serializes state-machine transitions on a workflow
+// run. The run row is the natural lock: every transition reads it first and
+// writes it last, and the kv_records row carries an updated_at revision that
+// UpdateRecordIfRevision can CAS on.
+//
+// Claim protocol:
+//  1. Read the run's revision. A terminal run (completed/failed/cancelled)
+//     refuses re-entry — completing a completed run is the duplicate-dispatch
+//     bug this gate exists to prevent.
+//  2. CAS the payload to a claim marker (run JSON + claim stamp). Winning
+//     this swap means no other transitioner observed the same revision.
+//  3. The caller proceeds; its subsequent SaveRun (run status/step updates)
+//     overwrites the claim marker, releasing the gate for the NEXT step.
+//
+// A crashed transitioner leaves a claim marker behind. The next claimant
+// detects the marker: if the marker's embedded run state matches what a
+// transition from the CURRENT active step would look like and its stamp is
+// older than transitionClaimTTL, the claim is considered abandoned and is
+// stolen. This trades a bounded (5-minute) stall after a mid-transition crash
+// for zero duplicate transitions.
+func (s *Store) claimWorkflowTransition(run *entity.WorkflowRun) error {
+	if run == nil {
+		return fmt.Errorf("workflow run is nil")
+	}
+	switch strings.TrimSpace(run.Status) {
+	case "completed", "failed", "cancelled":
+		// Terminal run: a second completion is always a duplicate dispatch.
+		return fmt.Errorf("%w: run %s is already %s", ErrStaleWorkflowTransition, run.ID, run.Status)
+	}
+	key := []string{run.Project, run.TaskID, run.ID}
+	// The claim witness is BOTH payload and revision: the CAS must fire only
+	// when the row still holds the exact payload this caller observed. A
+	// revision-only witness has a fatal hole — a claimant whose swap lands
+	// after another claimant's marker write would refresh the marker instead
+	// of losing (marker→marker swap against a same-row revision), letting two
+	// transitions run concurrently, which is the exact bug this gate exists
+	// to prevent.
+	current, found, err := s.db.GetRecord("workflow_runs", s.workspaceID, key)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("workflow run %s record missing", run.ID)
+	}
+	revision, found, err := s.db.RecordRevision("workflow_runs", s.workspaceID, key)
+	if err != nil || !found {
+		return fmt.Errorf("workflow run %s revision unavailable: found=%v err=%v", run.ID, found, err)
+	}
+	// A fresh claim marker already present means another transitioner is
+	// mid-flight with an unexpired stamp — refuse before any CAS.
+	if strings.HasPrefix(current, transitionClaimPrefix) {
+		if claimed, ok := s.decodeTransitionClaim(current); ok && claimed.UpdatedAt.After(time.Now().UTC().Add(-transitionClaimTTL)) {
+			return fmt.Errorf("%w: run %s step %s is already transitioning", ErrStaleWorkflowTransition, run.ID, run.ActiveStepID)
+		}
+		// Expired marker: fall through and steal it via the CAS below (the
+		// marker payload is the CAS witness, so the steal is atomic).
+	}
+	claim := entity.WorkflowRun{
+		ID: run.ID, DefinitionID: run.DefinitionID, DefinitionSnapshot: run.DefinitionSnapshot,
+		Project: run.Project, TaskID: run.TaskID,
+		Status: run.Status, ActiveStepID: run.ActiveStepID,
+		CurrentAssigneeType: run.CurrentAssigneeType, CurrentAssigneeID: run.CurrentAssigneeID,
+		CurrentAssigneeMembershipID: run.CurrentAssigneeMembershipID,
+		ActorBindings:               run.ActorBindings,
+		StartedAt:                   run.StartedAt, UpdatedAt: run.UpdatedAt, FinishedAt: run.FinishedAt,
+	}
+	raw, err := json.Marshal(claim)
+	if err != nil {
+		return err
+	}
+	marker := transitionClaimPrefix + string(raw)
+	swapped, err := s.db.UpdateRecordIfPayloadAndRevision("workflow_runs", s.workspaceID, key, marker, current, revision)
+	if err != nil {
+		return err
+	}
+	if swapped {
+		return nil
+	}
+	// Lost the swap: either a concurrent transitioner holds the claim, or the
+	// run advanced past our view. Distinguish via a fresh read.
+	fresh, ok, err := s.RunForTask(run.Project, run.TaskID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("workflow run %s record missing", run.ID)
+	}
+	if strings.TrimSpace(fresh.Status) != strings.TrimSpace(run.Status) || fresh.ActiveStepID != run.ActiveStepID {
+		// The run moved on — the classic duplicate: someone else already
+		// handled this step (or a later one).
+		return fmt.Errorf("%w: run %s is now status=%s activeStep=%s (was status=%s activeStep=%s)",
+			ErrStaleWorkflowTransition, run.ID, fresh.Status, fresh.ActiveStepID, run.Status, run.ActiveStepID)
+	}
+	return fmt.Errorf("%w: run %s step %s is already transitioning", ErrStaleWorkflowTransition, run.ID, run.ActiveStepID)
+}
+
+// transitionClaimTTL bounds how long a crashed transitioner's claim blocks
+// the workflow. 5 minutes: transitions take seconds; the TTL must exceed any
+// legitimate slow transition (a step with delivery side effects) by a wide
+// margin while not wedging recovery until a restart.
+const transitionClaimTTL = 5 * time.Minute
+
+// releaseWorkflowTransitionClaim unwinds a claim taken by
+// claimWorkflowTransition when the transition aborts BEFORE persisting
+// anything (route mismatch, dangling edge): the marker is swapped back to the
+// plain run payload so a corrected re-run can claim immediately. If the swap
+// fails the claim simply ages out via transitionClaimTTL — bounded staleness,
+// never a wedge.
+func (s *Store) releaseWorkflowTransitionClaim(run *entity.WorkflowRun) {
+	if run == nil || s.db == nil {
+		return
+	}
+	key := []string{run.Project, run.TaskID, run.ID}
+	payload, found, err := s.db.GetRecord("workflow_runs", s.workspaceID, key)
+	if err != nil || !found || !strings.HasPrefix(payload, transitionClaimPrefix) {
+		return
+	}
+	revision, found, err := s.db.RecordRevision("workflow_runs", s.workspaceID, key)
+	if err != nil || !found {
+		return
+	}
+	clean := *run
+	clean.UpdatedAt = run.UpdatedAt
+	raw, err := json.Marshal(clean)
+	if err != nil {
+		return
+	}
+	_, _ = s.db.UpdateRecordIfRevision("workflow_runs", s.workspaceID, key, string(raw), revision)
+}
+
+func (s *Store) decodeTransitionClaim(payload string) (*entity.WorkflowRun, bool) {
+	claimJSON := strings.TrimPrefix(payload, transitionClaimPrefix)
+	var claimed entity.WorkflowRun
+	if err := json.Unmarshal([]byte(claimJSON), &claimed); err != nil {
+		return nil, false
+	}
+	return &claimed, true
+}
+
 func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outputValues map[string]string, status string) (TransitionResult, error) {
 	var result TransitionResult
 	run, ok, err := s.RunForTask(project, taskID)
 	if err != nil || !ok {
 		return result, err
 	}
+	// Idempotency gate (Q2, GPT review): CompleteAndAdvance is a MULTI-write
+	// transition over independent kv_records rows (step instance, event, run)
+	// with no enclosing DB transaction — two concurrent completions of the
+	// same step (double webhook, ChatOps click racing the runtime finish,
+	// retry after timeout) would each persist a completion event, a next-step
+	// reset, and a review_rounds increment, then overwrite each other's run
+	// state. The gate claims the transition with a CAS on the run record's
+	// revision: only ONE caller may drive a given (run, activeStep) forward;
+	// every other caller gets ErrStaleWorkflowTransition and leaves zero
+	// writes behind. A completed/failed/cancelled run also refuses re-entry
+	// (the old code would happily double-complete a run whose status write
+	// raced ahead).
+	if err := s.claimWorkflowTransition(&run); err != nil {
+		return result, err
+	}
+	// Every abort below that happens BEFORE the first persistence (definition
+	// unavailable, output validation, route mismatch, dangling edge) must
+	// release the claim — a no-write abort that kept the claim would wedge a
+	// corrected re-run behind the TTL instead of failing fast.
 	def, ok, err := s.RunDefinition(run)
 	if err != nil || !ok {
+		s.releaseWorkflowTransitionClaim(&run)
 		return result, err
 	}
 	instances, err := s.ListStepInstances(run.ID)
 	if err != nil {
+		s.releaseWorkflowTransitionClaim(&run)
 		return result, err
 	}
 	currentStep, ok := stepByID(def.Steps, run.ActiveStepID)
 	if !ok {
+		s.releaseWorkflowTransitionClaim(&run)
 		return result, nil
 	}
 	now := time.Now().UTC()
 	values, err := normalizeWorkflowOutputValues(currentStep, outputValues, summary, output, strings.TrimSpace(status) == "failed")
 	if err != nil {
+		s.releaseWorkflowTransitionClaim(&run)
 		return result, err
 	}
 	if strings.TrimSpace(status) == "failed" && run.DefinitionID == ProjectInitializationWorkflowID {
@@ -2165,6 +2351,10 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 	// cannot re-dispatch (it only resumes pending/running instances).
 	edge, hasNext := chooseNextEdge(def.Edges, currentStep.ID, values, output)
 	if !hasNext && workflowHasOutgoingEdges(def.Edges, currentStep.ID) && !isTerminalReviewApproval(currentStep, def.Edges, values) {
+		// Release the transition claim: this abort happens BEFORE any
+		// persistence, so a corrected re-run must be able to claim again
+		// immediately (the route-mismatch retry contract below).
+		s.releaseWorkflowTransitionClaim(&run)
 		return result, fmt.Errorf("workflow step %q output did not match any outgoing route", currentStep.Title)
 	}
 	nextStep, nextFound := stepByID(def.Steps, edge.To)
@@ -2224,6 +2414,7 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 		// completed instance above is itself valid, so keep it persisted but
 		// fail closed with a config error; the run stays active on the same
 		// step for a corrected definition / operator intervention.
+		s.releaseWorkflowTransitionClaim(&run)
 		return result, fmt.Errorf("workflow step %q routes to missing step %q (definition configuration error)", currentStep.ID, edge.To)
 	}
 	run.ActiveStepID = nextStep.ID
