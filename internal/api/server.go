@@ -21,6 +21,7 @@ import (
 	"github.com/multigent/multigent/internal/builtins"
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
+	"github.com/multigent/multigent/internal/fixturesandbox"
 	"github.com/multigent/multigent/internal/gitworktree"
 	"github.com/multigent/multigent/internal/imbridge"
 	"github.com/multigent/multigent/internal/interaction"
@@ -138,6 +139,10 @@ type Server struct {
 	telemetryUsageCache    map[string]telemetryUsageCacheEntry
 	previewEngine          previewEngineAPI
 	worktreeMgr            *gitworktree.Manager
+	// fixtureSandbox provisions task-private test databases (V1). Nil when
+	// the control DB or data dir is unavailable — previews then run without
+	// sandbox integration (contract-less projects are unaffected).
+	fixtureSandbox *fixturesandbox.Provisioner
 	previewMu              sync.Mutex
 	previewSessions        map[string]*previewChatSession
 	previewChatMu          sync.Mutex
@@ -193,6 +198,11 @@ func NewServer(root, apiKey string) *Server {
 	tm.nodeTaskDispatch = func(project, agent, reason string) bool {
 		return s.dispatchTaskTriggerViaRuntime(project, agent, reason, nil)
 	}
+	// Test-data sandbox (V1): provision the task-private fixture database
+	// before preview containers start, and tear it down on stop/reap. The
+	// generator runs the contract's argv inside a disposable container —
+	// never on the host (plan §3.2 item 5).
+	s.initFixtureSandbox()
 	tm.StartPoller()
 	// Preview image selection happens per-project at preview start time
 	// (resolved from the project's runtime profile), not server-wide here.

@@ -53,6 +53,28 @@ const previewLease = 30 * time.Minute
 type Engine struct {
 	mu        sync.RWMutex
 	instances map[string]*PreviewInstance
+	// provisionSandbox, when set, runs before every preview start: it
+	// materializes the task-private fixture database (test-data sandbox V1)
+	// and returns the env assignments the container needs (e.g.
+	// APP_DB_PATH=<private db>). A returned error fails the preview start
+	// (fail-closed) — a contract-bearing project must never boot against a
+	// missing or drifted database.
+	provisionSandbox func(ctx context.Context, taskID, projectName, worktreeDir string) ([]string, error)
+	// releaseSandbox, when set, runs after a preview container is stopped or
+	// reaped: the sandbox store decides whether the lease is renewed (live
+	// preview) or torn down (stop/reap), stopping containers before deleting
+	// directories.
+	releaseSandbox func(taskID string, reason string)
+}
+
+// SetSandboxHooks wires the fixture-sandbox provisioner/releaser into the
+// engine. Nil hooks mean the project has no sandbox integration (V1 legacy
+// behavior). Call before the first preview start.
+func (e *Engine) SetSandboxHooks(provision func(ctx context.Context, taskID, projectName, worktreeDir string) ([]string, error), release func(taskID, reason string)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.provisionSandbox = provision
+	e.releaseSandbox = release
 }
 
 // NewEngine creates a new preview engine and starts the background
@@ -93,7 +115,12 @@ func (e *Engine) reapExpired() {
 	}
 	e.mu.Unlock()
 	for _, taskID := range expired {
-		_ = e.StopEphemeralPreview(taskID)
+		if err := e.StopEphemeralPreview(taskID); err != nil {
+			log.Printf("[preview-reaper] stop %s: %v", taskID, err)
+		} else if e.releaseSandbox != nil {
+			// reapExpired already went through StopEphemeralPreview which
+			// fires the release hook on success; this branch only logs.
+		}
 	}
 }
 
@@ -222,6 +249,17 @@ func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktree
 			URL:         "",
 			StartedAt:   time.Now().UTC(),
 		}, nil
+	}
+
+	// Test-data sandbox (V1): provision the task-private database BEFORE any
+	// container starts. Fail-closed — a project declaring the fixture
+	// contract must not boot against a stale or missing database.
+	var sandboxEnv []string
+	if e.provisionSandbox != nil {
+		sandboxEnv, err = e.provisionSandbox(ctx, taskID, projectName, worktreeDir)
+		if err != nil {
+			return nil, fmt.Errorf("fixture sandbox provisioning failed: %w", err)
+		}
 	}
 
 	port, err := findFreePort()
@@ -358,6 +396,9 @@ func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktree
 	})
 	dockerArgs = append(dockerArgs, e.profilePreviewEnv(runtime)...)
 	dockerArgs = append(dockerArgs, sandbox.TransportDockerArgs()...)
+	// Fixture sandbox env (e.g. APP_DB_PATH pointing at the task-private db)
+	// is passed as explicit KEY=VALUE pairs — never inherited from the host.
+	dockerArgs = append(dockerArgs, sandboxEnv...)
 	// Linked worktrees record their parent gitdir as an absolute host path;
 	// mount the parent repo at the same path so git inside the preview
 	// container can resolve it (otherwise every git command fails with
@@ -665,19 +706,27 @@ func (e *Engine) StopEphemeralPreview(taskID string) error {
 		}
 		lastErr = fmt.Errorf("docker rm %s: %w (%s)", containerName, err, strings.TrimSpace(string(out)))
 	}
-	if lastErr == nil {
-		delete(e.instances, taskID)
-		return nil
-	}
 	// Distinguish "rm failed but container is actually gone" from a real
 	// failure so retries cannot strand phantom instances in the map.
-	if exists, checkErr := containerExistsByTaskLabel(taskID); checkErr == nil && !exists {
-		delete(e.instances, taskID)
-		return nil
-	} else if checkErr != nil {
-		return fmt.Errorf("stopping preview %s: %v (container existence check failed: %w)", containerName, lastErr, checkErr)
+	containerGone := false
+	if lastErr == nil {
+		containerGone = true
+	} else if exists, checkErr := containerExistsByTaskLabel(taskID); checkErr == nil && !exists {
+		containerGone = true
+		lastErr = nil
 	}
-	delete(e.instances, taskID) // container exists but rm failed; keep map in sync with reality
+	if containerGone {
+		delete(e.instances, taskID)
+		if e.releaseSandbox != nil {
+			// The container is gone (or never existed); sandbox teardown may
+			// delete the task-private database directory.
+			e.releaseSandbox(taskID, "stopped")
+		}
+		return nil
+	}
+	// rm failed AND the container still exists: keep the instance mapped and
+	// surface the error (the reaper retries on its next pass).
+	delete(e.instances, taskID)
 	return lastErr
 }
 
