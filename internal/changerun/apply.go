@@ -57,14 +57,40 @@ func isHighRiskPath(path string) bool {
 }
 
 // PatchTouchedPaths extracts the file paths a unified diff touches, for
-// cross-checking against the declared Paths and the blacklist.
+// cross-checking against the declared Paths and the blacklist. It reads both
+// sides of each file header: +++ misses pure deletions and pure renames
+// (--git a/x b/y with no ---/+++ hunk lines), and every touched path is a
+// rollback surface, so the union of old/new paths is the touched set.
 func PatchTouchedPaths(patch string) []string {
+	seen := map[string]bool{}
 	var paths []string
+	add := func(p string) {
+		// Headers may carry the a/ or b/ prefix in either position
+		// (--- a/x, +++ b/x, --git a/x b/y, pure deletes keep a/).
+		p = strings.TrimPrefix(p, "a/")
+		p = strings.TrimPrefix(p, "b/")
+		if p != "" && p != "/dev/null" && !seen[p] {
+			seen[p] = true
+			paths = append(paths, p)
+		}
+	}
 	for _, line := range strings.Split(patch, "\n") {
-		if strings.HasPrefix(line, "+++ b/") {
-			paths = append(paths, strings.TrimPrefix(line, "+++ b/"))
-		} else if strings.HasPrefix(line, "+++ ") && line != "+++ /dev/null" {
-			paths = append(paths, strings.TrimPrefix(line, "+++ "))
+		switch {
+		case strings.HasPrefix(line, "--- "):
+			add(strings.TrimPrefix(line, "--- "))
+		case strings.HasPrefix(line, "+++ "):
+			add(strings.TrimPrefix(line, "+++ "))
+		case strings.HasPrefix(line, "diff --git "):
+			// diff --git a/old b/new — rename/delete headers carry no
+			// ---/+++ lines for pure operations; parse both sides. The
+			// a/ prefix must be stripped explicitly: paths without a
+			// b/ counterpart (pure deletes) keep their a/ form here.
+			body := strings.TrimPrefix(line, "diff --git ")
+			oldPart, newPart, ok := strings.Cut(body, " ")
+			if ok {
+				add(strings.TrimPrefix(oldPart, "a/"))
+				add(newPart)
+			}
 		}
 	}
 	sort.Strings(paths)

@@ -158,6 +158,43 @@ func TestApplyRejectsBinaryPatch(t *testing.T) {
 	}
 }
 
+func TestPatchTouchedPathsCoversDeleteRenameAndBothSides(t *testing.T) {
+	patch := `diff --git a/deploy/old.yaml b/deploy/new.yaml
+similarity index 100%
+rename from deploy/old.yaml
+rename to deploy/new.yaml
+diff --git a/.gitlab-ci.yml b/.gitlab-ci.yml
+deleted file mode 100644
+index 1234567..0000000
+diff --git a/app.go b/app.go
+--- a/app.go
++++ b/app.go
+@@ -1 +1 @@
+-old
++new
+`
+	got := PatchTouchedPaths(patch)
+	want := map[string]bool{"deploy/old.yaml": true, "deploy/new.yaml": true, ".gitlab-ci.yml": true, "app.go": true}
+	if len(got) != 4 {
+		t.Fatalf("touched paths = %v, want 4 entries", got)
+	}
+	for _, p := range got {
+		if !want[p] {
+			t.Fatalf("unexpected path %q in %v", p, got)
+		}
+	}
+	// Every extracted path must trip the blacklist where applicable — a
+	// delete/rename of a CI file can no longer slip past the gate.
+	for _, p := range got {
+		if p == "app.go" {
+			continue
+		}
+		if !isHighRiskPath(p) {
+			t.Fatalf("path %q must be classified high-risk", p)
+		}
+	}
+}
+
 func TestApplyRejectsBrokenPatchParksVerificationFailed(t *testing.T) {
 	e, s := newEngine(t)
 	badPatch := `diff --git a/missing.go b/missing.go
