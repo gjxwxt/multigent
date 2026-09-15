@@ -18,6 +18,16 @@
 > 未导出，需公开）+ proposal 状态 revision-CAS、验证顺序唯一化、V1 明确拒绝
 > dirty、proposal 记录限额与脱敏。待复审。
 >
+> **执行进度（2026-09-15，commit 0f59a381）**：Batch 1 的 §2.0 + §2.1 已落地
+> （除 §2.2 运行时收尾验证任务）：`MULTIGENT_PREVIEW_ORIGIN` /
+> `MULTIGENT_CONSOLE_ORIGIN` 显式配置 + fail-closed 路由闸门 + 兑换
+> （HttpOnly cookie / no-store / no-referrer / Location 无 token / 无效
+> token 不回显）+ CORS allowlist（反射已删）+ widget 与
+> `__MG_PREVIEW_TOKEN__` 注入删除 + `previewWritePrincipal`（Bearer-only、
+> operator 级、审批人匹配、fail-closed、principal 贯穿评论作者）+ Cap 位
+> `preview.view`（旧 token 只读兼容）。status 在泄露审计前要求登录。
+> 剩余：§2.2 运行时收尾验证、E2E 探测脚本、部署 runbook 更新。
+>
 > **九轮定案（仍然有效）**：Batch 1 采用独立 preview origin（sandbox iframe
 > 仅降级开关）；preview origin 来自显式部署配置；CORS allowlist **默认不含
 > preview origin**；写端点 Bearer-only；URL token 兑换 HttpOnly cookie（含
