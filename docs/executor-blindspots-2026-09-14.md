@@ -336,6 +336,20 @@ claim；stamp 失败时 `FailQueuedRuntimeRun` 只能处理仍为 queued 的 run
 另一条：注释里写的事务语义（BEGIN IMMEDIATE）与驱动实际行为（deferred BEGIN）要
 用行为测试钉住，不能只靠代码读起来对。
 
+**四轮半复审补充（GPT 拒绝第一版锁测试的回归证明）**：P0（claim 绑定初读快照）
+通过；P1 实现方向认可，但锁测试"不合格"——测试在第二连接写入前已经执行了事务体
+内的 INSERT，而 deferred 事务同样从首条语句起持锁，"5 秒阻塞"证明不了锁在
+BEGIN 时、首写前已取得，回归成 deferred 时该测试不会失败。重做（285d7dff）：
+`runImmediateTxNotify` 加 onBegun 信号点（BEGIN 返回、事务体零语句的瞬间），
+该瞬间正是 immediate/deferred 的唯一分界；探针连接（100ms busy_timeout）在此
+时刻写入——IMMEDIATE 必 Busy（回归 deferred 则写入成功、测试当场失败），
+deferred 对照组（同形态、普通 BEGIN、零语句）同刻写入必成功。两个测试只差
+BEGIN 与 BEGIN IMMEDIATE 一个词，结果必须相反——这才是区分性证明。同时移除
+Open() 的 `_txlock=immediate` 兜底：URI 级默认会改变所有其他 Begin() 调用点的
+全局语义，保证只留在显式语句这一处。教训：**行为测试的观测点必须放在被测性质
+唯一的分界时刻，且必须有对照组**——没有 deferred 对照的"第二连接被阻塞"永远
+无法区分"锁来得早"和"语句本身拿了锁"。
+
 ### F16. GPT 三轮复审：claim 闸门只护住了 abort，没护住成功路径（2026-09-15 第六轮；**当夜修复完毕**）
 
 三轮复审判定 Q1 通过；Q2 剩最后一个 P0：**claim owner 只在"失败前释放"路径被验证，
