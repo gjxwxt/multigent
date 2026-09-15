@@ -563,3 +563,22 @@ SanitizedGitEnv 再注入拒绝。make test 全绿。
 
 Task 3.1 完整 Change Run（proposal 状态机 + 隔离 clone 接入 agent 面 +
 SanitizedDiffArgs diff 提取 + 黑名单 + 回滚校验）仍未开工，待复审放行。
+
+---
+
+## 执行进度（2026-09-16 晨，夜间窗口，commits 5acbe42e + 981153fd + 520783bf）
+
+**Task 2.1 Batch B 全部完成**（§7 Batch B 条目清零）：
+
+- **B-a 返工可追溯**：qa_signoff 打回时平台把矩阵 failed/blocked/unexecuted
+  项聚合为结构化 `qa_rework_items`（含 manifest expected_result 逐项富化），
+  经 e-qa-rework 送返 implementation——§5.1 的"失败项与测试规格引用无损回流"
+  从纯文本透传升级为机器可读工件；旧定义在途 run 经 normalize 兼容放行。
+- **B-b QA checkpoint**：qa 步骤声明 touched_paths，平台确定性白名单校验
+  （测试源/testdata/fixtures/e2e/probe 通过，业务代码/CI/deploy/凭据/
+  AGENTS.md/.git 拒绝并报行号），拒绝即释放 claim 步骤 pending；按声明字段
+  opt-in，不误伤自定义工作流。
+- P2 两项完成：化石端口改写删除；日志双键契约化定案（canonical=_MB + 字节
+  回退 + 测试锁死），迁移文档 §6 同步。
+
+Batch C（真实项目试点）待部署窗口；每 commit 前 make test 36 包全绿。
