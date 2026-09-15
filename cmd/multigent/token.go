@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -42,7 +43,25 @@ service runs with, e.g.:
 Use the token as "Authorization: Bearer <token>". Treat it as a credential:
 it grants the named account's full API access until it expires.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			warnIfControlDBLooksFresh()
+			// A missing control DB is never legitimate here: there are no
+			// accounts in a fresh store to mint tokens for, and opening it
+			// would silently CREATE an empty DB with a brand-new jwt_secret —
+			// every token it issues is rejected by the running server (the
+			// production footgun where `sudo multigent admin-token` without
+			// MULTIGENT_DATA_DIR resolved to root's home and produced a 401).
+			// Fail closed WITHOUT creating anything; the error names the
+			// resolved path and the fix.
+			path, err := controldb.DefaultPath()
+			if err != nil {
+				return fmt.Errorf("resolve control DB path: %w", err)
+			}
+			if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
+				envSet := os.Getenv("MULTIGENT_CONTROL_DATA_DIR") != "" || os.Getenv("MULTIGENT_DATA_DIR") != ""
+				if envSet {
+					return fmt.Errorf("control DB %s does not exist — this command never creates one; initialize the deployment first (multigent start creates it), or fix MULTIGENT_DATA_DIR / MULTIGENT_CONTROL_DATA_DIR if it points at the wrong location", path)
+				}
+				return fmt.Errorf("control DB %s does not exist and MULTIGENT_DATA_DIR / MULTIGENT_CONTROL_DATA_DIR are unset — this command never creates one; pass the service's environment, e.g.: sudo env MULTIGENT_DATA_DIR=<service data dir> multigent admin-token", path)
+			}
 			db, err := controldb.OpenDefault()
 			if err != nil {
 				return fmt.Errorf("open control DB: %w", err)
@@ -81,27 +100,4 @@ func firstAdminUsername(users *api.UserStore) string {
 		}
 	}
 	return ""
-}
-
-// warnIfControlDBLooksFresh flags the case where the resolved control DB does
-// not exist yet: opening it would silently CREATE an empty store with a
-// brand-new jwt_secret, and every token issued against it is rejected by the
-// running server (which validates against the real data directory's secret —
-// the production footgun where `sudo multigent admin-token` without
-// MULTIGENT_DATA_DIR produced a 401). A missing DB is never legitimate for
-// this command: there are no accounts in a fresh store to mint tokens for.
-func warnIfControlDBLooksFresh() {
-	path, err := controldb.DefaultPath()
-	if err != nil {
-		return
-	}
-	if _, statErr := os.Stat(path); statErr == nil {
-		return
-	}
-	envSet := os.Getenv("MULTIGENT_CONTROL_DATA_DIR") != "" || os.Getenv("MULTIGENT_DATA_DIR") != ""
-	fmt.Fprintf(os.Stderr, "warning: control DB %s does not exist and will be CREATED EMPTY with a new jwt_secret\n", path)
-	if !envSet {
-		fmt.Fprintf(os.Stderr, "warning: MULTIGENT_DATA_DIR / MULTIGENT_CONTROL_DATA_DIR are unset, so this resolved to $HOME/.multigent — under sudo that is root's home, not the service's data dir\n")
-	}
-	fmt.Fprintf(os.Stderr, "warning: a token from a fresh DB will be REJECTED by the running server. Pass the service's environment, e.g.: sudo env MULTIGENT_DATA_DIR=<service data dir> multigent admin-token\n")
 }
