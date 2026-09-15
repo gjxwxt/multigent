@@ -1,7 +1,7 @@
-# 后续批次执行方案（Batch 1-4 评审与落地细化，v4 终稿）
+# 后续批次执行方案（Batch 1-4 评审与落地细化，v5）
 
-> 日期：2026-09-15。输入：GPT 四批执行计划 + 仓库既有设计文档 + GPT 六/七/八
-> 三轮评审修正。
+> 日期：2026-09-15。输入：GPT 四批执行计划 + 仓库既有设计文档 + GPT 六/七/八/
+> 九四轮评审修正。
 > 本方案对计划逐批评审（含与代码现状的核对结论），并给出可直接开工的落地设计。
 > 对应关系：Task 1.2 ← `intranet-runtime-plan.md` 收尾清单；Task 2.1 ←
 > `acceptance-test-design-plan.md`；Task 2.2 ← `test-data-fixture-sandbox-plan.md`
@@ -10,18 +10,18 @@
 > 3.1（Change Run）与 3.2（Skill Profiles）在 docs/ 下**没有已提交的设计文档**
 >（"质量方案 Phase 2/3"出处缺失），§6/§7 是补充设计，评审通过后应回填正式文档。
 >
-> **八轮决策（本文为准）**：Batch 1 采用**独立 preview origin**——sandbox
-> iframe 只是短期降级保护，**不列入完成定义**；preview origin 来自显式部署
-> 配置，不由请求 Host 推导；控制面 CORS 从反射任意 Origin 改为 allowlist
-> （server.go:930-933 现状反射坐实）。**"pvt + Bearer 过渡期双主体"废除**——
-> 同源时被预览应用能窃取 Bearer，允许它通过 operator 校验等于把上游 P0 的
-> 结果合法化；迁移顺序：先 origin 隔离 + 移除注入 widget，再启用写端点
-> Bearer-only 授权；共享预览永远没有 Copilot widget。URL token 兑换为
-> preview-origin 的 HttpOnly cookie。Batch 2 契约全部确认，**可进入实施**；
-> Batch 3 修正 alternate-index 临时 commit 与 apply/index 回滚契约后开工。
+> **九轮状态**：Batch 1（独立 preview origin）与 Batch 2（lease/generator
+> 契约）**批准开工**；Batch 3 **未通过**——v4 的 shadow worktree 仍是 linked
+> worktree，与主仓库共享 Git common dir，Agent 可经
+> `git rev-parse --git-common-dir`、`update-ref`、Git config 或 worktree 管理
+> 命令影响主仓库引用与元数据，并非真隔离。v5 按 §4.1 重写为"独立 `.git` 的
+> 临时 clone"执行环境 + 私有 ref 保活 + postimage 回滚校验，待复审。
 >
-> v3 修订背景：同源窃取 P0（token 在 localStorage、预览代理同 origin、widget
-> 注入凭据脚本）；live SSE 原样转发 Agent 输出；feedback.js 自动附 pvt。
+> **八轮定案（仍然有效）**：Batch 1 采用独立 preview origin——sandbox iframe
+> 只是短期降级保护，不列入完成定义；preview origin 来自显式部署配置，不由
+> Host 推导；CORS allowlist（反射任意 Origin 已坐实于 server.go:930-933）；
+> "pvt + Bearer 过渡期双主体"废除，写端点 Bearer-only；URL token 兑换
+> HttpOnly cookie。Batch 2 契约全部确认。
 
 ---
 
@@ -88,17 +88,27 @@ API——任何端点级校验都被真实凭据绕过。
 2. **控制面 CORS 从反射改为 allowlist**：现状 `withCORS` 把任意请求 Origin
    原样反射进 `Access-Control-Allow-Origin`（server.go:930-933）——独立 origin
    后这会把控制台 API 跨域开放给 preview origin 之外的所有站点。改为：
-   allowlist = {控制台 origin（部署配置）} ∪ {preview origin（部署配置）}；
-   非名单 Origin 一律不回 CORS 头（保持浏览器同源默认拒绝）。反射逻辑删除，
+   **allowlist = {控制台 origin（部署配置）}——默认不含 preview origin**
+   （九轮细化）：preview 没有调用控制台控制面 API 的必要，除非未来存在明确、
+   只读且单独审计的跨域接口，才逐条加入并记录审计理由。非名单 Origin 一律不回
+   CORS 头（保持浏览器同源默认拒绝）。反射逻辑删除，
    `Access-Control-Request-Headers` 同步收敛为固定集合。
-3. **URL token 兑换 HttpOnly cookie（八轮第 3 点）**：即使删除
-   `__MG_PREVIEW_TOKEN__`，分享 URL 的 `?pvt=` 仍可被项目脚本从
+3. **URL token 兑换 HttpOnly cookie（八轮第 3 点、九轮细化响应约束）**：
+   即使删除 `__MG_PREVIEW_TOKEN__`，分享 URL 的 `?pvt=` 仍可被项目脚本从
    `location.search` 读走外传。兑换流程：
    `GET <preview-origin>/preview/{task}/?pvt=<token>` → 服务端校验 token →
    `Set-Cookie: mg_pvt_<task>=<token>; HttpOnly; Secure; SameSite=Lax;
    Path=/preview/{task}/` → **302 到去掉 pvt 的干净 URL**。此后页面与 JS
-   可见 URL 均无 token；JS 永远读不到凭据（HttpOnly）。`feedback.js` 的
-   `?pvt=` 附加逻辑随 widget 退役一并删除。
+   可见 URL 均无 token；JS 永远读不到凭据（HttpOnly）。九轮细化（写入验收）：
+   - 兑换响应追加 `Cache-Control: no-store`、`Referrer-Policy: no-referrer`
+     （token 不进缓存、不经 Referer 泄漏）；
+   - 服务端日志与错误输出**一律脱敏 `pvt`**（含访问日志、审计事件、错误消息
+     回显路径——redact 规则与 git 输出脱敏同级）；
+   - `SameSite=Lax` 的适用前提：preview origin 与 console 为**同一 schemeful
+     site**（同 scheme + 注册域）；部署若跨 site（如独立子域不满足 schemeful
+     site 定义，或 iframe 嵌入场景），须重新评估 cookie 发送行为并改用
+     `SameSite=None; Secure` 或改走兑换后 302 的顶级导航（当前分享形态即顶级
+     导航，Lax 可用；嵌入 iframe 属于部署形态变更，实施时按实际形态复核）。
 4. **Copilot 控制 UI 迁出被预览文档**：chat/feedback/stop/live 的 UI 放在
    **认证后的控制台父页面**（AssistantWidget 体系，Bearer 经控制台 origin）；
    删除 preview 代理对 `/_multigent_preview/feedback.js` 与
@@ -299,13 +309,28 @@ Proposed → AwaitingApproval → Applying(验证) → Applied
   [project, taskID, proposalID]）：actor（显式 principal，同 Task 1.1）、
   原始请求、补丁、Diff、状态、验证结果、时间戳。**同一任务同时至多一个活跃
   proposal**（V1 不做并行）。
-- **隔离产出 = shadow worktree 机制，不是 Prompt 约束**（六轮修正）：当前
-  Agent 对 worktree 有真实写权限，靠 Prompt 说"别写"不可验证。机制：为 proposal
-  创建 **shadow worktree**（`git worktree add` 临时分支），Copilot 在 shadow
-  内产出改动；平台对 shadow 做 `git diff` 提取 patch。用户在预览抽屉看的是
-  **shadow 的 Diff**，主 worktree 在批准前不被触碰。
+- **隔离产出 = 独立 `.git` 的临时 clone，不是 linked worktree**（九轮推翻
+  v4 的 shadow worktree 形态）：`git worktree add` 创建的 linked worktree 与
+  主项目**共享 Git common dir**——Proposal Agent 若能在其中执行任意命令，即可
+  经 `git rev-parse --git-common-dir`、`git update-ref`、Git config 或 worktree
+  管理命令影响**主仓库的引用与元数据**，并没有被限制在 shadow diff 内。
+  v5 契约：
+  1. 平台**可以**在主仓库侧用 linked worktree/临时 ref 等 Git 操作**准备基线**
+     （这些操作由平台代码执行，不经 Agent）；
+  2. 用**私有临时 ref**（如 `refs/multigent/proposals/<proposalID>/baseline`）
+     固定 baseline commit——同时解决保活问题：临时 commit 在 clone 完成前
+     **必须由私有 ref 保活，不能裸挂等 GC**（九轮修正：无 ref 的 commit 在
+     `git gc` 后可能消失，clone 中途失败不可重现）；
+  3. 从该 ref 创建**独立 `.git` 的临时 clone**：无 remote 凭据、无父仓库
+     bind mount、无 Docker socket、无宿主 secrets 挂载；
+  4. **Agent 只拿到该 clone**（工作目录即执行环境边界）；
+  5. 平台从 clone 提取 `git diff` patch，随后**删除私有 ref 与 clone**（清理
+     幂等，失败可重试）；
+  6. 验收测试：在 clone 内以 Agent 视角执行
+     `rev-parse --git-common-dir`/`update-ref`/`config` 写操作/`worktree list`
+     等，断言主仓库引用、config、worktree 元数据**零变化**。
 - **proposal 基线 = 主 worktree 的真实状态，dirty 必须显式建模**（七轮提出、
-  八轮修正 Git 语义）：shadow 以 `baseCommit` 创建时看不到主 worktree 的未提交
+  八轮修正 Git 语义）：clone 只含 `baseCommit`，看不到主 worktree 的未提交
   变更——而 Copilot 要改的往往正是这些状态。契约按序：
   1. **主 worktree 必须 clean**（`git status --porcelain` 为空）才接受
      proposal；不 clean 时向用户明确报"请先提交或暂存当前变更"，不静默继续。
@@ -319,12 +344,14 @@ Proposed → AwaitingApproval → Applying(验证) → Applied
      b. `GIT_INDEX_FILE=<tmp> git add -A`（只写 alternate index，真实 index
         不动）；
      c. `GIT_INDEX_FILE=<tmp> git write-tree` 得到 tree；
-     d. `git commit-tree <tree> -p <base> -m "baseline"` 创建**无 ref 的临时
-        commit**，记为 proposal 的 `baselineCommit`；
-     e. shadow worktree 从该 commit 创建；patch 基线、preimage 校验、Diff
-        展示全部以 `baselineCommit` 为准；该对象随 proposal 回收
-        （`git gc` 可达，无 ref 悬空即弃）；全程真实 HEAD、分支、index 零移动
-        （测试断言）。
+     d. `git commit-tree <tree> -p <base> -m "baseline"` 创建临时 commit；
+     e. **临时 commit 立即由私有 ref 保活**
+        （`refs/multigent/proposals/<proposalID>/baseline`——九轮修正：裸挂
+        commit 会被 `git gc` 回收，clone 完成前必须 ref 可达）；
+     f. 独立 clone 从该 ref 创建（见"隔离产出"契约第 3-5 点）；
+        patch 基线、preimage 校验、Diff 展示全部以 `baselineCommit` 为准；
+     g. proposal 终态后删除私有 ref 与 clone（对象由 gc 自然回收）；全程真实
+        HEAD、分支、index 零移动（测试断言）。
 - **Apply 机制**：确认后申请写锁（`isTaskAtHumanReviewStep`
   fail-closed + `previewSessions` 互斥）→ 校验 **preimage hash**（patch 基于
   `baselineCommit` 的文件内容哈希 == 主 worktree 当前内容哈希；不一致 = 已漂移，
@@ -332,21 +359,26 @@ Proposed → AwaitingApproval → Applying(验证) → Applied
   `git apply`；dirty 形态见第 5 点）→ 按 runtime.json 契约跑 lint/build
   （超时封顶）。
 - **验证语义与回滚 = 不触碰 index 的受控协议，不是"快照回退"一词**（七轮
-  提出、八轮修正 index 语义）：
+  提出、八轮修正 index 语义、九轮补 postimage 校验）：
   - **验证不改主 worktree 源码**：验证命令若可能写源码（lint --fix 一类），
-    一律先在 **shadow worktree** 内对 patch 验证；主 worktree 只在 shadow 验证
-    通过后才 apply——主 worktree 的 apply 路径本身不产生"验证失败要回滚源码"
+    一律先在**隔离 clone** 内对 patch 验证；主 worktree 只在 clone 验证通过
+    后才 apply——主 worktree 的 apply 路径本身不产生"验证失败要回滚源码"
     的情形；
   - **V1 收敛：只接受 clean 主 worktree**（第 1 点）。clean 形态下
     `git apply` 不经 index、回滚 `git apply -R` 对称还原工作区文件，再按
     worktree 既有快照约定做完整性核验（**快照失败必须阻断**——沿用
     gitworktree 防丢未推送工作的约定），无 index 不一致问题；
+  - **回滚前校验 postimage**（九轮修正）：`git apply -R` 假设文件仍处于
+    apply 后状态——若人工/其他流程在 apply 与回滚之间改过文件，反向 patch
+    会把**别人的修改一起覆盖**。回滚前逐 touched path 校验当前内容仍等于
+    **postimage**（apply 时记录的文件哈希）；不等于 → 该路径拒绝自动回滚，
+    proposal 标记"需人工介入"，不静默覆盖；
   - dirty 形态（若支持）**不能**用"`git apply --index` 失败再
     `git apply -R`"——失败瞬间 index 与工作区可能已部分更新，逆向既不还原
     index 也不原子。必须单独设计不触碰真实 index 的 apply/reverse 协议：
     对每个 touched path 逐文件应用（工作区 + 独立临时 index 同步更新）、
     校验 preimage/postimage/stage 状态三者一致后提交该文件，任一文件失败即
-    对已应用文件逐一逆向并校验 stage 复原——该协议先评审再实施；
+    对已应用文件逐一逆向（同样先过 postimage 校验）——该协议先评审再实施；
   - 禁止 `git checkout -- .` / `git reset --hard` 一类无差别回退（会吞掉
     用户与 Agent 的并行未提交工作）；回滚动作与结果记入 proposal 记录。
 - **收编触发点与人工审核显式对齐**（六轮修正）：Apply 成功**不做**泛化
@@ -363,16 +395,18 @@ Proposed → AwaitingApproval → Applying(验证) → Applied
   （`AGENTS.md`、`CLAUDE.md`）、Skill 文件（`.agents/skills/`）、deploy/ 目录、
   Git 元数据操作（`.git/` 下任何路径、submodule/modules 变更、hooks 目录）。
 - **与 Task 1.1 的关系**：1.1 管"谁能发起"（登录 + operator + 审批人），Change
-  Run 管"发起后怎么落地"（shadow → 审 → apply → 验证），两层闸门串联。
-- **UI**：预览抽屉展示 shadow Diff + 确认/拒绝；流式进度复用现有
+  Run 管"发起后怎么落地"（隔离 clone → 审 → apply → 验证），两层闸门串联。
+- **UI**：预览抽屉展示隔离 clone 产出的 Diff + 确认/拒绝；流式进度复用现有
   previewSessions SSE 通道。
 - **测试**：黑名单各形态（新增/删除/重命名/symlink/二进制/路径穿越规范化）、
-  **dirty-worktree 两条路径**（clean 强制；显式 baseline 时断言真实
-  HEAD/分支/**index** 零移动——alternate index 的 add/write-tree 全程）、
-  preimage 漂移拒绝、无锁 Apply 拒绝、**shadow 先行验证**（可写源码的验证
-  命令不触碰主 worktree）、clean 回滚 = `git apply -R` 对称还原且不吞并行
-  未提交工作、proposal 串行化、1.1 权限矩阵在入口同样生效、apply 后收编仍只
-  由审核链路触发。
+  **隔离边界**（Agent 视角在 clone 内执行 update-ref/config 写/worktree 管理，
+  断言主仓库引用与元数据零变化）、**dirty-worktree 两条路径**（clean 强制；
+  显式 baseline 时断言真实 HEAD/分支/index 零移动、私有 ref 保活生效、终态后
+  ref/clone 清理幂等）、preimage 漂移拒绝、无锁 Apply 拒绝、**clone 先行验证**
+  （可写源码的验证命令不触碰主 worktree）、**回滚 postimage 校验**（apply 后
+  文件被人工改动 → 拒绝自动回滚并标记人工介入，不静默覆盖）、clean 回滚 =
+  `git apply -R` 对称还原且不吞并行未提交工作、proposal 串行化、1.1 权限矩阵
+  在入口同样生效、apply 后收编仍只由审核链路触发。
 
 ### 4.2 Task 3.2 Skill Profiles 受控挂载（约 1.5 天）
 
@@ -409,9 +443,9 @@ Proposed → AwaitingApproval → Applying(验证) → Applied
 
 | 批次 | 内容 | 修正后工期 | 前置 |
 | --- | --- | --- | --- |
-| 1 | **1.0 独立 preview origin**（含 CORS allowlist + cookie 兑换）+ 1.1 控制面封门 + 1.2 运行时收尾 | 3 天 | **八轮已定案**：独立 origin 单选，可直接开工 |
-| 2 | 2.1 验收测试 Agent + 2.2 数据沙盒 | 5-6 天 | **八轮已确认，可进入实施**（与 Batch 1 并行开工） |
-| 3 | 3.1 Change Run + 3.2 Skill Profiles | 4-5 天 | **八轮未确认**：先修正 alternate-index 临时 commit 与 apply/index 回滚契约（§4.1 第 2/5 点已按八轮意见改写，待复审）再开工 |
+| 1 | **1.0 独立 preview origin**（CORS allowlist 默认不含 preview origin + cookie 兑换含 no-store/no-referrer/日志脱敏 + SameSite 复核）+ 1.1 控制面封门 + 1.2 运行时收尾 | 3 天 | **九轮批准开工** |
+| 2 | 2.1 验收测试 Agent + 2.2 数据沙盒 | 5-6 天 | **九轮批准，与 Batch 1 并行开工** |
+| 3 | 3.1 Change Run + 3.2 Skill Profiles | 4-5 天 | **九轮未通过，待复审**：§4.1 已改写为独立 clone Agent 执行环境 + 私有 ref 保活 + postimage 回滚校验，复审通过后开工 |
 | 4 | 双人终验 / Brownfield / 自愈 | 验收类，穿插 | 对应批次完成 |
 
 在途：竞态面整改 **GPT 五轮复审已通过**（范围：workflow claim → guarded
