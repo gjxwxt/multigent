@@ -201,11 +201,17 @@ func (s *Server) previewWritePrincipal(w http.ResponseWriter, r *http.Request, p
 - 回归：带 preview token 的代理/静态资源仍 200；旧格式 token
   （无 Cap）读 200、写 403；409 执行锁与限流行为不变；
 - principal 贯穿：feedback/chat 的评论作者 = 登录名（不再出现 `"user"`）；
-- `preview/status` 审计结论记录在案（泄露 → 保持登录制；无泄露 → 可放宽，
-  单独 commit 说明）；
+- `preview/status` 审计结论（已记录，2026-09-15）：响应体为
+  `{taskId, busy, agent, startedAt}`——`agent` 仅是 Agent Worker 名称字面量
+  （如 `pm`，preview_handlers.go `session.Agent = agentName`），不含路径、
+  命令、Agent 会话输出。**无泄露**；同时十三轮 P0 修复后该端点已要求项目
+  读级 membership，"放宽给分享 token"无场景价值 → **维持登录制 +
+  项目 membership**，不再放宽；
 - **origin 隔离 E2E**（§2.0）：兑换 302 后 URL 无 token、cookie HttpOnly、
   预览文档内探测脚本读不到控制台 token、CORS 名单外 Origin 预检被拒、
-  控制台 origin 下 `/preview/` 不可达。
+  控制台 origin 下 `/preview/` 不可达。**部署前置**：反代必须覆盖外部
+  X-Forwarded-Proto，后端不可公网直连（十三轮 P0 后 scheme 校验在 gate，
+  XFP 不符 = 预览整体 404）。
 
 ### 2.2 Task 1.2 内网运行时 P0 审计收尾（验证任务，非开发）
 
