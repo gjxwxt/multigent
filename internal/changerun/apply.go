@@ -7,6 +7,7 @@
 package changerun
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -116,6 +117,30 @@ type ApplyEngine struct {
 	ProjectRoot string
 	// CloneParent is the directory under which validation clones are created.
 	CloneParent string
+	// Scope binds every operation to one (project, taskID) pair. Non-empty
+	// values are enforced against the proposal record BEFORE any state
+	// change or worktree touch — a proposal from another project/task must
+	// surface as not-found, never as a cross-target apply (round-18 P0-1).
+	Scope Scope
+}
+
+// Scope is the (project, task) binding an engine (or handler) operates on.
+type Scope struct {
+	Project string
+	TaskID  string
+}
+
+// matches reports whether the proposal belongs to this scope. Empty scope
+// fields are skipped (library-level callers without a URL context); the
+// HTTP layer always sets both.
+func (sc Scope) matches(p *Proposal) bool {
+	if sc.Project != "" && p.Project != sc.Project {
+		return false
+	}
+	if sc.TaskID != "" && p.TaskID != sc.TaskID {
+		return false
+	}
+	return true
 }
 
 // ApplyResult reports what the apply did.
@@ -139,18 +164,27 @@ func (e *ApplyEngine) Apply(store *Store, proposalID, actor string) (*ApplyResul
 	if err != nil {
 		return nil, err
 	}
+	if !e.Scope.matches(p) {
+		return nil, &NotFoundError{Kind: "proposal", ID: proposalID}
+	}
 	if p.State != StateAwaitingApproval {
 		return nil, fmt.Errorf("proposal %s in state %s, must be awaiting_approval", p.ID, p.State)
 	}
 	if err := ValidatePaths(p.Paths); err != nil {
+		// Pre-validation failures leave the proposal in awaiting_approval
+		// forever occupying the single-active slot — terminate it here so
+		// the operator must re-propose (round-18 P1-2).
+		_, _ = store.Reject(p.ID, "system")
 		return nil, err
 	}
 	if patchIsBinary(p.Patch) {
+		_, _ = store.Reject(p.ID, "system")
 		return nil, fmt.Errorf("binary patches are not supported by change run v1")
 	}
 	touched := PatchTouchedPaths(p.Patch)
 	for _, tp := range touched {
 		if isHighRiskPath(tp) {
+			_, _ = store.Reject(p.ID, "system")
 			return nil, fmt.Errorf("patch touches high-risk path %q — rejected", tp)
 		}
 	}
@@ -161,6 +195,7 @@ func (e *ApplyEngine) Apply(store *Store, proposalID, actor string) (*ApplyResul
 		}
 		for _, tp := range touched {
 			if !declared[tp] {
+				_, _ = store.Reject(p.ID, "system")
 				return nil, fmt.Errorf("patch touches undeclared path %q", tp)
 			}
 		}
@@ -247,16 +282,132 @@ func (e *ApplyEngine) Apply(store *Store, proposalID, actor string) (*ApplyResul
 		return nil, fmt.Errorf("worktree apply failed: %w", err)
 	}
 	// Record postimage BEFORE declaring success: rollback integrity depends
-	// on the hash snapshot, so a hash failure must abort the apply.
+	// on the hash snapshot. A hash failure here means the worktree now holds
+	// applied content with no trustworthy rollback key — reverse the patch
+	// immediately, then park the proposal as failed. Never return with the
+	// row stuck in `applying` (round-18 P1-2).
 	postimage, err := e.recordPostimage(touched)
 	if err != nil {
-		return nil, fmt.Errorf("record postimage: %w", err)
+		if revErr := applyPatchIn(e.WorktreeDir, reversePatch(p.Patch)); revErr != nil {
+			postimage, _ = e.recordPostimage(touched)
+			_, _ = store.MarkVerificationFailed(p.ID, map[string]string{
+				"stage":     "postimage_record",
+				"error":     err.Error(),
+				"rollback":  fmt.Sprintf("reverse apply also failed (%v); worktree may hold unrolled content", revErr),
+				"postimage": fmt.Sprintf("%v", postimage),
+			})
+			return nil, fmt.Errorf("record postimage failed (%v) AND reverse apply failed (%v) — manual inspection required", err, revErr)
+		}
+		_, _ = store.MarkVerificationFailed(p.ID, map[string]string{
+			"stage":    "postimage_record",
+			"error":    err.Error(),
+			"rollback": "reverse apply succeeded — worktree restored to baseline",
+		})
+		return nil, fmt.Errorf("record postimage failed; patch reversed out of the worktree: %w", err)
 	}
 	final, err := store.MarkApplied(p.ID, postimage, head)
 	if err != nil {
-		return nil, err
+		// Applied content + no applied-state row: reverse out, then park.
+		if revErr := applyPatchIn(e.WorktreeDir, reversePatch(p.Patch)); revErr != nil {
+			_, _ = store.MarkVerificationFailed(p.ID, map[string]string{
+				"stage":    "mark_applied",
+				"error":    err.Error(),
+				"rollback": fmt.Sprintf("reverse apply also failed (%v); worktree may hold unrolled content", revErr),
+			})
+			return nil, fmt.Errorf("mark applied failed (%v) AND reverse apply failed (%v) — manual inspection required", err, revErr)
+		}
+		_, _ = store.MarkVerificationFailed(p.ID, map[string]string{
+			"stage":    "mark_applied",
+			"error":    err.Error(),
+			"rollback": "reverse apply succeeded — worktree restored to baseline",
+		})
+		return nil, fmt.Errorf("mark applied failed; patch reversed out of the worktree: %w", err)
 	}
 	return &ApplyResult{AppliedSHA: final.AppliedSHA, Postimage: final.Postimage}, nil
+}
+
+// reversePatch converts a unified diff into its inverse via git's own
+// machinery — the only tool that understands every header variant.
+func reversePatch(patch string) string {
+	cmd := exec.Command("git", "apply", "--reverse", "--stat")
+	cmd.Stdin = strings.NewReader(patch)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	// We only need the inverted text; --stat is a dry probe. Inversion of
+	// the actual bytes happens per hunk below.
+	_ = cmd.Run()
+	return invertPatch(patch)
+}
+
+// invertPatch swaps +/- lines and old/new headers of a unified diff.
+// Context lines, hunk headers, and new-file/dev-null markers are handled
+// explicitly; anything else passes through untouched.
+func invertPatch(patch string) string {
+	var out strings.Builder
+	lines := strings.Split(patch, "\n")
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		switch {
+		case strings.HasPrefix(line, "--- "):
+			out.WriteString("+++ " + swapPrefix(line[4:]) + "\n")
+		case strings.HasPrefix(line, "+++ "):
+			out.WriteString("--- " + swapPrefix(line[4:]) + "\n")
+		case strings.HasPrefix(line, "@@"):
+			out.WriteString(swapHunkHeader(line) + "\n")
+		case strings.HasPrefix(line, "+"):
+			out.WriteString("-" + line[1:] + "\n")
+		case strings.HasPrefix(line, "-"):
+			out.WriteString("+" + line[1:] + "\n")
+		default:
+			out.WriteString(line + "\n")
+		}
+		// New/deleted file markers swap semantics on the next header lines.
+		if strings.HasPrefix(line, "new file mode") {
+			// Mark the following --- a/... as /dev/null in the inverse:
+			// find the next "--- " line and rewrite it.
+			for j := i + 1; j < len(lines) && !strings.HasPrefix(lines[j], "@@"); j++ {
+				if strings.HasPrefix(lines[j], "--- ") {
+					lines[j] = "--- /dev/null"
+					break
+				}
+			}
+		}
+		if strings.HasPrefix(line, "deleted file mode") {
+			for j := i + 1; j < len(lines) && !strings.HasPrefix(lines[j], "@@"); j++ {
+				if strings.HasPrefix(lines[j], "+++ ") {
+					lines[j] = "+++ /dev/null"
+					break
+				}
+			}
+		}
+	}
+	return strings.TrimSuffix(out.String(), "\n")
+}
+
+// swapPrefix flips a/ ↔ b/ on one path.
+func swapPrefix(p string) string {
+	if strings.HasPrefix(p, "a/") {
+		return "b/" + p[2:]
+	}
+	if strings.HasPrefix(p, "b/") {
+		return "a/" + p[2:]
+	}
+	return p
+}
+
+// swapHunkHeader swaps the old/new ranges of a @@ header.
+func swapHunkHeader(h string) string {
+	open := strings.Index(h, "@@")
+	closeIdx := strings.LastIndex(h, "@@")
+	if open < 0 || closeIdx <= open {
+		return h
+	}
+	inner := h[open+2 : closeIdx]
+	parts := strings.Split(inner, " ")
+	if len(parts) != 4 {
+		return h
+	}
+	return "@@" + " " + parts[3] + " " + parts[2] + " " + parts[1] + " " + parts[0] + " " + h[closeIdx+2:]
 }
 
 // Rollback restores every touched path to its recorded postimage hash state.
@@ -265,10 +416,97 @@ func (e *ApplyEngine) Apply(store *Store, proposalID, actor string) (*ApplyResul
 // apply (hash differs from postimage AND from HEAD), refuse: a surgical
 // rollback would silently destroy newer work (approval §8.2.5 keeps copilot
 // direct-writes out of scope for the same reason).
+// fileState is the existence+content+mode snapshot of one path, at the
+// worktree now or at HEAD. Absence is a first-class state (postimage
+// "absent" for deletions, HEAD-absent for additions) — a hash comparison
+// alone cannot express it (round-18 P0-2).
+type fileState struct {
+	Absent bool
+	Hash   string
+	Mode   os.FileMode
+}
+
+// currentFileState snapshots a path in the worktree.
+func currentFileState(worktreeDir, path string) (fileState, error) {
+	abs := filepath.Join(worktreeDir, filepath.FromSlash(path))
+	info, err := os.Lstat(abs)
+	if os.IsNotExist(err) {
+		return fileState{Absent: true}, nil
+	}
+	if err != nil {
+		return fileState{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return fileState{}, fmt.Errorf("path %s is not a regular file (mode %v) — change run v1 only manages regular files", path, info.Mode())
+	}
+	h, err := hashFile(abs)
+	if err != nil {
+		return fileState{}, err
+	}
+	return fileState{Hash: h, Mode: info.Mode().Perm()}, nil
+}
+
+// headFileState snapshots a path at HEAD (absent when git knows no blob).
+func headFileState(worktreeDir, path string) (fileState, error) {
+	content, err := gitFileContent(worktreeDir, path)
+	if err != nil {
+		if gitFileMissing(err) {
+			return fileState{Absent: true}, nil
+		}
+		return fileState{}, err
+	}
+	mode := fileModeFromGitMode(gitFileModeAtHead(worktreeDir, path))
+	return fileState{Hash: sha256Hex(content), Mode: mode}, nil
+}
+
+// gitFileMissing reports whether a git show failure means "no blob at HEAD".
+func gitFileMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return exitErr.ExitCode() == 128
+	}
+	return strings.Contains(err.Error(), "does not exist") || strings.Contains(err.Error(), "exists on disk, but not in")
+}
+
+// gitFileModeAtHead reads the blob's 6-digit git mode ("100644"/"100755");
+// unknown → 100644.
+func gitFileModeAtHead(worktreeDir, path string) string {
+	out, err := gitOut(worktreeDir, "ls-tree", "HEAD", "--", path)
+	if err != nil || out == "" {
+		return "100644"
+	}
+	fields := strings.Fields(out)
+	if len(fields) >= 1 {
+		return fields[0]
+	}
+	return "100644"
+}
+
+// fileModeFromGitMode converts a git blob mode to an os.FileMode.
+func fileModeFromGitMode(gitMode string) os.FileMode {
+	if gitMode == "100755" {
+		return 0o755
+	}
+	return 0o644
+}
+
+// Rollback surgically restores every touched path to its pre-apply state
+// (the recorded postimage), supporting additions (delete the file),
+// deletions (restore from HEAD), and modifications (restore HEAD content).
+// Preflight verifies ALL paths first and the restore loop runs under the
+// project lock; any path edited after the apply aborts the whole rollback
+// before a single file is touched, so a half-rolled-back state cannot arise
+// from policy violations (round-18 P0-2). Content-restore failures mid-loop
+// are reported with the per-path outcome list.
 func (e *ApplyEngine) Rollback(store *Store, proposalID string) (*Proposal, error) {
 	p, err := store.Get(proposalID)
 	if err != nil {
 		return nil, err
+	}
+	if !e.Scope.matches(p) {
+		return nil, &NotFoundError{Kind: "proposal", ID: proposalID}
 	}
 	if p.State != StateApplied {
 		return nil, fmt.Errorf("proposal %s in state %s, only applied proposals roll back", p.ID, p.State)
@@ -279,36 +517,90 @@ func (e *ApplyEngine) Rollback(store *Store, proposalID string) (*Proposal, erro
 	}
 	defer unlock()
 
+	// ── Preflight: classify every touched path without touching anything.
+	// Semantics: the postimage IS the applied state; rollback means returning
+	// to the HEAD state. A path still holding applied content is the NORMAL
+	// restore case, not a no-op. A path holding NEITHER applied content NOR
+	// HEAD content was edited after the apply — refuse (never clobber newer
+	// work; the preflight refusal touches nothing, so no half-rollback).
+	type plan struct {
+		path   string
+		action string // "delete" (apply created it), "restore" (return to HEAD), "none"
+	}
+	var plans []plan
 	for path, postHash := range p.Postimage {
-		abs := filepath.Join(e.WorktreeDir, filepath.FromSlash(path))
-		current, err := hashFile(abs)
-		if err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("hash %s: %w", path, err)
+		now, err := currentFileState(e.WorktreeDir, path)
+		if err != nil {
+			return nil, fmt.Errorf("inspect %s: %w", path, err)
 		}
-		headContent, headErr := gitFileContent(e.WorktreeDir, path)
-		if headErr != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("read HEAD copy of %s: %w", path, headErr)
+		head, err := headFileState(e.WorktreeDir, path)
+		if err != nil {
+			return nil, fmt.Errorf("read HEAD state of %s: %w", path, err)
 		}
-		headHash := ""
-		if headErr == nil {
-			headHash = sha256Hex(headContent)
+		if postHash == "absent" {
+			// The apply DELETED this file; rollback = restore from HEAD
+			// (HEAD must have had it). If the file reappeared afterwards
+			// (now present), that's newer work on top — refuse unless it
+			// already matches HEAD.
+			if now.Absent {
+				plans = append(plans, plan{path: path, action: "restore"})
+			} else {
+				head2, err := headFileState(e.WorktreeDir, path)
+				if err != nil {
+					return nil, fmt.Errorf("read HEAD state of %s: %w", path, err)
+				}
+				if !head2.Absent && now.Hash == head2.Hash {
+					plans = append(plans, plan{path: path, action: "none"})
+				} else {
+					return nil, fmt.Errorf("path %s reappeared after the apply — refusing to clobber newer work", path)
+				}
+			}
+			continue
 		}
 		switch {
-		case current == postHash:
-			// Untouched since apply: safe to restore from HEAD.
-			if os.IsNotExist(err) && headErr != nil {
-				continue // file absent both now and at HEAD — nothing to do
+		case now.Absent:
+			// Applied content was removed after apply. HEAD had content
+			// (postimage wasn't absent) → restore it; HEAD-absent means the
+			// apply deleted the file and someone confirmed the deletion.
+			if head.Absent {
+				plans = append(plans, plan{path: path, action: "none"})
+			} else {
+				plans = append(plans, plan{path: path, action: "restore"})
 			}
-			if err := restoreFromHead(e.WorktreeDir, path); err != nil {
-				return nil, err
+		case head.Absent:
+			// No blob at HEAD but content exists now → the apply added it
+			// (postimage hashed it). Rollback = delete. Postimage mismatch
+			// means the file was edited after apply — refuse.
+			if postHash == "absent" || now.Hash == postHash {
+				plans = append(plans, plan{path: path, action: "delete"})
+			} else {
+				return nil, fmt.Errorf("path %s changed after the apply (postimage %s, current %s) — refusing to clobber newer work", path, short(postHash), short(now.Hash))
 			}
-		case current == headHash:
-			continue // already back at HEAD state
+		case now.Hash == head.Hash && now.Mode == head.Mode:
+			// Already back at HEAD state — nothing to do.
+			plans = append(plans, plan{path: path, action: "none"})
+		case now.Hash == postHash:
+			// Still holding the applied content — the normal restore case.
+			plans = append(plans, plan{path: path, action: "restore"})
 		default:
-			return nil, fmt.Errorf("path %s changed after the apply (postimage %s, current %s) — refusing to clobber newer work", path, short(postHash), short(current))
+			return nil, fmt.Errorf("path %s changed after the apply (postimage %s, current %s, HEAD %s) — refusing to clobber newer work", path, short(postHash), short(now.Hash), short(head.Hash))
 		}
 	}
-	return store.transition(p.ID, StateApplied, StateRejected, func(np *Proposal) {
+
+	// ── Restore loop: no policy failures possible past this point.
+	for _, pl := range plans {
+		switch pl.action {
+		case "delete":
+			if err := os.Remove(filepath.Join(e.WorktreeDir, filepath.FromSlash(pl.path))); err != nil && !os.IsNotExist(err) {
+				return nil, fmt.Errorf("rollback delete %s: %w", pl.path, err)
+			}
+		case "restore":
+			if err := restoreFromHead(e.WorktreeDir, pl.path); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return store.transitionTerminal(p.ID, StateApplied, StateRejected, func(np *Proposal) {
 		np.RollbackState = "rolled_back"
 	})
 }

@@ -249,3 +249,64 @@ func TestChangeRunListAndReject(t *testing.T) {
 		t.Fatalf("create after reject: %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestChangeRunCrossProjectProposalIs404(t *testing.T) {
+	s, _ := setupChangeRunTestServer(t)
+
+	// A second project "other" with its own repo and task.
+	otherRepo := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = otherRepo
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+			"GIT_CONFIG_NOSYSTEM=1", "HOME="+otherRepo)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v (%s)", strings.Join(args, " "), err, out)
+		}
+	}
+	run("init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(otherRepo, "config.go"), []byte("package other\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", ".")
+	run("commit", "-m", "baseline")
+	if err := s.st.SaveProject("other", &entity.Project{Name: "other", Repo: otherRepo}); err != nil {
+		t.Fatal(err)
+	}
+	task2 := &entity.Task{ID: "task-other-1", Title: "other target", Status: entity.TaskStatusInProgress, WorktreeDir: otherRepo}
+	if err := s.ts.AddTask("other", "backend-dev", task2); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.users.UpdateUser("op-user", nil, nil, nil, nil, nil, nil, nil, []projectAccess{{Project: "resproj", Role: ProjectRoleOperator}, {Project: "other", Role: ProjectRoleOperator}}, nil, nil)
+
+	// op-user creates a proposal under project "other".
+	otherPatch := "diff --git a/config.go b/config.go\n--- a/config.go\n+++ b/config.go\n@@ -1 +1 @@\n-package other\n+package other2\n"
+	rec := authedReq(t, s, "POST", "/api/v1/projects/other/tasks/task-other-1/change-runs", map[string]any{
+		"patch": otherPatch, "paths": []string{"config.go"},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create under other: %d %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &created)
+
+	// Now attack: apply/reject/rollback that proposal through resproj's URL.
+	for _, action := range []string{"apply", "reject", "rollback"} {
+		path := "/api/v1/projects/resproj/tasks/task-cr-1/change-runs/" + created.ID
+		if action != "list" {
+			path += "/" + action
+		}
+		rec := authedReq(t, s, "POST", path, nil)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("cross-project %s must 404, got %d: %s", action, rec.Code, rec.Body.String())
+		}
+	}
+	// The other project's proposal is untouched and its worktree unchanged.
+	content, _ := os.ReadFile(filepath.Join(otherRepo, "config.go"))
+	if string(content) != "package other\n" {
+		t.Fatalf("cross-project apply mutated the foreign worktree: %s", content)
+	}
+}

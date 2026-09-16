@@ -88,9 +88,113 @@ func NewProposalID() string {
 	return "crp-" + hex.EncodeToString(b[:])
 }
 
+// taskSlot is the per-task single-active-proposal lock row. Create CAS-writes
+// it (empty → proposalID); every terminal transition frees it (proposalID →
+// empty) in the SAME CAS as the state change, so a crash between state change
+// and free is impossible. Concurrent Creates race on the slot row itself:
+// exactly one wins the empty→occupied swap (round-18 P1-1).
+type taskSlot struct {
+	ProposalID string `json:"proposalId"`
+	UpdatedAt  string `json:"updatedAt"`
+}
+
+func taskSlotKey(project, taskID string) []string {
+	// kv_records keys have exactly 3 segments; the proposal's (project,
+	// task) identity compresses into k2. The trailing empty k3 matches the
+	// convention of the proposal rows.
+	return []string{"slot", project + "\x00" + taskID, ""}
+}
+
+// acquireTaskSlot claims the task's single-active slot for proposalID. The
+// slot row is materialized with InsertRecordIfAbsent (atomic create: of N
+// concurrent materializers exactly one reports inserted=true) and the claim
+// rides a payload+revision CAS from the row's current state. The earlier
+// UpsertRecord-based materialization was unsound: a late blank upsert
+// ON-CONFLICT-overwrote a winner's occupied slot, letting a second claimant
+// also win (leak proven by probe, round-18 P1-1).
+func (s *Store) acquireTaskSlot(project, taskID, proposalID string) error {
+	slotKey := taskSlotKey(project, taskID)
+	occupied := taskSlot{ProposalID: proposalID, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	occupiedRaw, err := json.Marshal(occupied)
+	if err != nil {
+		return err
+	}
+	// Fast path: atomic create of the slot already owned by us.
+	inserted, err := s.db.InsertRecordIfAbsent(proposalTable, s.workspace, slotKey, string(occupiedRaw))
+	if err != nil {
+		return err
+	}
+	if inserted {
+		return nil
+	}
+	// Row exists: CAS it from its CURRENT payload (whatever state we observe)
+	// to ours. Empty payload = free slot; occupied = lost race. The CAS is
+	// serialized by SQLite, so concurrent claimants produce exactly one win.
+	for attempt := 0; attempt < 8; attempt++ {
+		recs, err := s.db.ListRecordsWithRevision(proposalTable, s.workspace, slotKey)
+		if err != nil {
+			return err
+		}
+		if len(recs) == 0 {
+			// Vanished between the fast-path miss and here (should not
+			// happen — slots are never deleted); retry the atomic create.
+			inserted, err := s.db.InsertRecordIfAbsent(proposalTable, s.workspace, slotKey, string(occupiedRaw))
+			if err != nil {
+				return err
+			}
+			if inserted {
+				return nil
+			}
+			continue
+		}
+		var current taskSlot
+		if err := json.Unmarshal([]byte(recs[0].Payload), &current); err != nil {
+			return err
+		}
+		if current.ProposalID != "" {
+			return fmt.Errorf("task %s slot held by proposal %s — concurrent create lost the race", taskID, current.ProposalID)
+		}
+		swapped, err := s.db.UpdateRecordIfPayloadAndRevision(proposalTable, s.workspace, slotKey, string(occupiedRaw), recs[0].Payload, recs[0].Revision)
+		if err != nil {
+			return err
+		}
+		if swapped {
+			return nil
+		}
+	}
+	return fmt.Errorf("task %s: concurrent create lost the slot race", taskID)
+}
+
+// freeTaskSlot releases the task slot if it still names proposalID (the
+// same CAS discipline as the state transition that calls it).
+func (s *Store) freeTaskSlot(project, taskID, proposalID string) {
+	slotKey := taskSlotKey(project, taskID)
+	recs, err := s.db.ListRecordsWithRevision(proposalTable, s.workspace, slotKey)
+	if err != nil || len(recs) != 1 {
+		return
+	}
+	var current taskSlot
+	if json.Unmarshal([]byte(recs[0].Payload), &current) != nil || current.ProposalID != proposalID {
+		return
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	emptyRaw, _ := json.Marshal(taskSlot{UpdatedAt: now})
+	_, _ = s.db.UpdateRecordIfPayloadAndRevision(proposalTable, s.workspace, slotKey, string(emptyRaw), recs[0].Payload, recs[0].Revision)
+}
+
+func isMissingRecordErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "no such record") || strings.Contains(msg, "not found") || strings.Contains(msg, "no rows")
+}
+
 // Create persists a new proposal in StateAwaitingApproval. Only one ACTIVE
 // proposal (not applied/rejected) may exist per task — V1 serialization
-// decision (approval §8.2.2).
+// decision (approval §8.2.2). Slot acquisition is a CAS on the per-task slot
+// row, not a read-then-write scan, so concurrent creates cannot both pass
+// (round-18 P1-1). The scan remains as a friendlier error message.
 func (s *Store) Create(project, taskID, actor, request, patch, diff string, paths []string) (*Proposal, error) {
 	if existing, err := s.ActiveForTask(project, taskID); err != nil {
 		return nil, err
@@ -118,11 +222,18 @@ func (s *Store) Create(project, taskID, actor, request, patch, diff string, path
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}
+	// Claim the slot BEFORE the proposal row lands: the loser aborts having
+	// written nothing durable.
+	if err := s.acquireTaskSlot(project, taskID, p.ID); err != nil {
+		return nil, err
+	}
 	raw, err := json.Marshal(p)
 	if err != nil {
+		s.freeTaskSlot(project, taskID, p.ID)
 		return nil, err
 	}
 	if err := s.db.UpsertRecord(proposalTable, s.workspace, proposalKey(p.ID), string(raw)); err != nil {
+		s.freeTaskSlot(project, taskID, p.ID)
 		return nil, err
 	}
 	return p, nil
@@ -209,36 +320,49 @@ func (s *Store) BeginApply(id string) (*Proposal, error) {
 }
 
 // MarkApplied records the postimage and final SHA after the main-worktree
-// apply succeeded.
+// apply succeeded, and frees the task's slot (applied is terminal).
 func (s *Store) MarkApplied(id string, postimage map[string]string, appliedSHA string) (*Proposal, error) {
-	return s.transition(id, StateApplying, StateApplied, func(p *Proposal) {
+	return s.transitionTerminal(id, StateApplying, StateApplied, func(p *Proposal) {
 		p.Postimage = postimage
 		p.AppliedSHA = appliedSHA
 	})
 }
 
-// MarkVerificationFailed parks a proposal whose in-clone verification failed.
+// MarkVerificationFailed parks a proposal whose in-clone verification failed
+// (terminal) and frees the task's slot.
 func (s *Store) MarkVerificationFailed(id string, verification map[string]string) (*Proposal, error) {
-	return s.transition(id, StateApplying, StateVerificationFaile, func(p *Proposal) {
+	return s.transitionTerminal(id, StateApplying, StateVerificationFaile, func(p *Proposal) {
 		p.Verification = verification
 	})
 }
 
 // AbortApply unwinds an apply that failed before touching the worktree
 // (environment errors, moved baseline): back to awaiting_approval with the
-// abort reason recorded, so a stranded `applying` row can never block the
-// task's single-active-proposal slot forever.
+// abort reason recorded. The slot stays held — awaiting_approval is active.
 func (s *Store) AbortApply(id string, detail map[string]string) (*Proposal, error) {
 	return s.transition(id, StateApplying, StateAwaitingApproval, func(p *Proposal) {
 		p.Verification = detail
 	})
 }
 
-// Reject terminates a proposal without applying.
+// Reject terminates a proposal without applying (terminal) and frees the
+// task's slot.
 func (s *Store) Reject(id, actor string) (*Proposal, error) {
-	return s.transition(id, StateAwaitingApproval, StateRejected, func(p *Proposal) {
+	return s.transitionTerminal(id, StateAwaitingApproval, StateRejected, func(p *Proposal) {
 		p.Actor = actor
 	})
+}
+
+// transitionTerminal performs the CAS state change and then frees the task
+// slot in the same call path — terminal states must never keep holding the
+// single-active slot.
+func (s *Store) transitionTerminal(id, expectState, newState string, mutate func(*Proposal)) (*Proposal, error) {
+	next, err := s.transition(id, expectState, newState, mutate)
+	if err != nil {
+		return nil, err
+	}
+	s.freeTaskSlot(next.Project, next.TaskID, next.ID)
+	return next, nil
 }
 
 // decodeProposal parses a stored row.

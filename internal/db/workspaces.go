@@ -306,6 +306,35 @@ ON CONFLICT(table_name, workspace_id, k1, k2, k3) DO UPDATE SET payload = exclud
 	return err
 }
 
+// InsertRecordIfAbsent writes payload only when NO row exists at the key
+// (INSERT OR IGNORE + rows-affected). It is the atomic create primitive the
+// CAS discipline needs: N concurrent inserters observe exactly one inserted=1
+// (SQLite serializes the statement), so "row absence" is claimed, never
+// inferred from a stale read — an UpsertRecord here would let a late
+// materializer overwrite an already-claimed slot (changerun round-18 leak).
+func (db *SQLiteStore) InsertRecordIfAbsent(table string, workspaceID string, key []string, payload string) (inserted bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("sqlite insert-if-absent panic recovered: %v", r)
+		}
+	}()
+	if db == nil || db.sql == nil {
+		return false, fmt.Errorf("database not open")
+	}
+	k1, k2, k3 := normalizeKey(key)
+	res, err := db.sql.Exec(`INSERT OR IGNORE INTO kv_records (table_name, workspace_id, k1, k2, k3, payload, updated_at, revision)
+VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
+		table, workspaceID, k1, k2, k3, payload, nowUTC())
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
 func (db *SQLiteStore) GetRecord(table string, workspaceID string, key []string) (payload string, found bool, err error) {
 	defer func() {
 		if r := recover(); r != nil {

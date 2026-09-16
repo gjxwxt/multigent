@@ -34,6 +34,7 @@ type Store interface {
 	ListWorkspaceMembersForUser(username string) ([]WorkspaceMember, error)
 
 	UpsertRecord(table string, workspaceID string, key []string, payload string) error
+	InsertRecordIfAbsent(table string, workspaceID string, key []string, payload string) (bool, error)
 	GetRecord(table string, workspaceID string, key []string) (string, bool, error)
 	UpdateRecordIfRevision(table, workspaceID string, key []string, newPayload, expectRevision string) (bool, error)
 	UpdateRecordIfPayloadAndRevision(table, workspaceID string, key []string, newPayload, expectPayload, expectRevision string) (bool, error)

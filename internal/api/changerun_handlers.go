@@ -9,6 +9,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -45,14 +46,20 @@ func (s *Server) resolveChangeRunTask(w http.ResponseWriter, r *http.Request, pr
 
 // changeRunEngine builds an ApplyEngine for a target. The engine locks on
 // the worktree-derived project root so it serializes with the same lock the
-// worktree manager and review commits hold.
-func (s *Server) changeRunEngine(worktreeDir string) *changerun.ApplyEngine {
+// worktree manager and review commits hold. Scope binds the engine to the
+// URL's (project, task): proposals from other projects/tasks surface as 404,
+// never as cross-target applies or state changes (round-18 P0-1).
+func (s *Server) changeRunEngine(worktreeDir, project, taskID string) *changerun.ApplyEngine {
 	cloneParent := filepath.Join(os.TempDir(), "multigent-changerun")
 	_ = os.MkdirAll(cloneParent, 0o755)
 	return &changerun.ApplyEngine{
 		WorktreeDir: worktreeDir,
 		ProjectRoot: gitworktree.ProjectRootForWorktree(worktreeDir),
 		CloneParent: cloneParent,
+		Scope: changerun.Scope{
+			Project: project,
+			TaskID:  taskID,
+		},
 	}
 }
 
@@ -100,7 +107,8 @@ func (s *Server) handleCreateChangeRunProposal(w http.ResponseWriter, r *http.Re
 	_ = json.NewEncoder(w).Encode(p)
 }
 
-// handleGetChangeRunProposal returns one proposal.
+// handleGetChangeRunProposal returns one proposal. A proposal from another
+// project/task renders as 404 (scope indistinguishable from missing).
 func (s *Server) handleGetChangeRunProposal(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("name")
 	taskID := r.PathValue("taskId")
@@ -145,8 +153,13 @@ func (s *Server) handleApplyChangeRunProposal(w http.ResponseWriter, r *http.Req
 	if !s.checkProjectOperator(w, r, project) {
 		return
 	}
-	res, err := s.changeRunEngine(worktreeDir).Apply(s.changerunStore(), r.PathValue("proposalId"), s.currentUser(r).Username)
+	res, err := s.changeRunEngine(worktreeDir, project, taskID).Apply(s.changerunStore(), r.PathValue("proposalId"), s.currentUser(r).Username)
 	if err != nil {
+		var nf *changerun.NotFoundError
+		if errors.As(err, &nf) {
+			s.jsonError(w, http.StatusNotFound, "proposal not found")
+			return
+		}
 		status := http.StatusConflict
 		if os.IsNotExist(err) || strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), " rows") {
 			status = http.StatusNotFound
@@ -168,8 +181,13 @@ func (s *Server) handleRollbackChangeRunProposal(w http.ResponseWriter, r *http.
 	if !s.checkProjectOperator(w, r, project) {
 		return
 	}
-	p, err := s.changeRunEngine(worktreeDir).Rollback(s.changerunStore(), r.PathValue("proposalId"))
+	p, err := s.changeRunEngine(worktreeDir, project, taskID).Rollback(s.changerunStore(), r.PathValue("proposalId"))
 	if err != nil {
+		var nf *changerun.NotFoundError
+		if errors.As(err, &nf) {
+			s.jsonError(w, http.StatusNotFound, "proposal not found")
+			return
+		}
 		status := http.StatusConflict
 		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), " rows") {
 			status = http.StatusNotFound
@@ -190,7 +208,15 @@ func (s *Server) handleRejectChangeRunProposal(w http.ResponseWriter, r *http.Re
 	if !s.checkProjectOperator(w, r, project) {
 		return
 	}
-	p, err := s.changerunStore().Reject(r.PathValue("proposalId"), s.currentUser(r).Username)
+	proposalID := r.PathValue("proposalId")
+	// Ownership precheck BEFORE the state change: a foreign proposal must
+	// render as 404 without its state ever being touched (round-18 P0-1).
+	stored, err := s.changerunStore().Get(proposalID)
+	if err != nil || stored.Project != project || stored.TaskID != taskID {
+		s.jsonError(w, http.StatusNotFound, "proposal not found")
+		return
+	}
+	p, err := s.changerunStore().Reject(proposalID, s.currentUser(r).Username)
 	if err != nil {
 		status := http.StatusConflict
 		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), " rows") {

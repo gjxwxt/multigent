@@ -107,10 +107,18 @@ func TestApplyRefusesHighRiskPaths(t *testing.T) {
 		if _, err := e.Apply(s, p.ID, "op"); err == nil || !strings.Contains(err.Error(), "high-risk") {
 			t.Fatalf("path %v must be rejected, got: %v", paths, err)
 		}
-		// Blacklist rejection happens before BeginApply — the proposal stays
-		// awaiting_approval and still occupies the slot, so reject it to clean up.
-		if _, err := s.Reject(p.ID, "op"); err != nil {
-			t.Fatalf("cleanup reject: %v", err)
+		// The apply itself auto-rejects blacklisted proposals (P1-2: no
+		// awaiting_approval stragglers) — the slot must already be free.
+		got, err := s.Get(p.ID)
+		if err != nil {
+			t.Fatalf("get after auto-reject: %v", err)
+		}
+		if got.State != StateRejected {
+			t.Fatalf("blacklisted proposal state = %s, want rejected", got.State)
+		}
+		// And the task may immediately take a new proposal.
+		if _, err := s.Create("proj", task, "agent", "r2", patchFor("hi", "hello"), patchFor("hi", "hello"), []string{"app.go"}); err != nil {
+			t.Fatalf("create after auto-reject: %v", err)
 		}
 	}
 }
@@ -264,5 +272,139 @@ func TestRollbackRefusesPostApplyEdits(t *testing.T) {
 	}
 	if _, err := e.Rollback(s, p.ID); err == nil || !strings.Contains(err.Error(), "refusing to clobber") {
 		t.Fatalf("rollback over newer edits must refuse, got: %v", err)
+	}
+}
+
+func TestScopeMismatchIsNotFound(t *testing.T) {
+	e, s := newEngine(t)
+	// Proposal belongs to (proj, task-1); engine scoped to another task.
+	p, err := s.Create("proj", "task-1", "agent", "r", patchFor("hi", "hello"), patchFor("hi", "hello"), []string{"app.go"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	e.Scope = Scope{Project: "proj", TaskID: "task-OTHER"}
+	for name, op := range map[string]func() error{
+		"apply":    func() error { _, err := e.Apply(s, p.ID, "op"); return err },
+		"rollback": func() error { _, err := e.Rollback(s, p.ID); return err },
+	} {
+		err := op()
+		var nf *NotFoundError
+		if err == nil || !errorsAsNotFound(err, &nf) {
+			t.Fatalf("%s must surface NotFoundError on scope mismatch, got: %v", name, err)
+		}
+	}
+	// State untouched — the operator never reached the record.
+	got, _ := s.Get(p.ID)
+	if got.State != StateAwaitingApproval {
+		t.Fatalf("scope-violated apply must not change state, got %s", got.State)
+	}
+	// Matching scope proceeds normally.
+	e.Scope = Scope{Project: "proj", TaskID: "task-1"}
+	if _, err := e.Apply(s, p.ID, "op"); err != nil {
+		t.Fatalf("apply with matching scope: %v", err)
+	}
+	if _, err := e.Rollback(s, p.ID); err != nil {
+		t.Fatalf("rollback with matching scope: %v", err)
+	}
+}
+
+func errorsAsNotFound(err error, target **NotFoundError) bool {
+	nf, ok := err.(*NotFoundError)
+	if ok {
+		*target = nf
+	}
+	return ok
+}
+
+func TestConcurrentCreatesExactlyOneWins(t *testing.T) {
+	s := newTestStore(t)
+	var wg sync.WaitGroup
+	errs := make([]error, 4)
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(slot int) {
+			defer wg.Done()
+			_, errs[slot] = s.Create("proj", "task-race", "agent", "r", "p", "d", nil)
+		}(i)
+	}
+	wg.Wait()
+	winners := 0
+	for _, err := range errs {
+		if err == nil {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("exactly one concurrent create must win, got %d: %v", winners, errs)
+	}
+}
+
+func TestRollbackCoversAddDeleteAndModify(t *testing.T) {
+	e, s := newEngine(t)
+	// Baseline: app.go exists ("hi"), deleted.go will be removed by the patch.
+	if err := os.WriteFile(filepath.Join(e.WorktreeDir, "deleted.go"), []byte("package main\n\nfunc Gone() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = e.WorktreeDir
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t", "GIT_CONFIG_NOSYSTEM=1", "HOME="+e.WorktreeDir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v (%s)", strings.Join(args, " "), err, out)
+		}
+	}
+	run("add", ".")
+	run("commit", "-m", "with deleted.go")
+
+	patch := `diff --git a/app.go b/app.go
+--- a/app.go
++++ b/app.go
+@@ -1,3 +1,3 @@
+ package main
+ 
+-func Hi() string { return "hi" }
++func Hi() string { return "hello" }
+diff --git a/added.go b/added.go
+new file mode 100644
+--- /dev/null
++++ b/added.go
+@@ -0,0 +1 @@
++package main
+diff --git a/deleted.go b/deleted.go
+deleted file mode 100644
+--- a/deleted.go
++++ /dev/null
+@@ -1,3 +0,0 @@
+-package main
+-
+-func Gone() {}
+`
+	p, err := s.Create("proj", "task-1", "agent", "mixed ops", patch, patch, []string{"app.go", "added.go", "deleted.go"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := e.Apply(s, p.ID, "op"); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	// All three effects landed.
+	if _, err := os.Stat(filepath.Join(e.WorktreeDir, "added.go")); err != nil {
+		t.Fatal("added.go missing after apply")
+	}
+	if _, err := os.Stat(filepath.Join(e.WorktreeDir, "deleted.go")); !os.IsNotExist(err) {
+		t.Fatal("deleted.go still present after apply")
+	}
+	if _, err := e.Rollback(s, p.ID); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	// Rollback inverted all three.
+	if _, err := os.Stat(filepath.Join(e.WorktreeDir, "added.go")); !os.IsNotExist(err) {
+		t.Fatal("added.go must be deleted by rollback")
+	}
+	if _, err := os.Stat(filepath.Join(e.WorktreeDir, "deleted.go")); err != nil {
+		t.Fatal("deleted.go must be restored by rollback")
+	}
+	content, _ := os.ReadFile(filepath.Join(e.WorktreeDir, "app.go"))
+	if !strings.Contains(string(content), `"hi"`) {
+		t.Fatalf("app.go must be restored: %s", content)
 	}
 }
