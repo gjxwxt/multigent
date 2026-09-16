@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -45,6 +46,7 @@ const previewTokenCookiePrefix = "mg_pvt_"
 func (s *Server) SetPreviewOrigin(origin string) {
 	s.previewOrigin = normalizeConfiguredOrigin(origin, PreviewOriginEnv,
 		"preview surfaces stay disabled (fail-closed)")
+	s.logSchemefulSiteCheck()
 }
 
 // SetConsoleOrigin configures the console public origin for the CORS
@@ -52,6 +54,60 @@ func (s *Server) SetPreviewOrigin(origin string) {
 func (s *Server) SetConsoleOrigin(origin string) {
 	s.consoleOrigin = normalizeConfiguredOrigin(origin, ConsoleOriginEnv,
 		"CORS allowlist falls back to the wildcard legacy behavior")
+	s.logSchemefulSiteCheck()
+}
+
+func (s *Server) logSchemefulSiteCheck() {
+	if warn := SchemefulSiteMismatchWarning(s.consoleOrigin, s.previewOrigin); warn != "" {
+		log.Printf("[preview-origin] WARNING: %s", warn)
+	}
+}
+
+// SchemefulSiteMismatchWarning checks whether the configured consoleOrigin and
+// previewOrigin share the same schemeful site (scheme + registrable domain).
+// Returns a non-empty warning message if they differ or are incompatible.
+func SchemefulSiteMismatchWarning(consoleOrigin, previewOrigin string) string {
+	consoleOrigin = strings.TrimSpace(consoleOrigin)
+	previewOrigin = strings.TrimSpace(previewOrigin)
+	if consoleOrigin == "" || previewOrigin == "" {
+		return ""
+	}
+	uConsole, err1 := url.Parse(consoleOrigin)
+	uPreview, err2 := url.Parse(previewOrigin)
+	if err1 != nil || err2 != nil || uConsole.Host == "" || uPreview.Host == "" {
+		return ""
+	}
+	if uConsole.Scheme != uPreview.Scheme {
+		return fmt.Sprintf("console scheme (%s) and preview scheme (%s) differ; cross-origin preview cookies with SameSite=Lax will be blocked in iframes (preview drawer requires the same schemeful site)", uConsole.Scheme, uPreview.Scheme)
+	}
+	siteConsole := registrableSite(uConsole.Hostname())
+	sitePreview := registrableSite(uPreview.Hostname())
+	if siteConsole != sitePreview {
+		return fmt.Sprintf("console host (%s) and preview host (%s) do not share the same registrable domain (%s vs %s); cross-origin preview cookies with SameSite=Lax will be blocked in iframes (preview drawer requires the same schemeful site)", uConsole.Hostname(), uPreview.Hostname(), siteConsole, sitePreview)
+	}
+	return ""
+}
+
+func registrableSite(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" || net.ParseIP(host) != nil {
+		return host
+	}
+	parts := strings.Split(host, ".")
+	if len(parts) <= 2 {
+		return host
+	}
+	n := len(parts)
+	penultimate := parts[n-2]
+	if len(penultimate) <= 3 && (penultimate == "com" || penultimate == "co" || penultimate == "org" || penultimate == "net" || penultimate == "gov" || penultimate == "edu") {
+		if n >= 3 {
+			return strings.Join(parts[n-3:], ".")
+		}
+	}
+	return strings.Join(parts[n-2:], ".")
 }
 
 // normalizeConfiguredOrigin trims, scheme-defaults, and validates an origin

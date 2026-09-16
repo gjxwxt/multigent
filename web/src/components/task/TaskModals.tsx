@@ -5,13 +5,15 @@ import { useTranslation } from 'react-i18next'
 import ReactMarkdown from 'react-markdown'
 import type { Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { ClipboardCopy, ExternalLink, GitPullRequest, Globe, Info, MessageSquare, Pencil, Play, RotateCw, Send, Trash2, X } from 'lucide-react'
+import { ClipboardCopy, ExternalLink, GitPullRequest, Globe, Info, MessageSquare, Pencil, Play, RotateCw, Send, Sparkles, Trash2, X } from 'lucide-react'
 import { cn } from '../../lib/cn'
 import { apiDelete, apiFetch, apiPost, apiPut } from '../../lib/api'
 import { copyTextToClipboard } from '../../lib/clipboard'
 import { useFormatDateTime } from '../../lib/format-datetime'
 import { useApiJson } from '../../lib/use-api'
+import { useAuth } from '../../lib/auth'
 import { ChangeRunPanel } from './ChangeRunPanel'
+import { PreviewDrawer } from './PreviewDrawer'
 import { formatGoDuration, taskElapsedLabel } from '../../lib/task-duration'
 import { showToast } from '../ui/Toast'
 import { WorkflowBoard, type WorkflowBranchInstance, type WorkflowDefinition, type WorkflowField, type WorkflowRun, type WorkflowStep, type WorkflowStepEvent, type WorkflowStepInstance } from '../workflow/WorkflowBoard'
@@ -269,6 +271,16 @@ export function EditTaskModal({ task, taskOptions = [], onClose, onSaved }: { ta
 
 /* ── Detail modal ─── */
 
+function isPreviewDrawerEnabled(): boolean {
+  if (typeof window === 'undefined') return false
+  const sp = new URLSearchParams(window.location.search)
+  if (sp.get('drawer') === '1' || sp.get('enable_preview_copilot_drawer') === '1') return true
+  if (localStorage.getItem('enable_preview_copilot_drawer') === 'true') return true
+  // @ts-ignore
+  if (import.meta.env?.VITE_ENABLE_PREVIEW_COPILOT_DRAWER === 'true') return true
+  return false
+}
+
 export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = true }: { task: TaskRow; onClose: () => void; onEdit: (r: TaskRow) => void; onMutated?: () => void; canEdit?: boolean }) {
   const { t } = useTranslation()
   const fmt = useFormatDateTime()
@@ -287,6 +299,8 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
   const [assigneeErr, setAssigneeErr] = useState<string | null>(null)
   const [startBusy, setStartBusy] = useState(false)
   const [previewStarting, setPreviewStarting] = useState(false)
+  const [previewDrawerOpen, setPreviewDrawerOpen] = useState(false)
+  const drawerEnabled = useMemo(() => isPreviewDrawerEnabled(), [])
 
   const runsQuery = `/api/v1/telemetry/runs?allTime=1&project=${encodeURIComponent(task.project)}`
   const runsState = useApiJson<{ runs: RunRow[] }>(runsQuery, 0)
@@ -515,27 +529,53 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
               )
             })()}
             {preview && preview.type !== 'cli' && (
-              <div className="flex items-center">
+              <div className="flex items-center gap-1.5">
                 {preview.status === 'running' ? (
-                  <a
-                    href={preview.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-950/40 dark:text-emerald-300"
-                  >
-                    <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />
-                    {t('tasks.openPreview', { defaultValue: '打开实时预览 ↗' })}
-                  </a>
+                  <>
+                    <a
+                      href={preview.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-950/40 dark:text-emerald-300"
+                    >
+                      <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />
+                      {t('tasks.openPreview', { defaultValue: '打开实时预览 ↗' })}
+                    </a>
+                    {drawerEnabled && (
+                      <button
+                        type="button"
+                        onClick={() => setPreviewDrawerOpen(true)}
+                        className="inline-flex items-center gap-1 rounded-md border border-sky-500/30 bg-sky-50 px-2 py-1 text-xs font-semibold text-sky-700 shadow-sm transition hover:bg-sky-100 dark:border-sky-500/30 dark:bg-sky-950/40 dark:text-sky-300"
+                        title={t('tasks.previewDrawer.openDrawer', { defaultValue: '打开实时预览与调优抽屉' })}
+                      >
+                        <Sparkles className="size-3 text-sky-600 dark:text-sky-400" />
+                        {t('tasks.previewDrawer.buttonLabel', { defaultValue: '预览调优抽屉' })}
+                      </button>
+                    )}
+                  </>
                 ) : preview.url && !preview.url.startsWith('/') ? (
-                  <a
-                    href={`${preview.url}?pvt=${encodeURIComponent(preview.previewToken ?? '')}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-950/40 dark:text-emerald-300"
-                  >
-                    <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />
-                    {t('tasks.openPreview', { defaultValue: '打开实时预览 ↗' })}
-                  </a>
+                  <>
+                    <a
+                      href={`${preview.url}?pvt=${encodeURIComponent(preview.previewToken ?? '')}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-950/40 dark:text-emerald-300"
+                    >
+                      <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />
+                      {t('tasks.openPreview', { defaultValue: '打开实时预览 ↗' })}
+                    </a>
+                    {drawerEnabled && (
+                      <button
+                        type="button"
+                        onClick={() => setPreviewDrawerOpen(true)}
+                        className="inline-flex items-center gap-1 rounded-md border border-sky-500/30 bg-sky-50 px-2 py-1 text-xs font-semibold text-sky-700 shadow-sm transition hover:bg-sky-100 dark:border-sky-500/30 dark:bg-sky-950/40 dark:text-sky-300"
+                        title={t('tasks.previewDrawer.openDrawer', { defaultValue: '打开实时预览与调优抽屉' })}
+                      >
+                        <Sparkles className="size-3 text-sky-600 dark:text-sky-400" />
+                        {t('tasks.previewDrawer.buttonLabel', { defaultValue: '预览调优抽屉' })}
+                      </button>
+                    )}
+                  </>
                 ) : preview.url.startsWith('/') && !isPreviewOriginConfigured ? (
                   <span
                     className="inline-flex max-w-[260px] items-center gap-1 rounded-md border border-amber-500/40 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700 dark:border-amber-500/30 dark:bg-amber-950/40 dark:text-amber-300"
@@ -819,12 +859,14 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
           </div>
         )}
 
-        <ChangeRunPanel
-          project={task.project}
-          taskId={task.id}
-          canOperator={canEdit}
-          onChanged={() => setWorkflowVersion((v) => v + 1)}
-        />
+        <div id="task-change-run-panel">
+          <ChangeRunPanel
+            project={task.project}
+            taskId={task.id}
+            canOperator={canEdit}
+            onChanged={() => setWorkflowVersion((v) => v + 1)}
+          />
+        </div>
         <TaskCommentsSection project={task.project} agent={task.agent} taskId={task.id} />
         </div>
       </div>
@@ -840,6 +882,21 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
             setDesignGateOpen(false)
           }}
           onClose={() => setDesignGateOpen(false)}
+        />
+      )}
+      {previewDrawerOpen && preview?.url && (
+        <PreviewDrawer
+          project={task.project}
+          taskId={task.id}
+          taskTitle={task.title}
+          previewUrl={preview.url}
+          previewToken={preview.previewToken}
+          canOperator={canEdit}
+          onClose={() => setPreviewDrawerOpen(false)}
+          onOpenChangeRun={() => {
+            setPreviewDrawerOpen(false)
+            document.getElementById('task-change-run-panel')?.scrollIntoView({ behavior: 'smooth' })
+          }}
         />
       )}
     </div>

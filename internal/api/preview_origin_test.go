@@ -386,3 +386,41 @@ func TestPreviewCookieAllowsConfiguredHTTPOrigin(t *testing.T) {
 		t.Fatal("Secure must be false when the configured origin is http")
 	}
 }
+
+func TestSchemefulSiteMismatchWarning(t *testing.T) {
+	cases := []struct {
+		consoleOrigin string
+		previewOrigin string
+		wantWarning   bool
+		subMatch      string
+	}{
+		{"", "", false, ""},
+		{"http://localhost:27892", "", false, ""},
+		{"", "http://localhost:27893", false, ""},
+		// Same schemeful site (localhost with different ports)
+		{"http://localhost:27892", "http://localhost:27893", false, ""},
+		{"https://console.example.com", "https://preview.example.com", false, ""},
+		{"https://console.example.co.uk", "https://preview.example.co.uk", false, ""},
+		// Scheme mismatch
+		{"http://console.example.com", "https://preview.example.com", true, "scheme"},
+		// Domain mismatch
+		{"https://console.foo.com", "https://preview.bar.com", true, "registrable domain"},
+		{"http://localhost:27892", "http://127.0.0.1:27893", true, "registrable domain"},
+	}
+
+	for _, tc := range cases {
+		warn := SchemefulSiteMismatchWarning(tc.consoleOrigin, tc.previewOrigin)
+		if tc.wantWarning {
+			if warn == "" {
+				t.Errorf("expected warning for console=%q preview=%q, got empty", tc.consoleOrigin, tc.previewOrigin)
+			} else if tc.subMatch != "" && !strings.Contains(warn, tc.subMatch) {
+				t.Errorf("warning %q did not contain %q", warn, tc.subMatch)
+			}
+		} else {
+			if warn != "" {
+				t.Errorf("expected no warning for console=%q preview=%q, got %q", tc.consoleOrigin, tc.previewOrigin, warn)
+			}
+		}
+	}
+}
+
