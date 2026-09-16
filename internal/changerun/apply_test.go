@@ -503,3 +503,158 @@ func TestContainerValidatorRunsCommandsInOrder(t *testing.T) {
 		t.Fatalf("results wrong: %+v", results)
 	}
 }
+
+// Round-19 P0: container output (and command/error text) must be redacted
+// BEFORE anything lands in the proposal record — build/test logs carry
+// tokens. Source-level redaction in VerifyDir and sink-level redaction in
+// verificationSummary are both asserted, the latter covering custom
+// Validators that bypass the source.
+func TestVerificationOutputIsRedactedBeforePersistence(t *testing.T) {
+	v := &ContainerValidator{
+		Opts: ContainerVerifyOptions{
+			Commands: []string{"curl -H \"Authorization: Bearer eyhbXhh.eyJzdWIi.9f8e7d6c\" https://ci.internal"},
+			Image:    "runtime-base:test",
+		},
+		RunContainer: func(ctx context.Context, dir, image, workdir, argv string, timeout time.Duration) (string, error) {
+			return "running with token sk-proj-abcdef12345678 password=hunter2222\nexit ok", nil
+		},
+	}
+	results, err := v.VerifyDir(context.Background(), "/some/clone")
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if strings.Contains(results[0].Command, "eyhbXhh") {
+		t.Fatalf("command text not redacted: %s", results[0].Command)
+	}
+	if strings.Contains(results[0].Output, "sk-proj-") || strings.Contains(results[0].Output, "hunter2222") {
+		t.Fatalf("output not redacted: %s", results[0].Output)
+	}
+	if !strings.Contains(results[0].Output, "[REDACTED]") {
+		t.Fatalf("expected [REDACTED] markers, got: %s", results[0].Output)
+	}
+
+	// Sink-level: a custom validator returning raw secrets still cannot
+	// reach the persisted summary.
+	raw := []VerificationResult{
+		{Command: "deploy --token ghp_AbcdefghijKlmnopqrst1234567890Abcdefgh", OK: true, Output: "Bearer eyhbGciOiJIUzI1NiJ9.eyJzIn0.5f4e3d2c1b payload"},
+	}
+	summary := verificationSummary(raw)
+	for k, val := range summary {
+		if strings.Contains(val, "ghp_Abcdefghij") || strings.Contains(val, "eyhbGciOiJIUzI1NiJ9") {
+			t.Fatalf("summary %q leaks secrets: %s", k, val)
+		}
+	}
+	if !strings.Contains(summary["cmd_0"], "[REDACTED]") {
+		t.Fatalf("summary must carry redaction markers: %v", summary)
+	}
+}
+
+// Round-19 P1: the failure compensations (recordPostimage / MarkApplied) run
+// `git apply --reverse` on the ORIGINAL patch. The hand-rolled inversion they
+// previously used produced illegal hunk headers ("@@ +1,7 -1,5"), so the
+// compensation could not be trusted. These tests pin the fixed machinery in
+// a real git repo: apply → reverse → tree back to baseline, clean status,
+// across modify-only and add/delete/modify patches.
+func TestReverseCompensationRestoresBaseline(t *testing.T) {
+	e, s := newEngine(t)
+	patch := patchFor("hi", "hello")
+	p, err := s.Create("proj", "task-1", "agent", "r", patch, patch, []string{"app.go"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := s.BeginApply(p.ID); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := applyPatchIn(e.WorktreeDir, patch); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	content, _ := os.ReadFile(filepath.Join(e.WorktreeDir, "app.go"))
+	if !strings.Contains(string(content), `"hello"`) {
+		t.Fatalf("precondition: patch applied, got %s", content)
+	}
+	if err := applyPatchReverse(e.WorktreeDir, patch); err != nil {
+		t.Fatalf("reverse apply must succeed on the original patch: %v", err)
+	}
+	restored, _ := os.ReadFile(filepath.Join(e.WorktreeDir, "app.go"))
+	if string(restored) != "package main\n\nfunc Hi() string { return \"hi\" }\n" {
+		t.Fatalf("worktree must return to baseline, got: %q", restored)
+	}
+	if dirty, _ := worktreeDirty(e.WorktreeDir); dirty {
+		t.Fatal("reverse must leave a clean tree")
+	}
+}
+
+func TestReverseCompensationCoversAddDeleteModify(t *testing.T) {
+	e, s := newEngine(t)
+	addPatch := `diff --git a/added.go b/added.go
+new file mode 100644
+--- /dev/null
++++ b/added.go
+@@ -0,0 +1,2 @@
++package main
++
+diff --git a/del.go b/del.go
+deleted file mode 100644
+--- a/del.go
++++ /dev/null
+@@ -1,2 +0,0 @@
+-package main
+-
+diff --git a/app.go b/app.go
+--- a/app.go
++++ b/app.go
+@@ -1,3 +1,3 @@
+ package main
+ 
+-func Hi() string { return "hi" }
++func Hi() string { return "hello" }
+`
+	// Fixture needs del.go present.
+	if err := os.WriteFile(filepath.Join(e.WorktreeDir, "del.go"), []byte("package main\n\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = e.WorktreeDir
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v (%s)", strings.Join(args, " "), err, out)
+		}
+	}
+	run("add", ".")
+	run("commit", "-m", "del.go baseline")
+
+	p, err := s.Create("proj", "task-1", "agent", "r", addPatch, addPatch, []string{"added.go", "del.go", "app.go"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := s.BeginApply(p.ID); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := applyPatchIn(e.WorktreeDir, addPatch); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(e.WorktreeDir, "added.go")); err != nil {
+		t.Fatal("precondition: added.go must exist after apply")
+	}
+	if _, err := os.Stat(filepath.Join(e.WorktreeDir, "del.go")); !os.IsNotExist(err) {
+		t.Fatal("precondition: del.go must be deleted after apply")
+	}
+	if err := applyPatchReverse(e.WorktreeDir, addPatch); err != nil {
+		t.Fatalf("reverse must undo add/delete/modify: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(e.WorktreeDir, "added.go")); !os.IsNotExist(err) {
+		t.Fatal("reverse must remove the added file")
+	}
+	del, err := os.ReadFile(filepath.Join(e.WorktreeDir, "del.go"))
+	if err != nil || string(del) != "package main\n\n" {
+		t.Fatalf("reverse must restore the deleted file, got %q (%v)", del, err)
+	}
+	app, _ := os.ReadFile(filepath.Join(e.WorktreeDir, "app.go"))
+	if !strings.Contains(string(app), `"hi"`) {
+		t.Fatalf("reverse must restore the modified file, got %s", app)
+	}
+	if dirty, _ := worktreeDirty(e.WorktreeDir); dirty {
+		t.Fatal("reverse must leave a clean tree across add/delete/modify")
+	}
+}

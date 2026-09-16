@@ -7,7 +7,6 @@
 package changerun
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -314,7 +313,7 @@ func (e *ApplyEngine) Apply(store *Store, proposalID, actor string, ctx context.
 	// row stuck in `applying` (round-18 P1-2).
 	postimage, err := e.recordPostimage(touched)
 	if err != nil {
-		if revErr := applyPatchIn(e.WorktreeDir, reversePatch(p.Patch)); revErr != nil {
+		if revErr := applyPatchReverse(e.WorktreeDir, p.Patch); revErr != nil {
 			postimage, _ = e.recordPostimage(touched)
 			_, _ = store.MarkVerificationFailed(p.ID, map[string]string{
 				"stage":     "postimage_record",
@@ -334,7 +333,7 @@ func (e *ApplyEngine) Apply(store *Store, proposalID, actor string, ctx context.
 	final, err := store.MarkApplied(p.ID, postimage, head)
 	if err != nil {
 		// Applied content + no applied-state row: reverse out, then park.
-		if revErr := applyPatchIn(e.WorktreeDir, reversePatch(p.Patch)); revErr != nil {
+		if revErr := applyPatchReverse(e.WorktreeDir, p.Patch); revErr != nil {
 			_, _ = store.MarkVerificationFailed(p.ID, map[string]string{
 				"stage":    "mark_applied",
 				"error":    err.Error(),
@@ -352,88 +351,23 @@ func (e *ApplyEngine) Apply(store *Store, proposalID, actor string, ctx context.
 	return &ApplyResult{AppliedSHA: final.AppliedSHA, Postimage: final.Postimage}, nil
 }
 
-// reversePatch converts a unified diff into its inverse via git's own
-// machinery — the only tool that understands every header variant.
-func reversePatch(patch string) string {
-	cmd := exec.Command("git", "apply", "--reverse", "--stat")
+// applyPatchReverse applies the ORIGINAL patch with git's own --reverse to
+// dir (round-19 P1): git understands every header variant and recomputes
+// inverted hunk ranges — the hand-rolled inversion this replaces produced
+// illegal headers (e.g. "@@ +1,7 -1,5") and stale line counts, so the
+// recordPostimage/MarkApplied failure compensation it served could not be
+// trusted. Failure text goes to the caller; nothing is parsed from git.
+func applyPatchReverse(dir, patch string) error {
+	cmd := exec.Command("git", "apply", "--reverse", "--whitespace=nowarn", "-")
+	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(patch)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	// We only need the inverted text; --stat is a dry probe. Inversion of
-	// the actual bytes happens per hunk below.
-	_ = cmd.Run()
-	return invertPatch(patch)
-}
-
-// invertPatch swaps +/- lines and old/new headers of a unified diff.
-// Context lines, hunk headers, and new-file/dev-null markers are handled
-// explicitly; anything else passes through untouched.
-func invertPatch(patch string) string {
-	var out strings.Builder
-	lines := strings.Split(patch, "\n")
-	for i := 0; i < len(lines); i++ {
-		line := lines[i]
-		switch {
-		case strings.HasPrefix(line, "--- "):
-			out.WriteString("+++ " + swapPrefix(line[4:]) + "\n")
-		case strings.HasPrefix(line, "+++ "):
-			out.WriteString("--- " + swapPrefix(line[4:]) + "\n")
-		case strings.HasPrefix(line, "@@"):
-			out.WriteString(swapHunkHeader(line) + "\n")
-		case strings.HasPrefix(line, "+"):
-			out.WriteString("-" + line[1:] + "\n")
-		case strings.HasPrefix(line, "-"):
-			out.WriteString("+" + line[1:] + "\n")
-		default:
-			out.WriteString(line + "\n")
-		}
-		// New/deleted file markers swap semantics on the next header lines.
-		if strings.HasPrefix(line, "new file mode") {
-			// Mark the following --- a/... as /dev/null in the inverse:
-			// find the next "--- " line and rewrite it.
-			for j := i + 1; j < len(lines) && !strings.HasPrefix(lines[j], "@@"); j++ {
-				if strings.HasPrefix(lines[j], "--- ") {
-					lines[j] = "--- /dev/null"
-					break
-				}
-			}
-		}
-		if strings.HasPrefix(line, "deleted file mode") {
-			for j := i + 1; j < len(lines) && !strings.HasPrefix(lines[j], "@@"); j++ {
-				if strings.HasPrefix(lines[j], "+++ ") {
-					lines[j] = "+++ /dev/null"
-					break
-				}
-			}
-		}
+	cmd.Env = gitworktree.SanitizedGitEnv()
+	out, err := cmd.Output()
+	if err != nil {
+		_ = out
+		return fmt.Errorf("git apply --reverse: %w", err)
 	}
-	return strings.TrimSuffix(out.String(), "\n")
-}
-
-// swapPrefix flips a/ ↔ b/ on one path.
-func swapPrefix(p string) string {
-	if strings.HasPrefix(p, "a/") {
-		return "b/" + p[2:]
-	}
-	if strings.HasPrefix(p, "b/") {
-		return "a/" + p[2:]
-	}
-	return p
-}
-
-// swapHunkHeader swaps the old/new ranges of a @@ header.
-func swapHunkHeader(h string) string {
-	open := strings.Index(h, "@@")
-	closeIdx := strings.LastIndex(h, "@@")
-	if open < 0 || closeIdx <= open {
-		return h
-	}
-	inner := h[open+2 : closeIdx]
-	parts := strings.Split(inner, " ")
-	if len(parts) != 4 {
-		return h
-	}
-	return "@@" + " " + parts[3] + " " + parts[2] + " " + parts[1] + " " + parts[0] + " " + h[closeIdx+2:]
+	return nil
 }
 
 // Rollback restores every touched path to its recorded postimage hash state.

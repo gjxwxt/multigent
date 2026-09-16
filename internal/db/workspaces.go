@@ -579,6 +579,85 @@ ON CONFLICT(table_name, workspace_id, k1, k2, k3) DO UPDATE SET payload = exclud
 	return nil
 }
 
+// CommitRecordWrites commits multiple kv_records writes as ONE atomic
+// transaction (BEGIN IMMEDIATE on a dedicated connection, same discipline as
+// CommitTransitionGuarded without the claim gate): either every write lands
+// or none does. This is the primitive that binds related records whose
+// consistency must survive a process crash — e.g. the change-run proposal
+// row and its task slot (round-19 P1: separate writes left ghost slots).
+func (db *SQLiteStore) CommitRecordWrites(workspaceID string, writes []KVWrite) error {
+	return db.CommitRecordWritesGuarded(workspaceID, nil, writes)
+}
+
+// CommitRecordWritesGuarded is CommitRecordWrites with an optional guard: a
+// caller-supplied check that runs INSIDE the transaction after BEGIN
+// IMMEDIATE has taken the write lock, BEFORE any write. A non-nil error
+// aborts the whole batch (nothing persists). The guard may read through tx —
+// because the IMMEDIATE lock is already held, its read cannot interleave
+// with another writer's commit, so check-then-write batches are race-free
+// (round-19 P1: slot free/occupy checks must be transactional with the
+// proposal writes they gate).
+func (db *SQLiteStore) CommitRecordWritesGuarded(workspaceID string, guard func(tx KVTx) error, writes []KVWrite) error {
+	if db == nil || db.sql == nil {
+		return fmt.Errorf("database not open")
+	}
+	if len(writes) == 0 {
+		return fmt.Errorf("record commit requires at least one write")
+	}
+	conn, err := db.sql.Conn(context.Background())
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	return runImmediateTx(conn, func(tx *immediateTx) error {
+		if guard != nil {
+			if err := guard(KVTx{conn: tx.conn}); err != nil {
+				return err
+			}
+		}
+		now := nowUTC()
+		for _, w := range writes {
+			k1, k2, k3 := normalizeKey(w.Key)
+			ws := w.Workspace
+			if ws == "" {
+				ws = workspaceID
+			}
+			_, err := tx.Exec(`INSERT INTO kv_records (table_name, workspace_id, k1, k2, k3, payload, updated_at, revision)
+VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+ON CONFLICT(table_name, workspace_id, k1, k2, k3) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, revision = kv_records.revision + 1`,
+				w.Table, ws, k1, k2, k3, w.Payload, now)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// KVTx is the transactional read/write handle passed to a
+// CommitRecordWritesGuarded guard. Reads see the IMMEDIATE-locked snapshot;
+// writes join the caller's batch.
+type KVTx struct {
+	conn *sql.Conn
+}
+
+// GetRecord reads one record inside the guarded transaction.
+func (t KVTx) GetRecord(table, workspaceID string, key []string) (payload string, found bool, err error) {
+	k1, k2, k3 := normalizeKey(key)
+	row := t.conn.QueryRowContext(context.Background(),
+		`SELECT payload FROM kv_records WHERE table_name = ? AND workspace_id = ? AND k1 = ? AND k2 = ? AND k3 = ?`,
+		table, workspaceID, k1, k2, k3)
+	var loaded string
+	if err := row.Scan(&loaded); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return loaded, true, nil
+}
+
 // runImmediateTx executes fn inside one explicit "BEGIN IMMEDIATE"
 // transaction on conn, committing on success and rolling back on error. The
 // statement is spelled out on a dedicated connection — NOT via the driver's

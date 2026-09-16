@@ -16,6 +16,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -88,11 +89,14 @@ func NewProposalID() string {
 	return "crp-" + hex.EncodeToString(b[:])
 }
 
-// taskSlot is the per-task single-active-proposal lock row. Create CAS-writes
-// it (empty → proposalID); every terminal transition frees it (proposalID →
-// empty) in the SAME CAS as the state change, so a crash between state change
-// and free is impossible. Concurrent Creates race on the slot row itself:
-// exactly one wins the empty→occupied swap (round-18 P1-1).
+// taskSlot is the per-task single-active-proposal lock row. It is written in
+// the SAME transaction as the proposal row it guards (Create, terminal
+// transitions) via CommitRecordWrites — a crash between the two writes is
+// impossible, so no ghost slot can outlive its proposal (round-19 P1).
+// Concurrent Creates still race, but now on the atomic swap itself: the
+// claim condition is enforced with a CAS on the slot row's payload+revision
+// INSIDE the transaction body — SQLite serializes IMMEDIATE transactions,
+// so exactly one concurrent claimant commits (round-18 P1-1).
 type taskSlot struct {
 	ProposalID string `json:"proposalId"`
 	UpdatedAt  string `json:"updatedAt"`
@@ -105,101 +109,79 @@ func taskSlotKey(project, taskID string) []string {
 	return []string{"slot", project + "\x00" + taskID, ""}
 }
 
-// acquireTaskSlot claims the task's single-active slot for proposalID. The
-// slot row is materialized with InsertRecordIfAbsent (atomic create: of N
-// concurrent materializers exactly one reports inserted=true) and the claim
-// rides a payload+revision CAS from the row's current state. The earlier
-// UpsertRecord-based materialization was unsound: a late blank upsert
-// ON-CONFLICT-overwrote a winner's occupied slot, letting a second claimant
-// also win (leak proven by probe, round-18 P1-1).
-func (s *Store) acquireTaskSlot(project, taskID, proposalID string) error {
-	slotKey := taskSlotKey(project, taskID)
-	occupied := taskSlot{ProposalID: proposalID, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
-	occupiedRaw, err := json.Marshal(occupied)
-	if err != nil {
-		return err
-	}
-	// Fast path: atomic create of the slot already owned by us.
-	inserted, err := s.db.InsertRecordIfAbsent(proposalTable, s.workspace, slotKey, string(occupiedRaw))
-	if err != nil {
-		return err
-	}
-	if inserted {
-		return nil
-	}
-	// Row exists: CAS it from its CURRENT payload (whatever state we observe)
-	// to ours. Empty payload = free slot; occupied = lost race. The CAS is
-	// serialized by SQLite, so concurrent claimants produce exactly one win.
-	for attempt := 0; attempt < 8; attempt++ {
-		recs, err := s.db.ListRecordsWithRevision(proposalTable, s.workspace, slotKey)
-		if err != nil {
-			return err
-		}
-		if len(recs) == 0 {
-			// Vanished between the fast-path miss and here (should not
-			// happen — slots are never deleted); retry the atomic create.
-			inserted, err := s.db.InsertRecordIfAbsent(proposalTable, s.workspace, slotKey, string(occupiedRaw))
-			if err != nil {
-				return err
-			}
-			if inserted {
-				return nil
-			}
-			continue
-		}
-		var current taskSlot
-		if err := json.Unmarshal([]byte(recs[0].Payload), &current); err != nil {
-			return err
-		}
-		if current.ProposalID != "" {
-			return fmt.Errorf("task %s slot held by proposal %s — concurrent create lost the race", taskID, current.ProposalID)
-		}
-		swapped, err := s.db.UpdateRecordIfPayloadAndRevision(proposalTable, s.workspace, slotKey, string(occupiedRaw), recs[0].Payload, recs[0].Revision)
-		if err != nil {
-			return err
-		}
-		if swapped {
-			return nil
-		}
-	}
-	return fmt.Errorf("task %s: concurrent create lost the slot race", taskID)
-}
+// acquireTaskSlot was the round-18 stopgap (slot row written separately from
+// the proposal row). Round-19 P1 replaces it: slot and proposal live and die
+// in ONE CommitRecordWritesGuarded transaction — see Create and
+// transitionTerminal.
 
-// freeTaskSlot releases the task slot if it still names proposalID (the
-// same CAS discipline as the state transition that calls it).
-func (s *Store) freeTaskSlot(project, taskID, proposalID string) {
+// freeTaskSlot was the round-18 stopgap with the same flaw. Replaced by the
+// transactional terminal transition.
+
+// orphanedSlotHoldState reports whether a slot row's holder no longer exists
+// as an active proposal (crash debris from a pre-transaction build, or a
+// proposal row lost after a partial legacy write). Such slots are repaired
+// on sight: the next Create reclaims them instead of erroring forever.
+func (s *Store) slotHolderIsActive(project, taskID string, tx controldb.KVTx) (bool, error) {
 	slotKey := taskSlotKey(project, taskID)
-	recs, err := s.db.ListRecordsWithRevision(proposalTable, s.workspace, slotKey)
-	if err != nil || len(recs) != 1 {
-		return
+	payload, found, err := tx.GetRecord(proposalTable, s.workspace, slotKey)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, nil
 	}
 	var current taskSlot
-	if json.Unmarshal([]byte(recs[0].Payload), &current) != nil || current.ProposalID != proposalID {
-		return
+	if err := json.Unmarshal([]byte(payload), &current); err != nil {
+		// Unparseable slot payload: crash debris — treat as orphaned.
+		return false, nil
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	emptyRaw, _ := json.Marshal(taskSlot{UpdatedAt: now})
-	_, _ = s.db.UpdateRecordIfPayloadAndRevision(proposalTable, s.workspace, slotKey, string(emptyRaw), recs[0].Payload, recs[0].Revision)
-}
-
-func isMissingRecordErr(err error) bool {
-	if err == nil {
-		return false
+	if current.ProposalID == "" {
+		return false, nil
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "no such record") || strings.Contains(msg, "not found") || strings.Contains(msg, "no rows")
+	// The holder's proposal row MUST be read through tx: the guard runs on
+	// the connection holding the IMMEDIATE lock — a pool read here would
+	// wait for that very lock and deadlock (proven by the round-19 hang).
+	holdPayload, found, err := tx.GetRecord(proposalTable, s.workspace, proposalKey(current.ProposalID))
+	if err != nil || !found {
+		return false, nil
+	}
+	p, err := decodeProposal(holdPayload)
+	if err != nil {
+		return false, nil
+	}
+	return isActiveState(p.State), nil
 }
 
 // Create persists a new proposal in StateAwaitingApproval. Only one ACTIVE
 // proposal (not applied/rejected) may exist per task — V1 serialization
-// decision (approval §8.2.2). Slot acquisition is a CAS on the per-task slot
-// row, not a read-then-write scan, so concurrent creates cannot both pass
-// (round-18 P1-1). The scan remains as a friendlier error message.
+// decision (approval §8.2.2). The proposal row and its task slot are written
+// in ONE guarded transaction whose guard re-reads the slot under the
+// IMMEDIATE write lock: concurrent Creates serialize, exactly one commits,
+// and a crash can never strand a slot without its proposal (round-18 P1-1,
+// round-19 P1). The ActiveForTask scan up front only produces a friendlier
+// error; the transactional guard is the real gate.
 func (s *Store) Create(project, taskID, actor, request, patch, diff string, paths []string) (*Proposal, error) {
-	if existing, err := s.ActiveForTask(project, taskID); err != nil {
+	existing, err := s.ActiveForTask(project, taskID)
+	if err != nil {
 		return nil, err
-	} else if existing != nil {
-		return nil, fmt.Errorf("task %s already has an active proposal %s (state %s) — resolve or reject it first", taskID, existing.ID, existing.State)
+	}
+	if existing != nil {
+		// Ghost repair (round-19 P1): a slot holder that no longer exists or
+		// sits in a terminal state is legacy crash debris — the transactional
+		// guard below re-verifies under the lock and overwrites the stale
+		// slot, so reclaim instead of erroring forever.
+		recs, recErr := s.db.ListRecordsWithRevision(proposalTable, s.workspace, proposalKey(existing.ID))
+		genuine := recErr == nil && len(recs) == 1
+		if genuine {
+			if p, decErr := decodeProposal(recs[0].Payload); decErr == nil && isActiveState(p.State) {
+				genuine = true
+			} else {
+				genuine = false
+			}
+		}
+		if genuine {
+			return nil, fmt.Errorf("task %s already has an active proposal %s (state %s) — resolve or reject it first", taskID, existing.ID, existing.State)
+		}
 	}
 	now := time.Now().UTC()
 	requestCapped, request := capAndRedact(request, MaxRequestBytes)
@@ -222,22 +204,56 @@ func (s *Store) Create(project, taskID, actor, request, patch, diff string, path
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}
-	// Claim the slot BEFORE the proposal row lands: the loser aborts having
-	// written nothing durable.
-	if err := s.acquireTaskSlot(project, taskID, p.ID); err != nil {
-		return nil, err
-	}
 	raw, err := json.Marshal(p)
 	if err != nil {
-		s.freeTaskSlot(project, taskID, p.ID)
 		return nil, err
 	}
-	if err := s.db.UpsertRecord(proposalTable, s.workspace, proposalKey(p.ID), string(raw)); err != nil {
-		s.freeTaskSlot(project, taskID, p.ID)
+	slot := taskSlot{ProposalID: p.ID, UpdatedAt: now.Format(time.RFC3339Nano)}
+	slotRaw, err := json.Marshal(slot)
+	if err != nil {
 		return nil, err
+	}
+	guardErr := s.db.CommitRecordWritesGuarded(s.workspace, func(tx controldb.KVTx) error {
+		// IMMEDIATE lock held: this read cannot interleave with another
+		// Create's commit, so check-then-write is race-free.
+		active, err := s.slotHolderIsActive(project, taskID, tx)
+		if err != nil {
+			return err
+		}
+		if active {
+			return errSlotHeld{project, taskID}
+		}
+		return nil
+	}, []controldb.KVWrite{
+		{Table: proposalTable, Workspace: s.workspace, Key: proposalKey(p.ID), Payload: string(raw)},
+		{Table: proposalTable, Workspace: s.workspace, Key: taskSlotKey(project, taskID), Payload: string(slotRaw)},
+	})
+	if guardErr != nil {
+		if errors.As(guardErr, &errSlotHeld{}) {
+			return nil, fmt.Errorf("task %s already has an active proposal — concurrent create lost the race", taskID)
+		}
+		return nil, guardErr
 	}
 	return p, nil
 }
+
+// errSlotHeld signals a slot occupied by an active proposal inside the
+// guarded create transaction.
+type errSlotHeld struct{ project, taskID string }
+
+func (e errSlotHeld) Error() string { return "slot held" }
+
+func isMissingRecordErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "no such record") || strings.Contains(msg, "not found") || strings.Contains(msg, "no rows")
+}
+
+// Create persists a new proposal in StateAwaitingApproval. See the
+// transactional implementation above (the doc comment there covers the
+// single-active and atomicity contract).
 
 // Get loads one proposal.
 func (s *Store) Get(id string) (*Proposal, error) {
@@ -353,16 +369,83 @@ func (s *Store) Reject(id, actor string) (*Proposal, error) {
 	})
 }
 
-// transitionTerminal performs the CAS state change and then frees the task
-// slot in the same call path — terminal states must never keep holding the
-// single-active slot.
+// transitionTerminal performs the CAS state change and frees the task slot
+// in ONE guarded transaction (round-19 P1): the guard re-verifies the
+// expected state under the IMMEDIATE write lock, then the batch swaps the
+// proposal payload to the terminal state and clears the slot atomically. A
+// crash mid-transition leaves either both rows old or both new — never a
+// terminal proposal still holding a slot (ghost slot).
 func (s *Store) transitionTerminal(id, expectState, newState string, mutate func(*Proposal)) (*Proposal, error) {
-	next, err := s.transition(id, expectState, newState, mutate)
+	recs, err := s.db.ListRecordsWithRevision(proposalTable, s.workspace, proposalKey(id))
 	if err != nil {
 		return nil, err
 	}
-	s.freeTaskSlot(next.Project, next.TaskID, next.ID)
-	return next, nil
+	if len(recs) != 1 {
+		return nil, fmt.Errorf("proposal %s: %d rows", id, len(recs))
+	}
+	current, err := decodeProposal(recs[0].Payload)
+	if err != nil {
+		return nil, err
+	}
+	next := *current
+	next.State = newState
+	next.UpdatedAt = time.Now().UTC()
+	if mutate != nil {
+		mutate(&next)
+	}
+	raw, err := json.Marshal(&next)
+	if err != nil {
+		return nil, err
+	}
+	slot := taskSlot{UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	slotRaw, err := json.Marshal(slot)
+	if err != nil {
+		return nil, err
+	}
+	err = s.db.CommitRecordWritesGuarded(s.workspace, func(tx controldb.KVTx) error {
+		// Claim check inside the lock: the proposal must still be in
+		// expectState, and the slot (if present) must still name us. Either
+		// violated = another transitioner won; abort with nothing written.
+		fresh, found, err := tx.GetRecord(proposalTable, s.workspace, proposalKey(id))
+		if err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("proposal %s vanished (lost race)", id)
+		}
+		p, err := decodeProposal(fresh)
+		if err != nil {
+			return err
+		}
+		if p.State != expectState {
+			return fmt.Errorf("proposal %s in state %s, expected %s (lost race)", id, p.State, expectState)
+		}
+		// The slot may legitimately be missing (pre-slot legacy rows) or
+		// held by us; held by ANOTHER active proposal means a concurrent
+		// create already replaced us as the active proposal. All reads ride
+		// tx — the IMMEDIATE lock holder cannot borrow pool connections.
+		slotKey := taskSlotKey(p.Project, p.TaskID)
+		payload, found, err := tx.GetRecord(proposalTable, s.workspace, slotKey)
+		if err != nil {
+			return err
+		}
+		if found {
+			var held taskSlot
+			if json.Unmarshal([]byte(payload), &held) == nil && held.ProposalID != "" && held.ProposalID != id {
+				return fmt.Errorf("task %s slot held by proposal %s (lost race)", p.TaskID, held.ProposalID)
+			}
+		}
+		return nil
+	}, []controldb.KVWrite{
+		{Table: proposalTable, Workspace: s.workspace, Key: proposalKey(id), Payload: string(raw)},
+		{Table: proposalTable, Workspace: s.workspace, Key: taskSlotKey(current.Project, current.TaskID), Payload: string(slotRaw)},
+	})
+	if err != nil {
+		// A lost race renders as a state mismatch in the error text — keep
+		// the transition() shape of the message for callers/tests.
+		return nil, err
+	}
+	return &next, nil
 }
 
 // decodeProposal parses a stored row.
@@ -401,6 +484,8 @@ var (
 func RedactSecrets(line string) string {
 	out := knownPrefixes.ReplaceAllString(line, "[REDACTED]")
 	out = secretAssign.ReplaceAllString(out, "${1}[REDACTED]")
-	out = authHeader.ReplaceAllString(out, "${1}${3}[REDACTED]")
+	// ${2} is the optional "bearer" scheme word; ${3} is the credential and
+	// must NOT be re-emitted (re-emitting it would undo the redaction).
+	out = authHeader.ReplaceAllString(out, "${1}${2}[REDACTED]")
 	return out
 }
