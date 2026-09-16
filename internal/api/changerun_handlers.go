@@ -8,14 +8,20 @@
 package api
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/multigent/multigent/internal/changerun"
+	"github.com/multigent/multigent/internal/fixturesandbox"
 	"github.com/multigent/multigent/internal/gitworktree"
 )
 
@@ -48,11 +54,14 @@ func (s *Server) resolveChangeRunTask(w http.ResponseWriter, r *http.Request, pr
 // the worktree-derived project root so it serializes with the same lock the
 // worktree manager and review commits hold. Scope binds the engine to the
 // URL's (project, task): proposals from other projects/tasks surface as 404,
-// never as cross-target applies or state changes (round-18 P0-1).
+// never as cross-target applies or state changes (round-18 P0-1). The
+// validator executes the project's ChangeRunVerifyCommands inside a
+// disposable container — project argv never runs on the host (round-18
+// P0-3, security red line).
 func (s *Server) changeRunEngine(worktreeDir, project, taskID string) *changerun.ApplyEngine {
 	cloneParent := filepath.Join(os.TempDir(), "multigent-changerun")
 	_ = os.MkdirAll(cloneParent, 0o755)
-	return &changerun.ApplyEngine{
+	engine := &changerun.ApplyEngine{
 		WorktreeDir: worktreeDir,
 		ProjectRoot: gitworktree.ProjectRootForWorktree(worktreeDir),
 		CloneParent: cloneParent,
@@ -61,6 +70,40 @@ func (s *Server) changeRunEngine(worktreeDir, project, taskID string) *changerun
 			TaskID:  taskID,
 		},
 	}
+	if p, err := s.st.Project(project); err == nil && p != nil && len(p.ChangeRunVerifyCommands) > 0 {
+		engine.Validator = &changerun.ContainerValidator{
+			Opts: changerun.ContainerVerifyOptions{
+				Commands: p.ChangeRunVerifyCommands,
+				Image:    fixturesandbox.GeneratorImage(),
+			},
+			RunContainer: runChangeRunVerifyContainer,
+		}
+	}
+	return engine
+}
+
+// runChangeRunVerifyContainer executes one verification command inside a
+// disposable container with dir mounted at /workspace (the fixturesandbox
+// generator's execution shape). Output is combined; caller redacts.
+func runChangeRunVerifyContainer(ctx context.Context, dir, image, workdir, argv string, timeout time.Duration) (string, error) {
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	args := []string{
+		"run", "--rm",
+		"-v", dir + ":/workspace",
+		"-w", workdir,
+		image,
+		"sh", "-c", argv,
+	}
+	cmd := exec.CommandContext(runCtx, "docker", args...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err := cmd.Run()
+	if runCtx.Err() == context.DeadlineExceeded {
+		return out.String(), fmt.Errorf("timed out after %s", timeout)
+	}
+	return out.String(), err
 }
 
 type createChangeRunProposalRequest struct {
@@ -153,7 +196,7 @@ func (s *Server) handleApplyChangeRunProposal(w http.ResponseWriter, r *http.Req
 	if !s.checkProjectOperator(w, r, project) {
 		return
 	}
-	res, err := s.changeRunEngine(worktreeDir, project, taskID).Apply(s.changerunStore(), r.PathValue("proposalId"), s.currentUser(r).Username)
+	res, err := s.changeRunEngine(worktreeDir, project, taskID).Apply(s.changerunStore(), r.PathValue("proposalId"), s.currentUser(r).Username, r.Context())
 	if err != nil {
 		var nf *changerun.NotFoundError
 		if errors.As(err, &nf) {

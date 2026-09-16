@@ -8,6 +8,7 @@ package changerun
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -122,6 +123,13 @@ type ApplyEngine struct {
 	// change or worktree touch — a proposal from another project/task must
 	// surface as not-found, never as a cross-target apply (round-18 P0-1).
 	Scope Scope
+	// Validator runs the project's verification suite inside the validation
+	// clone after the patch applies there and BEFORE the main worktree is
+	// touched (§4.1 v6 unique ordering). Optional: nil = clone-apply-only
+	// check, which the design contract calls an applicability check, not a
+	// verification pass — the API layer wires the container validator so
+	// project argv never runs on the host (round-18 P0-3).
+	Validator Validator
 }
 
 // Scope is the (project, task) binding an engine (or handler) operates on.
@@ -159,7 +167,7 @@ type ApplyResult struct {
 // On verification failure the proposal parks in verification_failed and the
 // worktree is untouched. Returned errors are the operator's message; store
 // state carries the machine truth.
-func (e *ApplyEngine) Apply(store *Store, proposalID, actor string) (*ApplyResult, error) {
+func (e *ApplyEngine) Apply(store *Store, proposalID, actor string, ctx context.Context) (*ApplyResult, error) {
 	p, err := store.Get(proposalID)
 	if err != nil {
 		return nil, err
@@ -240,6 +248,24 @@ func (e *ApplyEngine) Apply(store *Store, proposalID, actor string) (*ApplyResul
 	if err := applyPatchIn(cloneDir, p.Patch); err != nil {
 		_, _ = store.MarkVerificationFailed(p.ID, map[string]string{"stage": "clone_apply", "error": err.Error()})
 		return nil, fmt.Errorf("clone apply failed (worktree untouched): %w", err)
+	}
+
+	// In-clone verification (§4.1 v6 unique ordering: ALL verification —
+	// including source-writing commands — happens HERE, before the project
+	// lock and the main-worktree apply). A validator failure parks the
+	// proposal as verification_failed with the per-command trail; the
+	// worktree was never touched. Without a Validator this is an
+	// applicability check only — the API layer always wires the container
+	// validator (round-18 P0-3).
+	if e.Validator != nil {
+		results, err := e.Validator.VerifyDir(ctx, cloneDir)
+		if err != nil {
+			detail := verificationSummary(results)
+			detail["stage"] = "clone_verify"
+			detail["error"] = err.Error()
+			_, _ = store.MarkVerificationFailed(p.ID, detail)
+			return nil, fmt.Errorf("clone verification failed (worktree untouched): %w", err)
+		}
 	}
 
 	// Re-acquire state under the project lock: the CAS transition to applying

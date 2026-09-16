@@ -178,6 +178,13 @@ type Project struct {
 	// internal/api/deploy_port.go.
 	DeployPort int `yaml:"deploy_port,omitempty" json:"deployPort,omitempty"`
 
+	// ChangeRunVerifyCommands are the shell lines Change Run executes inside
+	// a disposable sandbox container (clone mounted at /workspace) after a
+	// patch applies there and before the main worktree is touched. Project
+	// argv never runs on the host. Empty = no in-clone verification (the
+	// apply is then an applicability check and the result says so).
+	ChangeRunVerifyCommands []string `yaml:"change_run_verify_commands,omitempty" json:"changeRunVerifyCommands,omitempty"`
+
 	// Remote code host integration metadata
 	RemoteProvider   string `yaml:"remote_provider,omitempty" json:"remoteProvider,omitempty"`     // "gitlab" | "github" | "gitee"
 	RemoteConnection string `yaml:"remote_connection,omitempty" json:"remoteConnection,omitempty"` // Connector ID

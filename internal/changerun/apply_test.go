@@ -1,6 +1,7 @@
 package changerun
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // newRepoFixture builds a real git repo with one commit, returns its path.
@@ -65,7 +67,7 @@ func TestApplyEndToEndAndRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	res, err := e.Apply(s, p.ID, "operator")
+	res, err := e.Apply(s, p.ID, "operator", context.Background())
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -104,7 +106,7 @@ func TestApplyRefusesHighRiskPaths(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		if _, err := e.Apply(s, p.ID, "op"); err == nil || !strings.Contains(err.Error(), "high-risk") {
+		if _, err := e.Apply(s, p.ID, "op", context.Background()); err == nil || !strings.Contains(err.Error(), "high-risk") {
 			t.Fatalf("path %v must be rejected, got: %v", paths, err)
 		}
 		// The apply itself auto-rejects blacklisted proposals (P1-2: no
@@ -132,7 +134,7 @@ func TestApplyRefusesDirtyBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := e.Apply(s, p.ID, "op"); err == nil || !strings.Contains(err.Error(), "uncommitted changes") {
+	if _, err := e.Apply(s, p.ID, "op", context.Background()); err == nil || !strings.Contains(err.Error(), "uncommitted changes") {
 		t.Fatalf("dirty baseline must be rejected, got: %v", err)
 	}
 	// Worktree file must be untouched by the failed apply.
@@ -149,7 +151,7 @@ func TestApplyRejectsUndeclaredPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := e.Apply(s, p.ID, "op"); err == nil || !strings.Contains(err.Error(), "undeclared") {
+	if _, err := e.Apply(s, p.ID, "op", context.Background()); err == nil || !strings.Contains(err.Error(), "undeclared") {
 		t.Fatalf("undeclared path must be rejected, got: %v", err)
 	}
 }
@@ -161,7 +163,7 @@ func TestApplyRejectsBinaryPatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := e.Apply(s, p.ID, "op"); err == nil || !strings.Contains(err.Error(), "binary") {
+	if _, err := e.Apply(s, p.ID, "op", context.Background()); err == nil || !strings.Contains(err.Error(), "binary") {
 		t.Fatalf("binary patch must be rejected, got: %v", err)
 	}
 }
@@ -216,7 +218,7 @@ func TestApplyRejectsBrokenPatchParksVerificationFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := e.Apply(s, p.ID, "op"); err == nil {
+	if _, err := e.Apply(s, p.ID, "op", context.Background()); err == nil {
 		t.Fatal("broken patch must fail")
 	}
 	got, _ := s.Get(p.ID)
@@ -241,7 +243,7 @@ func TestConcurrentAppliesExactlyOneWins(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i] = e.Apply(s, p.ID, "op")
+			_, errs[i] = e.Apply(s, p.ID, "op", context.Background())
 		}(i)
 	}
 	wg.Wait()
@@ -263,7 +265,7 @@ func TestConcurrentAppliesExactlyOneWins(t *testing.T) {
 func TestRollbackRefusesPostApplyEdits(t *testing.T) {
 	e, s := newEngine(t)
 	p, _ := s.Create("proj", "task-1", "agent", "r", patchFor("hi", "hello"), patchFor("hi", "hello"), []string{"app.go"})
-	if _, err := e.Apply(s, p.ID, "op"); err != nil {
+	if _, err := e.Apply(s, p.ID, "op", context.Background()); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	// Simulate newer work on top of the applied change.
@@ -284,7 +286,7 @@ func TestScopeMismatchIsNotFound(t *testing.T) {
 	}
 	e.Scope = Scope{Project: "proj", TaskID: "task-OTHER"}
 	for name, op := range map[string]func() error{
-		"apply":    func() error { _, err := e.Apply(s, p.ID, "op"); return err },
+		"apply":    func() error { _, err := e.Apply(s, p.ID, "op", context.Background()); return err },
 		"rollback": func() error { _, err := e.Rollback(s, p.ID); return err },
 	} {
 		err := op()
@@ -300,7 +302,7 @@ func TestScopeMismatchIsNotFound(t *testing.T) {
 	}
 	// Matching scope proceeds normally.
 	e.Scope = Scope{Project: "proj", TaskID: "task-1"}
-	if _, err := e.Apply(s, p.ID, "op"); err != nil {
+	if _, err := e.Apply(s, p.ID, "op", context.Background()); err != nil {
 		t.Fatalf("apply with matching scope: %v", err)
 	}
 	if _, err := e.Rollback(s, p.ID); err != nil {
@@ -383,7 +385,7 @@ deleted file mode 100644
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := e.Apply(s, p.ID, "op"); err != nil {
+	if _, err := e.Apply(s, p.ID, "op", context.Background()); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	// All three effects landed.
@@ -406,5 +408,98 @@ deleted file mode 100644
 	content, _ := os.ReadFile(filepath.Join(e.WorktreeDir, "app.go"))
 	if !strings.Contains(string(content), `"hi"`) {
 		t.Fatalf("app.go must be restored: %s", content)
+	}
+}
+
+func TestValidatorRunsInCloneAndFailureLeavesWorktreeUntouched(t *testing.T) {
+	e, s := newEngine(t)
+	p, err := s.Create("proj", "task-1", "agent", "r", patchFor("hi", "hello"), patchFor("hi", "hello"), []string{"app.go"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	var gotDir string
+	e.Validator = ValidatorFunc(func(ctx context.Context, dir string) ([]VerificationResult, error) {
+		gotDir = dir
+		// The clone must already contain the PATCHED content — verification
+		// runs after clone-apply.
+		content, err := os.ReadFile(filepath.Join(dir, "app.go"))
+		if err != nil {
+			return nil, err
+		}
+		if !strings.Contains(string(content), `"hello"`) {
+			t.Fatalf("validator saw pre-patch clone: %s", content)
+		}
+		return []VerificationResult{{Command: "cat app.go", OK: true}}, nil
+	})
+	if _, err := e.Apply(s, p.ID, "op", context.Background()); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if gotDir == e.WorktreeDir {
+		t.Fatal("validator must run in the clone, not the worktree")
+	}
+	// Failed validator → worktree untouched, proposal parked with trail.
+	e2, s2 := newEngine(t)
+	p2, _ := s2.Create("proj", "task-1", "agent", "r", patchFor("hi", "hello"), patchFor("hi", "hello"), []string{"app.go"})
+	e2.Validator = ValidatorFunc(func(ctx context.Context, dir string) ([]VerificationResult, error) {
+		return []VerificationResult{{Command: "make test", OK: false, Output: "FAIL"}}, fmt.Errorf("exit 1")
+	})
+	if _, err := e2.Apply(s2, p2.ID, "op", context.Background()); err == nil {
+		t.Fatal("failed verification must fail the apply")
+	}
+	content, _ := os.ReadFile(filepath.Join(e2.WorktreeDir, "app.go"))
+	if strings.Contains(string(content), `"hello"`) {
+		t.Fatal("failed verification must leave the worktree untouched")
+	}
+	got, _ := s2.Get(p2.ID)
+	if got.State != StateVerificationFaile {
+		t.Fatalf("state after failed verification: %s", got.State)
+	}
+	if got.Verification["stage"] != "clone_verify" {
+		t.Fatalf("verification trail missing: %v", got.Verification)
+	}
+}
+
+func TestContainerValidatorRefusesHostExecution(t *testing.T) {
+	v := &ContainerValidator{
+		Opts: ContainerVerifyOptions{
+			Commands: []string{"rm -rf /"},
+		},
+		RunContainer: func(ctx context.Context, dir, image, workdir, argv string, timeout time.Duration) (string, error) {
+			t.Fatal("RunContainer must not be called without an image")
+			return "", nil
+		},
+	}
+	if _, err := v.VerifyDir(context.Background(), "/tmp"); err == nil || !strings.Contains(err.Error(), "no image") {
+		t.Fatalf("commands without image must refuse host execution, got: %v", err)
+	}
+}
+
+func TestContainerValidatorRunsCommandsInOrder(t *testing.T) {
+	var ran []string
+	v := &ContainerValidator{
+		Opts: ContainerVerifyOptions{
+			Commands: []string{"go vet ./...", "go test ./..."},
+			Image:    "runtime-base:test",
+		},
+		RunContainer: func(ctx context.Context, dir, image, workdir, argv string, timeout time.Duration) (string, error) {
+			ran = append(ran, argv)
+			if image != "runtime-base:test" || workdir != "/workspace" || dir == "" {
+				t.Fatalf("container args wrong: dir=%q image=%q workdir=%q", dir, image, workdir)
+			}
+			if argv == "go test ./..." {
+				return "ok", nil
+			}
+			return "", nil
+		},
+	}
+	results, err := v.VerifyDir(context.Background(), "/some/clone")
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if len(ran) != 2 || ran[0] != "go vet ./..." || ran[1] != "go test ./..." {
+		t.Fatalf("commands ran out of order: %v", ran)
+	}
+	if len(results) != 2 || !results[1].OK {
+		t.Fatalf("results wrong: %+v", results)
 	}
 }
