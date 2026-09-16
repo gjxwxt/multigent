@@ -1214,7 +1214,7 @@ func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Tas
 	// them and nothing else may move the branch inside the project lock.
 	baseOut, baseErr := git.runStdout(10*time.Second, "rev-parse", "HEAD")
 	if baseErr != nil || len(bytes.TrimSpace(baseOut)) != 40 {
-		log.Printf("[review-commit] read preimage HEAD failed for task %s (project %s): %v", t.ID, project, statusErr)
+		log.Printf("[review-commit] read preimage HEAD failed for task %s (project %s): %v", t.ID, project, baseErr)
 		baseOut = nil // push-failure anchor degrades, commit path unaffected
 	}
 	preimageSHA := strings.TrimSpace(string(baseOut))
