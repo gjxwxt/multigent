@@ -1151,6 +1151,12 @@ func (s *Server) completeRuntimeWorkflowStep(workspaceID, project string, t *ent
 		return result, false, nil
 	}
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	// Real-change cross-check for the QA touched_paths checkpoint
+	// (round-18 P0-4): agent sandbox completions are the primary QA path,
+	// so the resolver must ride this store too.
+	wfStore.WorktreeResolver = func(project, taskID string) string {
+		return s.resolveTaskWorktreeDir(project, taskID)
+	}
 	if _, ok, err := wfStore.RunForTask(project, t.ID); err != nil || !ok {
 		return result, false, err
 	}

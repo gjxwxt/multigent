@@ -70,7 +70,15 @@ func (s *Server) workflowStoreForRequest(w http.ResponseWriter, r *http.Request)
 	if !s.checkWorkspaceAccess(w, r, workspaceID) {
 		return nil, false
 	}
-	return workflowstore.NewStore(s.controlDB, workspaceID), true
+	store := workflowstore.NewStore(s.controlDB, workspaceID)
+	// Real-change cross-check for the QA touched_paths checkpoint
+	// (round-18 P0-4): resolve the task's worktree so the gate compares
+	// declarations against the worktree's actual git delta, not just the
+	// agent's say-so.
+	store.WorktreeResolver = func(project, taskID string) string {
+		return s.resolveTaskWorktreeDir(project, taskID)
+	}
+	return store, true
 }
 
 func (s *Server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {

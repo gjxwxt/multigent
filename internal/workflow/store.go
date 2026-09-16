@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
 	"regexp"
 	"sort"
@@ -25,6 +26,10 @@ var workflowDocIDPattern = regexp.MustCompile(`^doc-\d{8}-[a-z0-9]+$`)
 type Store struct {
 	db          controldb.Store
 	workspaceID string
+	// WorktreeResolver, when set, lets the QA touched_paths checkpoint
+	// cross-check declared paths against the worktree's real git delta
+	// (round-18 P0-4). Nil = declaration-only validation (library callers).
+	WorktreeResolver WorktreeResolver
 }
 
 func NewStore(db controldb.Store, workspaceID string) *Store {
@@ -2644,6 +2649,21 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 		if err := ValidateQATouchedPaths(values["touched_paths"]); err != nil {
 			s.releaseWorkflowTransitionClaim(&run, claimID)
 			return result, fmt.Errorf("workflow step %q output rejected: %w", currentStep.Title, err)
+		}
+		// Real-change cross-check (round-18 P0-4): declarations must match
+		// the worktree's actual git delta — both directions plus the same
+		// test-artifact whitelist applied to the real surface. Skipped when
+		// the platform has no worktree for the task (resolver returns ""
+		// for non-code tasks), where only the declaration gate applies.
+		if s.WorktreeResolver != nil {
+			if worktreeDir := strings.TrimSpace(s.WorktreeResolver(run.Project, run.TaskID)); worktreeDir != "" {
+				if _, statErr := os.Stat(worktreeDir); statErr == nil {
+					if err := verifyQATouchedPathsAgainstWorktree(values["touched_paths"], worktreeDir); err != nil {
+						s.releaseWorkflowTransitionClaim(&run, claimID)
+						return result, fmt.Errorf("workflow step %q output rejected: touched_paths does not match the worktree: %w", currentStep.Title, err)
+					}
+				}
+			}
 		}
 	}
 	edge, hasNext := chooseNextEdge(def.Edges, currentStep.ID, values, output)
