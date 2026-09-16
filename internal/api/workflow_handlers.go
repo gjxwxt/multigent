@@ -1208,6 +1208,17 @@ func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Tas
 		return // working tree is clean (or unreadable — do not guess-commit)
 	}
 
+	// Preimage anchor (step-1 收编): the HEAD SHA the checkpoint commit will
+	// build on. If the push later fails, this pair (base → checkpoint) is the
+	// exact rollback key an operator needs — the review commit lands between
+	// them and nothing else may move the branch inside the project lock.
+	baseOut, baseErr := git.runStdout(10*time.Second, "rev-parse", "HEAD")
+	if baseErr != nil || len(bytes.TrimSpace(baseOut)) != 40 {
+		log.Printf("[review-commit] read preimage HEAD failed for task %s (project %s): %v", t.ID, project, statusErr)
+		baseOut = nil // push-failure anchor degrades, commit path unaffected
+	}
+	preimageSHA := strings.TrimSpace(string(baseOut))
+
 	// 2. Stage and commit
 	addOut, addErr := git.run(30*time.Second, "add", "-A")
 	if addErr != nil {
@@ -1220,6 +1231,11 @@ func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Tas
 	if commitErr != nil {
 		log.Printf("[review-commit] git commit failed for task %s (project %s): %v (%s)", t.ID, project, commitErr, strings.TrimSpace(string(commitOut)))
 		return
+	}
+	checkpointOut, cpErr := git.runStdout(10*time.Second, "rev-parse", "HEAD")
+	checkpointSHA := strings.TrimSpace(string(checkpointOut))
+	if cpErr != nil || len(checkpointSHA) != 40 {
+		checkpointSHA = ""
 	}
 
 	// 3. Push if remote is configured
@@ -1249,11 +1265,25 @@ func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Tas
 		if pushErr != nil {
 			log.Printf("[review-commit] git push origin %s failed for task %s: %v (%s)", branchName, t.ID, pushErr, strings.TrimSpace(string(pushOut)))
 			if s.ts != nil && agent != "" {
+				// Structured rollback anchor (step-1 收编): the push failed,
+				// so the local branch is ahead by exactly the checkpoint
+				// commit. Record base → checkpoint + the failure verbatim
+				// (redacted) so an operator can replay or surgically revert
+				// without archaeology; the comment is the durable trail.
+				// pushErr may echo the remote URL (credentials live in the
+				// config, not the error, but never trust that); the rest of
+				// the message is curated text + bare SHAs — no raw git
+				// output flows into the comment (redactGitOutput contract).
+				rollback := fmt.Sprintf("⚠️ 审核阶段修改自动推送至远程分支 `%s` 失败: %s", branchName, gitworktree.RedactGitOutput(pushErr.Error()))
+				if preimageSHA != "" && checkpointSHA != "" {
+					rollback += fmt.Sprintf("\n\n回滚锚点：preimage `%s` → checkpoint `%s`（本地分支 `%s` 领先远端恰一个提交 `%s`；确认后可 `git reset --hard %s` 撤销本次收编，或修复凭据后重推）",
+						shortSHA(preimageSHA), shortSHA(checkpointSHA), branchName, shortSHA(checkpointSHA), preimageSHA)
+				}
 				_ = s.ts.AddComment(project, agent, &entity.TaskComment{
 					ID:        entity.NewCommentID(),
 					TaskID:    t.ID,
 					Author:    "system",
-					Body:      fmt.Sprintf("⚠️ 审核阶段修改自动推送至远程分支 `%s` 失败: %v", branchName, pushErr),
+					Body:      rollback,
 					CreatedAt: time.Now().UTC(),
 				})
 			}
