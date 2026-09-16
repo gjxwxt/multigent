@@ -3069,5 +3069,24 @@
     "signalsHint": "Signals remind agents to pay attention to changes; they do not replace asset content. Source, priority, read state, and handling state will come later.",
     "noSignals": "No signals yet",
     "noSignalsHint": "IM, docs, tasks, and external systems will show up here as attention signals later."
+  },
+  "changerun": {
+    "title": "Change Run",
+    "state": {
+      "awaiting_approval": "Awaiting approval",
+      "applying": "Applying",
+      "applied": "Applied",
+      "verification_failed": "Verification failed",
+      "rejected": "Rejected"
+    },
+    "showDiff": "Show diff",
+    "hideDiff": "Hide diff",
+    "appliedSha": "Applied commit",
+    "apply": "Apply",
+    "applying": "Applying…",
+    "reject": "Reject",
+    "rollback": "Roll back",
+    "rollingBack": "Rolling back…",
+    "rollbackConfirm": "Rollback restores every file this proposal touched to its pre-apply state; it is refused if the files were modified after the apply. Confirm rollback?"
   }
 }

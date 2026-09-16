@@ -11,7 +11,7 @@ import { apiDelete, apiFetch, apiPost, apiPut } from '../../lib/api'
 import { copyTextToClipboard } from '../../lib/clipboard'
 import { useFormatDateTime } from '../../lib/format-datetime'
 import { useApiJson } from '../../lib/use-api'
-import { useAuth } from '../../lib/auth'
+import { ChangeRunPanel } from './ChangeRunPanel'
 import { formatGoDuration, taskElapsedLabel } from '../../lib/task-duration'
 import { showToast } from '../ui/Toast'
 import { WorkflowBoard, type WorkflowBranchInstance, type WorkflowDefinition, type WorkflowField, type WorkflowRun, type WorkflowStep, type WorkflowStepEvent, type WorkflowStepInstance } from '../workflow/WorkflowBoard'
@@ -819,6 +819,12 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
           </div>
         )}
 
+        <ChangeRunPanel
+          project={task.project}
+          taskId={task.id}
+          canOperator={canEdit}
+          onChanged={() => setWorkflowVersion((v) => v + 1)}
+        />
         <TaskCommentsSection project={task.project} agent={task.agent} taskId={task.id} />
         </div>
       </div>

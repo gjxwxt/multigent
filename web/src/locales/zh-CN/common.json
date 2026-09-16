@@ -3068,5 +3068,24 @@
     "signalsHint": "信号用于提醒 Agent 关注变化，不直接替代资产内容。后续会支持来源、优先级、已读与处理状态。",
     "noSignals": "还没有信号",
     "noSignalsHint": "后续这里会展示 IM、文档、任务和外部系统产生的注意力信号。"
+  },
+  "changerun": {
+    "title": "变更提案 (Change Run)",
+    "state": {
+      "awaiting_approval": "待批准",
+      "applying": "应用中",
+      "applied": "已应用",
+      "verification_failed": "验证失败",
+      "rejected": "已拒绝"
+    },
+    "showDiff": "查看 Diff",
+    "hideDiff": "收起 Diff",
+    "appliedSha": "已应用提交",
+    "apply": "应用",
+    "applying": "应用中…",
+    "reject": "拒绝",
+    "rollback": "回滚",
+    "rollingBack": "回滚中…",
+    "rollbackConfirm": "回滚将把本次提案触及的全部文件恢复到应用前状态；若应用后文件被人工改动，回滚会被拒绝。确认回滚？"
   }
 }
