@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"reflect"
 	"regexp"
 	"sort"
@@ -1905,6 +1904,30 @@ func (s *Store) CompleteBranchAndMaybeAdvance(project, taskID, runID, stepID, br
 	if strings.TrimSpace(summary) == "" {
 		summary = workflowSummaryFromValues(values)
 	}
+	// QA real-change gate on branch completions (round-19 P0): the checkpoint
+	// must cover EVERY completion entry — a custom parallel_stage workflow
+	// can route its qa work through a branch, and this path previously
+	// reached neither the resolver nor the gate. Opt-in differs from the
+	// linear path by necessity: branch IDs are user-defined (no canonical
+	// "qa" id to test), so ANY branch that declares a touched_paths output
+	// opts into the checkpoint — the same declaration-as-opt-in contract,
+	// deterministic path matching, never model judgment. Abort happens
+	// before any branch instance write, so the branch stays pending for a
+	// corrected completion.
+	if strings.TrimSpace(status) != "failed" && workflowFieldDeclared(branchStep.OutputFields, "touched_paths") {
+		if err := ValidateQATouchedPaths(values["touched_paths"]); err != nil {
+			return result, fmt.Errorf("workflow branch %q output rejected: %w", branchStep.Title, err)
+		}
+		if s.WorktreeResolver != nil {
+			worktreeDir := strings.TrimSpace(s.WorktreeResolver(project, taskID))
+			if worktreeDir == "" || !worktreeObservable(worktreeDir) {
+				return result, fmt.Errorf("workflow branch %q output rejected: touched_paths checkpoint requires an observable worktree for task %s (none found)", branchStep.Title, taskID)
+			}
+			if err := verifyQATouchedPathsAgainstWorktree(values["touched_paths"], worktreeDir); err != nil {
+				return result, fmt.Errorf("workflow branch %q output rejected: touched_paths does not match the worktree: %w", branchStep.Title, err)
+			}
+		}
+	}
 	found := false
 	for i := range branches {
 		if branches[i].BranchID != branchID {
@@ -2652,17 +2675,24 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 		}
 		// Real-change cross-check (round-18 P0-4): declarations must match
 		// the worktree's actual git delta — both directions plus the same
-		// test-artifact whitelist applied to the real surface. Skipped when
-		// the platform has no worktree for the task (resolver returns ""
-		// for non-code tasks), where only the declaration gate applies.
+		// test-artifact whitelist applied to the real surface. FAIL-CLOSED
+		// (round-19 P0): when the step opted into the checkpoint but the
+		// platform cannot observe the worktree (no resolver, no worktree
+		// dir, git status failure), the completion is rejected — silently
+		// falling back to the declaration-only gate would make the real-
+		// change contract bypassable by an unobservable worktree. Only a
+		// resolver that reports "this task genuinely has no code worktree"
+		// (empty string) downgrades to declaration-only, and the resolver
+		// implementations distinguish that from "worktree missing".
 		if s.WorktreeResolver != nil {
-			if worktreeDir := strings.TrimSpace(s.WorktreeResolver(run.Project, run.TaskID)); worktreeDir != "" {
-				if _, statErr := os.Stat(worktreeDir); statErr == nil {
-					if err := verifyQATouchedPathsAgainstWorktree(values["touched_paths"], worktreeDir); err != nil {
-						s.releaseWorkflowTransitionClaim(&run, claimID)
-						return result, fmt.Errorf("workflow step %q output rejected: touched_paths does not match the worktree: %w", currentStep.Title, err)
-					}
-				}
+			worktreeDir := strings.TrimSpace(s.WorktreeResolver(run.Project, run.TaskID))
+			if worktreeDir == "" || !worktreeObservable(worktreeDir) {
+				s.releaseWorkflowTransitionClaim(&run, claimID)
+				return result, fmt.Errorf("workflow step %q output rejected: touched_paths checkpoint requires an observable worktree for task %s (none found) — complete the step from a code task with a worktree, or drop the touched_paths output", currentStep.Title, run.TaskID)
+			}
+			if err := verifyQATouchedPathsAgainstWorktree(values["touched_paths"], worktreeDir); err != nil {
+				s.releaseWorkflowTransitionClaim(&run, claimID)
+				return result, fmt.Errorf("workflow step %q output rejected: touched_paths does not match the worktree: %w", currentStep.Title, err)
 			}
 		}
 	}

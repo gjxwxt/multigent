@@ -1185,6 +1185,12 @@ func (s *Server) completeRuntimeWorkflowBranch(workspaceID, project string, t *e
 		return result, fmt.Errorf("workflow branch metadata is incomplete")
 	}
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	// Real-change cross-check for the QA touched_paths checkpoint
+	// (round-19 P0): branch completions run the same gate as linear
+	// completions, so this store needs the resolver too.
+	wfStore.WorktreeResolver = func(project, taskID string) string {
+		return s.resolveTaskWorktreeDir(project, taskID)
+	}
 	summary := strings.TrimSpace(t.Summary)
 	if summary == "" {
 		summary = strings.TrimSpace(t.LastError)

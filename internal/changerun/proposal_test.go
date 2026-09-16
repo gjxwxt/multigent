@@ -1,6 +1,7 @@
 package changerun
 
 import (
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -151,5 +152,105 @@ func TestSizeCapTruncates(t *testing.T) {
 	}
 	if !strings.HasSuffix(p.Patch, "[truncated]") {
 		t.Fatalf("truncation marker missing: %q", p.Patch[len(p.Patch)-30:])
+	}
+}
+
+// Round-19 P1: slot and proposal rows are written in ONE guarded
+// transaction. Three properties are pinned:
+//  1. concurrent Creates still serialize (exactly one winner);
+//  2. a ghost slot (holder missing or terminal) is repaired on sight — the
+//     next Create reclaims it instead of erroring forever;
+//  3. terminal transitions clear the slot atomically with the state change
+//     (a terminal proposal never coexists with an occupied slot).
+func TestConcurrentCreatesExactlyOneWinsTransactionally(t *testing.T) {
+	s := newTestStore(t)
+	const n = 8
+	type result struct {
+		id  string
+		err string
+	}
+	results := make(chan result, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			p, err := s.Create("proj", "task-tx", "agent", "req", "patch", "diff", nil)
+			if err != nil {
+				results <- result{err: err.Error()}
+				return
+			}
+			results <- result{id: p.ID}
+		}(i)
+	}
+	wg.Wait()
+	close(results)
+	var winners, losers int
+	for r := range results {
+		if r.id != "" {
+			winners++
+		} else {
+			losers++
+		}
+	}
+	if winners != 1 || losers != n-1 {
+		t.Fatalf("exactly one create must win, got %d winners / %d losers", winners, losers)
+	}
+}
+
+func TestGhostSlotIsRepairedOnSight(t *testing.T) {
+	s := newTestStore(t)
+	// Forge a ghost slot: holder proposal row does not exist.
+	p1, err := s.Create("proj", "task-ghost", "agent", "req", "patch", "diff", nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Simulate legacy crash debris: point the slot at a nonexistent proposal
+	// AND remove the holder row entirely (the crash lost the proposal write).
+	if err := s.db.DeleteRecord(proposalTable, s.workspace, proposalKey(p1.ID)); err != nil {
+		t.Fatal(err)
+	}
+	ghost := taskSlot{ProposalID: "crp-doesnotexist", UpdatedAt: "now"}
+	raw, _ := json.Marshal(ghost)
+	if err := s.db.UpsertRecord(proposalTable, s.workspace, taskSlotKey("proj", "task-ghost"), string(raw)); err != nil {
+		t.Fatal(err)
+	}
+	p2, err := s.Create("proj", "task-ghost", "agent", "req2", "patch2", "diff2", nil)
+	if err != nil {
+		t.Fatalf("ghost slot must be reclaimed by the next create, got: %v", err)
+	}
+	if p2.ID == p1.ID {
+		t.Fatal("reclaimed create must mint a new proposal")
+	}
+	// Also repair when the holder exists but is TERMINAL.
+	if _, err := s.Reject(p2.ID, "op"); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	// After a terminal transition the slot must already be free — create again.
+	if _, err := s.Create("proj", "task-ghost", "agent", "req3", "patch3", "diff3", nil); err != nil {
+		t.Fatalf("post-terminal create must succeed, got: %v", err)
+	}
+}
+
+func TestTerminalTransitionClearsSlotAtomically(t *testing.T) {
+	s := newTestStore(t)
+	p, err := s.Create("proj", "task-term", "agent", "req", "patch", "diff", nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := s.Reject(p.ID, "op"); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	// The slot must read EMPTY right after the terminal transition.
+	recs, err := s.db.ListRecordsWithRevision(proposalTable, s.workspace, taskSlotKey("proj", "task-term"))
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("slot row missing: %v", err)
+	}
+	var held taskSlot
+	if err := json.Unmarshal([]byte(recs[0].Payload), &held); err != nil {
+		t.Fatal(err)
+	}
+	if held.ProposalID != "" {
+		t.Fatalf("terminal proposal must not keep holding the slot, holder=%s", held.ProposalID)
 	}
 }

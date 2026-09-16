@@ -89,14 +89,17 @@ func (v *ContainerValidator) VerifyDir(ctx context.Context, dir string) ([]Verif
 		start := time.Now()
 		out, err := v.RunContainer(ctx, dir, v.Opts.Image, workdir, argv, timeout)
 		res := VerificationResult{
-			Command:  argv,
-			Output:   tail(out, 4000),
+			Command:  RedactSecrets(argv),
+			Output:   tail(RedactSecrets(out), 4000),
 			Duration: time.Since(start).Round(time.Millisecond).String(),
 		}
 		if err != nil {
 			res.OK = false
 			results = append(results, res)
-			return results, fmt.Errorf("verification command failed: %s — %w", argv, err)
+			// The error text rides the same redaction gate as the output —
+			// docker/CLI failures echo arguments and paths that may embed
+			// credentials (round-19 P0).
+			return results, fmt.Errorf("verification command failed: %s — %s", RedactSecrets(argv), RedactSecrets(err.Error()))
 		}
 		res.OK = true
 		results = append(results, res)
@@ -104,7 +107,11 @@ func (v *ContainerValidator) VerifyDir(ctx context.Context, dir string) ([]Verif
 	return results, nil
 }
 
-// verificationSummary flattens results into the proposal record map.
+// verificationSummary flattens results into the proposal record map. Every
+// string is redacted again at this sink: VerifyDir already scrubs its own
+// output, but custom Validator implementations bypass that source — the
+// proposal record is the durable sink, so nothing lands in kv_records
+// unredacted (round-19 P0).
 func verificationSummary(results []VerificationResult) map[string]string {
 	out := map[string]string{}
 	for i, r := range results {
@@ -113,9 +120,9 @@ func verificationSummary(results []VerificationResult) map[string]string {
 		if !r.OK {
 			status = "fail"
 		}
-		out[key] = status + " " + r.Command
+		out[key] = RedactSecrets(status + " " + r.Command)
 		if r.Output != "" {
-			out[key+"_output_tail"] = r.Output
+			out[key+"_output_tail"] = RedactSecrets(r.Output)
 		}
 	}
 	if len(results) == 0 {

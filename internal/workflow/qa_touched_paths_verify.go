@@ -9,10 +9,13 @@ package workflow
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/multigent/multigent/internal/gitworktree"
 )
 
 // WorktreeResolver maps a (project, taskID) to its worktree directory.
@@ -84,6 +87,24 @@ func unquoteGitPath(p string) string {
 		b.WriteByte(p[i])
 	}
 	return b.String()
+}
+
+// worktreeObservable reports whether dir exists AND is a readable git
+// worktree. The QA real-change gate is fail-closed (round-19 P0): a
+// declared touched_paths step whose worktree is missing or unreadable must
+// NOT silently downgrade to declaration-only — the caller rejects the
+// completion instead. (An unreadable-but-existing dir also fails here; the
+// distinction is surfaced by the gate's error message.)
+func worktreeObservable(worktreeDir string) bool {
+	info, err := os.Stat(worktreeDir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	cmd.Dir = worktreeDir
+	cmd.Env = gitworktree.SanitizedGitEnv()
+	out, err := cmd.Output()
+	return err == nil && strings.TrimSpace(string(out)) == "true"
 }
 
 // verifyQATouchedPathsAgainstWorktree cross-checks the declared paths
