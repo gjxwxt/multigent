@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"golang.org/x/net/publicsuffix"
 )
 
 // Preview origin isolation (batch plan §2.0, review rounds 7-10 verdict).
@@ -30,7 +32,26 @@ const (
 	// origin, used solely to build the CORS allowlist. Empty (default) means
 	// the legacy wildcard fallback for non-browser API clients.
 	ConsoleOriginEnv = "MULTIGENT_CONSOLE_ORIGIN"
+	// PreviewCopilotDrawerEnv is the deployment config key to enable the preview
+	// copilot drawer feature flag (controlled rollout, default disabled).
+	PreviewCopilotDrawerEnv = "MULTIGENT_ENABLE_PREVIEW_COPILOT_DRAWER"
 )
+
+// SetPreviewCopilotDrawerEnabled enables or disables the preview copilot drawer.
+func (s *Server) SetPreviewCopilotDrawerEnabled(enabled bool) {
+	s.enablePreviewCopilotDrawer = enabled
+}
+
+// PreviewCopilotDrawerEnabled returns whether the preview drawer is enabled.
+func (s *Server) PreviewCopilotDrawerEnabled() bool {
+	return s.enablePreviewCopilotDrawer
+}
+
+// IsTruthyEnv returns true if val is "1", "true", "yes", or "on" (case-insensitive).
+func IsTruthyEnv(val string) bool {
+	val = strings.ToLower(strings.TrimSpace(val))
+	return val == "1" || val == "true" || val == "yes" || val == "on"
+}
 
 // previewCapabilityView is the only capability preview share tokens carry
 // (Task 1.1). Tokens without a Cap field (pre-Cap legacy share links) carry
@@ -93,21 +114,14 @@ func registrableSite(host string) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	if host == "localhost" || host == "127.0.0.1" || host == "::1" || net.ParseIP(host) != nil {
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" || net.ParseIP(host) != nil || !strings.Contains(host, ".") {
 		return host
 	}
-	parts := strings.Split(host, ".")
-	if len(parts) <= 2 {
-		return host
+	etld1, err := publicsuffix.EffectiveTLDPlusOne(host)
+	if err == nil {
+		return etld1
 	}
-	n := len(parts)
-	penultimate := parts[n-2]
-	if len(penultimate) <= 3 && (penultimate == "com" || penultimate == "co" || penultimate == "org" || penultimate == "net" || penultimate == "gov" || penultimate == "edu") {
-		if n >= 3 {
-			return strings.Join(parts[n-3:], ".")
-		}
-	}
-	return strings.Join(parts[n-2:], ".")
+	return host
 }
 
 // normalizeConfiguredOrigin trims, scheme-defaults, and validates an origin

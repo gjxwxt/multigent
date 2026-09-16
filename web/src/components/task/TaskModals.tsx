@@ -271,13 +271,17 @@ export function EditTaskModal({ task, taskOptions = [], onClose, onSaved }: { ta
 
 /* ── Detail modal ─── */
 
-function isPreviewDrawerEnabled(): boolean {
+/**
+ * isLocalDrawerOptIn returns true only during development/local debug when opted in
+ * via URL (?drawer=1) or localStorage. In production builds (import.meta.env.DEV === false),
+ * it always returns false, preventing URL/localStorage bypass of controlled rollout.
+ */
+function isLocalDrawerOptIn(): boolean {
   if (typeof window === 'undefined') return false
+  if (!import.meta.env.DEV) return false
   const sp = new URLSearchParams(window.location.search)
   if (sp.get('drawer') === '1' || sp.get('enable_preview_copilot_drawer') === '1') return true
   if (localStorage.getItem('enable_preview_copilot_drawer') === 'true') return true
-  // @ts-ignore
-  if (import.meta.env?.VITE_ENABLE_PREVIEW_COPILOT_DRAWER === 'true') return true
   return false
 }
 
@@ -300,7 +304,6 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
   const [startBusy, setStartBusy] = useState(false)
   const [previewStarting, setPreviewStarting] = useState(false)
   const [previewDrawerOpen, setPreviewDrawerOpen] = useState(false)
-  const drawerEnabled = useMemo(() => isPreviewDrawerEnabled(), [])
 
   const runsQuery = `/api/v1/telemetry/runs?allTime=1&project=${encodeURIComponent(task.project)}`
   const runsState = useApiJson<{ runs: RunRow[] }>(runsQuery, 0)
@@ -314,12 +317,13 @@ export function TaskDetailModal({ task, onClose, onEdit, onMutated, canEdit = tr
     workflowVersion,
     { silentStatuses: silentNotFound },
   )
-  const previewState = useApiJson<{ taskId: string; type: string; status: string; url: string; previewToken?: string }>(
+  const previewState = useApiJson<{ taskId: string; type: string; status: string; url: string; previewToken?: string; drawerEnabled?: boolean }>(
     task?.project && task?.id ? `/api/v1/projects/${encodeURIComponent(task.project)}/tasks/${encodeURIComponent(task.id)}/preview` : null,
     workflowVersion,
     { silentStatuses: silentNotFound },
   )
   const preview = previewState.status === 'ok' ? previewState.data : null
+  const drawerEnabled = Boolean(preview?.drawerEnabled || isLocalDrawerOptIn())
   // §2.0: when the share URL is still console-relative the deployment has no
   // preview origin configured — the origin gate would 404 any open, so the UI
   // says so instead of pretending the preview works.

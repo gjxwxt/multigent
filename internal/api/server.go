@@ -104,6 +104,9 @@ type Server struct {
 	// consoleOrigin is the deployment-configured console origin; when set it
 	// is the only Origin allowed by the CORS layer (allowlist, no reflection).
 	consoleOrigin string
+	// enablePreviewCopilotDrawer flags whether the preview drawer is active for
+	// this server instance (controlled rollout flag MULTIGENT_ENABLE_PREVIEW_COPILOT_DRAWER).
+	enablePreviewCopilotDrawer bool
 	execMu                 sync.Mutex
 	execProcs              map[string]*execProcess // key = "project/agent"
 	interactions           *interaction.Manager
@@ -192,6 +195,7 @@ func NewServer(root, apiKey string) *Server {
 		worktreeMgr:            gitworktree.NewManager(),
 		previewSessions:        make(map[string]*previewChatSession),
 		threadProjections:      imbridge.NewTaskThreadProjectionService(controlDB, nil),
+		enablePreviewCopilotDrawer: IsTruthyEnv(os.Getenv(PreviewCopilotDrawerEnv)),
 	}
 	// Runtime-node agents' task triggers join the node dispatch queue instead
 	// of the local wakeup cycle (hook wired after s exists; nil-safe before).

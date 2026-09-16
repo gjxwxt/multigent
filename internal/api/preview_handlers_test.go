@@ -41,6 +41,21 @@ func TestPreviewHandlers(t *testing.T) {
 	if res["taskId"] != "t-123" || res["status"] != "stopped" {
 		t.Fatalf("unexpected preview response: %v", res)
 	}
+	if res["drawerEnabled"] != false {
+		t.Fatalf("expected drawerEnabled to be false by default, got %v", res["drawerEnabled"])
+	}
+
+	// 1b. Get preview with drawerEnabled active
+	s.SetPreviewCopilotDrawerEnabled(true)
+	wActive := httptest.NewRecorder()
+	s.handleGetTaskPreview(wActive, req)
+	var resActive map[string]any
+	if err := json.NewDecoder(wActive.Body).Decode(&resActive); err != nil {
+		t.Fatalf("decode JSON: %v", err)
+	}
+	if resActive["drawerEnabled"] != true {
+		t.Fatalf("expected drawerEnabled to be true when flag is set, got %v", resActive["drawerEnabled"])
+	}
 
 	// 2. Stop preview
 	stopReq := providerTestRequest(http.MethodPost, "/api/v1/projects/testproj/tasks/t-123/preview/stop", "admin", nil)

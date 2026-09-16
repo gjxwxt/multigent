@@ -93,10 +93,14 @@ Authorization: Bearer <key>.`,
 			srv.SetLocalRuntimeAPIURL(os.Getenv("MULTIGENT_API_URL"))
 			srv.SetPreviewOrigin(os.Getenv(api.PreviewOriginEnv))
 			srv.SetConsoleOrigin(os.Getenv(api.ConsoleOriginEnv))
+			srv.SetPreviewCopilotDrawerEnabled(api.IsTruthyEnv(os.Getenv(api.PreviewCopilotDrawerEnv)))
 			if srv.PreviewOrigin() == "" {
 				log.Printf("preview sharing disabled: %s is not set (fail-closed; preview surfaces return 404)", api.PreviewOriginEnv)
 			} else {
 				log.Printf("preview sharing enabled on %s", srv.PreviewOrigin())
+			}
+			if srv.PreviewCopilotDrawerEnabled() {
+				log.Printf("preview copilot drawer enabled (%s=true)", api.PreviewCopilotDrawerEnv)
 			}
 			if err := srv.StartWorkspaceScheduler(); err != nil {
 				return fmt.Errorf("start workspace scheduler: %w", err)

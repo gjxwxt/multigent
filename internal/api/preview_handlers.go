@@ -313,13 +313,14 @@ func (s *Server) handleGetTaskPreview(w http.ResponseWriter, r *http.Request) {
 		projType := preview.DetectProjectType(worktreeDir)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"taskId":       taskID,
-			"project":      project,
-			"type":         string(projType),
-			"status":       "stopped",
-			"url":          s.previewSurfaceURL(taskID),
-			"worktreeDir":  worktreeDir,
-			"previewToken": s.signPreviewToken(taskID, project),
+			"taskId":        taskID,
+			"project":       project,
+			"type":          string(projType),
+			"status":        "stopped",
+			"url":           s.previewSurfaceURL(taskID),
+			"worktreeDir":   worktreeDir,
+			"previewToken":  s.signPreviewToken(taskID, project),
+			"drawerEnabled": s.enablePreviewCopilotDrawer,
 		})
 		return
 	}
@@ -327,8 +328,13 @@ func (s *Server) handleGetTaskPreview(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
 		*preview.PreviewInstance
-		PreviewToken string `json:"previewToken,omitempty"`
-	}{inst, s.signPreviewToken(taskID, inst.Project)})
+		PreviewToken  string `json:"previewToken,omitempty"`
+		DrawerEnabled bool   `json:"drawerEnabled"`
+	}{
+		PreviewInstance: inst,
+		PreviewToken:    s.signPreviewToken(taskID, inst.Project),
+		DrawerEnabled:   s.enablePreviewCopilotDrawer,
+	})
 }
 
 // previewSurfaceURL returns the shareable preview URL for a task. When the

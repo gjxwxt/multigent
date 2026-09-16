@@ -401,6 +401,11 @@ func TestSchemefulSiteMismatchWarning(t *testing.T) {
 		{"http://localhost:27892", "http://localhost:27893", false, ""},
 		{"https://console.example.com", "https://preview.example.com", false, ""},
 		{"https://console.example.co.uk", "https://preview.example.co.uk", false, ""},
+		// Multi-tenant Public Suffix: different tenants under github.io / appspot.com must mismatch
+		{"https://console.foo.github.io", "https://preview.bar.github.io", true, "registrable domain"},
+		{"https://foo.appspot.com", "https://bar.appspot.com", true, "registrable domain"},
+		// Same tenant under multi-tenant Public Suffix: matches!
+		{"https://console.foo.github.io", "https://preview.foo.github.io", false, ""},
 		// Scheme mismatch
 		{"http://console.example.com", "https://preview.example.com", true, "scheme"},
 		// Domain mismatch
