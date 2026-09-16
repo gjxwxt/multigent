@@ -121,7 +121,7 @@ func taskSlotKey(project, taskID string) []string {
 // as an active proposal (crash debris from a pre-transaction build, or a
 // proposal row lost after a partial legacy write). Such slots are repaired
 // on sight: the next Create reclaims them instead of erroring forever.
-func (s *Store) slotHolderIsActive(project, taskID string, tx controldb.KVTx) (bool, error) {
+func (s *Store) slotHolderIsActive(project, taskID string, tx controldb.KVTxReader) (bool, error) {
 	slotKey := taskSlotKey(project, taskID)
 	payload, found, err := tx.GetRecord(proposalTable, s.workspace, slotKey)
 	if err != nil {
@@ -213,7 +213,7 @@ func (s *Store) Create(project, taskID, actor, request, patch, diff string, path
 	if err != nil {
 		return nil, err
 	}
-	guardErr := s.db.CommitRecordWritesGuarded(s.workspace, func(tx controldb.KVTx) error {
+	guardErr := s.db.CommitRecordWritesGuarded(s.workspace, func(tx controldb.KVTxReader) error {
 		// IMMEDIATE lock held: this read cannot interleave with another
 		// Create's commit, so check-then-write is race-free.
 		active, err := s.slotHolderIsActive(project, taskID, tx)
@@ -402,7 +402,7 @@ func (s *Store) transitionTerminal(id, expectState, newState string, mutate func
 	if err != nil {
 		return nil, err
 	}
-	err = s.db.CommitRecordWritesGuarded(s.workspace, func(tx controldb.KVTx) error {
+	err = s.db.CommitRecordWritesGuarded(s.workspace, func(tx controldb.KVTxReader) error {
 		// Claim check inside the lock: the proposal must still be in
 		// expectState, and the slot (if present) must still name us. Either
 		// violated = another transitioner won; abort with nothing written.

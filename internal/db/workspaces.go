@@ -592,12 +592,15 @@ func (db *SQLiteStore) CommitRecordWrites(workspaceID string, writes []KVWrite) 
 // CommitRecordWritesGuarded is CommitRecordWrites with an optional guard: a
 // caller-supplied check that runs INSIDE the transaction after BEGIN
 // IMMEDIATE has taken the write lock, BEFORE any write. A non-nil error
-// aborts the whole batch (nothing persists). The guard may read through tx —
-// because the IMMEDIATE lock is already held, its read cannot interleave
-// with another writer's commit, so check-then-write batches are race-free
-// (round-19 P1: slot free/occupy checks must be transactional with the
-// proposal writes they gate).
-func (db *SQLiteStore) CommitRecordWritesGuarded(workspaceID string, guard func(tx KVTx) error, writes []KVWrite) error {
+// aborts the whole batch (nothing persists). The guard may read through the
+// KVTxReader — because the IMMEDIATE lock is already held, its read cannot
+// interleave with another writer's commit, so check-then-write batches are
+// race-free (round-19 P1: slot free/occupy checks must be transactional with
+// the proposal writes they gate). The reader-only interface (antigravity
+// round-19 verdict #2) makes borrowing a pool connection inside the guard a
+// compile error: a pool read here would wait for the very lock the guard
+// holds and deadlock.
+func (db *SQLiteStore) CommitRecordWritesGuarded(workspaceID string, guard func(tx KVTxReader) error, writes []KVWrite) error {
 	if db == nil || db.sql == nil {
 		return fmt.Errorf("database not open")
 	}
@@ -635,9 +638,17 @@ ON CONFLICT(table_name, workspace_id, k1, k2, k3) DO UPDATE SET payload = exclud
 	})
 }
 
-// KVTx is the transactional read/write handle passed to a
-// CommitRecordWritesGuarded guard. Reads see the IMMEDIATE-locked snapshot;
-// writes join the caller's batch.
+// KVTxReader is the read-only handle passed to a CommitRecordWritesGuarded
+// guard. Deliberately read-only (antigravity round-19 verdict #2): the guard
+// runs on the connection holding the IMMEDIATE lock, so ANY other connection
+// — including a pool borrow — would wait on that lock and deadlock. Reads
+// must go through the tx's own connection; writes join the caller's batch
+// via the KVWrite list, never inside the guard.
+type KVTxReader interface {
+	GetRecord(table, workspaceID string, key []string) (payload string, found bool, err error)
+}
+
+// KVTx is the concrete transactional handle satisfying KVTxReader.
 type KVTx struct {
 	conn *sql.Conn
 }
