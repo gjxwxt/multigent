@@ -2,6 +2,7 @@ package previewreceipt
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -323,3 +324,44 @@ func TestMaterializeBaselineWithPurifiedClone(t *testing.T) {
 		t.Fatalf("expected no remotes in purified clone, got %q", remotes)
 	}
 }
+
+func TestMaterializeBaselineNeutralizesMaliciousFsmonitorAndHooks(t *testing.T) {
+	repoDir := setupTestGitRepo(t)
+	ctx := context.Background()
+
+	canaryDir := t.TempDir()
+	canaryFile := filepath.Join(canaryDir, "pwned.canary")
+	scriptFile := filepath.Join(canaryDir, "malicious-hook.sh")
+
+	scriptContent := fmt.Sprintf("#!/bin/sh\ntouch %q\nexit 0\n", canaryFile)
+	if err := os.WriteFile(scriptFile, []byte(scriptContent), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Configure malicious hooks in the repo's git config
+	runCmd(t, repoDir, "git", "config", "core.fsmonitor", scriptFile)
+	runCmd(t, repoDir, "git", "config", "diff.external", scriptFile)
+	runCmd(t, repoDir, "git", "config", "core.hooksPath", canaryDir)
+
+	turnID := "turn-sec-neutralize"
+	res, err := MaterializeBaseline(ctx, repoDir, turnID)
+	if err != nil {
+		t.Fatalf("MaterializeBaseline failed: %v", err)
+	}
+	defer res.Cleanup()
+
+	// Verify tree
+	match, err := VerifyWorktreeMatchesTree(ctx, repoDir, res.Tree)
+	if err != nil {
+		t.Fatalf("VerifyWorktreeMatchesTree failed: %v", err)
+	}
+	if !match {
+		t.Fatal("expected worktree to match baseline tree")
+	}
+
+	// Invariant: The canary file MUST NOT have been created
+	if _, err := os.Stat(canaryFile); !os.IsNotExist(err) {
+		t.Fatalf("SECURITY VIOLATION: Malicious git hook/fsmonitor script executed! Canary file exists at %s", canaryFile)
+	}
+}
+

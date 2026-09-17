@@ -294,6 +294,22 @@ func SanitizedDiffArgs(args ...string) []string {
 	return append(base, args...)
 }
 
+// SanitizedExecutionArgs returns the git arguments for running git commands against
+// untrusted repositories or worktrees, neutralizing fsmonitor, hooks, filters, and external diffs.
+func SanitizedExecutionArgs(args ...string) []string {
+	base := []string{
+		"-c", "core.fsmonitor=",
+		"-c", "core.useBuiltinFSMonitor=false",
+		"-c", "core.hooksPath=/dev/null",
+		"-c", "filter.lfs.smudge=",
+		"-c", "filter.lfs.clean=",
+		"-c", "filter.lfs.process=",
+		"-c", "filter.lfs.required=false",
+		"-c", "diff.external=",
+	}
+	return append(base, args...)
+}
+
 // SanitizedGitEnv returns the environment for git subprocesses that run
 // against a repository whose config/hooks an agent (or preview copilot) may
 // have influenced. It strips every variable that redirects Git into a host

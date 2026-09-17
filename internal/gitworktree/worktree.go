@@ -146,7 +146,8 @@ func WorktreeDir(projectRoot, taskID string) string {
 	return filepath.Join(projectRoot, ".multigent", "worktrees", sanitizeTaskID(taskID))
 }
 
-func sanitizeTaskID(taskID string) string {
+// SanitizeTaskID sanitizes a task ID for use in filesystem paths.
+func SanitizeTaskID(taskID string) string {
 	taskID = strings.TrimSpace(taskID)
 	r := strings.NewReplacer("/", "-", "\\", "-", ":", "-", " ", "-")
 	cleaned := r.Replace(taskID)
@@ -159,6 +160,10 @@ func sanitizeTaskID(taskID string) string {
 		cleaned = "task"
 	}
 	return cleaned
+}
+
+func sanitizeTaskID(taskID string) string {
+	return SanitizeTaskID(taskID)
 }
 
 // EnsureWorktree prepares a dedicated git worktree for a task.

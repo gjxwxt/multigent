@@ -1,6 +1,8 @@
 package previewreceipt
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -154,4 +156,23 @@ func SanitizeDisplayDiff(patch string) string {
 		sanitized = sp.pattern.ReplaceAllString(sanitized, "[REDACTED_SECRET]")
 	}
 	return sanitized
+}
+
+// RedactSecrets scans arbitrary text (prompts, errors, comments) and redacts
+// any sensitive credentials, tokens, API keys, or private keys.
+func RedactSecrets(text string) string {
+	if text == "" {
+		return ""
+	}
+	res := text
+	for _, sp := range sensitivePatterns {
+		res = sp.pattern.ReplaceAllString(res, "[REDACTED_SECRET]")
+	}
+	return res
+}
+
+// ComputeRequestDigest computes an irreversible SHA-256 digest of a request payload.
+func ComputeRequestDigest(payload string) string {
+	h := sha256.Sum256([]byte(payload))
+	return hex.EncodeToString(h[:])
 }

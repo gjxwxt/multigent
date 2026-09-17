@@ -275,6 +275,35 @@ func (s *Store) Transition(ctx context.Context, project, taskID, receiptID strin
 					}
 				}
 			}
+		} else {
+			// Active holder state (PENDING, EXECUTING, CAPTURING, REVERTING, COMMITTING, REVERT_FAILED)
+			// Ensure slot is occupied by this receipt so no other turn can execute concurrently.
+			slotPayload, _, sFound, err := tx.GetRecordWithRevision(slotTable, s.workspace, slotKey(project, taskID))
+			var slot TaskSlot
+			if err == nil && sFound && strings.TrimSpace(slotPayload) != "" {
+				_ = json.Unmarshal([]byte(slotPayload), &slot)
+			}
+			if slot.ReceiptID != "" && slot.ReceiptID != receiptID && now.Before(slot.LeaseExpiresAt) {
+				return nil, fmt.Errorf("%w: active receipt %s holds slot until %s", ErrSlotOccupied, slot.ReceiptID, slot.LeaseExpiresAt.Format(time.RFC3339))
+			}
+			slot.ReceiptID = receiptID
+			slot.Project = project
+			slot.TaskID = taskID
+			slot.UpdatedAt = now
+			if current.LeaseExpiresAt.After(now) {
+				slot.LeaseExpiresAt = current.LeaseExpiresAt
+			} else {
+				slot.LeaseExpiresAt = now.Add(DefaultLeaseDuration)
+			}
+			slotBytes, err := json.Marshal(slot)
+			if err == nil {
+				writes = append(writes, controldb.KVWrite{
+					Table:     slotTable,
+					Workspace: s.workspace,
+					Key:       slotKey(project, taskID),
+					Payload:   string(slotBytes),
+				})
+			}
 		}
 
 		result = &current

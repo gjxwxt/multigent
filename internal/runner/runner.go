@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -270,6 +271,13 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 		execDir    string
 	)
 
+	isolatedPreviewRun := runtimeControlEnv["MULTIGENT_PREVIEW_ISOLATED_RUN"] == "1" || os.Getenv("MULTIGENT_PREVIEW_ISOLATED_RUN") == "1"
+	if isolatedPreviewRun {
+		if meta.Sandbox == nil || meta.Sandbox.Provider == "" || meta.Sandbox.Provider == entity.SandboxNone {
+			return nil, errors.New("preview copilot requires an isolated container sandbox; host execution is forbidden")
+		}
+	}
+
 	if meta.Sandbox != nil && meta.Sandbox.Provider != entity.SandboxNone {
 		provider, ok := runenv.ProviderFor(meta.Sandbox.Provider)
 		if !ok {
@@ -285,9 +293,15 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 		effectiveEnv = mergeEnv(effectiveEnv, processRuntimeEnv)
 		injectProviderEnvIntoRuntime(runtimeCfg, agentEnv)
 		injectRuntimeControlEnvIntoRuntime(runtimeCfg, processRuntimeEnv)
-		mounts := append([]entity.RuntimeMount(nil), runtimeCfg.Mounts...)
-		mounts = r.appendWorkspaceFilesMount(mounts, meta.Sandbox.Provider, runtimeCfg)
-		r.addRuntimeDockerSystemMounts(runtimeCfg)
+		var mounts []entity.RuntimeMount
+		if isolatedPreviewRun {
+			// Zero trust: preview copilot in isolated clone runs with strictly NO custom mounts and NO host system mounts
+			mounts = nil
+		} else {
+			mounts = append([]entity.RuntimeMount(nil), runtimeCfg.Mounts...)
+			mounts = r.appendWorkspaceFilesMount(mounts, meta.Sandbox.Provider, runtimeCfg)
+			r.addRuntimeDockerSystemMounts(runtimeCfg)
+		}
 		containerPromptFile := containerRuntimePath(promptFile, execAgentDir)
 		remappedInner := remapPromptFile(innerArgs, promptFile, containerPromptFile)
 		remappedInner = adaptSandboxArgs(model, remappedInner)
@@ -310,6 +324,9 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 			return nil, fmt.Errorf("runtime %s: build command: %w", meta.Sandbox.Provider, err)
 		}
 	} else {
+		if isolatedPreviewRun {
+			return nil, errors.New("preview copilot requires an isolated container sandbox; host execution is forbidden")
+		}
 		effectiveEnv = mergeEnv(effectiveEnv, directHostRuntimeEnv(model))
 		effectiveEnv = mergeEnv(effectiveEnv, directHostRuntimeHomeEnv(execAgentDir, model))
 		effectiveEnv = ensureDirectHostCLIPath(effectiveEnv)

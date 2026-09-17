@@ -280,3 +280,239 @@ func TestTurnEngineWorktreeDriftRejection(t *testing.T) {
 		t.Fatalf("drift.txt was wiped: %v", err)
 	}
 }
+
+func TestTurnEngineSensitiveSinksRedactedAndDigest(t *testing.T) {
+	t.Setenv(secretbox.EnvKey, "test-master-key-for-preview-32b!!")
+	repoDir := setupTestGitRepo(t)
+	store := setupTestStore(t)
+	engine := NewTurnEngine(store)
+
+	ctx := context.Background()
+	project := "proj-redact"
+	taskID := "task-redact"
+
+	rawPrompt := "Use secret token ghp_123456789012345678901234567890123456 to fix foo.txt"
+
+	runner := AgentRunnerFunc(func(ctx context.Context, cloneDir string, prompt string) error {
+		return os.WriteFile(filepath.Join(cloneDir, "foo.txt"), []byte("foo with secret fixed\n"), 0644)
+	})
+
+	receipt, err := engine.ExecuteTurn(ctx, ExecuteTurnParams{
+		WorkspaceID:    "ws-test-engine",
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		WorktreeDir:    repoDir,
+		Prompt:         rawPrompt,
+		Actor:          "tester",
+		Runner:         runner,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTurn failed: %v", err)
+	}
+
+	// 1. Verify RedactedPrompt has no plaintext token
+	if strings.Contains(receipt.RedactedPrompt, "ghp_") {
+		t.Fatalf("RedactedPrompt leaked secret token: %s", receipt.RedactedPrompt)
+	}
+	if !strings.Contains(receipt.RedactedPrompt, "[REDACTED_SECRET]") {
+		t.Fatalf("expected [REDACTED_SECRET] in RedactedPrompt, got: %s", receipt.RedactedPrompt)
+	}
+
+	// 2. Verify RequestDigest matches SHA-256 of raw prompt
+	expectedDigest := ComputeRequestDigest(rawPrompt)
+	if receipt.RequestDigest != expectedDigest {
+		t.Fatalf("expected RequestDigest %s, got %s", expectedDigest, receipt.RequestDigest)
+	}
+
+	// 3. Verify Turn Snapshot directory was created and contains no .git
+	snapshotDir := TurnSnapshotDir(repoDir, taskID, receipt.TurnID)
+	if fi, err := os.Stat(snapshotDir); err != nil || !fi.IsDir() {
+		t.Fatalf("expected snapshot dir to exist, err: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(snapshotDir, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("snapshot directory leaked .git directory: %s", filepath.Join(snapshotDir, ".git"))
+	}
+	snapshotFoo, err := os.ReadFile(filepath.Join(snapshotDir, "foo.txt"))
+	if err != nil || string(snapshotFoo) != "foo with secret fixed\n" {
+		t.Fatalf("snapshot foo.txt content mismatch: %v (%s)", err, string(snapshotFoo))
+	}
+
+	// 4. Test failure error redaction
+	failingRunner := AgentRunnerFunc(func(ctx context.Context, cloneDir string, prompt string) error {
+		return errors.New("failed with secret key: sk-ant-api03-abcdef1234567890abcdef1234567890-test")
+	})
+	_, failErr := engine.ExecuteTurn(ctx, ExecuteTurnParams{
+		WorkspaceID:    "ws-test-engine",
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         "task-redact-fail",
+		WorktreeDir:    repoDir,
+		Prompt:         "fail run",
+		Actor:          "tester",
+		Runner:         failingRunner,
+	})
+	if failErr == nil {
+		t.Fatal("expected failure")
+	}
+	if strings.Contains(failErr.Error(), "sk-ant-") {
+		t.Fatalf("returned error leaked secret: %v", failErr)
+	}
+	failReceipts, _ := store.List(ctx, project, "task-redact-fail")
+	if len(failReceipts) != 1 {
+		t.Fatalf("expected 1 receipt, got %d", len(failReceipts))
+	}
+	if strings.Contains(failReceipts[0].FailureReason, "sk-ant-") {
+		t.Fatalf("persisted FailureReason leaked secret: %s", failReceipts[0].FailureReason)
+	}
+}
+
+func TestTurnEngineRollbackMismatchLeavesCapturedState(t *testing.T) {
+	t.Setenv(secretbox.EnvKey, "test-master-key-for-preview-32b!!")
+	repoDir := setupTestGitRepo(t)
+	store := setupTestStore(t)
+	engine := NewTurnEngine(store)
+
+	ctx := context.Background()
+	project := "proj-mismatch"
+	taskID := "task-mismatch"
+
+	runner := AgentRunnerFunc(func(ctx context.Context, cloneDir string, prompt string) error {
+		return os.WriteFile(filepath.Join(cloneDir, "foo.txt"), []byte("foo modified\n"), 0644)
+	})
+
+	receipt, err := engine.ExecuteTurn(ctx, ExecuteTurnParams{
+		WorkspaceID:    "ws-test-engine",
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		WorktreeDir:    repoDir,
+		Prompt:         "modify foo",
+		Actor:          "tester",
+		Runner:         runner,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTurn failed: %v", err)
+	}
+
+	// External modification
+	_ = os.WriteFile(filepath.Join(repoDir, "foo.txt"), []byte("foo external edit\n"), 0644)
+
+	err = engine.RollbackTurn(ctx, RollbackTurnParams{
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		TurnID:         receipt.ID,
+		WorktreeDir:    repoDir,
+		Actor:          "tester",
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict, got: %v", err)
+	}
+
+	// Invariant: Receipt MUST NOT be stuck in REVERTING; it must remain CAPTURED
+	currentReceipt, err := store.Get(ctx, project, taskID, receipt.ID)
+	if err != nil {
+		t.Fatalf("Get receipt failed: %v", err)
+	}
+	if currentReceipt.Status != StatusCaptured {
+		t.Fatalf("expected receipt status %s after rejected rollback, got %s", StatusCaptured, currentReceipt.Status)
+	}
+}
+
+func TestTurnEngineRollbackReverseApplyFailureTransitionsToRevertFailed(t *testing.T) {
+	t.Setenv(secretbox.EnvKey, "test-master-key-for-preview-32b!!")
+	repoDir := setupTestGitRepo(t)
+	store := setupTestStore(t)
+	engine := NewTurnEngine(store)
+
+	ctx := context.Background()
+	project := "proj-revfail"
+	taskID := "task-revfail"
+
+	runner := AgentRunnerFunc(func(ctx context.Context, cloneDir string, prompt string) error {
+		return os.WriteFile(filepath.Join(cloneDir, "foo.txt"), []byte("foo modified\n"), 0644)
+	})
+
+	receipt, err := engine.ExecuteTurn(ctx, ExecuteTurnParams{
+		WorkspaceID:    "ws-test-engine",
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		WorktreeDir:    repoDir,
+		Prompt:         "modify foo",
+		Actor:          "tester",
+		Runner:         runner,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTurn failed: %v", err)
+	}
+
+	// Tamper with the sealed patch so that OpenBytesStrict succeeds but git apply --reverse fails
+	corruptedPatch := `--- a/foo.txt
++++ b/foo.txt
+@@ -1,1 +1,1 @@
+-nonexistent line that fails reverse apply
++different line
+`
+	sealedCorrupt, err := secretbox.SealBytesStrict([]byte(corruptedPatch))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Update the stored patch in store
+	_, err = store.Transition(ctx, project, taskID, receipt.ID, receipt.Revision, StatusCaptured, func(r *PreviewReceipt) error {
+		r.OperationalPatch = sealedCorrupt
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Now execute RollbackTurn
+	err = engine.RollbackTurn(ctx, RollbackTurnParams{
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		TurnID:         receipt.ID,
+		WorktreeDir:    repoDir,
+		Actor:          "tester",
+	})
+	if err == nil {
+		t.Fatal("expected RollbackTurn to fail during reverse apply")
+	}
+
+	// Verify state transitioned to REVERT_FAILED
+	failedReceipt, err := store.Get(ctx, project, taskID, receipt.ID)
+	if err != nil {
+		t.Fatalf("Get receipt failed: %v", err)
+	}
+	if failedReceipt.Status != StatusRevertFailed {
+		t.Fatalf("expected status %s, got %s", StatusRevertFailed, failedReceipt.Status)
+	}
+	if !strings.Contains(failedReceipt.FailureReason, "reverse apply failed") {
+		t.Fatalf("expected failure reason to mention reverse apply failed, got: %s", failedReceipt.FailureReason)
+	}
+
+	// Verify that REVERT_FAILED holds the slot to prevent new turns on dirty state
+	if !IsActiveHolder(StatusRevertFailed) {
+		t.Fatal("expected StatusRevertFailed to be an active slot holder")
+	}
+
+	// Verify that new turn creation is blocked by the occupied slot
+	_, err = engine.ExecuteTurn(ctx, ExecuteTurnParams{
+		WorkspaceID:    "ws-test-engine",
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		WorktreeDir:    repoDir,
+		Prompt:         "another turn",
+		Actor:          "tester",
+		Runner:         runner,
+	})
+	if err == nil || !errors.Is(err, ErrSlotOccupied) {
+		t.Fatalf("expected ErrSlotOccupied while in REVERT_FAILED, got: %v", err)
+	}
+}
+
+

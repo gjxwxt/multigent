@@ -152,13 +152,17 @@ func VerifyWorktreeMatchesTree(ctx context.Context, projectRoot, expectedTree st
 	indexPath := filepath.Join(tempIndexDir, "index")
 	gitEnv := append(gitworktree.SanitizedGitEnv(), "GIT_INDEX_FILE="+indexPath)
 
-	if _, err := runGitIn(ctx, cleanRoot, gitEnv, "read-tree", "HEAD"); err != nil {
+	runVerifyGit := func(args ...string) (string, error) {
+		return runGitIn(ctx, cleanRoot, gitEnv, args...)
+	}
+
+	if _, err := runVerifyGit("read-tree", "HEAD"); err != nil {
 		return false, fmt.Errorf("verify read-tree: %w", err)
 	}
-	if _, err := runGitIn(ctx, cleanRoot, gitEnv, "add", "--all"); err != nil {
+	if _, err := runVerifyGit("add", "--all"); err != nil {
 		return false, fmt.Errorf("verify add --all: %w", err)
 	}
-	treeOut, err := runGitIn(ctx, cleanRoot, gitEnv, "write-tree")
+	treeOut, err := runVerifyGit("write-tree")
 	if err != nil {
 		return false, fmt.Errorf("verify write-tree: %w", err)
 	}
@@ -258,7 +262,8 @@ func VerifyWorktreeMatchesPostimages(projectRoot string, entries []PostimageEntr
 }
 
 func runGitIn(ctx context.Context, dir string, env []string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	sanitizedArgs := gitworktree.SanitizedExecutionArgs(args...)
+	cmd := exec.CommandContext(ctx, "git", sanitizedArgs...)
 	cmd.Dir = dir
 	cmd.Env = env
 	var stdout, stderr bytes.Buffer

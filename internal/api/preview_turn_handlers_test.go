@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"github.com/multigent/multigent/internal/entity"
+	"github.com/multigent/multigent/internal/gitworktree"
+	"github.com/multigent/multigent/internal/preview"
 	"github.com/multigent/multigent/internal/previewreceipt"
 	"github.com/multigent/multigent/internal/secretbox"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
@@ -391,3 +394,203 @@ func TestPostTaskPreviewChat_ExecutionAndCapture(t *testing.T) {
 		t.Fatalf("expected audit comment added to task, got comments: %+v", comments)
 	}
 }
+
+func TestTurnPreviewStart_SnapshotIsolationAndFlagCheck(t *testing.T) {
+	t.Setenv(secretbox.EnvKey, "test-master-key-for-preview-32b!!")
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	s.previewEngine = preview.NewEngine()
+	seedSampleAgentsForTest(t, s, workspaceID)
+	if err := s.st.SaveProject("sample", &entity.Project{Name: "sample"}); err != nil {
+		t.Fatalf("save project: %v", err)
+	}
+
+	repoDir := setupTestWorktreeRepo(t)
+	task := setupHumanReviewTask(t, s, workspaceID, "sample", "t-turn-preview-start", repoDir)
+
+	req := providerTestRequest(http.MethodGet, "/api/v1/projects/sample/tasks/t-turn-preview-start/preview/turns", "admin", nil)
+	store := s.receiptStore(req)
+
+	// 1. When flag is disabled -> 403 Forbidden
+	s.SetPreviewTurnReceiptsEnabled(false)
+	startReqDisabled := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/t-turn-preview-start/preview/turns/turn-1/preview/start", "admin", nil)
+	startReqDisabled.SetPathValue("name", "sample")
+	startReqDisabled.SetPathValue("taskId", task.ID)
+	startReqDisabled.SetPathValue("turnId", "turn-1")
+	wDisabled := httptest.NewRecorder()
+	s.handlePostTaskPreviewTurnPreviewStart(wDisabled, startReqDisabled)
+	if wDisabled.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 forbidden when turn receipts disabled, got %d: %s", wDisabled.Code, wDisabled.Body.String())
+	}
+
+	s.SetPreviewTurnReceiptsEnabled(true)
+
+	// 2. When turn does not exist -> 404 Not Found
+	startReq404 := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/t-turn-preview-start/preview/turns/turn-nonexistent/preview/start", "admin", nil)
+	startReq404.SetPathValue("name", "sample")
+	startReq404.SetPathValue("taskId", task.ID)
+	startReq404.SetPathValue("turnId", "turn-nonexistent")
+	w404 := httptest.NewRecorder()
+	s.handlePostTaskPreviewTurnPreviewStart(w404, startReq404)
+	if w404.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for nonexistent turn, got %d: %s", w404.Code, w404.Body.String())
+	}
+
+	// 3. Create a receipt in PENDING state -> 409 Conflict (must be CAPTURED)
+	created, err := store.Create(context.Background(), previewreceipt.CreateParams{
+		Project:        "sample",
+		TaskID:         task.ID,
+		TurnID:         "turn-pending",
+		BaselineTree:   "tree-1",
+		BaselineCommit: "commit-1",
+		Creator:        "admin",
+	})
+	if err != nil {
+		t.Fatalf("create receipt: %v", err)
+	}
+	startReqPending := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/t-turn-preview-start/preview/turns/"+created.ID+"/preview/start", "admin", nil)
+	startReqPending.SetPathValue("name", "sample")
+	startReqPending.SetPathValue("taskId", task.ID)
+	startReqPending.SetPathValue("turnId", created.ID)
+	wPending := httptest.NewRecorder()
+	s.handlePostTaskPreviewTurnPreviewStart(wPending, startReqPending)
+	if wPending.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for non-captured turn, got %d: %s", wPending.Code, wPending.Body.String())
+	}
+
+	// 4. Create snapshot directory and transition to CAPTURED
+	projectGitRoot := gitworktree.ProjectRootForWorktree(repoDir)
+	snapshotDir := previewreceipt.TurnSnapshotDir(projectGitRoot, task.ID, created.TurnID)
+	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(snapshotDir, "index.html"), []byte("<h1>Snapshot</h1>"), 0644)
+
+	// Invariant check: snapshotDir must NOT equal repoDir (worktreeDir)
+	if snapshotDir == repoDir {
+		t.Fatalf("snapshotDir must not equal worktreeDir: %s", snapshotDir)
+	}
+
+	r1, _ := store.Transition(context.Background(), "sample", task.ID, created.ID, created.Revision, previewreceipt.StatusExecuting, nil)
+	r2, _ := store.Transition(context.Background(), "sample", task.ID, r1.ID, r1.Revision, previewreceipt.StatusCapturing, nil)
+	captured, _ := store.Transition(context.Background(), "sample", task.ID, r2.ID, r2.Revision, previewreceipt.StatusCaptured, nil)
+
+	// Test turn preview start with captured receipt
+	startReqCaptured := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/t-turn-preview-start/preview/turns/"+captured.ID+"/preview/start", "admin", nil)
+	startReqCaptured.SetPathValue("name", "sample")
+	startReqCaptured.SetPathValue("taskId", task.ID)
+	startReqCaptured.SetPathValue("turnId", captured.ID)
+	wCaptured := httptest.NewRecorder()
+	s.handlePostTaskPreviewTurnPreviewStart(wCaptured, startReqCaptured)
+
+	// Since previewEngine is initialized on s, it should succeed (CLI/Static project type returns 200)
+	if wCaptured.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK starting turn preview, got %d: %s", wCaptured.Code, wCaptured.Body.String())
+	}
+
+	var res map[string]any
+	_ = json.Unmarshal(wCaptured.Body.Bytes(), &res)
+	if res["turnId"] != captured.ID {
+		t.Fatalf("expected turnId %s, got %v", captured.ID, res["turnId"])
+	}
+}
+
+func TestPreviewAgentRunner_RejectsHostFallbackAndEnforcesContainer(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	seedSampleAgentsForTest(t, s, workspaceID)
+
+	runner := s.newPreviewAgentRunner(workspaceID, "sample", "pm", "http://127.0.0.1")
+
+	// 1. Without scheduler -> fails with scheduler unavailable
+	err := runner.RunAgent(context.Background(), t.TempDir(), "test prompt")
+	if err == nil {
+		t.Fatal("expected runner.RunAgent to fail when scheduler is nil")
+	}
+	if !strings.Contains(err.Error(), "agent runner scheduler unavailable") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	// 2. With scheduler, but agent 'pm' has no container sandbox (SandboxNone/nil) -> fails closed!
+	s.sched = &SchedulerManager{binPath: "/bin/echo"}
+	err = runner.RunAgent(context.Background(), t.TempDir(), "test prompt")
+	if err == nil {
+		t.Fatal("expected runner.RunAgent to reject host execution / missing sandbox, but it succeeded")
+	}
+	if !strings.Contains(err.Error(), "requires an isolated container sandbox") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
+func TestPostTaskPreviewChat_SensitiveDataRedactedInCommentAndError(t *testing.T) {
+	t.Setenv(secretbox.EnvKey, "test-master-key-for-preview-32b!!")
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	seedSampleAgentsForTest(t, s, workspaceID)
+	if err := s.st.SaveProject("sample", &entity.Project{Name: "sample"}); err != nil {
+		t.Fatalf("save project: %v", err)
+	}
+
+	repoDir := setupTestWorktreeRepo(t)
+	task := setupHumanReviewTask(t, s, workspaceID, "sample", "t-chat-redact", repoDir)
+
+	s.SetConsoleOrigin("http://127.0.0.1:27891")
+	s.SetPreviewOrigin("http://127.0.0.1:27892")
+	s.SetPreviewCopilotDrawerEnabled(true)
+	s.SetPreviewTurnReceiptsEnabled(true)
+
+	secretToken := "sk-ant-api03-abcdef1234567890abcdef1234567890"
+
+	// 1. Successful run with secret in prompt
+	s.previewAgentRunnerFunc = func(workspaceID, project, agentName, runtimeURL string) previewreceipt.AgentRunner {
+		return previewreceipt.AgentRunnerFunc(func(ctx context.Context, cloneDir string, prompt string) error {
+			return os.WriteFile(filepath.Join(cloneDir, "code.txt"), []byte("fixed\n"), 0644)
+		})
+	}
+
+	chatReq := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/t-chat-redact/preview/chat", "admin", previewChatBody{
+		Message: "Fix bug using " + secretToken,
+	})
+	chatReq.SetPathValue("name", "sample")
+	chatReq.SetPathValue("taskId", task.ID)
+	wChat := httptest.NewRecorder()
+
+	s.handlePostTaskPreviewChat(wChat, chatReq)
+	if wChat.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", wChat.Code, wChat.Body.String())
+	}
+
+	// Verify task comment does NOT leak the secret
+	comments, err := s.ts.ListComments("sample", "pm", task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latestComment := comments[len(comments)-1].Body
+	if strings.Contains(latestComment, "sk-ant-") {
+		t.Fatalf("task comment leaked secret token: %s", latestComment)
+	}
+	if !strings.Contains(latestComment, "[REDACTED_SECRET]") {
+		t.Fatalf("expected [REDACTED_SECRET] in comment, got: %s", latestComment)
+	}
+
+	// 2. Failing run with secret in error output
+	s.previewAgentRunnerFunc = func(workspaceID, project, agentName, runtimeURL string) previewreceipt.AgentRunner {
+		return previewreceipt.AgentRunnerFunc(func(ctx context.Context, cloneDir string, prompt string) error {
+			return errors.New("fatal: auth failed with token " + secretToken)
+		})
+	}
+
+	failReq := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/t-chat-redact/preview/chat", "admin", previewChatBody{
+		Message: "Trigger failure",
+	})
+	failReq.SetPathValue("name", "sample")
+	failReq.SetPathValue("taskId", task.ID)
+	wFail := httptest.NewRecorder()
+
+	s.handlePostTaskPreviewChat(wFail, failReq)
+	if wFail.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 internal server error, got %d", wFail.Code)
+	}
+	failBody := wFail.Body.String()
+	if strings.Contains(failBody, "sk-ant-") {
+		t.Fatalf("HTTP error response leaked secret token: %s", failBody)
+	}
+}
+

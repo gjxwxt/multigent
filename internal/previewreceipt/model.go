@@ -41,7 +41,7 @@ func IsTerminal(status string) bool {
 // IsActiveHolder reports whether status actively occupies the task slot.
 func IsActiveHolder(status string) bool {
 	switch status {
-	case StatusPending, StatusExecuting, StatusCapturing, StatusReverting, StatusCommitting:
+	case StatusPending, StatusExecuting, StatusCapturing, StatusReverting, StatusCommitting, StatusRevertFailed:
 		return true
 	default:
 		return false
@@ -66,7 +66,7 @@ func ValidateTransition(from, to string) error {
 	case StatusExecuting:
 		valid = to == StatusCapturing || to == StatusFailed
 	case StatusCapturing:
-		valid = to == StatusCaptured || to == StatusFailed
+		valid = to == StatusCaptured || to == StatusFailed || to == StatusRevertFailed
 	case StatusCaptured:
 		valid = to == StatusReverting || to == StatusSuperseded || to == StatusCommitting || to == StatusFailed
 	case StatusReverting:

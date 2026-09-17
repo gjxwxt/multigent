@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/gitworktree"
 	"github.com/multigent/multigent/internal/previewreceipt"
+	"github.com/multigent/multigent/internal/sandbox"
 )
 
 type previewDefaultAgentRunner struct {
@@ -26,13 +28,30 @@ type previewDefaultAgentRunner struct {
 
 func (r *previewDefaultAgentRunner) RunAgent(ctx context.Context, cloneDir string, prompt string) error {
 	if r.server == nil || r.server.sched == nil || strings.TrimSpace(r.server.sched.binPath) == "" {
-		return nil
+		return errors.New("agent runner scheduler unavailable")
 	}
+
+	// Invariant: Preview Copilot requires an isolated container sandbox; host fallback is forbidden.
+	meta, err := r.server.agentMetaForProjectMember(r.workspaceID, r.project, r.agentName)
+	if err != nil {
+		return fmt.Errorf("load agent metadata: %w", err)
+	}
+	if meta == nil || meta.Sandbox == nil || meta.Sandbox.Provider == "" || meta.Sandbox.Provider == entity.SandboxNone {
+		return errors.New("preview copilot requires an isolated container sandbox; host execution is forbidden")
+	}
+
+	if meta.Sandbox.Provider == entity.SandboxDocker {
+		if err := sandbox.CheckDocker(); err != nil {
+			return fmt.Errorf("docker sandbox unavailable: %w", err)
+		}
+	}
+
 	args := []string{"--dir", r.server.root, "exec", "--project", r.project, "--agent", r.agentName, "--prompt", prompt, "--no-save-session", "--no-session"}
 	cmd := exec.CommandContext(ctx, r.server.sched.binPath, args...)
 	cmd.Dir = r.server.root
 	r.server.configureAgentExecEnv(cmd, r.workspaceID, r.project, r.agentName, r.runtimeURL, map[string]string{
-		"MULTIGENT_WORKTREE_DIR": cloneDir,
+		"MULTIGENT_WORKTREE_DIR":         cloneDir,
+		"MULTIGENT_PREVIEW_ISOLATED_RUN": "1",
 	})
 	setProcGroup(cmd)
 
@@ -40,9 +59,9 @@ func (r *previewDefaultAgentRunner) RunAgent(ctx context.Context, cloneDir strin
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 
-	err := cmd.Run()
+	err = cmd.Run()
 	if err != nil {
-		return fmt.Errorf("agent execution in clone failed: %w (output: %s)", err, strings.TrimSpace(out.String()))
+		return fmt.Errorf("agent execution in clone failed: %w (output: %s)", err, previewreceipt.RedactSecrets(strings.TrimSpace(out.String())))
 	}
 	return nil
 }
@@ -129,10 +148,10 @@ func (s *Server) executePreviewChatTurn(w http.ResponseWriter, r *http.Request, 
 	})
 	if err != nil {
 		if errors.Is(err, previewreceipt.ErrConflict) {
-			s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, err.Error())
+			s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, previewreceipt.RedactSecrets(err.Error()))
 			return
 		}
-		s.jsonErrorCode(w, http.StatusInternalServerError, "turn_execution_failed", err.Error())
+		s.jsonErrorCode(w, http.StatusInternalServerError, "turn_execution_failed", previewreceipt.RedactSecrets(err.Error()))
 		return
 	}
 
@@ -141,7 +160,7 @@ func (s *Server) executePreviewChatTurn(w http.ResponseWriter, r *http.Request, 
 		ID:        entity.NewCommentID(),
 		TaskID:    taskID,
 		Author:    principal.Username,
-		Body:      fmt.Sprintf("[Preview Copilot Turn %s] %s", receipt.ID, msg),
+		Body:      previewreceipt.RedactSecrets(fmt.Sprintf("[Preview Copilot Turn %s] %s", receipt.ID, msg)),
 		CreatedAt: time.Now().UTC(),
 	})
 
@@ -345,7 +364,7 @@ func (s *Server) handlePostTaskPreviewTurnRollback(w http.ResponseWriter, r *htt
 		ID:        entity.NewCommentID(),
 		TaskID:    taskID,
 		Author:    principal.Username,
-		Body:      fmt.Sprintf("[Preview Copilot] Rolled back turn %s", turnID),
+		Body:      previewreceipt.RedactSecrets(fmt.Sprintf("[Preview Copilot] Rolled back turn %s", turnID)),
 		CreatedAt: time.Now().UTC(),
 	})
 
@@ -369,14 +388,53 @@ func (s *Server) handlePostTaskPreviewTurnPreviewStart(w http.ResponseWriter, r 
 	}
 	r = authReq
 
+	if !s.enablePreviewTurnReceipts {
+		s.jsonErrorCode(w, http.StatusForbidden, "feature_disabled", "preview turn receipts are disabled")
+		return
+	}
+
 	if s.previewEngine == nil {
 		s.jsonError(w, http.StatusInternalServerError, "preview engine not initialized")
+		return
+	}
+
+	store := s.receiptStore(r)
+	if store == nil {
+		s.jsonError(w, http.StatusInternalServerError, "receipt store unavailable")
+		return
+	}
+
+	receipt, err := store.Get(r.Context(), project, taskID, turnID)
+	if err != nil {
+		if errors.Is(err, previewreceipt.ErrNotFound) {
+			s.jsonErrorCode(w, http.StatusNotFound, ErrCodeNotFound, "turn receipt not found")
+			return
+		}
+		s.serverError(w, err)
+		return
+	}
+
+	if receipt.Status != previewreceipt.StatusCaptured {
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, fmt.Sprintf("turn %s in status %s cannot be previewed (must be captured)", turnID, receipt.Status))
 		return
 	}
 
 	worktreeDir := s.resolveTaskWorktreeDir(project, taskID)
 	if worktreeDir == "" {
 		s.jsonError(w, http.StatusInternalServerError, "worktree directory not found")
+		return
+	}
+	projectGitRoot := gitworktree.ProjectRootForWorktree(worktreeDir)
+	snapshotDir := previewreceipt.TurnSnapshotDir(projectGitRoot, taskID, receipt.TurnID)
+
+	// Invariant: Turn preview must mount dedicated turn snapshot, NEVER the main worktreeDir
+	if snapshotDir == "" || snapshotDir == worktreeDir {
+		s.jsonError(w, http.StatusInternalServerError, "invalid turn snapshot directory")
+		return
+	}
+
+	if fi, err := os.Stat(snapshotDir); err != nil || !fi.IsDir() {
+		s.jsonErrorCode(w, http.StatusNotFound, ErrCodeNotFound, "turn preview snapshot directory not found")
 		return
 	}
 
@@ -386,7 +444,7 @@ func (s *Server) handlePostTaskPreviewTurnPreviewStart(w http.ResponseWriter, r 
 		return
 	}
 
-	inst, err := s.previewEngine.StartTurnPreviewWithRuntime(r.Context(), taskID, turnID, project, worktreeDir, runtime)
+	inst, err := s.previewEngine.StartTurnPreviewWithRuntime(r.Context(), taskID, turnID, project, snapshotDir, runtime)
 	if err != nil {
 		s.jsonError(w, http.StatusInternalServerError, "failed to start turn preview: "+err.Error())
 		return
