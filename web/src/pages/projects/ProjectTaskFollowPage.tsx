@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { ExternalLink, GitBranch, Globe, Play, RefreshCw, X } from 'lucide-react'
+import { ExternalLink, GitBranch, Globe, Play, RefreshCw, Sparkles, X } from 'lucide-react'
+import { PreviewDrawer } from '../../components/task/PreviewDrawer'
 import { WorkflowBoard } from '../../components/workflow/WorkflowBoard'
 import { ConversationLog } from '../../components/ui/ConversationLog'
 import { PlaceholderCard } from '../../components/ui/PlaceholderCard'
@@ -412,13 +413,45 @@ export default function ProjectTaskFollowPage() {
     }
   }
 
-  const previewState = useApiJson<{ taskId: string; type: string; status: string; url: string; previewToken?: string }>(
+  const [previewVersion, setPreviewVersion] = useState(0)
+  const previewState = useApiJson<{ taskId: string; type: string; status: string; url: string; previewToken?: string; drawerEnabled?: boolean }>(
     projectId && taskId ? `/api/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/preview` : null,
-    5000,
+    previewVersion,
   )
   const [previewStarting, setPreviewStarting] = useState(false)
+  const [previewDrawerOpen, setPreviewDrawerOpen] = useState(false)
 
   const preview = previewState.status === 'ok' ? previewState.data : null
+  const drawerEnabled = Boolean(preview?.drawerEnabled)
+  const isPreviewOriginConfigured = Boolean(preview?.url && !preview.url.startsWith('/'))
+
+  const previewShareUrl = useMemo(() => {
+    if (!preview?.url) return ''
+    const sep = preview.url.includes('?') ? '&' : '?'
+    const tokenPart = preview.previewToken ? `${sep}pvt=${encodeURIComponent(preview.previewToken)}` : ''
+    return `${preview.url}${tokenPart}`
+  }, [preview?.url, preview?.previewToken])
+
+  const handleStartPreview = useCallback(async () => {
+    setPreviewStarting(true)
+    try {
+      const inst = await apiPost<{ previewToken?: string; url?: string }>(
+        `/api/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/preview/start`,
+        {},
+      )
+      setPreviewVersion((v) => v + 1)
+      if (drawerEnabled) {
+        setPreviewDrawerOpen(true)
+      } else {
+        const baseUrl = inst?.url || `/preview/${encodeURIComponent(taskId)}/`
+        const sep = baseUrl.includes('?') ? '&' : '?'
+        const target = inst?.previewToken ? `${baseUrl}${sep}pvt=${encodeURIComponent(inst.previewToken)}` : baseUrl
+        window.open(target, '_blank')
+      }
+    } finally {
+      setPreviewStarting(false)
+    }
+  }, [projectId, taskId, drawerEnabled])
 
   return (
     <div className="fixed inset-0 z-[70] flex flex-col bg-neutral-50 text-neutral-900 dark:bg-zinc-950 dark:text-zinc-100">
@@ -461,48 +494,54 @@ export default function ProjectTaskFollowPage() {
               </div>
             )
           })()}
-          {preview && (preview.status === 'running' || preview.type !== 'cli') && (
-            <div className="flex items-center">
+          {preview && preview.type !== 'cli' && (
+            <div className="flex items-center gap-1.5">
               {preview.status === 'running' ? (
-                <a
-                  href={preview.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-50 px-2.5 py-1.5 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-950/40 dark:text-emerald-300"
-                >
-                  <span className="size-2 animate-pulse rounded-full bg-emerald-500" />
-                  打开实时预览 ↗
-                </a>
-              ) : preview.url && !preview.url.startsWith('/') ? (
-                <a
-                  href={`${preview.url}?pvt=${encodeURIComponent(preview.previewToken ?? '')}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-50 px-2.5 py-1.5 text-xs font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-950/40 dark:text-emerald-300"
-                >
-                  <span className="size-2 animate-pulse rounded-full bg-emerald-500" />
-                  打开实时预览 ↗
-                </a>
-              ) : preview.url.startsWith('/') ? (
+                drawerEnabled ? (
+                  <div className="inline-flex items-center rounded-lg border border-sky-500/30 bg-sky-50 shadow-xs dark:border-sky-500/30 dark:bg-sky-950/40">
+                    <button
+                      type="button"
+                      onClick={() => setPreviewDrawerOpen(true)}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-sky-700 transition hover:bg-sky-100/80 rounded-l-lg dark:text-sky-300 dark:hover:bg-sky-900/40"
+                      title={t('tasks.previewDrawer.openDrawer', { defaultValue: '打开实时预览与调优抽屉' })}
+                    >
+                      <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />
+                      <Sparkles className="size-3 text-sky-600 dark:text-sky-400" />
+                      <span>{t('tasks.previewDrawer.buttonLabel', { defaultValue: '实时预览与调优' })}</span>
+                    </button>
+                    <div className="h-3.5 w-px bg-sky-200 dark:bg-sky-800" />
+                    <a
+                      href={previewShareUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center justify-center px-2 py-1.5 text-sky-600 transition hover:bg-sky-100/80 rounded-r-lg dark:text-sky-400 dark:hover:bg-sky-900/40"
+                      title={t('tasks.openPreviewExternal', { defaultValue: '在独立新标签页打开 ↗' })}
+                    >
+                      <ExternalLink className="size-3.5" />
+                    </a>
+                  </div>
+                ) : (
+                  <a
+                    href={previewShareUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-50 px-2.5 py-1.5 text-xs font-semibold text-emerald-700 shadow-xs transition hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-950/40 dark:text-emerald-300"
+                  >
+                    <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />
+                    {t('tasks.openPreview', { defaultValue: '打开实时预览 ↗' })}
+                  </a>
+                )
+              ) : preview.url.startsWith('/') && !isPreviewOriginConfigured ? (
                 <span
                   className="inline-flex max-w-[280px] items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-50 px-2.5 py-1.5 text-xs font-medium text-amber-700 dark:border-amber-500/30 dark:bg-amber-950/40 dark:text-amber-300"
-                  title="当前部署未配置预览 origin（需设置 MULTIGENT_PREVIEW_ORIGIN），分享预览不可用。"
+                  title={t('tasks.previewUnavailable', { defaultValue: '当前部署未配置预览 origin（需设置 MULTIGENT_PREVIEW_ORIGIN），分享预览不可用。' })}
                 >
-                  预览未配置：需设置 MULTIGENT_PREVIEW_ORIGIN
+                  {t('tasks.previewUnavailable', { defaultValue: '预览未配置：需设置 MULTIGENT_PREVIEW_ORIGIN' })}
                 </span>
               ) : (
                 <button
                   type="button"
-                  onClick={async () => {
-                    setPreviewStarting(true)
-                    try {
-                      const inst = await apiPost<{ previewToken?: string; url?: string }>(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/preview/start`, {})
-                      const target = inst?.url && !inst.url.startsWith('/') ? `${inst.url}?pvt=${encodeURIComponent(inst?.previewToken ?? '')}` : `/preview/${encodeURIComponent(taskId)}/?pvt=${encodeURIComponent(inst?.previewToken ?? '')}`
-                      window.open(target, '_blank')
-                    } finally {
-                      setPreviewStarting(false)
-                    }
-                  }}
+                  onClick={() => void handleStartPreview()}
                   disabled={previewStarting}
                   className={cn(
                     'inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition',
@@ -512,7 +551,7 @@ export default function ProjectTaskFollowPage() {
                   )}
                 >
                   <Globe className={cn('size-3.5', previewStarting && 'animate-spin')} />
-                  {previewStarting ? '启动中…' : canReview ? '打开审核预览 ↗' : '启动实时预览'}
+                  {previewStarting ? t('tasks.startingPreview', { defaultValue: '启动中…' }) : canReview ? '打开审核预览 ↗' : t('tasks.startPreview', { defaultValue: '启动实时预览' })}
                 </button>
               )}
             </div>
@@ -734,6 +773,22 @@ export default function ProjectTaskFollowPage() {
           )}
         </aside>
       </main>
+      {previewDrawerOpen && preview && (
+        <PreviewDrawer
+          project={projectId}
+          taskId={taskId}
+          taskTitle={displayTask?.title || taskId}
+          previewUrl={preview.url}
+          previewToken={preview.previewToken}
+          previewStatus={preview.status}
+          canOperator={canReview}
+          onClose={() => setPreviewDrawerOpen(false)}
+          onStartPreview={async () => {
+            await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/preview/start`, {})
+            setPreviewVersion((v) => v + 1)
+          }}
+        />
+      )}
     </div>
   )
 }

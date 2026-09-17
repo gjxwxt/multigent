@@ -265,7 +265,7 @@ export default function AssistantWidget({ hidden = false, onHide }: AssistantWid
           onHide?.()
         }}
         className={cn(
-          'fixed z-[60] flex size-11 cursor-grab items-center justify-center rounded-full shadow-md backdrop-blur-sm transition-all active:cursor-grabbing',
+          'fixed z-40 flex size-11 cursor-grab items-center justify-center rounded-full shadow-md backdrop-blur-sm transition-all active:cursor-grabbing',
           open
             ? 'bg-neutral-700/70 text-white hover:bg-neutral-800/80 dark:bg-zinc-600/70'
             : 'bg-sky-600/50 text-white hover:bg-sky-600/75 dark:bg-sky-500/50 dark:hover:bg-sky-500/70',
@@ -278,7 +278,7 @@ export default function AssistantWidget({ hidden = false, onHide }: AssistantWid
 
       {open && (
         <div
-          className="fixed z-[60] flex h-[600px] w-[460px] flex-col overflow-hidden rounded-2xl border border-neutral-200/60 bg-white/95 shadow-2xl backdrop-blur-md animate-scale-in dark:border-zinc-700/60 dark:bg-zinc-900/95"
+          className="fixed z-40 flex h-[600px] w-[460px] flex-col overflow-hidden rounded-2xl border border-neutral-200/60 bg-white/95 shadow-2xl backdrop-blur-md animate-scale-in dark:border-zinc-700/60 dark:bg-zinc-900/95"
           style={{ bottom: panelBottom, right: panelRight }}
         >
           {/* Header */}

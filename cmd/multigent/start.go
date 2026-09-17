@@ -116,7 +116,7 @@ remote server. For local development with hot-reload, use
 				return fmt.Errorf("start workspace scheduler: %w", err)
 			}
 
-			handler := newSPAHandler(srv.Handler())
+			handler := newSPAHandler(srv.Handler(), srv)
 
 			url := fmt.Sprintf("http://%s", addr)
 			// Deployment verification starts here: after an upgrade, the first
@@ -219,7 +219,7 @@ func logDockerReadiness() {
 // newSPAHandler wraps the API handler with an SPA file server.
 // /api/ requests are forwarded to the API handler; everything else is served
 // from the embedded web/dist with SPA fallback to index.html.
-func newSPAHandler(apiHandler http.Handler) http.Handler {
+func newSPAHandler(apiHandler http.Handler, srv *api.Server) http.Handler {
 	distFS, err := fs.Sub(web.DistFS, "dist")
 	if err != nil {
 		log.Fatalf("embedded web assets not found: %v", err)
@@ -236,6 +236,10 @@ func newSPAHandler(apiHandler http.Handler) http.Handler {
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/preview/") {
+			apiHandler.ServeHTTP(w, r)
+			return
+		}
+		if srv != nil && srv.IsPreviewSessionRequest(r) {
 			apiHandler.ServeHTTP(w, r)
 			return
 		}

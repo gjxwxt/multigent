@@ -48,8 +48,17 @@ func NewProvisioner(store *Store, generate ContainerGenerator) *Provisioner {
 }
 
 // ProvisionForPreview is the engine hook: returns docker env assignments
-// (KEY=VALUE) or an error that fails the preview start.
+// (KEY=VALUE) or an error that fails the preview start. If the worktree has
+// no fixture contract, it returns nil, nil (contract-less projects need no
+// database sandbox).
 func (p *Provisioner) ProvisionForPreview(ctx context.Context, taskID, projectName, worktreeDir string) ([]string, error) {
+	contract, err := p.loadContract(worktreeDir)
+	if err != nil {
+		return nil, err
+	}
+	if contract == nil {
+		return nil, nil
+	}
 	res, err := p.provision(ctx, projectName, taskID, worktreeDir, KindPreview, "default")
 	if err != nil {
 		return nil, err

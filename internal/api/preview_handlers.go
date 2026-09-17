@@ -950,7 +950,10 @@ func (s *Server) handleTaskPreviewProxy(w http.ResponseWriter, r *http.Request) 
 	proxy.ServeHTTP(w, r)
 }
 
-var htmlAttrRe = regexp.MustCompile(`(?i)\b(href|src|action)\s*=\s*(["'])/([^"']*)(["'])`)
+var (
+	htmlAttrRe  = regexp.MustCompile(`(?i)\b(href|src|action)\s*=\s*(["'])/([^"']*)(["'])`)
+	esmImportRe = regexp.MustCompile(`(?m)\b(from\s*|import\s*)(["'])/([^"']*)(["'])`)
+)
 
 func rewriteHTML(html, taskID, projectName string) string {
 	previewPrefix := fmt.Sprintf("/preview/%s/", taskID)
@@ -959,7 +962,7 @@ func rewriteHTML(html, taskID, projectName string) string {
 	// and SPA History Navigation. §2.0.4: no credential is ever injected into
 	// the shared preview document — no __MG_PREVIEW_TOKEN__, no Copilot
 	// widget. The previewed app has zero ties to console identity.
-	patchScript := fmt.Sprintf(`<base href=%q><script>
+	patchScript := fmt.Sprintf(`<meta name="referrer" content="same-origin"><base href=%q><script>
 (function(){
   var prefix = %q;
   window.__MG_PREVIEW_TASK_ID__ = %q;
@@ -971,9 +974,6 @@ func rewriteHTML(html, taskID, projectName string) string {
   } catch(e) {}
 
   function patchUrl(u) {
-    if (typeof u === 'string' && u.startsWith(controlPrefix)) {
-      return u;
-    }
     if (typeof u === 'string' && u.startsWith('/') && !u.startsWith('/preview/') && !u.startsWith('/_multigent_preview/')) {
       return prefix + u.slice(1);
     }
@@ -1068,10 +1068,223 @@ func rewriteHTML(html, taskID, projectName string) string {
 		return fmt.Sprintf("%s=%s%s%s%s", attr, quote1, previewPrefix, path, quote2)
 	})
 
+	// Rewrite inline ES module imports: from "/...", import "/..."
+	html = esmImportRe.ReplaceAllStringFunc(html, func(match string) string {
+		sub := esmImportRe.FindStringSubmatch(match)
+		if len(sub) < 5 {
+			return match
+		}
+		prefix := sub[1]
+		quote1 := sub[2]
+		path := sub[3]
+		quote2 := sub[4]
+
+		if strings.HasPrefix(path, "preview/") || strings.HasPrefix(path, "_multigent_preview/") || strings.HasPrefix(path, "/") {
+			return match
+		}
+		return fmt.Sprintf("%s%s%s%s%s", prefix, quote1, previewPrefix, path, quote2)
+	})
+
+	const inspectorScript = `<script>
+(function() {
+  var isInspectorActive = false;
+  var inspectorOverlay = null;
+  var inspectorBadge = null;
+  var inspectorBar = null;
+
+  function ensureInspectorElements() {
+    if (inspectorOverlay) return;
+    var style = document.createElement('style');
+    style.textContent = '' +
+      '.mg-inspector-overlay { position: fixed; pointer-events: none; border: 2px solid #0284c7; background: rgba(2, 132, 199, 0.16); border-radius: 4px; z-index: 2147483647; margin: 0; padding: 0; display: none; transition: all 0.05s ease-out; box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6); }' +
+      '.mg-inspector-badge { position: absolute; top: -22px; left: 0; background: #0284c7; color: #ffffff; font-size: 10px; font-family: ui-monospace, monospace; padding: 1px 6px; border-radius: 3px; white-space: nowrap; pointer-events: none; box-shadow: 0 2px 6px rgba(0,0,0,0.2); }' +
+      '.mg-inspector-bar { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 2147483647; background: rgba(15, 23, 42, 0.92); color: #ffffff; padding: 7px 16px; border-radius: 9999px; border: none; margin: 0; box-shadow: 0 12px 30px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.15); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); display: none; align-items: center; gap: 12px; font-size: 12.5px; font-weight: 500; font-family: system-ui, -apple-system, sans-serif; }' +
+      '.mg-inspector-bar-cancel { background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.25); color: #f8fafc; padding: 2px 8px; border-radius: 6px; font-size: 11px; cursor: pointer; transition: background 0.15s; }' +
+      '.mg-inspector-bar-cancel:hover { background: rgba(255,255,255,0.28); }';
+    (document.head || document.documentElement).appendChild(style);
+
+    inspectorOverlay = document.createElement('div');
+    inspectorOverlay.className = 'mg-inspector-overlay';
+    inspectorBadge = document.createElement('div');
+    inspectorBadge.className = 'mg-inspector-badge';
+    inspectorOverlay.appendChild(inspectorBadge);
+    (document.body || document.documentElement).appendChild(inspectorOverlay);
+
+    inspectorBar = document.createElement('div');
+    inspectorBar.className = 'mg-inspector-bar';
+    inspectorBar.innerHTML = '<span>🎯 请在页面上点击需要修改的目标元素</span><button type="button" class="mg-inspector-bar-cancel">取消 (Esc)</button>';
+    (document.body || document.documentElement).appendChild(inspectorBar);
+
+    var cancelBtn = inspectorBar.querySelector('.mg-inspector-bar-cancel');
+    if (cancelBtn) {
+      cancelBtn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        stopInspector(true);
+      });
+    }
+  }
+
+  function getCssSelector(el) {
+    var path = [];
+    while (el && el.nodeType === 1 && el !== document.body && el !== document.documentElement) {
+      var selector = el.nodeName.toLowerCase();
+      if (el.id) {
+        selector += '#' + el.id;
+        path.unshift(selector);
+        break;
+      } else if (el.className && typeof el.className === 'string' && el.className.trim()) {
+        selector += '.' + el.className.trim().split(/\\s+/)[0];
+      }
+      var parent = el.parentNode;
+      if (parent) {
+        var siblings = Array.prototype.filter.call(parent.children, function(e) { return e.nodeName === el.nodeName; });
+        if (siblings.length > 1) {
+          var index = Array.prototype.indexOf.call(siblings, el) + 1;
+          selector += ':nth-of-type(' + index + ')';
+        }
+      }
+      path.unshift(selector);
+      el = el.parentElement;
+    }
+    return path.join(' > ');
+  }
+
+  function onInspectorMouseMove(e) {
+    if (!isInspectorActive || !inspectorOverlay) return;
+    var el = document.elementFromPoint(e.clientX, e.clientY);
+    if (!el || el.closest('.mg-inspector-bar') || el.closest('.mg-inspector-overlay')) {
+      inspectorOverlay.style.display = 'none';
+      return;
+    }
+
+    var rect = el.getBoundingClientRect();
+    inspectorOverlay.style.display = 'block';
+    inspectorOverlay.style.top = rect.top + 'px';
+    inspectorOverlay.style.left = rect.left + 'px';
+    inspectorOverlay.style.width = rect.width + 'px';
+    inspectorOverlay.style.height = rect.height + 'px';
+
+    var tagStr = el.tagName.toLowerCase();
+    if (el.id) tagStr += '#' + el.id;
+    else if (el.className && typeof el.className === 'string' && el.className.trim()) {
+      tagStr += '.' + el.className.trim().split(/\\s+/).slice(0, 2).join('.');
+    }
+    inspectorBadge.textContent = '<' + tagStr + '> ' + Math.round(rect.width) + '×' + Math.round(rect.height);
+
+    if (rect.top < 26) {
+      inspectorBadge.style.top = 'auto';
+      inspectorBadge.style.bottom = '-22px';
+    } else {
+      inspectorBadge.style.top = '-22px';
+      inspectorBadge.style.bottom = 'auto';
+    }
+  }
+
+  function extractElementContext(el) {
+    var tag = el.tagName.toLowerCase();
+    var id = el.id ? '#' + el.id : '';
+    var classes = (typeof el.className === 'string' && el.className.trim()) ? '.' + el.className.trim().split(/\\s+/).slice(0, 2).join('.') : '';
+    var tagDisplay = tag + (id ? id : classes);
+
+    var text = (el.innerText || el.textContent || '').trim().slice(0, 80);
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+      text = el.value || el.placeholder || text;
+    }
+
+    var attrs = [];
+    ['id', 'name', 'type', 'placeholder', 'role', 'aria-label', 'href', 'data-testid'].forEach(function(k) {
+      if (el.hasAttribute && el.hasAttribute(k)) {
+        attrs.push(k + '="' + el.getAttribute(k) + '"');
+      }
+    });
+
+    var parentInfo = '';
+    if (el.parentElement && el.parentElement !== document.body && el.parentElement !== document.documentElement) {
+      var p = el.parentElement;
+      var pTag = p.tagName.toLowerCase() + (p.id ? '#' + p.id : (p.className && typeof p.className === 'string' && p.className.trim() ? '.' + p.className.trim().split(/\\s+/)[0] : ''));
+      var pText = (p.innerText || '').trim().slice(0, 24);
+      parentInfo = '<' + pTag + '>' + (pText ? ' "' + pText + '"' : '');
+    }
+
+    var selector = getCssSelector(el);
+    var outerHTML = (el.outerHTML || '').slice(0, 260);
+
+    return {
+      tag: tagDisplay,
+      tagName: tag,
+      id: el.id || '',
+      name: el.getAttribute ? (el.getAttribute('name') || '') : '',
+      text: text,
+      attrs: attrs.join(' '),
+      parent: parentInfo,
+      selector: selector,
+      outerHTML: outerHTML
+    };
+  }
+
+  function onInspectorClick(e) {
+    if (!isInspectorActive) return;
+    var el = document.elementFromPoint(e.clientX, e.clientY);
+    if (el && el.closest('.mg-inspector-bar')) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (el && !el.closest('.mg-inspector-bar') && !el.closest('.mg-inspector-overlay')) {
+      var targetCtx = extractElementContext(el);
+      try {
+        window.parent.postMessage({ type: 'MG_DOM_SELECTED', target: targetCtx }, '*');
+      } catch(err) {}
+    }
+    stopInspector(false);
+  }
+
+  function startInspector() {
+    ensureInspectorElements();
+    isInspectorActive = true;
+    if (inspectorBar) inspectorBar.style.display = 'flex';
+    document.addEventListener('mousemove', onInspectorMouseMove, true);
+    document.addEventListener('click', onInspectorClick, true);
+  }
+
+  function stopInspector(notify) {
+    isInspectorActive = false;
+    if (inspectorOverlay) inspectorOverlay.style.display = 'none';
+    if (inspectorBar) inspectorBar.style.display = 'none';
+    document.removeEventListener('mousemove', onInspectorMouseMove, true);
+    document.removeEventListener('click', onInspectorClick, true);
+    if (notify) {
+      try {
+        window.parent.postMessage({ type: 'MG_DOM_CANCELLED' }, '*');
+      } catch(err) {}
+    }
+  }
+
+  window.addEventListener('message', function(e) {
+    if (!e || !e.data) return;
+    if (e.data.type === 'MG_START_INSPECTOR') {
+      startInspector();
+    } else if (e.data.type === 'MG_STOP_INSPECTOR') {
+      stopInspector(false);
+    }
+  });
+
+  window.addEventListener('keydown', function(e) {
+    if (isInspectorActive && e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      stopInspector(true);
+    }
+  }, true);
+})();
+</script>`
+
+	fullScript := patchScript + inspectorScript
+
 	if strings.Contains(html, "<head>") {
-		html = strings.Replace(html, "<head>", "<head>"+patchScript, 1)
+		html = strings.Replace(html, "<head>", "<head>"+fullScript, 1)
 	} else {
-		html = patchScript + html
+		html = fullScript + html
 	}
 
 	// §2.0.4: the Copilot widget is never injected into shared preview

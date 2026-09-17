@@ -53,6 +53,7 @@ const previewLease = 30 * time.Minute
 type Engine struct {
 	mu        sync.RWMutex
 	instances map[string]*PreviewInstance
+	taskMu    sync.Map // taskID -> *sync.Mutex
 	// provisionSandbox, when set, runs before every preview start: it
 	// materializes the task-private fixture database (test-data sandbox V1)
 	// and returns the env assignments the container needs (e.g.
@@ -218,20 +219,51 @@ func (e *Engine) StartSnapshotPreviewWithRuntime(ctx context.Context, taskID, pr
 	return e.startPreview(ctx, taskID, projectName, worktreeDir, true, runtime)
 }
 
-func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktreeDir string, readOnly bool, runtime RuntimeSelection) (*PreviewInstance, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+func (e *Engine) taskLock(taskID string) func() {
+	val, _ := e.taskMu.LoadOrStore(taskID, &sync.Mutex{})
+	mtx := val.(*sync.Mutex)
+	mtx.Lock()
+	return mtx.Unlock
+}
 
+// ActiveTaskIDs returns a snapshot set of task IDs whose preview containers are active.
+func (e *Engine) ActiveTaskIDs() map[string]bool {
+	if e == nil {
+		return nil
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make(map[string]bool, len(e.instances))
+	for id, inst := range e.instances {
+		if inst != nil && (inst.Status == "running" || inst.Status == "starting") {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktreeDir string, readOnly bool, runtime RuntimeSelection) (*PreviewInstance, error) {
 	taskID = strings.TrimSpace(taskID)
+	unlock := e.taskLock(taskID)
+	defer unlock()
+
+	var oldContainerID string
+	e.mu.Lock()
 	if inst, ok := e.instances[taskID]; ok && inst.Status == "running" {
 		if !readOnly || inst.ReadOnly {
+			e.mu.Unlock()
 			return inst, nil
 		}
 		// A task can transition to completed while its writable preview is
 		// still alive. Replace that container before exposing a read-only
 		// completion snapshot.
-		dockerRmF("preview", inst.ContainerID)
+		oldContainerID = inst.ContainerID
 		delete(e.instances, taskID)
+	}
+	e.mu.Unlock()
+
+	if oldContainerID != "" {
+		dockerRmF("preview", oldContainerID)
 	}
 
 	projType := DetectProjectType(worktreeDir)
@@ -255,8 +287,11 @@ func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktree
 	// container starts. Fail-closed — a project declaring the fixture
 	// contract must not boot against a stale or missing database.
 	var sandboxEnv []string
-	if e.provisionSandbox != nil {
-		sandboxEnv, err = e.provisionSandbox(ctx, taskID, projectName, worktreeDir)
+	e.mu.RLock()
+	provisionFn := e.provisionSandbox
+	e.mu.RUnlock()
+	if provisionFn != nil {
+		sandboxEnv, err = provisionFn(ctx, taskID, projectName, worktreeDir)
 		if err != nil {
 			return nil, fmt.Errorf("fixture sandbox provisioning failed: %w", err)
 		}
@@ -284,7 +319,9 @@ func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktree
 		ReadOnly:    readOnly,
 	}
 	instance.ExpiresAt = instance.StartedAt.Add(previewLease)
+	e.mu.Lock()
 	e.instances[taskID] = instance
+	e.mu.Unlock()
 
 	// Determine container startup command based on project layout. Keep startup
 	// errors visible: a healthy Vite process must not hide a dead API process.
@@ -415,8 +452,10 @@ func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktree
 	cmd := exec.CommandContext(ctx, "docker", dockerArgs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		e.mu.Lock()
 		instance.Status = "error"
 		instance.Error = fmt.Sprintf("docker run failed: %v, output: %s", err, string(out))
+		e.mu.Unlock()
 		return instance, fmt.Errorf("start preview container: %w (%s)", err, string(out))
 	}
 
@@ -429,13 +468,15 @@ func (e *Engine) startPreview(ctx context.Context, taskID, projectName, worktree
 		}
 	}
 	if backendHostPort > 0 && !backendReady {
-		return instance, failInstance(instance, containerName, "preview backend did not become ready")
+		return instance, e.failInstance(instance, containerName, "preview backend did not become ready")
 	}
 	if !CheckHTTPReadyAt(port, healthPath, startupTimeout) {
-		return instance, failInstance(instance, containerName, "preview web server did not become ready")
+		return instance, e.failInstance(instance, containerName, "preview web server did not become ready")
 	}
 
+	e.mu.Lock()
 	instance.Status = "running"
+	e.mu.Unlock()
 	return instance, nil
 }
 
@@ -575,7 +616,7 @@ func resolvePreviewStartupTimeout(runtimeSpec *RuntimeSpec, contractTimeoutSecon
 // with it) and returns the error to surface to the caller. An early container
 // exit is reported as such: a dead frontend process otherwise masquerades as
 // "backend did not become ready".
-func failInstance(instance *PreviewInstance, containerName, reason string) error {
+func (e *Engine) failInstance(instance *PreviewInstance, containerName, reason string) error {
 	logs, _ := dockerOutput(10*time.Second, "logs", "--tail", "120", containerName)
 	exit := ""
 	if out, err := dockerOutput(5*time.Second, "inspect", "--format", "{{.State.Status}} exitcode={{.State.ExitCode}}", containerName); err == nil {
@@ -586,8 +627,10 @@ func failInstance(instance *PreviewInstance, containerName, reason string) error
 	if exit != "" {
 		reason = "preview container exited during startup (" + exit + ")"
 	}
+	e.mu.Lock()
 	instance.Status = "error"
 	instance.Error = fmt.Sprintf("%s; logs: %s", reason, strings.TrimSpace(string(logs)))
+	e.mu.Unlock()
 	dockerRmF("preview", containerName)
 	return errors.New(reason)
 }
@@ -687,10 +730,10 @@ func (e *Engine) Reconcile(ctx context.Context) error {
 // The ground-truth "gone" check uses the task label, so name-based and
 // ID-based removal paths agree on what "removed" means.
 func (e *Engine) StopEphemeralPreview(taskID string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	taskID = strings.TrimSpace(taskID)
+	unlock := e.taskLock(taskID)
+	defer unlock()
+
 	containerName := fmt.Sprintf("multigent-preview-%s", sanitizeContainerName(taskID))
 
 	var lastErr error
@@ -715,18 +758,22 @@ func (e *Engine) StopEphemeralPreview(taskID string) error {
 		containerGone = true
 		lastErr = nil
 	}
+
+	e.mu.Lock()
+	delete(e.instances, taskID)
+	releaseFn := e.releaseSandbox
+	e.mu.Unlock()
+
 	if containerGone {
-		delete(e.instances, taskID)
-		if e.releaseSandbox != nil {
+		if releaseFn != nil {
 			// The container is gone (or never existed); sandbox teardown may
 			// delete the task-private database directory.
-			e.releaseSandbox(taskID, "stopped")
+			releaseFn(taskID, "stopped")
 		}
 		return nil
 	}
 	// rm failed AND the container still exists: keep the instance mapped and
 	// surface the error (the reaper retries on its next pass).
-	delete(e.instances, taskID)
 	return lastErr
 }
 

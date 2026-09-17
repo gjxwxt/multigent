@@ -151,3 +151,17 @@ func TestProvisionRejectsUndeclaredScenario(t *testing.T) {
 		t.Fatalf("undeclared scenario must be rejected, got %v", err)
 	}
 }
+
+func TestProvisionForPreviewContractLessWorktree(t *testing.T) {
+	s, _ := newTestStore(t)
+	root := t.TempDir() // empty directory, no .multigent/fixtures.json
+	p := NewProvisioner(s, nil)
+	env, err := p.ProvisionForPreview(context.Background(), "t-empty", "proj", root)
+	if err != nil {
+		t.Fatalf("contract-less project must return nil error, got %v", err)
+	}
+	if len(env) != 0 {
+		t.Fatalf("contract-less project must return empty env, got %v", env)
+	}
+}
+

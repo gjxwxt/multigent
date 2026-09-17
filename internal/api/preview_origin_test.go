@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/multigent/multigent/internal/preview"
 )
 
 // Task 1.0 (§2.0 origin isolation) test matrix:
@@ -426,6 +428,77 @@ func TestSchemefulSiteMismatchWarning(t *testing.T) {
 				t.Errorf("expected no warning for console=%q preview=%q, got %q", tc.consoleOrigin, tc.previewOrigin, warn)
 			}
 		}
+	}
+}
+
+func TestPreviewOriginRootFallback(t *testing.T) {
+	s := newPreviewOriginServer(t, "http://preview.internal:8080", "http://console.internal:8080")
+	s.previewEngine = preview.NewEngine()
+	s.previewEngine.SeedInstanceForTest(&preview.PreviewInstance{
+		TaskID: "t-fallback",
+		Status: "running",
+		Port:   12345,
+	})
+
+	// 1. Root-relative request on preview origin with Referer from preview session
+	req := httptest.NewRequest(http.MethodGet, "/src/index.css?v=abc", nil)
+	req.Host = "preview.internal:8080"
+	req.Header.Set("X-Forwarded-Proto", "http")
+	req.Header.Set("Referer", "http://preview.internal:8080/preview/t-fallback/src/main.tsx")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("expected 307 redirect, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	if loc := w.Header().Get("Location"); loc != "/preview/t-fallback/src/index.css?v=abc" {
+		t.Fatalf("expected Location /preview/t-fallback/src/index.css?v=abc, got %q", loc)
+	}
+
+	// 2. Multigent API endpoints must not be redirected
+	reqAPI := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+	reqAPI.Host = "preview.internal:8080"
+	reqAPI.Header.Set("X-Forwarded-Proto", "http")
+	reqAPI.Header.Set("Referer", "http://preview.internal:8080/preview/t-fallback/")
+	wAPI := httptest.NewRecorder()
+	s.Handler().ServeHTTP(wAPI, reqAPI)
+	if wAPI.Code == http.StatusTemporaryRedirect {
+		t.Fatalf("/api/v1/ endpoints must never be redirected, got 307")
+	}
+
+	// 3. Fallback with cookie on preview origin when Referer is absent
+	reqCookie := httptest.NewRequest(http.MethodGet, "/src/logo.png", nil)
+	reqCookie.Host = "preview.internal:8080"
+	reqCookie.Header.Set("X-Forwarded-Proto", "http")
+	reqCookie.AddCookie(&http.Cookie{
+		Name:  previewTokenCookiePrefix + "t-fallback",
+		Value: "dummy",
+	})
+	wCookie := httptest.NewRecorder()
+	s.Handler().ServeHTTP(wCookie, reqCookie)
+	if wCookie.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("expected 307 with cookie fallback on preview origin, got %d", wCookie.Code)
+	}
+	if loc := wCookie.Header().Get("Location"); loc != "/preview/t-fallback/src/logo.png" {
+		t.Fatalf("expected /preview/t-fallback/src/logo.png, got %q", loc)
+	}
+}
+
+func TestRewriteHTMLESMImports(t *testing.T) {
+	rawHTML := `<!doctype html><html><head>
+<script type="module">import { inject } from "/@react-refresh";</script>
+<script type="module" src="/src/main.tsx"></script>
+</head><body><div id="root"></div></body></html>`
+
+	rewritten := rewriteHTML(rawHTML, "t-test", "myproj")
+	if !strings.Contains(rewritten, `from "/preview/t-test/@react-refresh"`) {
+		t.Fatalf("inline ESM import was not rewritten with preview prefix: %s", rewritten)
+	}
+	if !strings.Contains(rewritten, `src="/preview/t-test/src/main.tsx"`) {
+		t.Fatalf("script src was not rewritten with preview prefix: %s", rewritten)
+	}
+	if !strings.Contains(rewritten, `<meta name="referrer" content="same-origin">`) {
+		t.Fatalf("referrer meta tag missing: %s", rewritten)
 	}
 }
 

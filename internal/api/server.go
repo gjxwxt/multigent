@@ -840,6 +840,9 @@ func (s *Server) Handler() http.Handler {
 		if s.serveDesignLooseAsset(w, r) {
 			return
 		}
+		if s.handlePreviewOriginRootFallback(w, r) {
+			return
+		}
 		s.withTokenAuth(mux).ServeHTTP(w, r)
 	})
 	publicMux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/feedback", s.handlePostTaskPreviewFeedback)

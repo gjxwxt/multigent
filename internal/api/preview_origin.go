@@ -240,6 +240,90 @@ func extractPreviewTaskID(path string) string {
 	return parts[0]
 }
 
+func isValidPreviewTaskID(id string) bool {
+	if id == "" || len(id) > 128 {
+		return false
+	}
+	for _, ch := range id {
+		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func extractPreviewTaskIDFromReferer(ref string) string {
+	if ref == "" {
+		return ""
+	}
+	u, err := url.Parse(ref)
+	if err != nil || !strings.HasPrefix(u.Path, "/preview/") {
+		return ""
+	}
+	return extractPreviewTaskID(u.Path)
+}
+
+// IsPreviewSessionRequest reports whether a request belongs to the preview surface
+// (arrived on the preview origin, carries a Referer from a /preview/ URL, or
+// carries a preview token cookie).
+func (s *Server) IsPreviewSessionRequest(r *http.Request) bool {
+	if s == nil {
+		return false
+	}
+	if s.requestOnPreviewOrigin(r) {
+		return true
+	}
+	if extractPreviewTaskIDFromReferer(r.Header.Get("Referer")) != "" {
+		return true
+	}
+	for _, c := range r.Cookies() {
+		if strings.HasPrefix(c.Name, previewTokenCookiePrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// handlePreviewOriginRootFallback intercepts loose root-relative requests (e.g.
+// /src/main.tsx, /@vite/client, /node_modules/...) made by preview pages or
+// module imports. Because browsers resolve root-relative imports against the
+// origin root rather than the document <base>, these requests lack the /preview/{task}/
+// prefix and would otherwise hit console SPA fallback or 401.
+// By checking the Referer header (or preview cookies on the dedicated preview origin),
+// we 307-redirect them into their proper /preview/{task}/ subpath where the preview
+// cookie is sent and the proxy serves the assets.
+func (s *Server) handlePreviewOriginRootFallback(w http.ResponseWriter, r *http.Request) bool {
+	path := r.URL.Path
+	if strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/preview/") || strings.HasPrefix(path, "/projects/") || strings.HasPrefix(path, "/_multigent_") {
+		return false
+	}
+
+	taskID := extractPreviewTaskIDFromReferer(r.Header.Get("Referer"))
+	if taskID == "" && s.requestOnPreviewOrigin(r) {
+		// On dedicated preview origin, if Referer was omitted or stripped, check for preview cookies
+		for _, c := range r.Cookies() {
+			if strings.HasPrefix(c.Name, previewTokenCookiePrefix) {
+				taskID = strings.TrimPrefix(c.Name, previewTokenCookiePrefix)
+				break
+			}
+		}
+	}
+
+	if taskID == "" || !isValidPreviewTaskID(taskID) {
+		return false
+	}
+
+	if s.previewEngine != nil {
+		if _, ok := s.previewEngine.GetInstance(taskID); !ok {
+			return false
+		}
+	}
+
+	target := fmt.Sprintf("/preview/%s%s", taskID, r.URL.RequestURI())
+	http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+	return true
+}
+
 // handlePreviewTokenExchange implements GET /preview/{task}/?pvt=<token> ->
 // validate -> Set-Cookie (HttpOnly, path-scoped) -> 302 to the token-free
 // URL. Hardening per round 9: Cache-Control: no-store (token never enters a
