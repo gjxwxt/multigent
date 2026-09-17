@@ -40,6 +40,10 @@ const (
 	// PreviewTurnReceiptsEnv is the deployment config key to enable turn receipts
 	// and isolated transactional modification (controlled rollout, default disabled).
 	PreviewTurnReceiptsEnv = "MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS"
+	// PreviewTurnReceiptsProjectsEnv is the deployment config key for the comma-separated
+	// list of exact project names permitted to use turn receipts (gray rollout).
+	// Empty, whitespace, or "*" matches nothing (fail-closed).
+	PreviewTurnReceiptsProjectsEnv = "MULTIGENT_PREVIEW_TURN_RECEIPTS_PROJECTS"
 )
 
 // SetPreviewCopilotDrawerEnabled enables or disables the preview copilot drawer.
@@ -86,7 +90,20 @@ func (s *Server) SetPreviewTurnReceiptsEnabled(enabled bool) {
 	s.enablePreviewTurnReceipts = enabled
 }
 
-// PreviewTurnReceiptsEnabled returns whether preview turn receipts are enabled.
+// SetPreviewTurnReceiptsProjects sets the comma-separated project allowlist for turn receipts.
+func (s *Server) SetPreviewTurnReceiptsProjects(projects string) {
+	s.previewTurnReceiptsProjects = projects
+}
+
+// PreviewTurnReceiptsProjects returns the configured project allowlist.
+func (s *Server) PreviewTurnReceiptsProjects() string {
+	if s == nil {
+		return ""
+	}
+	return s.previewTurnReceiptsProjects
+}
+
+// PreviewTurnReceiptsEnabled returns whether preview turn receipts are enabled globally.
 // Fail-closed rule (Phase 1):
 // 1. MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS must be enabled.
 // 2. PreviewCopilotDrawerEnabled() must be true (valid origins, same schemeful site).
@@ -104,7 +121,7 @@ func (s *Server) PreviewTurnReceiptsEnabled() bool {
 	return true
 }
 
-// PreviewTurnReceiptsDisabledReason returns the reason why turn receipts are disabled.
+// PreviewTurnReceiptsDisabledReason returns the reason why turn receipts are disabled globally.
 func (s *Server) PreviewTurnReceiptsDisabledReason() string {
 	if s == nil || !s.enablePreviewTurnReceipts {
 		return "turn receipts feature flag is disabled"
@@ -114,6 +131,49 @@ func (s *Server) PreviewTurnReceiptsDisabledReason() string {
 	}
 	if err := secretbox.StrictEncryptionSelfTest(); err != nil {
 		return fmt.Sprintf("strict encryption unavailable: %v", err)
+	}
+	return ""
+}
+
+// PreviewTurnReceiptsEnabledForProject returns whether turn receipts are enabled for a specific project.
+// Fail-closed rule:
+// 1. Global PreviewTurnReceiptsEnabled() must be true.
+// 2. The project must be explicitly in MULTIGENT_PREVIEW_TURN_RECEIPTS_PROJECTS.
+// Empty string, whitespace, or "*" matches nothing (fail-closed).
+func (s *Server) PreviewTurnReceiptsEnabledForProject(project string) bool {
+	if s == nil || !s.PreviewTurnReceiptsEnabled() {
+		return false
+	}
+	project = strings.TrimSpace(project)
+	if project == "" {
+		return false
+	}
+	allowlistRaw := strings.TrimSpace(s.previewTurnReceiptsProjects)
+	if allowlistRaw == "" {
+		return false
+	}
+	for _, p := range strings.Split(allowlistRaw, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" && p != "*" && p == project {
+			return true
+		}
+	}
+	return false
+}
+
+// PreviewTurnReceiptsDisabledReasonForProject returns the reason why turn receipts are disabled for this project.
+func (s *Server) PreviewTurnReceiptsDisabledReasonForProject(project string) string {
+	if s == nil || !s.enablePreviewTurnReceipts {
+		return "turn receipts feature flag is disabled"
+	}
+	if !s.PreviewCopilotDrawerEnabled() {
+		return s.PreviewCopilotDrawerDisabledReason()
+	}
+	if err := secretbox.StrictEncryptionSelfTest(); err != nil {
+		return fmt.Sprintf("strict encryption unavailable: %v", err)
+	}
+	if !s.PreviewTurnReceiptsEnabledForProject(project) {
+		return fmt.Sprintf("project %q is not in preview turn receipts allowlist (%s)", project, PreviewTurnReceiptsProjectsEnv)
 	}
 	return ""
 }

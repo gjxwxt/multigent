@@ -1262,6 +1262,30 @@ func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Tas
 			if err := engine.FinalizeCommitReceipts(context.Background(), project, t.ID, committingReceipts, preimageSHA, projectRoot); err != nil {
 				return fmt.Errorf("finalize clean commit receipts: %w", err)
 			}
+			var turnIDs []string
+			var receiptIDs []string
+			for _, rec := range committingReceipts {
+				turnIDs = append(turnIDs, rec.TurnID)
+				receiptIDs = append(receiptIDs, rec.ID)
+			}
+			workspaceID, _ := s.currentWorkspaceID()
+			s.auditLog(auditLogInput{
+				WorkspaceID:  workspaceID,
+				ActorType:    "system",
+				ActorID:      agent,
+				Action:       "preview_turn.review_committed",
+				ResourceType: "preview_turn",
+				ResourceID:   intentID,
+				Summary:      fmt.Sprintf("review commit finalized %d turn receipts for task %s", len(committingReceipts), t.ID),
+				After: map[string]any{
+					"project":        project,
+					"taskId":         t.ID,
+					"commitIntentId": intentID,
+					"commitSha":      preimageSHA,
+					"turnIds":        turnIDs,
+					"receiptIds":     receiptIDs,
+				},
+			})
 		}
 		return nil
 	}
@@ -1303,6 +1327,30 @@ func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Tas
 		if err := engine.FinalizeCommitReceipts(context.Background(), project, t.ID, committingReceipts, checkpointSHA, projectRoot); err != nil {
 			return fmt.Errorf("finalize commit receipts: %w", err)
 		}
+		var turnIDs []string
+		var receiptIDs []string
+		for _, rec := range committingReceipts {
+			turnIDs = append(turnIDs, rec.TurnID)
+			receiptIDs = append(receiptIDs, rec.ID)
+		}
+		workspaceID, _ := s.currentWorkspaceID()
+		s.auditLog(auditLogInput{
+			WorkspaceID:  workspaceID,
+			ActorType:    "system",
+			ActorID:      agent,
+			Action:       "preview_turn.review_committed",
+			ResourceType: "preview_turn",
+			ResourceID:   intentID,
+			Summary:      fmt.Sprintf("review commit finalized %d turn receipts for task %s", len(committingReceipts), t.ID),
+			After: map[string]any{
+				"project":        project,
+				"taskId":         t.ID,
+				"commitIntentId": intentID,
+				"commitSha":      checkpointSHA,
+				"turnIds":        turnIDs,
+				"receiptIds":     receiptIDs,
+			},
+		})
 	}
 
 	// 3. Push if remote is configured

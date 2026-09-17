@@ -105,6 +105,21 @@ func (s *Server) executePreviewChatTurn(w http.ResponseWriter, r *http.Request, 
 	// Invariant: Concurrent write lock. Allow interactive Copilot only when
 	// the task is at a human review step or awaiting confirmation.
 	if task.Status == entity.TaskStatusInProgress && !s.isTaskAtHumanReviewStep(workspaceID, project, taskID) {
+		s.auditLog(auditLogInput{
+			WorkspaceID:  workspaceID,
+			ActorType:    "user",
+			ActorID:      principal.Username,
+			Action:       "preview_turn.execution_rejected",
+			ResourceType: "preview_turn",
+			ResourceID:   taskID,
+			Summary:      fmt.Sprintf("preview turn execution rejected for task %s: not at human review step", taskID),
+			After: map[string]any{
+				"project":   project,
+				"taskId":    taskID,
+				"errorCode": ErrCodeConflict,
+			},
+			Request: r,
+		})
 		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "当前节点正由智能体后台执行中。待流转至人工审核节点后即可进行代码即时调优。")
 		return
 	}
@@ -176,13 +191,48 @@ func (s *Server) executePreviewChatTurn(w http.ResponseWriter, r *http.Request, 
 		LeaseDuration:  5 * time.Minute,
 	})
 	if err != nil {
+		errCode := "turn_execution_failed"
+		httpStatus := http.StatusInternalServerError
 		if errors.Is(err, previewreceipt.ErrConflict) {
-			s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, previewreceipt.RedactSecrets(err.Error()))
-			return
+			errCode = ErrCodeConflict
+			httpStatus = http.StatusConflict
 		}
-		s.jsonErrorCode(w, http.StatusInternalServerError, "turn_execution_failed", previewreceipt.RedactSecrets(err.Error()))
+		s.auditLog(auditLogInput{
+			WorkspaceID:  workspaceID,
+			ActorType:    "user",
+			ActorID:      principal.Username,
+			Action:       "preview_turn.execution_rejected",
+			ResourceType: "preview_turn",
+			ResourceID:   taskID,
+			Summary:      fmt.Sprintf("preview turn execution failed for task %s: %s", taskID, errCode),
+			After: map[string]any{
+				"project":   project,
+				"taskId":    taskID,
+				"errorCode": errCode,
+			},
+			Request: r,
+		})
+		s.jsonErrorCode(w, httpStatus, errCode, previewreceipt.RedactSecrets(err.Error()))
 		return
 	}
+
+	s.auditLog(auditLogInput{
+		WorkspaceID:  workspaceID,
+		ActorType:    "user",
+		ActorID:      principal.Username,
+		Action:       "preview_turn.executed",
+		ResourceType: "preview_turn",
+		ResourceID:   receipt.ID,
+		Summary:      fmt.Sprintf("preview turn %s executed for task %s", receipt.ID, taskID),
+		After: map[string]any{
+			"project":   project,
+			"taskId":    taskID,
+			"turnId":    receipt.TurnID,
+			"receiptId": receipt.ID,
+			"status":    receipt.Status,
+		},
+		Request: r,
+	})
 
 	// Add audit comment to task
 	_ = s.ts.AddComment(project, agentName, &entity.TaskComment{
@@ -319,6 +369,11 @@ func (s *Server) handlePostTaskPreviewTurnRollback(w http.ResponseWriter, r *htt
 	}
 	r = authReq
 
+	if !s.PreviewTurnReceiptsEnabledForProject(project) {
+		s.jsonErrorCode(w, http.StatusConflict, "feature_disabled", s.PreviewTurnReceiptsDisabledReasonForProject(project))
+		return
+	}
+
 	task, agentName, err := s.findTaskInProject(project, taskID)
 	if err != nil || task == nil {
 		s.jsonError(w, http.StatusNotFound, "task not found")
@@ -335,6 +390,22 @@ func (s *Server) handlePostTaskPreviewTurnRollback(w http.ResponseWriter, r *htt
 
 	workspaceID := s.currentWorkspaceIDValue(r)
 	if !s.isTaskAtHumanReviewStep(workspaceID, project, taskID) {
+		s.auditLog(auditLogInput{
+			WorkspaceID:  workspaceID,
+			ActorType:    "user",
+			ActorID:      principal.Username,
+			Action:       "preview_turn.rollback_rejected",
+			ResourceType: "preview_turn",
+			ResourceID:   turnID,
+			Summary:      fmt.Sprintf("preview turn rollback rejected for turn %s in task %s: not at human review step", turnID, taskID),
+			After: map[string]any{
+				"project":   project,
+				"taskId":    taskID,
+				"turnId":    turnID,
+				"errorCode": ErrCodeConflict,
+			},
+			Request: r,
+		})
 		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "当前节点正由智能体后台执行中。待流转至人工审核节点后即可进行回滚调优。")
 		return
 	}
@@ -349,6 +420,22 @@ func (s *Server) handlePostTaskPreviewTurnRollback(w http.ResponseWriter, r *htt
 	if err == nil {
 		for _, rec := range receipts {
 			if rec.Status == previewreceipt.StatusCommitting {
+				s.auditLog(auditLogInput{
+					WorkspaceID:  workspaceID,
+					ActorType:    "user",
+					ActorID:      principal.Username,
+					Action:       "preview_turn.rollback_rejected",
+					ResourceType: "preview_turn",
+					ResourceID:   turnID,
+					Summary:      fmt.Sprintf("preview turn rollback rejected for turn %s in task %s: changes are committing to git", turnID, taskID),
+					After: map[string]any{
+						"project":   project,
+						"taskId":    taskID,
+						"turnId":    turnID,
+						"errorCode": ErrCodeConflict,
+					},
+					Request: r,
+				})
 				s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "cannot rollback turn while changes are committing to git")
 				return
 			}
@@ -377,17 +464,59 @@ func (s *Server) handlePostTaskPreviewTurnRollback(w http.ResponseWriter, r *htt
 		Actor:          principal.Username,
 	})
 	if err != nil {
+		errCode := "rollback_failed"
+		httpStatus := http.StatusInternalServerError
 		if errors.Is(err, previewreceipt.ErrNotFound) {
-			s.jsonErrorCode(w, http.StatusNotFound, ErrCodeNotFound, "turn receipt not found")
+			errCode = ErrCodeNotFound
+			httpStatus = http.StatusNotFound
+		} else if errors.Is(err, previewreceipt.ErrConflict) {
+			errCode = ErrCodeConflict
+			httpStatus = http.StatusConflict
+		}
+		s.auditLog(auditLogInput{
+			WorkspaceID:  workspaceID,
+			ActorType:    "user",
+			ActorID:      principal.Username,
+			Action:       "preview_turn.rollback_rejected",
+			ResourceType: "preview_turn",
+			ResourceID:   turnID,
+			Summary:      fmt.Sprintf("preview turn rollback failed for turn %s in task %s: %s", turnID, taskID, errCode),
+			After: map[string]any{
+				"project":   project,
+				"taskId":    taskID,
+				"turnId":    turnID,
+				"errorCode": errCode,
+			},
+			Request: r,
+		})
+		if errors.Is(err, previewreceipt.ErrNotFound) {
+			s.jsonErrorCode(w, httpStatus, errCode, "turn receipt not found")
 			return
 		}
 		if errors.Is(err, previewreceipt.ErrConflict) {
-			s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, fmt.Sprintf("rollback conflict: %v", err))
+			s.jsonErrorCode(w, httpStatus, errCode, fmt.Sprintf("rollback conflict: %v", err))
 			return
 		}
 		s.serverError(w, err)
 		return
 	}
+
+	s.auditLog(auditLogInput{
+		WorkspaceID:  workspaceID,
+		ActorType:    "user",
+		ActorID:      principal.Username,
+		Action:       "preview_turn.rolled_back",
+		ResourceType: "preview_turn",
+		ResourceID:   turnID,
+		Summary:      fmt.Sprintf("preview turn %s rolled back for task %s", turnID, taskID),
+		After: map[string]any{
+			"project": project,
+			"taskId":  taskID,
+			"turnId":  turnID,
+			"status":  previewreceipt.StatusRolledBack,
+		},
+		Request: r,
+	})
 
 	_ = s.ts.AddComment(project, agentName, &entity.TaskComment{
 		ID:        entity.NewCommentID(),

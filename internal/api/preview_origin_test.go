@@ -600,5 +600,59 @@ func TestPreviewTurnReceiptsEnabledFailClosed(t *testing.T) {
 	}
 }
 
+func TestPreviewTurnReceiptsEnabledForProject(t *testing.T) {
+	s := &Server{}
+	s.SetPreviewCopilotDrawerEnabled(true)
+	s.SetConsoleOrigin("https://console.example.com")
+	s.SetPreviewOrigin("https://preview.example.com")
+	t.Setenv("MULTIGENT_CONNECTION_ENCRYPTION_KEY", "bXlzdGVyaW91c2tleWZvcjMyYnl0ZXNlY3JldA==")
+
+	// 1. Global flag disabled -> all projects return false
+	s.SetPreviewTurnReceiptsEnabled(false)
+	s.SetPreviewTurnReceiptsProjects("sample-project")
+	if s.PreviewTurnReceiptsEnabledForProject("sample-project") {
+		t.Fatal("expected false when global receipts flag is disabled")
+	}
+
+	// 2. Global flag enabled, but allowlist empty -> returns false
+	s.SetPreviewTurnReceiptsEnabled(true)
+	s.SetPreviewTurnReceiptsProjects("")
+	if s.PreviewTurnReceiptsEnabledForProject("sample-project") {
+		t.Fatal("expected false when allowlist is empty")
+	}
+	if !strings.Contains(s.PreviewTurnReceiptsDisabledReasonForProject("sample-project"), "is not in preview turn receipts allowlist") {
+		t.Fatalf("unexpected reason: %s", s.PreviewTurnReceiptsDisabledReasonForProject("sample-project"))
+	}
+
+	// 3. Allowlist is "*" or contains "*" -> fail-closed, does not wildcard match
+	s.SetPreviewTurnReceiptsProjects("*")
+	if s.PreviewTurnReceiptsEnabledForProject("sample-project") {
+		t.Fatal("expected false when allowlist is wildcard '*'")
+	}
+	s.SetPreviewTurnReceiptsProjects("*,foo")
+	if s.PreviewTurnReceiptsEnabledForProject("foo") {
+		// "foo" matches, but "*" never matches as wildcard:
+		if s.PreviewTurnReceiptsEnabledForProject("sample-project") {
+			t.Fatal("wildcard '*' must never match other projects")
+		}
+	}
+
+	// 4. Exact match in comma-separated list
+	s.SetPreviewTurnReceiptsProjects("proj-alpha, proj-beta")
+	if !s.PreviewTurnReceiptsEnabledForProject("proj-alpha") {
+		t.Fatal("expected true for proj-alpha")
+	}
+	if !s.PreviewTurnReceiptsEnabledForProject("proj-beta") {
+		t.Fatal("expected true for proj-beta")
+	}
+	if s.PreviewTurnReceiptsEnabledForProject("proj-gamma") {
+		t.Fatal("expected false for unlisted proj-gamma")
+	}
+	if s.PreviewTurnReceiptsEnabledForProject("") {
+		t.Fatal("expected false for empty project")
+	}
+}
+
+
 
 

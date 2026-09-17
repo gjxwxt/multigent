@@ -113,9 +113,10 @@ type PreviewReceipt struct {
 	TouchedPaths     []string         `json:"touchedPaths,omitempty"`
 	Postimages       []PostimageEntry `json:"postimages,omitempty"`
 	FailureReason    string           `json:"failureReason,omitempty"`
-	CommitIntentID   string           `json:"commitIntentId,omitempty"`
-	PreCommitSHA     string           `json:"preCommitSha,omitempty"`
-	CommittedSHA     string           `json:"committedSha,omitempty"`
+	CommitIntentID         string           `json:"commitIntentId,omitempty"`
+	PreCommitSHA           string           `json:"preCommitSha,omitempty"`
+	CommittedSHA           string           `json:"committedSha,omitempty"`
+	SnapshotCleanupPending bool             `json:"snapshotCleanupPending,omitempty"`
 }
 
 // receiptRecord is used exclusively for internal storage in kv_records to persist
@@ -125,11 +126,48 @@ type receiptRecord struct {
 	StoredPatch string `json:"storedPatch,omitempty"`
 }
 
+const (
+	HolderTypeTurn         = "turn"
+	HolderTypeCommitIntent = "commit_intent"
+)
+
 // TaskSlot tracks the active receipt slot for a project/task pair.
 type TaskSlot struct {
-	ReceiptID      string    `json:"receiptId"`
+	HolderType     string    `json:"holderType,omitempty"`
+	ReceiptID      string    `json:"receiptId,omitempty"`
+	CommitIntentID string    `json:"commitIntentId,omitempty"`
+	ReceiptIDs     []string  `json:"receiptIds,omitempty"`
 	Project        string    `json:"project"`
 	TaskID         string    `json:"taskId"`
 	UpdatedAt      time.Time `json:"updatedAt"`
 	LeaseExpiresAt time.Time `json:"leaseExpiresAt"`
+}
+
+// IsCommitIntentGroup reports whether slot is held by a commit intent group.
+func (s *TaskSlot) IsCommitIntentGroup() bool {
+	if s == nil {
+		return false
+	}
+	return s.HolderType == HolderTypeCommitIntent || s.CommitIntentID != ""
+}
+
+// MatchesHolder reports whether receiptID or intentID matches this slot's holder.
+func (s *TaskSlot) MatchesHolder(receiptID, intentID string) bool {
+	if s == nil {
+		return false
+	}
+	if s.IsCommitIntentGroup() {
+		if intentID != "" && s.CommitIntentID == intentID {
+			return true
+		}
+		if receiptID != "" {
+			for _, id := range s.ReceiptIDs {
+				if id == receiptID {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return receiptID != "" && s.ReceiptID == receiptID
 }

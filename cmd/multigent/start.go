@@ -105,6 +105,7 @@ remote server. For local development with hot-reload, use
 			srv.SetConsoleOrigin(os.Getenv(api.ConsoleOriginEnv))
 			srv.SetPreviewCopilotDrawerEnabled(api.IsTruthyEnv(os.Getenv(api.PreviewCopilotDrawerEnv)))
 			srv.SetPreviewTurnReceiptsEnabled(api.IsTruthyEnv(os.Getenv(api.PreviewTurnReceiptsEnv)))
+			srv.SetPreviewTurnReceiptsProjects(os.Getenv(api.PreviewTurnReceiptsProjectsEnv))
 			if srv.PreviewOrigin() == "" {
 				log.Printf("preview sharing disabled: %s is not set (fail-closed; preview surfaces return 404)", api.PreviewOriginEnv)
 			} else {

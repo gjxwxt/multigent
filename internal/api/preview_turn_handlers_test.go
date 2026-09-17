@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/gitworktree"
 	"github.com/multigent/multigent/internal/preview"
@@ -251,6 +252,12 @@ func TestPostTaskPreviewTurnRollback_Lifecycle(t *testing.T) {
 	}
 
 	// 1. Rollback when task is not at human_review step -> blocked (409)
+	s.SetConsoleOrigin("http://127.0.0.1:27891")
+	s.SetPreviewOrigin("http://127.0.0.1:27892")
+	s.SetPreviewCopilotDrawerEnabled(true)
+	s.SetPreviewTurnReceiptsEnabled(true)
+	s.SetPreviewTurnReceiptsProjects("sample")
+
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
 	_, _ = wfStore.CompleteAndAdvance("sample", task.ID, "ok", "", map[string]string{"decision": "approve"}, "completed")
 	// Now step is 'dev' (agent_task)
@@ -334,6 +341,7 @@ func TestPostTaskPreviewChat_ExecutionAndCapture(t *testing.T) {
 	s.SetPreviewOrigin("http://127.0.0.1:27892")
 	s.SetPreviewCopilotDrawerEnabled(true)
 	s.SetPreviewTurnReceiptsEnabled(true)
+	s.SetPreviewTurnReceiptsProjects("sample")
 
 	s.previewAgentRunnerFunc = func(workspaceID, project, agentName, runtimeURL string) previewreceipt.AgentRunner {
 		return previewreceipt.AgentRunnerFunc(func(ctx context.Context, cloneDir string, prompt string) error {
@@ -535,6 +543,7 @@ func TestPostTaskPreviewChat_SensitiveDataRedactedInCommentAndError(t *testing.T
 	s.SetPreviewOrigin("http://127.0.0.1:27892")
 	s.SetPreviewCopilotDrawerEnabled(true)
 	s.SetPreviewTurnReceiptsEnabled(true)
+	s.SetPreviewTurnReceiptsProjects("sample")
 
 	secretToken := "sk-ant-api03-abcdef1234567890abcdef1234567890"
 
@@ -854,4 +863,192 @@ func TestPreviewTurn_StaleRecoverySweepsOrphanedTurns(t *testing.T) {
 	}
 }
 
+func TestPreviewTurn_AllowlistEnforcement(t *testing.T) {
+	t.Setenv(secretbox.EnvKey, "test-master-key-for-preview-32b!!")
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	seedSampleAgentsForTest(t, s, workspaceID)
+	if err := s.st.SaveProject("sample", &entity.Project{Name: "sample"}); err != nil {
+		t.Fatalf("save project: %v", err)
+	}
 
+	repoDir := setupTestWorktreeRepo(t)
+	task := setupHumanReviewTask(t, s, workspaceID, "sample", "t-allowlist-test", repoDir)
+
+	s.SetConsoleOrigin("http://127.0.0.1:27891")
+	s.SetPreviewOrigin("http://127.0.0.1:27892")
+	s.SetPreviewCopilotDrawerEnabled(true)
+	s.SetPreviewTurnReceiptsEnabled(true)
+
+	runnerInvoked := false
+	s.previewAgentRunnerFunc = func(workspaceID, project, agentName, runtimeURL string) previewreceipt.AgentRunner {
+		return previewreceipt.AgentRunnerFunc(func(ctx context.Context, cloneDir string, prompt string) error {
+			runnerInvoked = true
+			return os.WriteFile(filepath.Join(cloneDir, "code.txt"), []byte("allowlist ok\n"), 0644)
+		})
+	}
+
+	chatPayload := previewChatBody{
+		Message: "test allowlist enforcement",
+	}
+
+	// 1. When project "sample" is NOT in allowlist -> 409 feature_disabled
+	s.SetPreviewTurnReceiptsProjects("other-project,unrelated")
+	reqChat := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/t-allowlist-test/preview/chat", "admin", chatPayload)
+	reqChat.SetPathValue("name", "sample")
+	reqChat.SetPathValue("taskId", task.ID)
+	wChat := httptest.NewRecorder()
+
+	s.handlePostTaskPreviewChat(wChat, reqChat)
+	if wChat.Code != http.StatusConflict {
+		t.Fatalf("expected 409 conflict when project not in allowlist, got %d: %s", wChat.Code, wChat.Body.String())
+	}
+	if !strings.Contains(wChat.Body.String(), "feature_disabled") || !strings.Contains(wChat.Body.String(), "allowlist") {
+		t.Fatalf("expected feature_disabled and allowlist reason, got: %s", wChat.Body.String())
+	}
+	if runnerInvoked {
+		t.Fatal("agent runner must NOT be invoked when project is not in allowlist")
+	}
+
+	// 2. Rollback also rejected with 409 feature_disabled
+	reqRollback := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/t-allowlist-test/preview/turns/fake-turn/rollback", "admin", nil)
+	reqRollback.SetPathValue("name", "sample")
+	reqRollback.SetPathValue("taskId", task.ID)
+	reqRollback.SetPathValue("turnId", "fake-turn")
+	wRollback := httptest.NewRecorder()
+
+	s.handlePostTaskPreviewTurnRollback(wRollback, reqRollback)
+	if wRollback.Code != http.StatusConflict {
+		t.Fatalf("expected 409 conflict for rollback when project not in allowlist, got %d: %s", wRollback.Code, wRollback.Body.String())
+	}
+	if !strings.Contains(wRollback.Body.String(), "feature_disabled") || !strings.Contains(wRollback.Body.String(), "allowlist") {
+		t.Fatalf("expected feature_disabled and allowlist reason, got: %s", wRollback.Body.String())
+	}
+
+	// 3. Status response reports turnReceiptsEnabled == false for unlisted project
+	reqStatus := providerTestRequest(http.MethodGet, "/api/v1/projects/sample/tasks/t-allowlist-test/preview/status", "admin", nil)
+	reqStatus.SetPathValue("name", "sample")
+	reqStatus.SetPathValue("taskId", task.ID)
+	wStatus := httptest.NewRecorder()
+	s.handleGetTaskPreviewStatus(wStatus, reqStatus)
+	var statusData map[string]any
+	if err := json.Unmarshal(wStatus.Body.Bytes(), &statusData); err != nil {
+		t.Fatal(err)
+	}
+	if statusData["turnReceiptsEnabled"] != false {
+		t.Fatalf("expected turnReceiptsEnabled=false for unlisted project, got: %v", statusData["turnReceiptsEnabled"])
+	}
+
+	// 4. Once project "sample" is added to allowlist -> chat execution proceeds to 200 OK!
+	s.SetPreviewTurnReceiptsProjects("other-project, sample, unrelated")
+	wChatOK := httptest.NewRecorder()
+	s.handlePostTaskPreviewChat(wChatOK, reqChat)
+	if wChatOK.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK when project is in allowlist, got %d: %s", wChatOK.Code, wChatOK.Body.String())
+	}
+	if !runnerInvoked {
+		t.Fatal("agent runner should be invoked when project is in allowlist")
+	}
+}
+
+func TestPreviewTurn_AuditEventLogging(t *testing.T) {
+	t.Setenv(secretbox.EnvKey, "test-master-key-for-preview-32b!!")
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	seedSampleAgentsForTest(t, s, workspaceID)
+	if err := s.st.SaveProject("sample", &entity.Project{Name: "sample"}); err != nil {
+		t.Fatalf("save project: %v", err)
+	}
+
+	s.SetConsoleOrigin("http://127.0.0.1:27891")
+	s.SetPreviewOrigin("http://127.0.0.1:27892")
+	s.SetPreviewCopilotDrawerEnabled(true)
+	s.SetPreviewTurnReceiptsEnabled(true)
+	s.SetPreviewTurnReceiptsProjects("sample")
+
+	repoDir := setupTestWorktreeRepo(t)
+	task := setupHumanReviewTask(t, s, workspaceID, "sample", "t-audit-test", repoDir)
+
+	secretPrompt := "SUPER_CONFIDENTIAL_USER_PROMPT_12345"
+	s.previewAgentRunnerFunc = func(ws, proj, ag, localAPI string) previewreceipt.AgentRunner {
+		return previewreceipt.AgentRunnerFunc(func(ctx context.Context, cloneDir string, prompt string) error {
+			return os.WriteFile(filepath.Join(cloneDir, "code.txt"), []byte("audited change\n"), 0644)
+		})
+	}
+
+	// 1. Execute Turn -> Should emit preview_turn.executed
+	chatBody := previewChatBody{Message: secretPrompt}
+	reqChat := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/t-audit-test/preview/chat", "admin", chatBody)
+	reqChat.SetPathValue("name", "sample")
+	reqChat.SetPathValue("taskId", task.ID)
+	wChat := httptest.NewRecorder()
+	s.handlePostTaskPreviewChat(wChat, reqChat)
+	if wChat.Code != http.StatusOK {
+		t.Fatalf("chat failed: %d (%s)", wChat.Code, wChat.Body.String())
+	}
+
+	var chatResp map[string]any
+	_ = json.Unmarshal(wChat.Body.Bytes(), &chatResp)
+	turnID, _ := chatResp["turnId"].(string)
+	if turnID == "" {
+		t.Fatal("expected turnId in chat response")
+	}
+
+	// 2. Rollback Turn -> Should emit preview_turn.rolled_back
+	reqRollback := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/t-audit-test/preview/turns/"+turnID+"/rollback", "admin", nil)
+	reqRollback.SetPathValue("name", "sample")
+	reqRollback.SetPathValue("taskId", task.ID)
+	reqRollback.SetPathValue("turnId", turnID)
+	wRollback := httptest.NewRecorder()
+	s.handlePostTaskPreviewTurnRollback(wRollback, reqRollback)
+	if wRollback.Code != http.StatusOK {
+		t.Fatalf("rollback failed: %d (%s)", wRollback.Code, wRollback.Body.String())
+	}
+
+	// 3. Rollback again -> Should fail with conflict/not found -> emit preview_turn.rollback_rejected
+	wRollback2 := httptest.NewRecorder()
+	s.handlePostTaskPreviewTurnRollback(wRollback2, reqRollback)
+	if wRollback2.Code == http.StatusOK {
+		t.Fatal("expected 2nd rollback to fail")
+	}
+
+	// 4. Cancel active turn / stop preview -> Should emit preview_turn.cancelled
+	reqStop := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/t-audit-test/preview/stop", "admin", nil)
+	reqStop.SetPathValue("name", "sample")
+	reqStop.SetPathValue("taskId", task.ID)
+	wStop := httptest.NewRecorder()
+	s.handlePostTaskPreviewStop(wStop, reqStop)
+	if wStop.Code != http.StatusOK {
+		t.Fatalf("stop failed: %d (%s)", wStop.Code, wStop.Body.String())
+	}
+
+	// 5. Query controlDB for audit events
+	events, err := s.controlDB.ListAuditEvents(db.AuditEventFilter{WorkspaceID: workspaceID})
+	if err != nil {
+		t.Fatalf("ListAuditEvents: %v", err)
+	}
+
+	actionsFound := make(map[string]bool)
+	for _, ev := range events {
+		if strings.HasPrefix(ev.Action, "preview_turn.") {
+			actionsFound[ev.Action] = true
+
+			// Strict privacy invariant assertion:
+			if strings.Contains(ev.Summary, secretPrompt) || strings.Contains(ev.AfterJSON, secretPrompt) {
+				t.Fatalf("audit event %s leaked confidential prompt: summary=%s, after=%s", ev.Action, ev.Summary, ev.AfterJSON)
+			}
+			if strings.Contains(ev.AfterJSON, "SUPER_SECRET") || strings.Contains(ev.AfterJSON, "diff --git") {
+				t.Fatalf("audit event %s leaked diff or patch content: %s", ev.Action, ev.AfterJSON)
+			}
+		}
+	}
+
+	for _, expectedAction := range []string{
+		"preview_turn.executed",
+		"preview_turn.rolled_back",
+		"preview_turn.rollback_rejected",
+		"preview_turn.cancelled",
+	} {
+		if !actionsFound[expectedAction] {
+			t.Errorf("expected audit event %s was not emitted", expectedAction)
+		}
+	}
+}

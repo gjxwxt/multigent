@@ -158,8 +158,9 @@ type Server struct {
 	designRateMu           sync.Mutex
 	designReadRateSeen     map[string]*previewChatBucket
 	designWriteRateSeen    map[string]*previewChatBucket
-	threadProjections      *imbridge.TaskThreadProjectionService
-	previewAgentRunnerFunc func(workspaceID, project, agentName, runtimeURL string) previewreceipt.AgentRunner
+	threadProjections           *imbridge.TaskThreadProjectionService
+	previewAgentRunnerFunc      func(workspaceID, project, agentName, runtimeURL string) previewreceipt.AgentRunner
+	previewTurnReceiptsProjects string
 }
 
 // NewServer builds an API server for the given workspace root.
@@ -200,8 +201,9 @@ func NewServer(root, apiKey string) *Server {
 		worktreeMgr:                gitworktree.NewManager(),
 		previewSessions:            make(map[string]*previewChatSession),
 		threadProjections:          imbridge.NewTaskThreadProjectionService(controlDB, nil),
-		enablePreviewCopilotDrawer: IsTruthyEnv(os.Getenv(PreviewCopilotDrawerEnv)),
-		enablePreviewTurnReceipts:  IsTruthyEnv(os.Getenv(PreviewTurnReceiptsEnv)),
+		enablePreviewCopilotDrawer:  IsTruthyEnv(os.Getenv(PreviewCopilotDrawerEnv)),
+		enablePreviewTurnReceipts:   IsTruthyEnv(os.Getenv(PreviewTurnReceiptsEnv)),
+		previewTurnReceiptsProjects: os.Getenv(PreviewTurnReceiptsProjectsEnv),
 	}
 	// Runtime-node agents' task triggers join the node dispatch queue instead
 	// of the local wakeup cycle (hook wired after s exists; nil-safe before).

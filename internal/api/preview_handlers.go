@@ -320,7 +320,7 @@ func (s *Server) handleGetTaskPreview(w http.ResponseWriter, r *http.Request) {
 			"worktreeDir":   worktreeDir,
 			"previewToken":        s.signPreviewToken(taskID, project),
 			"drawerEnabled":       s.PreviewCopilotDrawerEnabled(),
-			"turnReceiptsEnabled": s.PreviewTurnReceiptsEnabled(),
+			"turnReceiptsEnabled": s.PreviewTurnReceiptsEnabledForProject(project),
 		})
 		return
 	}
@@ -335,7 +335,7 @@ func (s *Server) handleGetTaskPreview(w http.ResponseWriter, r *http.Request) {
 		PreviewInstance:     inst,
 		PreviewToken:        s.signPreviewToken(taskID, inst.Project),
 		DrawerEnabled:       s.PreviewCopilotDrawerEnabled(),
-		TurnReceiptsEnabled: s.PreviewTurnReceiptsEnabled(),
+		TurnReceiptsEnabled: s.PreviewTurnReceiptsEnabledForProject(inst.Project),
 	})
 }
 
@@ -455,8 +455,8 @@ func (s *Server) handlePostTaskPreviewFeedback(w http.ResponseWriter, r *http.Re
 	}
 
 	// Guard 3: Slice B gate — receipts feature flag and isolated clone
-	if !s.PreviewTurnReceiptsEnabled() {
-		s.jsonErrorCode(w, http.StatusConflict, "feature_disabled", s.PreviewTurnReceiptsDisabledReason())
+	if !s.PreviewTurnReceiptsEnabledForProject(project) {
+		s.jsonErrorCode(w, http.StatusConflict, "feature_disabled", s.PreviewTurnReceiptsDisabledReasonForProject(project))
 		return
 	}
 	s.jsonErrorCode(w, http.StatusConflict, "feature_disabled", "preview feedback code modification is disabled until receipt and isolated clone are implemented")
@@ -507,8 +507,8 @@ func (s *Server) handlePostTaskPreviewChat(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Guard 3: Slice B gate — receipts feature flag and isolated clone
-	if !s.PreviewTurnReceiptsEnabled() {
-		s.jsonErrorCode(w, http.StatusConflict, "feature_disabled", s.PreviewTurnReceiptsDisabledReason())
+	if !s.PreviewTurnReceiptsEnabledForProject(project) {
+		s.jsonErrorCode(w, http.StatusConflict, "feature_disabled", s.PreviewTurnReceiptsDisabledReasonForProject(project))
 		return
 	}
 
@@ -581,9 +581,11 @@ func (s *Server) handlePostTaskPreviewStop(w http.ResponseWriter, r *http.Reques
 	taskID := strings.TrimSpace(r.PathValue("taskId"))
 	// Task 1.1: stop kills a running Copilot session — a real principal with
 	// operator rights only; share tokens are view-only (403 here).
-	if _, _, ok := s.previewWritePrincipal(w, r, project, taskID); !ok {
+	authReq, principal, ok := s.previewWritePrincipal(w, r, project, taskID)
+	if !ok {
 		return
 	}
+	r = authReq
 	s.previewMu.Lock()
 	session, exists := s.previewSessions[taskID]
 	if exists && session != nil {
@@ -599,6 +601,21 @@ func (s *Server) handlePostTaskPreviewStop(w http.ResponseWriter, r *http.Reques
 	engine := s.turnEngine(r)
 	if engine != nil {
 		_ = engine.CancelActiveTurn(r.Context(), project, taskID, "stopped by operator")
+		s.auditLog(auditLogInput{
+			WorkspaceID:  s.currentWorkspaceIDValue(r),
+			ActorType:    "user",
+			ActorID:      principal.Username,
+			Action:       "preview_turn.cancelled",
+			ResourceType: "preview_turn",
+			ResourceID:   taskID,
+			Summary:      fmt.Sprintf("preview turn cancelled for task %s", taskID),
+			After: map[string]any{
+				"project": project,
+				"taskId":  taskID,
+				"reason":  "stopped by operator",
+			},
+			Request: r,
+		})
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -641,7 +658,7 @@ func (s *Server) handleGetTaskPreviewStatus(w http.ResponseWriter, r *http.Reque
 		"busy":                busy,
 		"agent":               agent,
 		"startedAt":           startedAt,
-		"turnReceiptsEnabled": s.PreviewTurnReceiptsEnabled(),
+		"turnReceiptsEnabled": s.PreviewTurnReceiptsEnabledForProject(project),
 	})
 }
 
