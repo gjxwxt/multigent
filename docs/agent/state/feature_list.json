@@ -51,13 +51,57 @@
     },
     {
       "id": "im-instance-approval-identity-hardening",
-      "status": "planned",
+      "status": "completed",
       "dependsOn": ["im-instance-delivery-routing"],
+      "commit": "d15e7fd",
       "summary": "Scope Mattermost bind-conflict and approval/callback identity resolution to the IM instance, not only the provider.",
-      "doneWhen": [
+      "verification": [
+        "go test -v ./internal/db -run TestClaimMattermostIdentity",
+        "go test -v ./internal/api -run 'TestChatops_|TestMattermostSlashBind'",
+        "make test",
+        "make build"
+      ],
+      "boundaries": [
         "Mattermost bind-conflict checks no longer use a provider-global external identity as their security key.",
         "Interactive-card callbacks resolve a user through the source binding or administrator-attested instance, never an arbitrary same-provider identity.",
         "Existing non-Mattermost provider behavior and unassociated Mattermost connections remain compatible and fail closed."
+      ]
+    },
+    {
+      "id": "preview-turn-receipts-slice-b",
+      "status": "completed",
+      "commit": "b114bd9b",
+      "summary": "Transactional Turn Receipts for Preview Copilot with single-transaction group-slot lifecycle, lease defense, strict Docker container isolation, project allowlist gate, and zero-leakage audit events.",
+      "verification": [
+        "MULTIGENT_RUN_DOCKER_INTEGRATION=1 MULTIGENT_PREVIEW_DOCKER_TEST_IMAGE='alpine:3.21' go test -race -v ./internal/api -run 'TestPreviewTurn_DockerSandboxExecution_RealContainer'",
+        "go test -race -v ./internal/sandbox -run 'TestBuildArgs_IsolatedPreview'",
+        "go test -race -v ./internal/runner -run 'TestIsolatedPreviewRun_FailClosedRejection'",
+        "go test -race -count=1 ./internal/previewreceipt/...",
+        "go test -race -count=1 ./internal/api -run 'Test(WorkflowReview_Commit|ReviewCommit|PreviewTurn|PreviewOrigin)'",
+        "make test",
+        "make build"
+      ],
+      "boundaries": [
+        "MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS remains false by default (fail-closed 409).",
+        "Isolated preview execution strictly permits exactly 1 volume mount (cloneDir:/workspace:rw) and rejects all extra host directories, credentials, and docker.sock.",
+        "Task slot is permanently locked on REVERT_FAILED; no automatic recovery API is exposed."
+      ]
+    },
+    {
+      "id": "preview-guarded-skill-profiles",
+      "status": "completed",
+      "dependsOn": ["preview-turn-receipts-slice-b"],
+      "summary": "Guarded Skill Profiles for Preview Copilot with server allowlist, SHA-256 integrity digest validation, script execution neutralization, endpoint GET /api/v1/projects/{name}/tasks/{taskId}/preview/profiles, and UI profile chips selector.",
+      "verification": [
+        "go test -race -v ./internal/api -run 'TestPreviewSkillProfiles'",
+        "cd web && npm run build",
+        "make test",
+        "make build"
+      ],
+      "boundaries": [
+        "Preview Copilot strictly disables script execution (.sh) attachments; only pure declarative markdown guidance is injected.",
+        "Unlisted skill profiles fail closed with 400 Bad Request.",
+        "Tampering with skill directory files invalidates digest and triggers failure."
       ]
     }
   ]

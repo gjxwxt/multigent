@@ -58,10 +58,18 @@ export type CopilotTool = {
   target: string
 }
 
+export type PreviewSkillProfile = {
+  id: string
+  name: string
+  description: string
+  skillIds: string[]
+}
+
 export type CopilotMsg = {
   id: string
   role: 'user' | 'assistant'
   content: string
+  profile?: string
   domTarget?: DOMTarget
   tools?: CopilotTool[]
   isThinking?: boolean
@@ -311,6 +319,8 @@ export function PreviewDrawer({
   const [isRollingBack, setIsRollingBack] = useState(false)
   const [rollbackError, setRollbackError] = useState<string | null>(null)
   const [showRollbackConfirm, setShowRollbackConfirm] = useState(false)
+  const [availableProfiles, setAvailableProfiles] = useState<PreviewSkillProfile[]>([])
+  const [selectedProfile, setSelectedProfile] = useState<string | null>(null)
 
   const abortCtrlRef = useRef<AbortController | null>(null)
   const chatScrollRef = useRef<HTMLDivElement>(null)
@@ -403,12 +413,32 @@ export function PreviewDrawer({
     }
   }, [project, taskId])
 
-  // Fetch turns when copilot is opened or taskId changes
+  const fetchProfiles = useCallback(async () => {
+    try {
+      const token = getStoredToken()
+      const headers: Record<string, string> = {}
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      const res = await fetch(
+        apiUrl(`/api/v1/projects/${encodeURIComponent(project || 'current')}/tasks/${encodeURIComponent(taskId)}/preview/profiles`),
+        { headers }
+      )
+      if (!res.ok) return
+      const data = await res.json()
+      if (data && data.ok && Array.isArray(data.profiles)) {
+        setAvailableProfiles(data.profiles)
+      }
+    } catch {
+      // ignore
+    }
+  }, [project, taskId])
+
+  // Fetch turns and skill profiles when copilot is opened or taskId changes
   useEffect(() => {
     if (copilotOpen) {
       void fetchTurns()
+      void fetchProfiles()
     }
-  }, [copilotOpen, fetchTurns])
+  }, [copilotOpen, fetchTurns, fetchProfiles])
 
   const handleSelectTurn = useCallback(
     async (turn: TurnReceipt) => {
@@ -483,11 +513,12 @@ export function PreviewDrawer({
 
   useEffect(() => {
     void checkStatus()
+    void fetchProfiles()
     const timer = setInterval(() => {
       void checkStatus()
     }, 5000)
     return () => clearInterval(timer)
-  }, [checkStatus])
+  }, [checkStatus, fetchProfiles])
 
   const handleSetLayoutMode = (mode: 'floating' | 'docked') => {
     setLayoutMode(mode)
@@ -745,11 +776,13 @@ export function PreviewDrawer({
     return false
   }
 
-  const handleSend = async (overridePrompt?: string) => {
+  const handleSend = async (overridePrompt?: string, profileOverride?: string) => {
     if (!turnReceiptsEnabled) return
     const text = (overridePrompt ?? input).trim()
     if (!text && !selectedDOM) return
     if (isStreaming) return
+
+    const activeProfile = profileOverride !== undefined ? profileOverride : selectedProfile
 
     setLockWarning(null)
     const dom = selectedDOM
@@ -776,6 +809,7 @@ export function PreviewDrawer({
       id: 'msg-' + Date.now() + '-u',
       role: 'user',
       content: displayContent,
+      profile: activeProfile || undefined,
       domTarget: dom || undefined,
     }
 
@@ -809,12 +843,20 @@ export function PreviewDrawer({
         content: m.content,
       }))
 
+      const reqBody: Record<string, any> = {
+        message: finalPrompt,
+        history: historyPayload,
+      }
+      if (activeProfile) {
+        reqBody.profile = activeProfile
+      }
+
       const res = await fetch(
         apiUrl(`/api/v1/projects/${encodeURIComponent(project || 'current')}/tasks/${encodeURIComponent(taskId)}/preview/chat`),
         {
           method: 'POST',
           headers,
-          body: JSON.stringify({ message: finalPrompt, history: historyPayload }),
+          body: JSON.stringify(reqBody),
           signal: controller.signal,
         }
       )
@@ -1284,7 +1326,7 @@ export function PreviewDrawer({
                     </button>
                     <button
                       type="button"
-                      onClick={() => void handleSend('请优化当前页面的整体色彩搭配、边距排版和视觉层次')}
+                      onClick={() => void handleSend('请优化当前页面的整体色彩搭配、边距排版和视觉层次', 'ui-polish')}
                       disabled={!turnReceiptsEnabled || !canOperator}
                       title={!turnReceiptsEnabled ? '只读审查模式，禁止发起调优' : undefined}
                       className="flex items-center gap-2 rounded-xl border border-neutral-200/80 bg-neutral-50/70 p-2.5 text-xs text-neutral-700 hover:bg-neutral-100 disabled:opacity-50 disabled:cursor-not-allowed transition dark:border-zinc-800 dark:bg-zinc-800/40 dark:text-zinc-300"
@@ -1294,7 +1336,7 @@ export function PreviewDrawer({
                     </button>
                     <button
                       type="button"
-                      onClick={() => void handleSend('请检查并修复页面表单输入项的交互逻辑与校验提示')}
+                      onClick={() => void handleSend('请检查并修复页面表单输入项的交互逻辑与校验提示', 'form-logic')}
                       disabled={!turnReceiptsEnabled || !canOperator}
                       title={!turnReceiptsEnabled ? '只读审查模式，禁止发起调优' : undefined}
                       className="flex items-center gap-2 rounded-xl border border-neutral-200/80 bg-neutral-50/70 p-2.5 text-xs text-neutral-700 hover:bg-neutral-100 disabled:opacity-50 disabled:cursor-not-allowed transition dark:border-zinc-800 dark:bg-zinc-800/40 dark:text-zinc-300"
@@ -1304,7 +1346,7 @@ export function PreviewDrawer({
                     </button>
                     <button
                       type="button"
-                      onClick={() => void handleSend('请适配移动端与窄屏幕视口下的排版与流式响应式布局')}
+                      onClick={() => void handleSend('请适配移动端与窄屏幕视口下的排版与流式响应式布局', 'responsive-layout')}
                       disabled={!turnReceiptsEnabled || !canOperator}
                       title={!turnReceiptsEnabled ? '只读审查模式，禁止发起调优' : undefined}
                       className="flex items-center gap-2 rounded-xl border border-neutral-200/80 bg-neutral-50/70 p-2.5 text-xs text-neutral-700 hover:bg-neutral-100 disabled:opacity-50 disabled:cursor-not-allowed transition dark:border-zinc-800 dark:bg-zinc-800/40 dark:text-zinc-300"
@@ -1320,6 +1362,12 @@ export function PreviewDrawer({
                     return (
                       <div key={m.id} className="flex justify-end">
                         <div className="max-w-[85%] rounded-2xl rounded-tr-xs bg-sky-600 px-3.5 py-2.5 text-white shadow-xs dark:bg-sky-500">
+                          {m.profile && (
+                            <div className="mb-1.5 inline-flex items-center gap-1 rounded bg-sky-700/80 px-2 py-0.5 text-[10px] font-medium text-sky-100">
+                              <Sparkles className="size-2.5" />
+                              <span>{availableProfiles.find((p) => p.id === m.profile)?.name || m.profile}</span>
+                            </div>
+                          )}
                           {m.domTarget && (
                             <div className="mb-1.5 inline-flex items-center gap-1 rounded bg-sky-700/80 px-2 py-0.5 text-[10px] font-mono text-sky-100">
                               <span>🎯 @DOM</span>
@@ -1483,6 +1531,35 @@ export function PreviewDrawer({
                   <span>当前无 Operator 权限，仅可查看调优状态</span>
                 </div>
               ) : null}
+
+              {turnReceiptsEnabled && canOperator && availableProfiles.length > 0 && (
+                <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                  <span className="text-[10px] text-neutral-400 dark:text-zinc-500 font-medium">技能指引:</span>
+                  {availableProfiles.map((p) => {
+                    const isSelected = selectedProfile === p.id
+                    return (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => setSelectedProfile(isSelected ? null : p.id)}
+                        title={`${p.description} (包含: ${p.skillIds.join(', ')})`}
+                        className={cn(
+                          'inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[10px] font-medium transition border',
+                          isSelected
+                            ? 'bg-sky-50 border-sky-300 text-sky-700 dark:bg-sky-950/60 dark:border-sky-700 dark:text-sky-300 shadow-2xs'
+                            : 'bg-neutral-50 border-neutral-200 text-neutral-600 hover:bg-neutral-100 dark:bg-zinc-800/60 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800'
+                        )}
+                      >
+                        <Sparkles className={cn('size-2.5', isSelected ? 'text-sky-600 dark:text-sky-400' : 'text-neutral-400 dark:text-zinc-500')} />
+                        <span>{p.name}</span>
+                        {isSelected && (
+                          <X className="size-2.5 ml-0.5 hover:text-sky-900 dark:hover:text-sky-100" />
+                        )}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
 
               <div className="relative">
                 <textarea

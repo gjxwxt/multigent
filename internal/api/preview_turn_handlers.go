@@ -105,10 +105,13 @@ func (s *Server) newPreviewAgentRunner(workspaceID, project, agentName, runtimeU
 	}
 }
 
-func (s *Server) buildPreviewChatPrompt(project, taskID, worktreeDir, msg string, history []previewChatMsg) string {
+func (s *Server) buildPreviewChatPrompt(project, taskID, worktreeDir, msg string, history []previewChatMsg, profileGuidance string) string {
 	var promptBuf strings.Builder
 	promptBuf.WriteString("【预览界面即时修改】用户在特性分支 (Worktree) 的实时预览环境中提出了代码修改要求。\n\n")
 	promptBuf.WriteString(s.buildPreviewEnvSnapshot(project, taskID, worktreeDir))
+	if strings.TrimSpace(profileGuidance) != "" {
+		promptBuf.WriteString("\n\n" + strings.TrimSpace(profileGuidance))
+	}
 	promptBuf.WriteString("\n\n以下为此前对话记录(仅供理解意图):\n\n")
 	for _, h := range history {
 		roleLabel := "用户"
@@ -158,6 +161,16 @@ func (s *Server) executePreviewChatTurn(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	var profileGuidance string
+	if strings.TrimSpace(body.Profile) != "" {
+		guidance, err := ResolveSkillProfileGuidance(s.st, body.Profile)
+		if err != nil {
+			s.jsonError(w, http.StatusBadRequest, fmt.Sprintf("invalid skill profile: %v", err))
+			return
+		}
+		profileGuidance = guidance
+	}
+
 	worktreeDir := s.resolveTaskWorktreeDir(project, taskID)
 	if worktreeDir == "" {
 		s.jsonError(w, http.StatusInternalServerError, "worktree directory not found")
@@ -166,7 +179,7 @@ func (s *Server) executePreviewChatTurn(w http.ResponseWriter, r *http.Request, 
 	projectGitRoot := gitworktree.ProjectRootForWorktree(worktreeDir)
 
 	_, agentName, _ := s.findTaskInProject(project, taskID)
-	promptText := s.buildPreviewChatPrompt(project, taskID, worktreeDir, msg, body.History)
+	promptText := s.buildPreviewChatPrompt(project, taskID, worktreeDir, msg, body.History, profileGuidance)
 
 	engine := s.turnEngine(r)
 	if engine == nil {

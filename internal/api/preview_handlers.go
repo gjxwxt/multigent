@@ -106,6 +106,7 @@ type previewChatMsg struct {
 type previewChatBody struct {
 	Message string           `json:"message"`
 	History []previewChatMsg `json:"history,omitempty"`
+	Profile string           `json:"profile,omitempty"`
 }
 
 // buildPreviewEnvSnapshot renders the platform-known environment facts for a

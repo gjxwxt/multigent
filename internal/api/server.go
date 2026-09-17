@@ -681,6 +681,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/remote-sync/retry", s.handlePostTaskRemoteSyncRetry)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/feedback", s.handlePostTaskPreviewFeedback)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview/turns", s.handleGetTaskPreviewTurns)
+	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview/profiles", s.handleGetTaskPreviewProfiles)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview/turns/{turnId}/diff", s.handleGetTaskPreviewTurnDiff)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/turns/{turnId}/rollback", s.handlePostTaskPreviewTurnRollback)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/turns/{turnId}/preview/start", s.handlePostTaskPreviewTurnPreviewStart)

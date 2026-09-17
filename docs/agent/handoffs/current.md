@@ -2,10 +2,24 @@
 
 ## Start here
 
-Branch: `feat/chatops-live-card-and-d6`.
-Status: Phase 1 安全缺陷闭环修复、ChatOps 本地级联清理与 Phase 2 企业级模板均已完成并通过全量验证，End-to-End Pilot 生命周期及伪造输入防御测试全绿。
+Branch: `dev`.
+Status: Preview Copilot Turn Receipts 切片 B（Batch 0 至 Batch 5.1，commit `b114bd9b`）已全面完成、全量自动化回归通过、真实生产链路 Docker 验证通过，并已获用户正式审批放行。
+Feature Flag `MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS` 维持默认严格关闭 (`false`)，受控灰度已具备服务端项目白名单硬门禁。
 
 Key status & deliverables:
+0. **Preview Copilot Turn Receipts 切片 B（已正式放行）**:
+   - **事务性回执与 Group-Slot 单事务原子化**：`internal/previewreceipt` 支持状态机 `CAPTURED → COMMITTING → COMMITTED / REVERTING → REVERTED / REVERT_FAILED`；`Prepare`、`Finalize`、`Abort`、`Recover` 均在单 DB 事务原子批处理中完成；租赁防御杜绝租期超时误抢占。
+   - **人工审核收编与不可变基线保障**：审核通过时自动收编，生成携带 `Multigent-Commit-Intent` Trailer 的 Checkpoint Commit；启动自愈按行严格校验 Intent Trailer，准确区分已提交与未提交。
+   - **真实生产执行链路与沙箱严格隔离断言**：`previewDefaultAgentRunner` $\to$ `multigent exec` $\to$ `runner.Runner` $\to$ `runenv.DockerProvider` $\to$ `sandbox.BuildArgs` $\to$ 真实 Docker 容器；严格拒绝任何 `ExtraVolumes`、`CredentialMounts`、`docker.sock` 与宿主目录挂载，卷挂载数量严格等于 1（仅隔离 clone 目录挂载为 `/workspace:rw`）。
+   - **零泄漏审计与生产 Runbook**：输出 `docs/runbook-preview-turn-receipts.md`，彻底排除破坏性命令（`reset --hard` / `clean -fd`），明确 Fail-Closed 永久加锁与无自动恢复接口的逐路径处置 SOP。
+   - **发布审批状态**：用户已确认放行 Batch 5.1。当前处于受控灰度就绪状态。
+
+0.1. **Preview Copilot Guarded Skill Profiles (Task 3.2, 规范就绪)**:
+   - **服务端受控技能白名单与防篡改摘要**：预置 4 类技能 Profile (`ui-polish`、`a11y-remediation`、`responsive-layout`、`form-logic`)，`ComputeSkillDigest` 计算 SHA-256 完整性摘要并校验；非白名单请求严格 400 Bad Request fail-closed。
+   - **脚本执行中立化安全红线**：预览 Copilot 严禁将技能执行附件（`.sh`）挂载进沙箱或执行；仅提取纯声明式 Markdown 规范指引注入提示词。
+   - **全链路前端可视化集成**：`PreviewDrawer.tsx` 动态加载 Profile 列表，提供直观的技能药丸徽标切换、快捷操作自动匹配 Profile、用户消息徽标实时展示生效 Profile。
+   - **自动化验证证据**：`TestPreviewSkillProfiles` (6/6 PASS)、`npm run build` (PASS)、`make test` (PASS)、`make build` (PASS)。
+
 1. **ChatOps Channel Automation & Cascade Cleanup (产品边界明确)**:
    - Strictly scoped to IM instance; 409 conflict intercept prevents channel hijacking; link mode strictly finds existing channels (404 if missing).
    - Bot channel invite failures tracked (`status: error`, target suppressed); partial failures recoverable via UI retry.

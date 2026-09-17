@@ -83,3 +83,48 @@ Deployment and the live callback's actual rejection stage remain unverified. A l
    - `internal/api/od_client.go`: `odDefaultModel = "glm-5.3-flash"`
    - `go test -v ./internal/api -run TestDesign` 全绿 (PASS)
    - 交叉编译 `dist/multigent-linux-amd64` 并热部署到 VM，服务状态 healthy。
+
+## Completed: Preview Copilot Turn Receipts 切片 B (commit `b114bd9b`)
+
+1. **事务性回执与 Group-Slot 生命周期**：
+   - 实现了 `internal/previewreceipt`：包含 `TurnEngine` 与 SQLite CAS `Store`，支持状态机 `CAPTURED → COMMITTING → COMMITTED / REVERTING → REVERTED / REVERT_FAILED`。
+   - `Prepare`、`Finalize`、`Abort`、`Recover` 全生命周期实行单 DB 事务原子批处理（`CommitRecordWritesGuardedTx`），彻底消除了多回执收编裂脑与半终态。
+   - 实现了租赁防御（Lease Defense）：`COMMITTING`、`REVERTING`、`REVERT_FAILED` 及 `commit_intent` 组即便超时也严禁新 Turn 接管。
+2. **人工审核收编与不可变基线保障**：
+   - `workflow_handlers.go`：在人工审核通过时调用 `commitAndPushReviewChanges`，统一以 `PreCommitSHA` 和 `CommitIntentID` 生成携带 `Multigent-Commit-Intent` Trailer 的 Checkpoint Commit，本地提交/回执失败严格阻断流转。
+   - 启动自愈扫描（`RecoverStaleReceipts`）：精准按行匹配 Intent Trailer，区分已提交与未提交，安全释放或补齐快照清理。
+3. **严格沙箱隔离与生产链路 Docker 验证**：
+   - 隔离预览运行专有配置（`IsolatedPreview: true`）：拒绝 `ExtraVolumes`、自动凭据挂载、Docker socket 及宿主目录（`WorktreeParentMount`、用户 bin、Cursor 二进制）。
+   - 沙箱硬断言：卷挂载数量严格等于 1，且唯一挂载目标只能是 `/workspace:rw`。
+   - 生产链路真实 Docker 测试（`TestPreviewTurn_DockerSandboxExecution_RealContainer`）：通过 `previewDefaultAgentRunner` $\to$ `multigent exec` $\to$ `runner.Runner` $\to$ `runenv.DockerProvider` $\to$ `sandbox.BuildArgs` $\to$ 真实 `alpine:3.21` 容器，验证代码修改、回执生成、Checkpoint 提交与快照物理清理。
+4. **服务治理与零泄漏审计**：
+   - 服务端项目白名单硬门禁（`MULTIGENT_PREVIEW_TURN_RECEIPTS_PROJECTS`）。
+   - 产出 [`docs/runbook-preview-turn-receipts.md`](file:///Users/imac/Documents/code/github/multigent/docs/runbook-preview-turn-receipts.md)，明确非破坏性排查恢复 SOP。
+   - 零泄漏结构化审计日志覆盖执行、拒绝、回滚、取消及收编事件。
+5. **验证证据**:
+   - `MULTIGENT_RUN_DOCKER_INTEGRATION=1 MULTIGENT_PREVIEW_DOCKER_TEST_IMAGE="alpine:3.21" go test -race -v ./internal/api -run 'TestPreviewTurn_DockerSandboxExecution_RealContainer'`: PASS
+   - `go test -race -v ./internal/sandbox -run 'TestBuildArgs_IsolatedPreview'`: PASS
+   - `go test -race -v ./internal/runner -run 'TestIsolatedPreviewRun_FailClosedRejection'`: PASS
+   - `go test -race -count=1 ./internal/previewreceipt/...`: PASS
+   - `go test -race -count=1 ./internal/api -run 'Test(WorkflowReview_Commit|ReviewCommit|PreviewTurn|PreviewOrigin)'`: PASS
+   - `make test` & `make build`: PASS
+
+## Completed: Preview Copilot Guarded Skill Profiles (Task 3.2)
+
+1. **服务端受控技能画像白名单 (Curated Allowlisted Profiles)**:
+   - 定义 4 组预置 Skill Profiles：`ui-polish`、`a11y-remediation`、`responsive-layout`、`form-logic`；
+   - 未在白名单内的 Profile 严格 Fail-Closed（返回 400 Bad Request）。
+2. **内置技能与 SHA-256 完整性摘要保护 (Integrity Digest)**:
+   - 内置 `modern-web-guidance` 与 `a11y-debugging` 核心专业工程规范；
+   - `ComputeSkillDigest` 计算全目录文件 SHA-256，防御文件篡改并提供版本溯源指纹。
+3. **脚本执行中立化防线 (Script Neutralization Invariant)**:
+   - 严格落实架构红线：预览 Copilot 严禁挂载或执行脚本附件（`.sh`），仅提取纯声明式 Markdown 指引注入提示词。
+4. **端点与前端交互集成 (API & Web Console)**:
+   - 暴露 `GET /api/v1/projects/{name}/tasks/{taskId}/preview/profiles` 端点；
+   - `PreviewDrawer.tsx` 支持技能药丸徽标（Chips）单点切换、快捷操作自动附带画像、消息气泡清晰呈现当前生效技能。
+5. **验证证据**:
+   - `go test -race -v ./internal/api -run 'TestPreviewSkillProfiles'`: PASS (6/6)
+   - `go test -race -count=1 ./internal/api -run 'Test(WorkflowReview_Commit|ReviewCommit|PreviewTurn|PreviewOrigin)'`: PASS
+   - `cd web && npm run build`: PASS (TypeScript 0 错误)
+   - `make test`: PASS (全仓库 40+ 包)
+   - `make build`: PASS (二进制全量嵌入完成)
