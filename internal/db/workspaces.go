@@ -601,11 +601,25 @@ func (db *SQLiteStore) CommitRecordWrites(workspaceID string, writes []KVWrite) 
 // compile error: a pool read here would wait for the very lock the guard
 // holds and deadlock.
 func (db *SQLiteStore) CommitRecordWritesGuarded(workspaceID string, guard func(tx KVTxReader) error, writes []KVWrite) error {
+	return db.CommitRecordWritesGuardedTx(workspaceID, func(tx KVTxReader) ([]KVWrite, error) {
+		if guard != nil {
+			if err := guard(tx); err != nil {
+				return nil, err
+			}
+		}
+		return writes, nil
+	})
+}
+
+// CommitRecordWritesGuardedTx evaluates plan inside BEGIN IMMEDIATE on a dedicated
+// connection, allowing the plan function to read records and dynamically compute
+// the exact batch of KVWrites atomically within the same transaction.
+func (db *SQLiteStore) CommitRecordWritesGuardedTx(workspaceID string, plan func(tx KVTxReader) ([]KVWrite, error)) error {
 	if db == nil || db.sql == nil {
 		return fmt.Errorf("database not open")
 	}
-	if len(writes) == 0 {
-		return fmt.Errorf("record commit requires at least one write")
+	if plan == nil {
+		return fmt.Errorf("record commit requires a non-nil plan")
 	}
 	conn, err := db.sql.Conn(context.Background())
 	if err != nil {
@@ -614,10 +628,12 @@ func (db *SQLiteStore) CommitRecordWritesGuarded(workspaceID string, guard func(
 	defer conn.Close()
 
 	return runImmediateTx(conn, func(tx *immediateTx) error {
-		if guard != nil {
-			if err := guard(KVTx{conn: tx.conn}); err != nil {
-				return err
-			}
+		writes, err := plan(KVTx{conn: tx.conn})
+		if err != nil {
+			return err
+		}
+		if len(writes) == 0 {
+			return fmt.Errorf("record commit requires at least one write")
 		}
 		now := nowUTC()
 		for _, w := range writes {
@@ -646,6 +662,7 @@ ON CONFLICT(table_name, workspace_id, k1, k2, k3) DO UPDATE SET payload = exclud
 // via the KVWrite list, never inside the guard.
 type KVTxReader interface {
 	GetRecord(table, workspaceID string, key []string) (payload string, found bool, err error)
+	GetRecordWithRevision(table, workspaceID string, key []string) (payload string, revision int64, found bool, err error)
 }
 
 // KVTx is the concrete transactional handle satisfying KVTxReader.
@@ -655,18 +672,25 @@ type KVTx struct {
 
 // GetRecord reads one record inside the guarded transaction.
 func (t KVTx) GetRecord(table, workspaceID string, key []string) (payload string, found bool, err error) {
+	payload, _, found, err = t.GetRecordWithRevision(table, workspaceID, key)
+	return payload, found, err
+}
+
+// GetRecordWithRevision reads one record along with its revision inside the guarded transaction.
+func (t KVTx) GetRecordWithRevision(table, workspaceID string, key []string) (payload string, revision int64, found bool, err error) {
 	k1, k2, k3 := normalizeKey(key)
 	row := t.conn.QueryRowContext(context.Background(),
-		`SELECT payload FROM kv_records WHERE table_name = ? AND workspace_id = ? AND k1 = ? AND k2 = ? AND k3 = ?`,
+		`SELECT payload, revision FROM kv_records WHERE table_name = ? AND workspace_id = ? AND k1 = ? AND k2 = ? AND k3 = ?`,
 		table, workspaceID, k1, k2, k3)
 	var loaded string
-	if err := row.Scan(&loaded); err != nil {
+	var rev int64
+	if err := row.Scan(&loaded, &rev); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", false, nil
+			return "", 0, false, nil
 		}
-		return "", false, err
+		return "", 0, false, err
 	}
-	return loaded, true, nil
+	return loaded, rev, true, nil
 }
 
 // runImmediateTx executes fn inside one explicit "BEGIN IMMEDIATE"

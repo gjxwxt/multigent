@@ -318,8 +318,9 @@ func (s *Server) handleGetTaskPreview(w http.ResponseWriter, r *http.Request) {
 			"status":        "stopped",
 			"url":           s.previewSurfaceURL(taskID),
 			"worktreeDir":   worktreeDir,
-			"previewToken":  s.signPreviewToken(taskID, project),
-			"drawerEnabled": s.PreviewCopilotDrawerEnabled(),
+			"previewToken":        s.signPreviewToken(taskID, project),
+			"drawerEnabled":       s.PreviewCopilotDrawerEnabled(),
+			"turnReceiptsEnabled": s.PreviewTurnReceiptsEnabled(),
 		})
 		return
 	}
@@ -327,12 +328,14 @@ func (s *Server) handleGetTaskPreview(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
 		*preview.PreviewInstance
-		PreviewToken  string `json:"previewToken,omitempty"`
-		DrawerEnabled bool   `json:"drawerEnabled"`
+		PreviewToken        string `json:"previewToken,omitempty"`
+		DrawerEnabled       bool   `json:"drawerEnabled"`
+		TurnReceiptsEnabled bool   `json:"turnReceiptsEnabled"`
 	}{
-		PreviewInstance: inst,
-		PreviewToken:    s.signPreviewToken(taskID, inst.Project),
-		DrawerEnabled:   s.PreviewCopilotDrawerEnabled(),
+		PreviewInstance:     inst,
+		PreviewToken:        s.signPreviewToken(taskID, inst.Project),
+		DrawerEnabled:       s.PreviewCopilotDrawerEnabled(),
+		TurnReceiptsEnabled: s.PreviewTurnReceiptsEnabled(),
 	})
 }
 
@@ -451,7 +454,11 @@ func (s *Server) handlePostTaskPreviewFeedback(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Guard 3: Slice B gate — legacy feedback and direct worktree modifications are disabled until Receipt is implemented
+	// Guard 3: Slice B gate — receipts feature flag and isolated clone
+	if !s.PreviewTurnReceiptsEnabled() {
+		s.jsonErrorCode(w, http.StatusConflict, "feature_disabled", s.PreviewTurnReceiptsDisabledReason())
+		return
+	}
 	s.jsonErrorCode(w, http.StatusConflict, "feature_disabled", "preview feedback code modification is disabled until receipt and isolated clone are implemented")
 }
 
@@ -499,7 +506,11 @@ func (s *Server) handlePostTaskPreviewChat(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Guard 3: Slice B gate — Direct code modification is disabled until Receipt and isolated clone are implemented
+	// Guard 3: Slice B gate — receipts feature flag and isolated clone
+	if !s.PreviewTurnReceiptsEnabled() {
+		s.jsonErrorCode(w, http.StatusConflict, "feature_disabled", s.PreviewTurnReceiptsDisabledReason())
+		return
+	}
 	s.jsonErrorCode(w, http.StatusConflict, "feature_disabled", "preview code modification is disabled until receipt and isolated clone are implemented")
 }
 

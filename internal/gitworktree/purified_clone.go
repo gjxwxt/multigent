@@ -64,6 +64,9 @@ type PurifiedCloneOptions struct {
 	// Commit is the exact commit the clone must contain (verified after
 	// clone; a mismatch is a hard error, not a warning).
 	Commit string
+	// Ref is an optional specific ref to fetch if Commit is not on a default branch
+	// (e.g. refs/mg-turns/<turnID>).
+	Ref string
 	// Dest is the destination directory (must not exist or must be empty).
 	Dest string
 	// Env adds extra environment variables for git subprocesses (on top of
@@ -137,6 +140,20 @@ func EnsurePurifiedClone(opts PurifiedCloneOptions) (cleanup func(), err error) 
 	if err := rejectAlternates(dest); err != nil {
 		cleanup()
 		return nil, err
+	}
+
+	// Ensure the requested commit is available in the clone. When Commit
+	// is on a non-branch ref (e.g. refs/mg-turns/*), git clone --no-local
+	// does not fetch it automatically. Fetch it from origin before stripping remotes.
+	if err := run("cat-file", "-e", commit+"^{commit}"); err != nil {
+		fetchTarget := commit
+		if ref := strings.TrimSpace(opts.Ref); ref != "" {
+			fetchTarget = ref
+		}
+		if out, fetchErr := runIn(dest, "fetch", "--no-tags", "origin", fetchTarget); fetchErr != nil {
+			cleanup()
+			return nil, fmt.Errorf("purified clone fetch commit %s (target %s): %w (%s)", commit, fetchTarget, fetchErr, RedactGitOutput(strings.TrimSpace(out)))
+		}
 	}
 
 	// Strip every remote: the agent-facing clone has no upstream to push to.

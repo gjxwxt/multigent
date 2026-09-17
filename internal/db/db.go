@@ -43,6 +43,7 @@ type Store interface {
 	CommitTransitionGuarded(workspaceID string, runKey []string, expectClaimID string, writes []KVWrite) error
 	CommitRecordWrites(workspaceID string, writes []KVWrite) error
 	CommitRecordWritesGuarded(workspaceID string, guard func(tx KVTxReader) error, writes []KVWrite) error
+	CommitRecordWritesGuardedTx(workspaceID string, plan func(tx KVTxReader) ([]KVWrite, error)) error
 	ListRecords(table string, workspaceID string, keyPrefix []string) ([]Record, error)
 	DeleteRecord(table string, workspaceID string, key []string) error
 

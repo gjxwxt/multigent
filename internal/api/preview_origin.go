@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"golang.org/x/net/publicsuffix"
+
+	"github.com/multigent/multigent/internal/secretbox"
 )
 
 // Preview origin isolation (batch plan §2.0, review rounds 7-10 verdict).
@@ -35,6 +37,9 @@ const (
 	// PreviewCopilotDrawerEnv is the deployment config key to enable the preview
 	// copilot drawer feature flag (controlled rollout, default disabled).
 	PreviewCopilotDrawerEnv = "MULTIGENT_ENABLE_PREVIEW_COPILOT_DRAWER"
+	// PreviewTurnReceiptsEnv is the deployment config key to enable turn receipts
+	// and isolated transactional modification (controlled rollout, default disabled).
+	PreviewTurnReceiptsEnv = "MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS"
 )
 
 // SetPreviewCopilotDrawerEnabled enables or disables the preview copilot drawer.
@@ -72,6 +77,43 @@ func (s *Server) PreviewCopilotDrawerDisabledReason() string {
 	}
 	if warn := SchemefulSiteMismatchWarning(s.consoleOrigin, s.previewOrigin); warn != "" {
 		return warn
+	}
+	return ""
+}
+
+// SetPreviewTurnReceiptsEnabled enables or disables turn receipts and transactional isolation.
+func (s *Server) SetPreviewTurnReceiptsEnabled(enabled bool) {
+	s.enablePreviewTurnReceipts = enabled
+}
+
+// PreviewTurnReceiptsEnabled returns whether preview turn receipts are enabled.
+// Fail-closed rule (Phase 1):
+// 1. MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS must be enabled.
+// 2. PreviewCopilotDrawerEnabled() must be true (valid origins, same schemeful site).
+// 3. Strict encryption self-test must pass (secretbox.StrictEncryptionSelfTest() == nil).
+func (s *Server) PreviewTurnReceiptsEnabled() bool {
+	if s == nil || !s.enablePreviewTurnReceipts {
+		return false
+	}
+	if !s.PreviewCopilotDrawerEnabled() {
+		return false
+	}
+	if err := secretbox.StrictEncryptionSelfTest(); err != nil {
+		return false
+	}
+	return true
+}
+
+// PreviewTurnReceiptsDisabledReason returns the reason why turn receipts are disabled.
+func (s *Server) PreviewTurnReceiptsDisabledReason() string {
+	if s == nil || !s.enablePreviewTurnReceipts {
+		return "turn receipts feature flag is disabled"
+	}
+	if !s.PreviewCopilotDrawerEnabled() {
+		return s.PreviewCopilotDrawerDisabledReason()
+	}
+	if err := secretbox.StrictEncryptionSelfTest(); err != nil {
+		return fmt.Sprintf("strict encryption unavailable: %v", err)
 	}
 	return ""
 }

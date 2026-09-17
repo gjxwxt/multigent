@@ -26,6 +26,7 @@ import (
 	"github.com/multigent/multigent/internal/imbridge"
 	"github.com/multigent/multigent/internal/interaction"
 	"github.com/multigent/multigent/internal/preview"
+	"github.com/multigent/multigent/internal/previewreceipt"
 	"github.com/multigent/multigent/internal/sandbox"
 	"github.com/multigent/multigent/internal/store"
 	"github.com/multigent/multigent/internal/taskstore"
@@ -107,6 +108,9 @@ type Server struct {
 	// enablePreviewCopilotDrawer flags whether the preview drawer is active for
 	// this server instance (controlled rollout flag MULTIGENT_ENABLE_PREVIEW_COPILOT_DRAWER).
 	enablePreviewCopilotDrawer bool
+	// enablePreviewTurnReceipts flags whether turn receipts and isolated transactional
+	// modifications are active (controlled rollout flag MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS).
+	enablePreviewTurnReceipts bool
 	execMu                 sync.Mutex
 	execProcs              map[string]*execProcess // key = "project/agent"
 	interactions           *interaction.Manager
@@ -174,28 +178,29 @@ func NewServer(root, apiKey string) *Server {
 	ts := taskstore.NewDB(root, controlDB)
 	tm := newTriggerManager(root, sched.binPath, ts, controlDB)
 	s := &Server{
-		root:                   root,
-		apiKey:                 strings.TrimSpace(apiKey),
-		controlDB:              controlDB,
-		st:                     store.NewDB(root, controlDB),
-		ts:                     ts,
-		users:                  newUserStore(controlDB),
-		sched:                  sched,
-		triggers:               tm,
-		okrStore:               store.NewOKRStore(root),
-		msStore:                store.NewMilestoneStore(root),
-		execProcs:              make(map[string]*execProcess),
-		interactions:           interaction.NewManager(),
-		agentDirectory:         agentdir.New(controlDB),
-		agentIMCancel:          make(map[string]context.CancelFunc),
-		connectorSetupSessions: make(map[string]connectorDeviceAuthSession),
-		modelAuthSessions:      make(map[string]*modelAuthSession),
-		telemetryUsageCache:    make(map[string]telemetryUsageCacheEntry),
-		previewEngine:          preview.NewEngine(),
-		worktreeMgr:            gitworktree.NewManager(),
-		previewSessions:        make(map[string]*previewChatSession),
-		threadProjections:      imbridge.NewTaskThreadProjectionService(controlDB, nil),
+		root:                       root,
+		apiKey:                     strings.TrimSpace(apiKey),
+		controlDB:                  controlDB,
+		st:                         store.NewDB(root, controlDB),
+		ts:                         ts,
+		users:                      newUserStore(controlDB),
+		sched:                      sched,
+		triggers:                   tm,
+		okrStore:                   store.NewOKRStore(root),
+		msStore:                    store.NewMilestoneStore(root),
+		execProcs:                  make(map[string]*execProcess),
+		interactions:               interaction.NewManager(),
+		agentDirectory:             agentdir.New(controlDB),
+		agentIMCancel:              make(map[string]context.CancelFunc),
+		connectorSetupSessions:     make(map[string]connectorDeviceAuthSession),
+		modelAuthSessions:          make(map[string]*modelAuthSession),
+		telemetryUsageCache:        make(map[string]telemetryUsageCacheEntry),
+		previewEngine:              preview.NewEngine(),
+		worktreeMgr:                gitworktree.NewManager(),
+		previewSessions:            make(map[string]*previewChatSession),
+		threadProjections:          imbridge.NewTaskThreadProjectionService(controlDB, nil),
 		enablePreviewCopilotDrawer: IsTruthyEnv(os.Getenv(PreviewCopilotDrawerEnv)),
+		enablePreviewTurnReceipts:  IsTruthyEnv(os.Getenv(PreviewTurnReceiptsEnv)),
 	}
 	// Runtime-node agents' task triggers join the node dispatch queue instead
 	// of the local wakeup cycle (hook wired after s exists; nil-safe before).
@@ -319,6 +324,14 @@ func (s *Server) SetUpdateChecker(fn UpdateChecker) { s.updateCheck = fn }
 
 // SetDaemonStatus sets the function used to get daemon status.
 func (s *Server) SetDaemonStatus(fn DaemonStatusFunc) { s.daemonStatus = fn }
+
+// receiptStore resolves the preview receipt store for the current workspace.
+func (s *Server) receiptStore(r *http.Request) *previewreceipt.Store {
+	if s == nil || s.controlDB == nil {
+		return nil
+	}
+	return previewreceipt.NewStore(s.controlDB, s.currentWorkspaceIDValue(r))
+}
 
 // SetLocalRuntimeAPIURL sets the loopback Runtime API URL for internally
 // initiated runs that do not have an HTTP request to infer the listen port from.

@@ -556,4 +556,49 @@ func TestPreviewCopilotDrawerEnabledFailClosed(t *testing.T) {
 	}
 }
 
+func TestPreviewTurnReceiptsEnabledFailClosed(t *testing.T) {
+	s := &Server{}
+
+	// Case 1: Flag false
+	s.SetPreviewTurnReceiptsEnabled(false)
+	if s.PreviewTurnReceiptsEnabled() {
+		t.Fatal("expected false when receipts flag is false")
+	}
+	if s.PreviewTurnReceiptsDisabledReason() != "turn receipts feature flag is disabled" {
+		t.Fatalf("unexpected reason: %s", s.PreviewTurnReceiptsDisabledReason())
+	}
+
+	// Case 2: Flag true, but drawer disabled
+	s.SetPreviewTurnReceiptsEnabled(true)
+	s.SetPreviewCopilotDrawerEnabled(false)
+	if s.PreviewTurnReceiptsEnabled() {
+		t.Fatal("expected false when drawer is disabled")
+	}
+	if s.PreviewTurnReceiptsDisabledReason() != "drawer feature flag is disabled" {
+		t.Fatalf("unexpected reason: %s", s.PreviewTurnReceiptsDisabledReason())
+	}
+
+	// Case 3: Flag true, drawer enabled, but strict encryption key missing
+	s.SetPreviewCopilotDrawerEnabled(true)
+	s.SetConsoleOrigin("https://console.example.com")
+	s.SetPreviewOrigin("https://preview.example.com")
+	t.Setenv("MULTIGENT_CONNECTION_ENCRYPTION_KEY", "")
+	if s.PreviewTurnReceiptsEnabled() {
+		t.Fatal("expected false when encryption key is not set")
+	}
+	if !strings.Contains(s.PreviewTurnReceiptsDisabledReason(), "MULTIGENT_CONNECTION_ENCRYPTION_KEY is not configured") {
+		t.Fatalf("unexpected reason: %s", s.PreviewTurnReceiptsDisabledReason())
+	}
+
+	// Case 4: Flag true, drawer enabled, key set
+	t.Setenv("MULTIGENT_CONNECTION_ENCRYPTION_KEY", "bXlzdGVyaW91c2tleWZvcjMyYnl0ZXNlY3JldA==")
+	if !s.PreviewTurnReceiptsEnabled() {
+		t.Fatal("expected true when drawer enabled and strict crypto key set")
+	}
+	if s.PreviewTurnReceiptsDisabledReason() != "" {
+		t.Fatalf("expected empty reason when enabled, got: %s", s.PreviewTurnReceiptsDisabledReason())
+	}
+}
+
+
 

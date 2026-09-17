@@ -104,6 +104,7 @@ remote server. For local development with hot-reload, use
 			srv.SetPreviewOrigin(os.Getenv(api.PreviewOriginEnv))
 			srv.SetConsoleOrigin(os.Getenv(api.ConsoleOriginEnv))
 			srv.SetPreviewCopilotDrawerEnabled(api.IsTruthyEnv(os.Getenv(api.PreviewCopilotDrawerEnv)))
+			srv.SetPreviewTurnReceiptsEnabled(api.IsTruthyEnv(os.Getenv(api.PreviewTurnReceiptsEnv)))
 			if srv.PreviewOrigin() == "" {
 				log.Printf("preview sharing disabled: %s is not set (fail-closed; preview surfaces return 404)", api.PreviewOriginEnv)
 			} else {
@@ -111,6 +112,9 @@ remote server. For local development with hot-reload, use
 			}
 			if srv.PreviewCopilotDrawerEnabled() {
 				log.Printf("preview copilot drawer enabled (%s=true)", api.PreviewCopilotDrawerEnv)
+			}
+			if srv.PreviewTurnReceiptsEnabled() {
+				log.Printf("preview turn receipts enabled (%s=true)", api.PreviewTurnReceiptsEnv)
 			}
 			if err := srv.StartWorkspaceScheduler(); err != nil {
 				return fmt.Errorf("start workspace scheduler: %w", err)
