@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -320,7 +319,7 @@ func (s *Server) handleGetTaskPreview(w http.ResponseWriter, r *http.Request) {
 			"url":           s.previewSurfaceURL(taskID),
 			"worktreeDir":   worktreeDir,
 			"previewToken":  s.signPreviewToken(taskID, project),
-			"drawerEnabled": s.enablePreviewCopilotDrawer,
+			"drawerEnabled": s.PreviewCopilotDrawerEnabled(),
 		})
 		return
 	}
@@ -333,7 +332,7 @@ func (s *Server) handleGetTaskPreview(w http.ResponseWriter, r *http.Request) {
 	}{
 		PreviewInstance: inst,
 		PreviewToken:    s.signPreviewToken(taskID, inst.Project),
-		DrawerEnabled:   s.enablePreviewCopilotDrawer,
+		DrawerEnabled:   s.PreviewCopilotDrawerEnabled(),
 	})
 }
 
@@ -514,6 +513,25 @@ func (s *Server) handlePostTaskPreviewChat(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	r = authReq
+	_ = principal
+
+	// Guard 1: Drawer feature flag gate (server-controlled rollout, fail-closed)
+	if !s.PreviewCopilotDrawerEnabled() {
+		s.jsonErrorCode(w, http.StatusConflict, "feature_disabled", "preview copilot drawer is disabled")
+		return
+	}
+
+	// Guard 2: Task status gate (fail-closed check on task.Status, regardless of container lifecycle)
+	task, _, err := s.findTaskInProject(project, taskID)
+	if err != nil || task == nil {
+		s.jsonError(w, http.StatusNotFound, "task not found")
+		return
+	}
+	if task.Status != entity.TaskStatusInProgress {
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "task is not in progress; modifying completed or inactive task code is forbidden")
+		return
+	}
+
 	if !s.allowPreviewChat(taskID) {
 		s.jsonErrorCode(w, http.StatusTooManyRequests, ErrCodeConflict, "preview chat rate limit exceeded; retry shortly")
 		return
@@ -523,204 +541,8 @@ func (s *Server) handlePostTaskPreviewChat(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var body previewChatBody
-	if err := s.readJSON(w, r, &body); err != nil {
-		s.jsonError(w, http.StatusBadRequest, "invalid JSON body")
-		return
-	}
-
-	msg := strings.TrimSpace(body.Message)
-	if msg == "" {
-		s.jsonError(w, http.StatusBadRequest, "message content is required")
-		return
-	}
-
-	task, agentName, err := s.findTaskInProject(project, taskID)
-	if err != nil || task == nil {
-		s.jsonError(w, http.StatusNotFound, "task not found")
-		return
-	}
-
-	workspaceID, err := s.currentWorkspaceID()
-	if err != nil {
-		s.serverError(w, err)
-		return
-	}
-
-	// Active execution lock: prevent concurrent file writes while an agent is actively executing background steps.
-	// Allow interactive Copilot when the task is at a human review step (human_review) or awaiting confirmation.
-	if task.Status == entity.TaskStatusInProgress && !s.isTaskAtHumanReviewStep(workspaceID, project, taskID) {
-		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "当前节点正由智能体后台执行中。待流转至人工审核节点后即可进行代码即时调优。")
-		return
-	}
-
-	worktreeDir := s.resolveTaskWorktreeDir(project, taskID)
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		s.jsonError(w, http.StatusInternalServerError, "streaming not supported")
-		return
-	}
-
-	// 1. Branch Mutex check
-	s.previewMu.Lock()
-	if existing, busy := s.previewSessions[taskID]; busy && existing != nil && !existing.Done && !existing.Stopped {
-		s.previewMu.Unlock()
-		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "Agent 正在修改当前分支代码，请稍候或点击中止")
-		return
-	}
-
-	// Detached background context: page refresh will NOT kill the agent!
-	ctx, cancel := context.WithCancel(context.Background())
-	session := &previewChatSession{
-		TaskID:      taskID,
-		Project:     project,
-		Agent:       agentName,
-		StartedAt:   time.Now(),
-		Cancel:      cancel,
-		Subscribers: make(map[chan string]struct{}),
-	}
-	s.previewSessions[taskID] = session
-	s.previewMu.Unlock()
-
-	// 2. Record user comment — author is the authenticated principal returned
-	// by previewWritePrincipal (no "user" fallback, Task 1.1).
-	author := principal.Username
-	_ = s.ts.AddComment(project, agentName, &entity.TaskComment{
-		ID:        entity.NewCommentID(),
-		TaskID:    taskID,
-		Author:    author,
-		Body:      "[Preview Chat] " + msg,
-		CreatedAt: time.Now().UTC(),
-	})
-
-	// 3. Build Prompt: environment snapshot first (fact baseline), then
-	// replayed history (intent context only — may contain stale states),
-	// then the new request. Snapshot-before-history so a long history can
-	// neither bury nor mislead the facts.
-	var promptBuf strings.Builder
-	promptBuf.WriteString("【预览界面即时修改】用户在特性分支 (Worktree) 的实时预览环境中提出了代码修改要求。\n\n")
-	promptBuf.WriteString(s.buildPreviewEnvSnapshot(project, taskID, worktreeDir))
-	promptBuf.WriteString("\n\n以下为此前对话记录(仅供理解意图):\n\n")
-	for _, h := range body.History {
-		roleLabel := "用户"
-		if h.Role == "assistant" {
-			roleLabel = "助手"
-		}
-		promptBuf.WriteString(fmt.Sprintf("%s: %s\n", roleLabel, h.Content))
-	}
-	promptBuf.WriteString(fmt.Sprintf("\n用户最新修改需求: %s\n\n", msg))
-	promptBuf.WriteString("【重要准则】请严格在当前 Worktree 目录 (/workspace) 内完成代码修改，并确保本地服务热重载正常，严禁切换分支。")
-	promptText := promptBuf.String()
-
-	// 4. Start execution command in background goroutine
-	args := []string{"--dir", s.root, "exec", "--project", project, "--agent", agentName, "--prompt", promptText, "--no-save-session", "--no-session"}
-	cmd := exec.CommandContext(ctx, s.sched.binPath, args...)
-	cmd.Dir = s.root
-	runID := "preview-exec-" + time.Now().UTC().Format("20060102-150405")
-	runtimeToken := s.issueAgentRuntimeToken(runtimeAgentTokenPayload{
-		WorkspaceID:  workspaceID,
-		Project:      project,
-		Agent:        agentName,
-		RunID:        runID,
-		Capabilities: defaultRuntimeCapabilities(),
-	}, 2*time.Hour)
-	cmd.Env = append(os.Environ(),
-		"MULTIGENT_API_URL="+localRuntimeAPIURLForRequest(r),
-		"MULTIGENT_AGENT_TOKEN="+runtimeToken,
-		"MULTIGENT_RUN_ID="+runID,
-		"MULTIGENT_WORKSPACE_ID="+workspaceID,
-		"MULTIGENT_WORKTREE_DIR="+worktreeDir,
-	)
-	setProcGroup(cmd)
-	session.Cmd = cmd
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		session.finish(true)
-		s.serverError(w, err)
-		return
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		session.finish(true)
-		s.serverError(w, err)
-		return
-	}
-
-	if err := cmd.Start(); err != nil {
-		session.finish(true)
-		s.serverError(w, err)
-		return
-	}
-
-	agentModel := entity.AgentModel("")
-	if meta, err := s.agentMetaForProjectMember(workspaceID, project, agentName); err == nil && meta != nil {
-		agentModel = meta.Model
-	}
-
-	go func() {
-		lines := make(chan string, 64)
-		var wg sync.WaitGroup
-		scan := func(src io.Reader) {
-			defer wg.Done()
-			scanner := bufio.NewScanner(src)
-			scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
-			for scanner.Scan() {
-				line := strings.TrimRight(scanner.Text(), "\r")
-				if line != "" {
-					lines <- line
-				}
-			}
-		}
-		wg.Add(2)
-		go scan(stdout)
-		go scan(stderr)
-		go func() {
-			wg.Wait()
-			close(lines)
-		}()
-
-		for line := range lines {
-			payload := chatSSEPayload(line, agentModel)
-			session.broadcast(payload)
-		}
-
-		_ = cmd.Wait()
-		session.finish(ctx.Err() != nil)
-	}()
-
-	// Subscribe current HTTP request to the live stream
-	subCh, history := session.addSubscriber()
-	defer session.removeSubscriber(subCh)
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	flusher.Flush()
-
-	for _, p := range history {
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", p); err != nil {
-			return
-		}
-		flusher.Flush()
-	}
-
-	for {
-		select {
-		case p, ok := <-subCh:
-			if !ok {
-				return
-			}
-			if _, err := fmt.Fprintf(w, "data: %s\n\n", p); err != nil {
-				return
-			}
-			flusher.Flush()
-		case <-r.Context().Done():
-			return
-		}
-	}
+	// Guard 3: Slice B gate — Direct code modification is disabled until Receipt and isolated clone are implemented
+	s.jsonErrorCode(w, http.StatusConflict, "feature_disabled", "preview code modification is disabled until receipt and isolated clone are implemented")
 }
 
 func (s *Server) handleGetTaskPreviewLive(w http.ResponseWriter, r *http.Request) {
@@ -930,7 +752,11 @@ func (s *Server) handleTaskPreviewProxy(w http.ResponseWriter, r *http.Request) 
 		}
 		_ = resp.Body.Close()
 
-		html := rewriteHTML(string(bodyBytes), taskID, inst.Project)
+		consoleOrigin := ""
+		if s.PreviewCopilotDrawerEnabled() {
+			consoleOrigin = s.consoleOrigin
+		}
+		html := rewriteHTML(string(bodyBytes), taskID, inst.Project, consoleOrigin)
 
 		newBodyBytes := []byte(html)
 		if isGzip {
@@ -944,6 +770,9 @@ func (s *Server) handleTaskPreviewProxy(w http.ResponseWriter, r *http.Request) 
 		resp.Body = io.NopCloser(bytes.NewReader(newBodyBytes))
 		resp.ContentLength = int64(len(newBodyBytes))
 		resp.Header.Set("Content-Length", strconv.Itoa(len(newBodyBytes)))
+		resp.Header.Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+		resp.Header.Set("Pragma", "no-cache")
+		resp.Header.Del("ETag")
 		return nil
 	}
 
@@ -955,8 +784,12 @@ var (
 	esmImportRe = regexp.MustCompile(`(?m)\b(from\s*|import\s*)(["'])/([^"']*)(["'])`)
 )
 
-func rewriteHTML(html, taskID, projectName string) string {
+func rewriteHTML(html, taskID, projectName string, consoleOrigins ...string) string {
 	previewPrefix := fmt.Sprintf("/preview/%s/", taskID)
+	consoleOrigin := ""
+	if len(consoleOrigins) > 0 {
+		consoleOrigin = strings.TrimSpace(consoleOrigins[0])
+	}
 
 	// Interceptor script to handle dynamic fetches, XMLHttpRequest, WebSocket,
 	// and SPA History Navigation. §2.0.4: no credential is ever injected into
@@ -1018,35 +851,38 @@ func rewriteHTML(html, taskID, projectName string) string {
     window.fetch = function(input, init) {
       if (typeof input === 'string') {
         input = patchUrl(input);
-      } else if (input && typeof input.url === 'string') {
-        input = new Request(patchUrl(input.url), input);
+      } else if (input instanceof Request) {
+        var newUrl = patchUrl(input.url);
+        if (newUrl !== input.url) {
+          input = new Request(newUrl, input);
+        }
       }
       return origFetch.call(this, input, init);
     };
   }
+
   var origOpen = XMLHttpRequest.prototype.open;
-  if (origOpen) {
-    XMLHttpRequest.prototype.open = function(method, url) {
-      var args = Array.prototype.slice.call(arguments);
-      args[1] = patchUrl(url);
-      return origOpen.apply(this, args);
-    };
-  }
-  var origWS = window.WebSocket;
-  if (origWS) {
+  XMLHttpRequest.prototype.open = function(method, url, async, user, password) {
+    if (typeof url === 'string') {
+      url = patchUrl(url);
+    }
+    return origOpen.call(this, method, url, async !== false, user, password);
+  };
+
+  var origWebSocket = window.WebSocket;
+  if (origWebSocket) {
     window.WebSocket = function(url, protocols) {
-      if (typeof url === 'string') {
+      if (typeof url === 'string' && (url.startsWith('ws://') || url.startsWith('wss://'))) {
         try {
           var parsed = new URL(url);
-          if (parsed.pathname === '/' || !parsed.pathname.startsWith('/preview/')) {
-            parsed.pathname = prefix + (parsed.pathname.startsWith('/') ? parsed.pathname.slice(1) : parsed.pathname);
+          if (parsed.pathname && !parsed.pathname.startsWith('/preview/') && !parsed.pathname.startsWith('/_multigent_preview/')) {
+            parsed.pathname = prefix.replace(/\/$/, '') + parsed.pathname;
             url = parsed.toString();
           }
-        } catch(e) {}
+        } catch(err) {}
       }
-      return protocols !== undefined ? new origWS(url, protocols) : new origWS(url);
+      return protocols ? new origWebSocket(url, protocols) : new origWebSocket(url);
     };
-    window.WebSocket.prototype = origWS.prototype;
   }
 })();
 </script>`, previewPrefix, previewPrefix, taskID, projectName, taskID, projectName)
@@ -1085,42 +921,36 @@ func rewriteHTML(html, taskID, projectName string) string {
 		return fmt.Sprintf("%s%s%s%s%s", prefix, quote1, previewPrefix, path, quote2)
 	})
 
-	const inspectorScript = `<script>
+	inspectorScript := fmt.Sprintf(`<script>
 (function() {
   var isInspectorActive = false;
   var inspectorOverlay = null;
   var inspectorBadge = null;
-  var inspectorBar = null;
+  var expectedConsoleOrigin = %q;
 
   function ensureInspectorElements() {
-    if (inspectorOverlay) return;
-    var style = document.createElement('style');
-    style.textContent = '' +
-      '.mg-inspector-overlay { position: fixed; pointer-events: none; border: 2px solid #0284c7; background: rgba(2, 132, 199, 0.16); border-radius: 4px; z-index: 2147483647; margin: 0; padding: 0; display: none; transition: all 0.05s ease-out; box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6); }' +
-      '.mg-inspector-badge { position: absolute; top: -22px; left: 0; background: #0284c7; color: #ffffff; font-size: 10px; font-family: ui-monospace, monospace; padding: 1px 6px; border-radius: 3px; white-space: nowrap; pointer-events: none; box-shadow: 0 2px 6px rgba(0,0,0,0.2); }' +
-      '.mg-inspector-bar { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 2147483647; background: rgba(15, 23, 42, 0.92); color: #ffffff; padding: 7px 16px; border-radius: 9999px; border: none; margin: 0; box-shadow: 0 12px 30px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.15); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); display: none; align-items: center; gap: 12px; font-size: 12.5px; font-weight: 500; font-family: system-ui, -apple-system, sans-serif; }' +
-      '.mg-inspector-bar-cancel { background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.25); color: #f8fafc; padding: 2px 8px; border-radius: 6px; font-size: 11px; cursor: pointer; transition: background 0.15s; }' +
-      '.mg-inspector-bar-cancel:hover { background: rgba(255,255,255,0.28); }';
-    (document.head || document.documentElement).appendChild(style);
+    var parent = document.body || document.documentElement;
+    if (!parent) return;
 
-    inspectorOverlay = document.createElement('div');
-    inspectorOverlay.className = 'mg-inspector-overlay';
-    inspectorBadge = document.createElement('div');
-    inspectorBadge.className = 'mg-inspector-badge';
-    inspectorOverlay.appendChild(inspectorBadge);
-    (document.body || document.documentElement).appendChild(inspectorOverlay);
+    if (!document.getElementById('__mg_inspector_styles__')) {
+      var style = document.createElement('style');
+      style.id = '__mg_inspector_styles__';
+      style.textContent = '' +
+        '.mg-inspecting, .mg-inspecting * { cursor: crosshair !important; }' +
+        '.mg-inspector-overlay { position: fixed !important; pointer-events: none !important; border: 2px solid #0284c7 !important; background: rgba(2, 132, 199, 0.18) !important; border-radius: 4px !important; z-index: 2147483647 !important; margin: 0 !important; padding: 0 !important; display: none; box-sizing: border-box !important; transition: all 0.05s ease-out; box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.8), 0 4px 12px rgba(2, 132, 199, 0.25) !important; }' +
+        '.mg-inspector-badge { position: absolute !important; top: -24px !important; left: 0 !important; background: #0284c7 !important; color: #ffffff !important; font-size: 11px !important; font-weight: 500 !important; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important; padding: 2px 7px !important; border-radius: 4px !important; white-space: nowrap !important; pointer-events: none !important; box-shadow: 0 2px 6px rgba(0,0,0,0.3) !important; line-height: 14px !important; }';
+      (document.head || parent).appendChild(style);
+    }
 
-    inspectorBar = document.createElement('div');
-    inspectorBar.className = 'mg-inspector-bar';
-    inspectorBar.innerHTML = '<span>🎯 请在页面上点击需要修改的目标元素</span><button type="button" class="mg-inspector-bar-cancel">取消 (Esc)</button>';
-    (document.body || document.documentElement).appendChild(inspectorBar);
-
-    var cancelBtn = inspectorBar.querySelector('.mg-inspector-bar-cancel');
-    if (cancelBtn) {
-      cancelBtn.addEventListener('click', function(e) {
-        e.stopPropagation();
-        stopInspector(true);
-      });
+    if (!inspectorOverlay) {
+      inspectorOverlay = document.createElement('div');
+      inspectorOverlay.className = 'mg-inspector-overlay';
+      inspectorBadge = document.createElement('div');
+      inspectorBadge.className = 'mg-inspector-badge';
+      inspectorOverlay.appendChild(inspectorBadge);
+      parent.appendChild(inspectorOverlay);
+    } else if (inspectorOverlay.parentElement !== parent) {
+      parent.appendChild(inspectorOverlay);
     }
   }
 
@@ -1133,7 +963,7 @@ func rewriteHTML(html, taskID, projectName string) string {
         path.unshift(selector);
         break;
       } else if (el.className && typeof el.className === 'string' && el.className.trim()) {
-        selector += '.' + el.className.trim().split(/\\s+/)[0];
+        selector += '.' + el.className.trim().split(/\s+/)[0];
       }
       var parent = el.parentNode;
       if (parent) {
@@ -1150,14 +980,20 @@ func rewriteHTML(html, taskID, projectName string) string {
   }
 
   function onInspectorMouseMove(e) {
-    if (!isInspectorActive || !inspectorOverlay) return;
+    if (!isInspectorActive) return;
+    ensureInspectorElements();
     var el = document.elementFromPoint(e.clientX, e.clientY);
-    if (!el || el.closest('.mg-inspector-bar') || el.closest('.mg-inspector-overlay')) {
-      inspectorOverlay.style.display = 'none';
+    if (!el || el === document.body || el === document.documentElement || (el.closest && el.closest('.mg-inspector-overlay'))) {
+      if (inspectorOverlay) inspectorOverlay.style.display = 'none';
       return;
     }
 
     var rect = el.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) {
+      if (inspectorOverlay) inspectorOverlay.style.display = 'none';
+      return;
+    }
+
     inspectorOverlay.style.display = 'block';
     inspectorOverlay.style.top = rect.top + 'px';
     inspectorOverlay.style.left = rect.left + 'px';
@@ -1167,105 +1003,135 @@ func rewriteHTML(html, taskID, projectName string) string {
     var tagStr = el.tagName.toLowerCase();
     if (el.id) tagStr += '#' + el.id;
     else if (el.className && typeof el.className === 'string' && el.className.trim()) {
-      tagStr += '.' + el.className.trim().split(/\\s+/).slice(0, 2).join('.');
+      tagStr += '.' + el.className.trim().split(/\s+/).slice(0, 2).join('.');
     }
     inspectorBadge.textContent = '<' + tagStr + '> ' + Math.round(rect.width) + '×' + Math.round(rect.height);
 
-    if (rect.top < 26) {
+    if (rect.top < 28) {
       inspectorBadge.style.top = 'auto';
-      inspectorBadge.style.bottom = '-22px';
+      inspectorBadge.style.bottom = '-24px';
     } else {
-      inspectorBadge.style.top = '-22px';
+      inspectorBadge.style.top = '-24px';
       inspectorBadge.style.bottom = 'auto';
     }
   }
 
   function extractElementContext(el) {
-    var tag = el.tagName.toLowerCase();
-    var id = el.id ? '#' + el.id : '';
-    var classes = (typeof el.className === 'string' && el.className.trim()) ? '.' + el.className.trim().split(/\\s+/).slice(0, 2).join('.') : '';
-    var tagDisplay = tag + (id ? id : classes);
+    var tag = (el.tagName || '').toLowerCase();
+    var id = '';
+    if (el.id && /^[A-Za-z][A-Za-z0-9_:-]{0,63}$/.test(el.id)) {
+      id = el.id;
+    }
+    var classes = '';
+    if (typeof el.className === 'string' && el.className.trim()) {
+      var safeClasses = el.className.trim().split(/\s+/)
+        .filter(function(c) { return /^[a-zA-Z0-9_\-:]+$/.test(c); })
+        .slice(0, 3);
+      if (safeClasses.length) classes = '.' + safeClasses.join('.');
+    }
+    var tagDisplay = tag + (id ? '#' + id : classes);
 
-    var text = (el.innerText || el.textContent || '').trim().slice(0, 80);
-    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-      text = el.value || el.placeholder || text;
+    var role = '';
+    if (el.getAttribute && el.getAttribute('role')) {
+      var rVal = (el.getAttribute('role') || '').trim();
+      if (/^[a-zA-Z0-9_\-]+$/.test(rVal)) role = rVal;
     }
 
-    var attrs = [];
-    ['id', 'name', 'type', 'placeholder', 'role', 'aria-label', 'href', 'data-testid'].forEach(function(k) {
-      if (el.hasAttribute && el.hasAttribute(k)) {
-        attrs.push(k + '="' + el.getAttribute(k) + '"');
-      }
-    });
+    var type = '';
+    if (el.getAttribute && el.getAttribute('type')) {
+      var tVal = (el.getAttribute('type') || '').trim();
+      if (/^[a-zA-Z0-9_\-]+$/.test(tVal)) type = tVal;
+    }
 
-    var parentInfo = '';
-    if (el.parentElement && el.parentElement !== document.body && el.parentElement !== document.documentElement) {
-      var p = el.parentElement;
-      var pTag = p.tagName.toLowerCase() + (p.id ? '#' + p.id : (p.className && typeof p.className === 'string' && p.className.trim() ? '.' + p.className.trim().split(/\\s+/)[0] : ''));
-      var pText = (p.innerText || '').trim().slice(0, 24);
-      parentInfo = '<' + pTag + '>' + (pText ? ' "' + pText + '"' : '');
+    var testId = '';
+    if (el.getAttribute && el.getAttribute('data-testid')) {
+      var tidVal = (el.getAttribute('data-testid') || '').trim();
+      if (/^[A-Za-z][A-Za-z0-9_:-]{0,63}$/.test(tidVal)) testId = tidVal;
     }
 
     var selector = getCssSelector(el);
-    var outerHTML = (el.outerHTML || '').slice(0, 260);
 
+    // SECURITY (Phase 0): Absolutely zero input values, placeholders, text snippets, hrefs, raw markup, or parent trees
     return {
       tag: tagDisplay,
       tagName: tag,
-      id: el.id || '',
-      name: el.getAttribute ? (el.getAttribute('name') || '') : '',
-      text: text,
-      attrs: attrs.join(' '),
-      parent: parentInfo,
-      selector: selector,
-      outerHTML: outerHTML
+      id: id,
+      role: role,
+      type: type,
+      testId: testId,
+      selector: selector
     };
+  }
+
+  function notifyHost(msg) {
+    try {
+      if (!expectedConsoleOrigin) return;
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage(msg, expectedConsoleOrigin);
+      }
+    } catch(e) {}
   }
 
   function onInspectorClick(e) {
     if (!isInspectorActive) return;
     var el = document.elementFromPoint(e.clientX, e.clientY);
-    if (el && el.closest('.mg-inspector-bar')) return;
+    if (!el) return;
 
     e.preventDefault();
     e.stopPropagation();
 
-    if (el && !el.closest('.mg-inspector-bar') && !el.closest('.mg-inspector-overlay')) {
+    if (el !== document.body && el !== document.documentElement && (!el.closest || !el.closest('.mg-inspector-overlay'))) {
       var targetCtx = extractElementContext(el);
-      try {
-        window.parent.postMessage({ type: 'MG_DOM_SELECTED', target: targetCtx }, '*');
-      } catch(err) {}
+      notifyHost({ type: 'MG_DOM_SELECTED', target: targetCtx });
+      stopInspector(false);
     }
-    stopInspector(false);
   }
 
   function startInspector() {
-    ensureInspectorElements();
+    try {
+      ensureInspectorElements();
+    } catch(err) {
+      console.warn('[Multigent Inspector] Error ensuring elements:', err);
+    }
     isInspectorActive = true;
-    if (inspectorBar) inspectorBar.style.display = 'flex';
+    document.documentElement.classList.add('mg-inspecting');
+    try {
+      if (document.body) document.body.style.setProperty('cursor', 'crosshair', 'important');
+      if (document.documentElement) document.documentElement.style.setProperty('cursor', 'crosshair', 'important');
+    } catch(e) {}
     document.addEventListener('mousemove', onInspectorMouseMove, true);
     document.addEventListener('click', onInspectorClick, true);
+    notifyHost({ type: 'MG_INSPECTOR_ACTIVE' });
+    console.log('[Multigent Inspector] Activated successfully');
   }
 
   function stopInspector(notify) {
     isInspectorActive = false;
+    document.documentElement.classList.remove('mg-inspecting');
+    try {
+      if (document.body) document.body.style.removeProperty('cursor');
+      if (document.documentElement) document.documentElement.style.removeProperty('cursor');
+    } catch(e) {}
     if (inspectorOverlay) inspectorOverlay.style.display = 'none';
-    if (inspectorBar) inspectorBar.style.display = 'none';
     document.removeEventListener('mousemove', onInspectorMouseMove, true);
     document.removeEventListener('click', onInspectorClick, true);
+    notifyHost({ type: 'MG_INSPECTOR_INACTIVE' });
     if (notify) {
-      try {
-        window.parent.postMessage({ type: 'MG_DOM_CANCELLED' }, '*');
-      } catch(err) {}
+      notifyHost({ type: 'MG_DOM_CANCELLED' });
     }
+    console.log('[Multigent Inspector] Deactivated');
   }
 
   window.addEventListener('message', function(e) {
-    if (!e || !e.data) return;
+    if (!e || !e.data || typeof e.data !== 'object') return;
+    if (e.source !== window.parent) return;
+    if (!expectedConsoleOrigin || e.origin !== expectedConsoleOrigin) return;
     if (e.data.type === 'MG_START_INSPECTOR') {
       startInspector();
     } else if (e.data.type === 'MG_STOP_INSPECTOR') {
       stopInspector(false);
+    } else if (e.data.type === 'MG_PING_INSPECTOR') {
+      notifyHost({ type: 'MG_PONG_INSPECTOR', active: isInspectorActive });
     }
   });
 
@@ -1276,10 +1142,25 @@ func rewriteHTML(html, taskID, projectName string) string {
       stopInspector(true);
     }
   }, true);
-})();
-</script>`
 
-	fullScript := patchScript + inspectorScript
+  // Announce mount to host window immediately, and on DOMContentLoaded / load
+  notifyHost({ type: 'MG_INSPECTOR_MOUNTED' });
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function() {
+      notifyHost({ type: 'MG_INSPECTOR_MOUNTED' });
+    });
+  }
+  window.addEventListener('load', function() {
+    notifyHost({ type: 'MG_INSPECTOR_MOUNTED' });
+  });
+  console.log('[Multigent Inspector] Script mounted and listening');
+})();
+</script>`, consoleOrigin)
+
+	fullScript := patchScript
+	if consoleOrigin != "" {
+		fullScript += inspectorScript
+	}
 
 	if strings.Contains(html, "<head>") {
 		html = strings.Replace(html, "<head>", "<head>"+fullScript, 1)

@@ -43,8 +43,37 @@ func (s *Server) SetPreviewCopilotDrawerEnabled(enabled bool) {
 }
 
 // PreviewCopilotDrawerEnabled returns whether the preview drawer is enabled.
+// Fail-closed rule (Phase 0): If MULTIGENT_ENABLE_PREVIEW_COPILOT_DRAWER is true,
+// both MULTIGENT_PREVIEW_ORIGIN and MULTIGENT_CONSOLE_ORIGIN must be configured,
+// non-empty, and share the exact same schemeful site. Otherwise, it is disabled.
 func (s *Server) PreviewCopilotDrawerEnabled() bool {
-	return s.enablePreviewCopilotDrawer
+	if s == nil || !s.enablePreviewCopilotDrawer {
+		return false
+	}
+	if s.previewOrigin == "" || s.consoleOrigin == "" {
+		return false
+	}
+	if SchemefulSiteMismatchWarning(s.consoleOrigin, s.previewOrigin) != "" {
+		return false
+	}
+	return true
+}
+
+// PreviewCopilotDrawerDisabledReason returns the reason why drawer is disabled.
+func (s *Server) PreviewCopilotDrawerDisabledReason() string {
+	if s == nil || !s.enablePreviewCopilotDrawer {
+		return "drawer feature flag is disabled"
+	}
+	if s.previewOrigin == "" {
+		return "MULTIGENT_PREVIEW_ORIGIN is not configured"
+	}
+	if s.consoleOrigin == "" {
+		return "MULTIGENT_CONSOLE_ORIGIN is not configured"
+	}
+	if warn := SchemefulSiteMismatchWarning(s.consoleOrigin, s.previewOrigin); warn != "" {
+		return warn
+	}
+	return ""
 }
 
 // IsTruthyEnv returns true if val is "1", "true", "yes", or "on" (case-insensitive).

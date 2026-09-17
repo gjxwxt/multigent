@@ -28,13 +28,11 @@ import { cn } from '../../lib/cn'
 export type DOMTarget = {
   tag: string
   tagName: string
-  id: string
-  name: string
-  text: string
-  attrs: string
-  parent: string
+  id?: string
+  role?: string
+  type?: string
+  testId?: string
   selector: string
-  outerHTML: string
 }
 
 export type CopilotTool = {
@@ -178,7 +176,9 @@ export function PreviewDrawer({
 
   // Visual DOM element selector state
   const [isInspectingDOM, setIsInspectingDOM] = useState(false)
+  const [inspectorConnected, setInspectorConnected] = useState(false)
   const [selectedDOM, setSelectedDOM] = useState<DOMTarget | null>(null)
+  const [reloadKey, setReloadKey] = useState(() => Date.now())
 
   // Lock and error feedback
   const [lockWarning, setLockWarning] = useState<string | null>(null)
@@ -200,9 +200,15 @@ export function PreviewDrawer({
     return []
   })
 
+  // Security (Phase 0): Strip domTarget metadata from localStorage persistence
   useEffect(() => {
     try {
-      localStorage.setItem(storageKey, JSON.stringify(msgs))
+      const sanitized = msgs.map((m) => {
+        if (!m.domTarget) return m
+        const { domTarget: _unused, ...rest } = m
+        return rest
+      })
+      localStorage.setItem(storageKey, JSON.stringify(sanitized))
     } catch {}
   }, [msgs, storageKey])
 
@@ -265,33 +271,105 @@ export function PreviewDrawer({
     }
   }
 
+  const previewOrigin = useMemo(() => {
+    if (!previewUrl) return ''
+    try {
+      return new URL(previewUrl).origin
+    } catch {
+      return ''
+    }
+  }, [previewUrl])
+
+  const postToPreview = useCallback((msg: { type: string; [key: string]: unknown }) => {
+    if (!iframeRef.current?.contentWindow) return false
+    if (!previewOrigin) return false
+    try {
+      iframeRef.current.contentWindow.postMessage(msg, previewOrigin)
+      return true
+    } catch {
+      return false
+    }
+  }, [previewOrigin])
+
+  const handleStartInspect = useCallback(() => {
+    if (!previewOrigin) return
+    setIsInspectingDOM(true)
+    setInspectorConnected(false)
+    postToPreview({ type: 'MG_START_INSPECTOR' })
+  }, [postToPreview, previewOrigin])
+
+  const handleStopInspect = useCallback(() => {
+    setIsInspectingDOM(false)
+    setInspectorConnected(false)
+    postToPreview({ type: 'MG_STOP_INSPECTOR' })
+    setCopilotOpen(true)
+    setCopilotMinimized(false)
+  }, [postToPreview])
+
   const handleToggleInspect = () => {
+    if (!previewOrigin) return
     if (isInspectingDOM) {
-      setIsInspectingDOM(false)
-      iframeRef.current?.contentWindow?.postMessage({ type: 'MG_STOP_INSPECTOR' }, '*')
+      handleStopInspect()
     } else {
-      setIsInspectingDOM(true)
-      iframeRef.current?.contentWindow?.postMessage({ type: 'MG_START_INSPECTOR' }, '*')
+      handleStartInspect()
     }
   }
 
-  // Window message bridge for cross-origin DOM selection
+  // Window message bridge for cross-origin DOM selection and bidirectional handshake
   useEffect(() => {
     function handleMessage(e: MessageEvent) {
       if (!e || !e.data || typeof e.data !== 'object') return
-      if (e.data.type === 'MG_DOM_SELECTED' && e.data.target) {
+      // Security gate: verify event origin and source against expected preview iframe (fail-closed)
+      if (!previewOrigin || e.origin !== previewOrigin) return
+      if (!iframeRef.current?.contentWindow || e.source !== iframeRef.current.contentWindow) return
+
+      const t = e.data.type
+      if (t === 'MG_INSPECTOR_ACTIVE' || t === 'MG_PONG_INSPECTOR') {
+        if (e.data.active !== false) {
+          setInspectorConnected(true)
+        }
+      } else if (t === 'MG_INSPECTOR_MOUNTED') {
+        if (isInspectingDOM) {
+          postToPreview({ type: 'MG_START_INSPECTOR' })
+        }
+      } else if (t === 'MG_DOM_SELECTED' && e.data.target) {
         setSelectedDOM(e.data.target as DOMTarget)
         setIsInspectingDOM(false)
+        setInspectorConnected(false)
         setCopilotOpen(true)
         setCopilotMinimized(false)
-        textareaRef.current?.focus()
-      } else if (e.data.type === 'MG_DOM_CANCELLED') {
+        setTimeout(() => {
+          textareaRef.current?.focus()
+        }, 60)
+      } else if (t === 'MG_DOM_CANCELLED') {
         setIsInspectingDOM(false)
+        setInspectorConnected(false)
+        setCopilotOpen(true)
+        setCopilotMinimized(false)
       }
     }
     window.addEventListener('message', handleMessage)
     return () => window.removeEventListener('message', handleMessage)
-  }, [])
+  }, [isInspectingDOM, postToPreview, previewOrigin])
+
+  // Periodic heartbeat / retry until iframe acknowledges inspection mode
+  useEffect(() => {
+    if (!isInspectingDOM) return
+
+    // Immediately dispatch start request
+    postToPreview({ type: 'MG_START_INSPECTOR' })
+
+    // Keep checking gently until connected
+    const timer = setInterval(() => {
+      if (inspectorConnected) {
+        clearInterval(timer)
+        return
+      }
+      postToPreview({ type: 'MG_START_INSPECTOR' })
+    }, 350)
+
+    return () => clearInterval(timer)
+  }, [isInspectingDOM, inspectorConnected, postToPreview])
 
   // Keyboard shortcut: Cmd+K / Ctrl+K toggles Copilot, Escape handles hierarchy
   useEffect(() => {
@@ -304,8 +382,7 @@ export function PreviewDrawer({
       if (e.key === 'Escape') {
         if (isInspectingDOM) {
           e.preventDefault()
-          setIsInspectingDOM(false)
-          iframeRef.current?.contentWindow?.postMessage({ type: 'MG_STOP_INSPECTOR' }, '*')
+          handleStopInspect()
           return
         }
         if (copilotOpen && !copilotMinimized) {
@@ -321,23 +398,25 @@ export function PreviewDrawer({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [copilotOpen, copilotMinimized, isInspectingDOM, onClose])
 
-  // Construct target preview URL
+  // Construct target preview URL with cache-busting timestamp
   const targetUrl = useMemo(() => {
     if (!previewUrl) return ''
-    if (!previewToken) return previewUrl
     const sep = previewUrl.includes('?') ? '&' : '?'
-    return `${previewUrl}${sep}pvt=${encodeURIComponent(previewToken)}`
-  }, [previewUrl, previewToken])
+    const tokenPart = previewToken ? `pvt=${encodeURIComponent(previewToken)}&` : ''
+    return `${previewUrl}${sep}${tokenPart}_t=${reloadKey}`
+  }, [previewUrl, previewToken, reloadKey])
 
-  const handleReload = () => {
+  const handleReload = useCallback(() => {
+    setReloadKey(Date.now())
     setIframeKey((k) => k + 1)
-  }
+  }, [])
 
   const handleStartFromDrawer = async () => {
     if (!onStartPreview) return
     setStartBusy(true)
     try {
       await onStartPreview()
+      setReloadKey(Date.now())
       setIframeKey((k) => k + 1)
     } finally {
       setStartBusy(false)
@@ -440,8 +519,15 @@ export function PreviewDrawer({
     let displayContent = text
     let finalPrompt = text
     if (dom) {
-      displayContent = `@DOM(${dom.tag}) ${text || '请针对该元素进行优化'}`
-      finalPrompt = `【目标页面 DOM 元素精准定位上下文】:\n- CSS 选择器路径: ${dom.selector}\n- 标签与类名: <${dom.tag}>\n- 父级容器上下文: ${dom.parent || '无'}\n- 核心属性与配置: ${dom.attrs || '无'}\n- 页面可见文本/占位符: "${dom.text || '无'}"\n- HTML 代码结构片段:\n\`\`\`html\n${dom.outerHTML}\n\`\`\`\n\n【用户代码优化需求】:\n${text || '请根据上述目标 DOM 元素位置与代码上下文进行优化与修复'}`
+      displayContent = `@DOM(${dom.tag}) ${text || '请针对该元素进行审查'}`
+      const structuralInfo = [
+        `- 选择器: ${dom.selector}`,
+        `- 标签与类: <${dom.tag}>`,
+        dom.role ? `- 角色 (role): ${dom.role}` : null,
+        dom.type ? `- 类型 (type): ${dom.type}` : null,
+        dom.testId ? `- 测试标识 (data-testid): ${dom.testId}` : null,
+      ].filter(Boolean).join('\n')
+      finalPrompt = `【目标页面 DOM 元素结构元数据】:\n${structuralInfo}\n\n【用户审查需求】:\n${text || '请根据上述目标 DOM 元素位置与上下文进行分析'}`
     }
 
     const userMsg: CopilotMsg = {
@@ -643,7 +729,9 @@ export function PreviewDrawer({
               <button
                 type="button"
                 onClick={handleToggleInspect}
-                className="flex items-center gap-2 rounded-xl border border-sky-200/80 bg-sky-50/70 p-2.5 text-xs text-sky-800 hover:bg-sky-100 transition dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-300"
+                disabled={!previewOrigin}
+                title={!previewOrigin ? '预览源未配置或不匹配，已禁用元素选取' : (isInspectingDOM ? '取消选取 (Esc)' : '在页面上点击选择目标元素')}
+                className="flex items-center gap-2 rounded-xl border border-sky-200/80 bg-sky-50/70 p-2.5 text-xs text-sky-800 hover:bg-sky-100 disabled:opacity-50 disabled:cursor-not-allowed transition dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-300"
               >
                 <Crosshair className="size-3.5 shrink-0 text-sky-600 dark:text-sky-400" />
                 <span className="truncate">{t('tasks.previewDrawer.emptyPrompt1', { defaultValue: '🎯 选取页面元素并修改' })}</span>
@@ -809,20 +897,33 @@ export function PreviewDrawer({
                   <span className="text-neutral-400">{t('tasks.previewDrawer.selector', { defaultValue: '选择器' })}: </span>
                   {selectedDOM.selector}
                 </div>
-                {selectedDOM.text && (
+                {selectedDOM.role && (
                   <div>
-                    <span className="text-neutral-400">{t('tasks.previewDrawer.elementText', { defaultValue: '文本' })}: </span>
-                    "{selectedDOM.text}"
+                    <span className="text-neutral-400">role: </span>
+                    {selectedDOM.role}
                   </div>
                 )}
-                {selectedDOM.parent && (
+                {selectedDOM.type && (
                   <div>
-                    <span className="text-neutral-400">{t('tasks.previewDrawer.parentContainer', { defaultValue: '父级' })}: </span>
-                    {selectedDOM.parent}
+                    <span className="text-neutral-400">type: </span>
+                    {selectedDOM.type}
+                  </div>
+                )}
+                {selectedDOM.testId && (
+                  <div>
+                    <span className="text-neutral-400">data-testid: </span>
+                    {selectedDOM.testId}
                   </div>
                 )}
               </div>
             </div>
+          </div>
+        )}
+
+        {!canOperator && (
+          <div className="mb-2 flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50/80 px-2.5 py-1.5 text-[11px] text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300">
+            <Lock className="size-3 shrink-0" />
+            <span>当前无 Operator 权限，仅可查看调优状态</span>
           </div>
         )}
 
@@ -833,13 +934,15 @@ export function PreviewDrawer({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleTextareaKeyDown}
-            disabled={isStreaming}
+            disabled={isStreaming || !canOperator}
             placeholder={
-              selectedDOM
-                ? `针对 @DOM(${selectedDOM.tag}) 输入修改要求 (⌘+Enter 发送)…`
-                : t('tasks.previewDrawer.inputPlaceholder', { defaultValue: '描述想要修改的页面内容或样式 (⌘+Enter 发送)…' })
+              !canOperator
+                ? '仅项目 Operator 可发起调优'
+                : (selectedDOM
+                    ? `针对 @DOM(${selectedDOM.tag}) 输入修改要求 (⌘+Enter 发送)…`
+                    : t('tasks.previewDrawer.inputPlaceholder', { defaultValue: '描述想要修改的页面内容或样式 (⌘+Enter 发送)…' }))
             }
-            className="w-full resize-none rounded-xl border border-neutral-200 bg-neutral-50/80 p-2.5 text-xs text-neutral-800 outline-none transition focus:border-sky-500 focus:bg-white dark:border-zinc-800 dark:bg-zinc-800/60 dark:text-zinc-100 dark:focus:border-sky-500 dark:focus:bg-zinc-900"
+            className="w-full resize-none rounded-xl border border-neutral-200 bg-neutral-50/80 p-2.5 text-xs text-neutral-800 outline-none transition focus:border-sky-500 focus:bg-white dark:border-zinc-800 dark:bg-zinc-800/60 dark:text-zinc-100 dark:focus:border-sky-500 dark:focus:bg-zinc-900 disabled:opacity-60 disabled:cursor-not-allowed"
           />
         </div>
 
@@ -860,7 +963,8 @@ export function PreviewDrawer({
               <button
                 type="button"
                 onClick={() => void handleSend()}
-                disabled={!input.trim() && !selectedDOM}
+                disabled={(!input.trim() && !selectedDOM) || !canOperator}
+                title={!canOperator ? '仅项目 Operator 可发起调优' : undefined}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1 font-semibold text-white shadow-xs hover:bg-sky-500 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 transition"
               >
                 <Send className="size-3" />
@@ -876,7 +980,7 @@ export function PreviewDrawer({
   return createPortal(
     <div
       className={cn(
-        'fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs transition-all duration-150',
+        'fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-xs transition-all duration-150',
         isMaximized ? 'p-0' : 'p-2 sm:p-4'
       )}
     >
@@ -979,7 +1083,7 @@ export function PreviewDrawer({
         {/* Main Area: Iframe + Copilot (Docked or Floating) */}
         <div className="relative flex min-h-0 flex-1 overflow-hidden">
           {/* Iframe Viewport: takes 100% width in floating mode */}
-          <div className="relative flex-1 overflow-hidden bg-neutral-100 dark:bg-zinc-950">
+          <div className={cn('relative flex-1 overflow-hidden bg-neutral-100 dark:bg-zinc-950', isInspectingDOM && 'cursor-crosshair')}>
             {previewStatus && previewStatus !== 'running' ? (
               <div className="flex size-full flex-col items-center justify-center p-6 text-center">
                 <div className="flex size-14 items-center justify-center rounded-2xl bg-sky-50 text-sky-600 dark:bg-sky-950/60 dark:text-sky-400 mb-4 shadow-xs">
@@ -1011,7 +1115,7 @@ export function PreviewDrawer({
                 ref={iframeRef}
                 src={targetUrl}
                 title={`preview-${taskId}`}
-                className="size-full border-none"
+                className={cn('size-full border-none', isInspectingDOM && 'cursor-crosshair')}
                 sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
               />
             ) : (
@@ -1022,7 +1126,7 @@ export function PreviewDrawer({
           </div>
 
           {/* Docked Sidebar Mode */}
-          {layoutMode === 'docked' && copilotOpen && (
+          {layoutMode === 'docked' && copilotOpen && !isInspectingDOM && (
             <div className="flex w-88 shrink-0 flex-col border-l border-neutral-200 bg-white shadow-lg dark:border-zinc-800 dark:bg-zinc-900 sm:w-96">
               <div className="flex h-11 items-center justify-between border-b border-neutral-100 px-3.5 dark:border-zinc-800">
                 <div className="flex items-center gap-2">
@@ -1030,18 +1134,23 @@ export function PreviewDrawer({
                   <span className="text-xs font-semibold text-neutral-800 dark:text-zinc-200">
                     {t('tasks.previewDrawer.copilotTitle', { defaultValue: '智能调优助手' })}
                   </span>
+                  <span className="text-[10px] font-normal text-amber-700 bg-amber-50 dark:bg-amber-950/60 dark:text-amber-300 px-1.5 py-0.5 rounded border border-amber-200 dark:border-amber-800 shrink-0">
+                    只读审查
+                  </span>
                 </div>
                 <div className="flex items-center gap-1">
                   {/* DOM Picker Button */}
                   <button
                     type="button"
                     onClick={handleToggleInspect}
-                    title={isInspectingDOM ? '取消选取 (Esc)' : '在页面上点击选择目标元素'}
+                    disabled={!previewOrigin}
+                    title={!previewOrigin ? '预览源未配置或不匹配，已禁用元素选取' : (isInspectingDOM ? '取消选取 (Esc)' : '在页面上点击选择目标元素')}
                     className={cn(
                       'inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium transition',
                       isInspectingDOM
                         ? 'bg-sky-600 text-white animate-pulse'
-                        : 'bg-sky-50 text-sky-700 hover:bg-sky-100 dark:bg-sky-950/50 dark:text-sky-300'
+                        : 'bg-sky-50 text-sky-700 hover:bg-sky-100 dark:bg-sky-950/50 dark:text-sky-300',
+                      !previewOrigin && 'opacity-50 cursor-not-allowed hover:bg-sky-50 dark:hover:bg-sky-950/50'
                     )}
                   >
                     <Crosshair className="size-3" />
@@ -1080,7 +1189,7 @@ export function PreviewDrawer({
           )}
 
           {/* Floating Overlay Mode */}
-          {layoutMode === 'floating' && copilotOpen && !copilotMinimized && (
+          {layoutMode === 'floating' && copilotOpen && !copilotMinimized && !isInspectingDOM && (
             <div className="absolute bottom-4 right-4 z-30 flex h-[540px] max-h-[calc(100%-32px)] w-88 sm:w-96 flex-col overflow-hidden rounded-2xl border border-neutral-200/90 bg-white/95 shadow-2xl backdrop-blur-md dark:border-zinc-700/80 dark:bg-zinc-900/95 transition-all">
               <div className="flex h-11 shrink-0 items-center justify-between border-b border-neutral-200/70 bg-neutral-50/80 px-3.5 dark:border-zinc-800 dark:bg-zinc-800/60">
                 <div className="flex items-center gap-2 overflow-hidden">
@@ -1088,18 +1197,23 @@ export function PreviewDrawer({
                   <span className="truncate text-xs font-semibold text-neutral-800 dark:text-zinc-200">
                     {t('tasks.previewDrawer.copilotTitle', { defaultValue: '智能调优助手' })}
                   </span>
+                  <span className="text-[10px] font-normal text-amber-700 bg-amber-50 dark:bg-amber-950/60 dark:text-amber-300 px-1.5 py-0.5 rounded border border-amber-200 dark:border-amber-800 shrink-0">
+                    只读审查
+                  </span>
                 </div>
                 <div className="flex items-center gap-1">
                   {/* DOM Picker Button */}
                   <button
                     type="button"
                     onClick={handleToggleInspect}
-                    title={isInspectingDOM ? '取消选取 (Esc)' : '在页面上点击选择目标元素'}
+                    disabled={!previewOrigin}
+                    title={!previewOrigin ? '预览源未配置或不匹配，已禁用元素选取' : (isInspectingDOM ? '取消选取 (Esc)' : '在页面上点击选择目标元素')}
                     className={cn(
                       'inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[11px] font-medium transition',
                       isInspectingDOM
                         ? 'bg-sky-600 text-white animate-pulse'
-                        : 'bg-sky-50 text-sky-700 hover:bg-sky-100 dark:bg-sky-950/50 dark:text-sky-300'
+                        : 'bg-sky-50 text-sky-700 hover:bg-sky-100 dark:bg-sky-950/50 dark:text-sky-300',
+                      !previewOrigin && 'opacity-50 cursor-not-allowed hover:bg-sky-50 dark:hover:bg-sky-950/50'
                     )}
                   >
                     <Crosshair className="size-3" />
@@ -1145,8 +1259,40 @@ export function PreviewDrawer({
             </div>
           )}
 
+          {/* Inspecting DOM Header Banner */}
+          {isInspectingDOM && (
+            <div className="pointer-events-none absolute top-4 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 rounded-full border border-sky-400/40 bg-slate-900/95 px-5 py-2 text-xs font-semibold text-white shadow-2xl backdrop-blur-md animate-in fade-in zoom-in duration-150">
+              <span className="relative flex size-2.5 items-center justify-center">
+                <span className={cn('size-2 rounded-full', inspectorConnected ? 'bg-sky-400' : 'bg-amber-400 animate-pulse')} />
+                <span className={cn('absolute size-3.5 rounded-full animate-ping', inspectorConnected ? 'bg-sky-400/50' : 'bg-amber-400/50')} />
+              </span>
+              <span>
+                {inspectorConnected
+                  ? t('tasks.previewDrawer.inspectingBanner', { defaultValue: '🎯 请在页面上点击需要修改的目标元素' })
+                  : t('tasks.previewDrawer.connectingInspector', { defaultValue: '🎯 正在激活页面选取模式…' })}
+              </span>
+              {!inspectorConnected && (
+                <button
+                  type="button"
+                  onClick={handleReload}
+                  className="pointer-events-auto rounded-full bg-amber-500/25 px-2.5 py-0.5 text-[11px] font-medium text-amber-200 hover:bg-amber-500/40 transition cursor-pointer"
+                  title="未检测到页面响应？点击重新加载预览页面"
+                >
+                  刷新重试
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={handleStopInspect}
+                className="pointer-events-auto rounded-full bg-white/15 px-3 py-1 text-[11px] font-medium text-white/90 hover:bg-white/25 transition cursor-pointer"
+              >
+                {t('common.cancel', { defaultValue: '取消 (Esc)' })}
+              </button>
+            </div>
+          )}
+
           {/* Classic Bottom-Right Floating Pill Badge */}
-          {(!copilotOpen || copilotMinimized) && (
+          {(!copilotOpen || copilotMinimized) && !isInspectingDOM && (
             <button
               type="button"
               onClick={() => {

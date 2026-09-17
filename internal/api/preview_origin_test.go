@@ -502,3 +502,58 @@ func TestRewriteHTMLESMImports(t *testing.T) {
 	}
 }
 
+func TestPreviewCopilotDrawerEnabledFailClosed(t *testing.T) {
+	s := &Server{}
+
+	// Case 1: Flag false
+	s.SetPreviewCopilotDrawerEnabled(false)
+	if s.PreviewCopilotDrawerEnabled() {
+		t.Fatal("expected false when flag is false")
+	}
+	if s.PreviewCopilotDrawerDisabledReason() != "drawer feature flag is disabled" {
+		t.Fatalf("unexpected reason: %s", s.PreviewCopilotDrawerDisabledReason())
+	}
+
+	// Case 2: Flag true, missing preview origin
+	s.SetPreviewCopilotDrawerEnabled(true)
+	s.SetPreviewOrigin("")
+	s.SetConsoleOrigin("https://console.example.com")
+	if s.PreviewCopilotDrawerEnabled() {
+		t.Fatal("expected false when previewOrigin is missing")
+	}
+	if !strings.Contains(s.PreviewCopilotDrawerDisabledReason(), "MULTIGENT_PREVIEW_ORIGIN is not configured") {
+		t.Fatalf("unexpected reason: %s", s.PreviewCopilotDrawerDisabledReason())
+	}
+
+	// Case 3: Flag true, missing console origin
+	s.SetPreviewOrigin("https://preview.example.com")
+	s.SetConsoleOrigin("")
+	if s.PreviewCopilotDrawerEnabled() {
+		t.Fatal("expected false when consoleOrigin is missing")
+	}
+	if !strings.Contains(s.PreviewCopilotDrawerDisabledReason(), "MULTIGENT_CONSOLE_ORIGIN is not configured") {
+		t.Fatalf("unexpected reason: %s", s.PreviewCopilotDrawerDisabledReason())
+	}
+
+	// Case 4: Flag true, different schemeful site
+	s.SetConsoleOrigin("https://console.company-a.com")
+	s.SetPreviewOrigin("https://preview.company-b.com")
+	if s.PreviewCopilotDrawerEnabled() {
+		t.Fatal("expected false when schemeful sites differ")
+	}
+	if !strings.Contains(s.PreviewCopilotDrawerDisabledReason(), "do not share the same registrable domain") {
+		t.Fatalf("unexpected reason: %s", s.PreviewCopilotDrawerDisabledReason())
+	}
+
+	// Case 5: Flag true, matching schemeful site
+	s.SetConsoleOrigin("https://console.example.com")
+	s.SetPreviewOrigin("https://preview.example.com")
+	if !s.PreviewCopilotDrawerEnabled() {
+		t.Fatal("expected true when origins share same schemeful site")
+	}
+	if s.PreviewCopilotDrawerDisabledReason() != "" {
+		t.Fatalf("expected empty reason when enabled, got: %s", s.PreviewCopilotDrawerDisabledReason())
+	}
+}
+
+
