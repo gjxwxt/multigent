@@ -5,12 +5,17 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   AlertCircle,
+  ArrowLeft,
+  Code2,
   Crosshair,
   ExternalLink,
+  FileCode,
   Globe,
+  History,
   Layers,
   Lock,
   Maximize2,
+  MessageSquare,
   Minimize2,
   Minus,
   PanelRight,
@@ -28,6 +33,23 @@ import { type DOMTarget, decodeDOMTarget } from '../../lib/domTarget'
 
 export type { DOMTarget }
 export { decodeDOMTarget }
+
+export type TurnReceipt = {
+  id: string
+  turnId: string
+  status: string
+  revision: number
+  baselineTree?: string
+  baselineCommit?: string
+  requestDigest?: string
+  redactedPrompt?: string
+  creator?: string
+  createdAt?: string
+  updatedAt?: string
+  displayDiff?: string
+  touchedPaths?: string[]
+  failureReason?: string
+}
 
 export type CopilotTool = {
   type: 'bash' | 'read' | 'edit' | 'search' | 'other'
@@ -77,6 +99,103 @@ function diffLineClass(line: string): string {
     return 'bg-red-50 text-red-700 dark:bg-red-950/30 dark:text-red-300'
   }
   return 'text-neutral-700 dark:text-zinc-300'
+}
+
+function formatTurnTime(isoStr?: string): string {
+  if (!isoStr) return ''
+  try {
+    const d = new Date(isoStr)
+    if (isNaN(d.getTime())) return isoStr
+    return d.toLocaleString(undefined, {
+      month: 'numeric',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    })
+  } catch {
+    return isoStr || ''
+  }
+}
+
+function renderTurnStatusBadge(status: string) {
+  switch (status) {
+    case 'CAPTURED':
+      return (
+        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 border border-emerald-200 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-800">
+          <span className="size-1.5 rounded-full bg-emerald-500" />
+          已捕获 (可撤销)
+        </span>
+      )
+    case 'ROLLED_BACK':
+      return (
+        <span className="inline-flex items-center gap-1 rounded-full bg-neutral-100 px-2 py-0.5 text-[10px] font-semibold text-neutral-600 border border-neutral-200 dark:bg-zinc-800 dark:text-zinc-400 dark:border-zinc-700">
+          已撤销
+        </span>
+      )
+    case 'SUPERSEDED':
+      return (
+        <span className="inline-flex items-center gap-1 rounded-full bg-neutral-100 px-2 py-0.5 text-[10px] font-semibold text-neutral-500 border border-neutral-200 dark:bg-zinc-800 dark:text-zinc-500 dark:border-zinc-700">
+          已覆盖
+        </span>
+      )
+    case 'COMMITTING':
+      return (
+        <span className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2 py-0.5 text-[10px] font-semibold text-sky-700 border border-sky-200 dark:bg-sky-950/50 dark:text-sky-300 dark:border-sky-800 animate-pulse">
+          正在收编…
+        </span>
+      )
+    case 'COMMITTED':
+      return (
+        <span className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 border border-indigo-200 dark:bg-indigo-950/50 dark:text-indigo-300 dark:border-indigo-800">
+          已收编入库
+        </span>
+      )
+    case 'PENDING':
+    case 'EXECUTING':
+    case 'CAPTURING':
+      return (
+        <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700 border border-amber-200 dark:bg-amber-950/50 dark:text-amber-300 dark:border-amber-800 animate-pulse">
+          <span className="size-1.5 rounded-full bg-amber-500 animate-ping" />
+          {status === 'CAPTURING' ? '捕获核验中' : '智能体执行中'}
+        </span>
+      )
+    case 'REVERTING':
+      return (
+        <span className="inline-flex items-center gap-1 rounded-full bg-orange-50 px-2 py-0.5 text-[10px] font-semibold text-orange-700 border border-orange-200 dark:bg-orange-950/50 dark:text-orange-300 dark:border-orange-800 animate-pulse">
+          正在回滚…
+        </span>
+      )
+    case 'REVERT_FAILED':
+      return (
+        <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-800 border border-red-300 dark:bg-red-950/60 dark:text-red-200 dark:border-red-800">
+          回滚失败 (需人工排查)
+        </span>
+      )
+    case 'FAILED':
+    default:
+      return (
+        <span className="inline-flex items-center gap-1 rounded-full bg-red-50 px-2 py-0.5 text-[10px] font-semibold text-red-700 border border-red-200 dark:bg-red-950/50 dark:text-red-300 dark:border-red-800">
+          执行失败
+        </span>
+      )
+  }
+}
+
+function renderDiffContent(diffText: string) {
+  const lines = diffText.split('\n')
+  return (
+    <div className="overflow-x-auto rounded-xl border border-neutral-200 bg-neutral-900 p-2.5 font-mono text-[11px] leading-relaxed text-neutral-100 dark:border-zinc-800 dark:bg-zinc-950">
+      {lines.map((line, idx) => (
+        <div key={idx} className={cn('px-2 py-0.5 whitespace-pre', diffLineClass(line))}>
+          <span className="inline-block w-8 select-none text-right text-neutral-500 mr-3 opacity-60">
+            {idx + 1}
+          </span>
+          {line || ' '}
+        </div>
+      ))}
+    </div>
+  )
 }
 
 const copilotMdComponents = {
@@ -180,6 +299,15 @@ export function PreviewDrawer({
   const [isBusy, setIsBusy] = useState(false)
   const [input, setInput] = useState('')
 
+  // Turn receipt & history states
+  const [turnReceiptsEnabled, setTurnReceiptsEnabled] = useState(false)
+  const [activeTab, setActiveTab] = useState<'chat' | 'turns'>('chat')
+  const [turns, setTurns] = useState<TurnReceipt[]>([])
+  const [loadingTurns, setLoadingTurns] = useState(false)
+  const [selectedTurnId, setSelectedTurnId] = useState<string | null>(null)
+  const [turnDiffMap, setTurnDiffMap] = useState<Record<string, string>>({})
+  const [loadingDiff, setLoadingDiff] = useState(false)
+
   const abortCtrlRef = useRef<AbortController | null>(null)
   const chatScrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -240,13 +368,78 @@ export function PreviewDrawer({
       })
       if (!res.ok) return
       const data = await res.json()
-      if (data && data.busy) {
-        setIsBusy(true)
-      } else {
-        setIsBusy(false)
+      if (data) {
+        setIsBusy(Boolean(data.busy))
+        if (typeof data.turnReceiptsEnabled === 'boolean') {
+          setTurnReceiptsEnabled(data.turnReceiptsEnabled)
+        }
       }
     } catch {}
   }, [project, taskId])
+
+  const fetchTurns = useCallback(async () => {
+    setLoadingTurns(true)
+    try {
+      const token = getStoredToken()
+      const headers: Record<string, string> = {}
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      const res = await fetch(
+        apiUrl(`/api/v1/projects/${encodeURIComponent(project || 'current')}/tasks/${encodeURIComponent(taskId)}/preview/turns`),
+        { headers }
+      )
+      if (!res.ok) return
+      const data = await res.json()
+      if (data && Array.isArray(data.receipts)) {
+        setTurns(data.receipts)
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoadingTurns(false)
+    }
+  }, [project, taskId])
+
+  // Fetch turns when copilot is opened or taskId changes
+  useEffect(() => {
+    if (copilotOpen) {
+      void fetchTurns()
+    }
+  }, [copilotOpen, fetchTurns])
+
+  const handleSelectTurn = useCallback(
+    async (turn: TurnReceipt) => {
+      setSelectedTurnId(turn.turnId)
+      if (turn.displayDiff) {
+        setTurnDiffMap((prev) => ({ ...prev, [turn.turnId]: turn.displayDiff! }))
+        return
+      }
+      if (turnDiffMap[turn.turnId]) {
+        return
+      }
+      setLoadingDiff(true)
+      try {
+        const token = getStoredToken()
+        const headers: Record<string, string> = {}
+        if (token) headers['Authorization'] = `Bearer ${token}`
+        const res = await fetch(
+          apiUrl(
+            `/api/v1/projects/${encodeURIComponent(project || 'current')}/tasks/${encodeURIComponent(taskId)}/preview/turns/${encodeURIComponent(turn.turnId)}/diff`
+          ),
+          { headers }
+        )
+        if (!res.ok) return
+        const data = await res.json()
+        if (data && typeof data.displayDiff === 'string') {
+          setTurnDiffMap((prev) => ({ ...prev, [turn.turnId]: data.displayDiff }))
+        }
+      } catch {
+        // ignore
+      } finally {
+        setLoadingDiff(false)
+      }
+    },
+    [project, taskId, turnDiffMap]
+  )
 
   useEffect(() => {
     void checkStatus()
@@ -513,6 +706,7 @@ export function PreviewDrawer({
   }
 
   const handleSend = async (overridePrompt?: string) => {
+    if (!turnReceiptsEnabled) return
     const text = (overridePrompt ?? input).trim()
     if (!text && !selectedDOM) return
     if (isStreaming) return
@@ -698,292 +892,540 @@ export function PreviewDrawer({
   }
 
   // Render assistant content body & input
-  const renderCopilotBody = () => (
-    <>
-      {/* Chat Messages Body */}
-      <div ref={chatScrollRef} className="flex-1 space-y-3.5 overflow-y-auto p-4 text-xs">
-        {/* Workflow Concurrency / Write Lock Warning Banner */}
-        {lockWarning && (
-          <div className="rounded-xl border border-amber-300 bg-amber-50/90 p-3 text-amber-900 shadow-xs dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-200 animate-fade-in">
-            <div className="flex items-start gap-2">
-              <Lock className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" />
-              <div className="space-y-1">
-                <div className="font-semibold">{lockWarning}</div>
-                <div className="text-[11px] opacity-85 leading-relaxed">
-                  {t('tasks.previewDrawer.workflowLocked', {
-                    defaultValue: '工作流写保护：当前节点正由智能体后台执行中。待流转至人工审核节点后即可提交即时调优。',
-                  })}
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
+  const renderCopilotBody = () => {
+    const selectedTurn = selectedTurnId ? turns.find((t) => t.turnId === selectedTurnId) : null
+    const currentDiff = selectedTurnId ? turnDiffMap[selectedTurnId] || selectedTurn?.displayDiff || '' : ''
 
-        {/* Empty state with helpful prompt chips */}
-        {msgs.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-6 text-center text-neutral-500 dark:text-zinc-400">
-            <div className="mb-3 flex size-12 items-center justify-center rounded-2xl bg-sky-50 text-sky-600 shadow-xs dark:bg-sky-950/60 dark:text-sky-400">
-              <Sparkles className="size-6" />
-            </div>
-            <h4 className="text-sm font-semibold text-neutral-800 dark:text-zinc-200">
-              {t('tasks.previewDrawer.copilotTitle', { defaultValue: '智能调优助手' })}
-            </h4>
-            <p className="mt-1 max-w-xs text-[11px] text-neutral-400 dark:text-zinc-500">
-              与任务当前代码分支实时对话，支持点击页面选取 DOM 元素并即时修改。
-            </p>
-
-            {/* Quick chips */}
-            <div className="mt-4 flex flex-col gap-2 w-full max-w-xs text-left">
-              <button
-                type="button"
-                onClick={handleToggleInspect}
-                disabled={!previewOrigin}
-                title={!previewOrigin ? '预览源未配置或不匹配，已禁用元素选取' : (isInspectingDOM ? '取消选取 (Esc)' : '在页面上点击选择目标元素')}
-                className="flex items-center gap-2 rounded-xl border border-sky-200/80 bg-sky-50/70 p-2.5 text-xs text-sky-800 hover:bg-sky-100 disabled:opacity-50 disabled:cursor-not-allowed transition dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-300"
-              >
-                <Crosshair className="size-3.5 shrink-0 text-sky-600 dark:text-sky-400" />
-                <span className="truncate">{t('tasks.previewDrawer.emptyPrompt1', { defaultValue: '🎯 选取页面元素并修改' })}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleSend('请优化当前页面的整体色彩搭配、边距排版和视觉层次')}
-                className="flex items-center gap-2 rounded-xl border border-neutral-200/80 bg-neutral-50/70 p-2.5 text-xs text-neutral-700 hover:bg-neutral-100 transition dark:border-zinc-800 dark:bg-zinc-800/40 dark:text-zinc-300"
-              >
-                <span>🎨</span>
-                <span className="truncate">{t('tasks.previewDrawer.emptyPrompt2', { defaultValue: '🎨 调整整体色调与排版' })}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleSend('请检查并修复页面表单输入项的交互逻辑与校验提示')}
-                className="flex items-center gap-2 rounded-xl border border-neutral-200/80 bg-neutral-50/70 p-2.5 text-xs text-neutral-700 hover:bg-neutral-100 transition dark:border-zinc-800 dark:bg-zinc-800/40 dark:text-zinc-300"
-              >
-                <span>⚡</span>
-                <span className="truncate">{t('tasks.previewDrawer.emptyPrompt3', { defaultValue: '⚡ 修复表单提交与校验逻辑' })}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleSend('请适配移动端与窄屏幕视口下的排版与流式响应式布局')}
-                className="flex items-center gap-2 rounded-xl border border-neutral-200/80 bg-neutral-50/70 p-2.5 text-xs text-neutral-700 hover:bg-neutral-100 transition dark:border-zinc-800 dark:bg-zinc-800/40 dark:text-zinc-300"
-              >
-                <span>📱</span>
-                <span className="truncate">{t('tasks.previewDrawer.emptyPrompt4', { defaultValue: '📱 适配移动端视口宽度' })}</span>
-              </button>
-            </div>
-          </div>
-        ) : (
-          msgs.map((m) => {
-            if (m.role === 'user') {
-              return (
-                <div key={m.id} className="flex justify-end">
-                  <div className="max-w-[85%] rounded-2xl rounded-tr-xs bg-sky-600 px-3.5 py-2.5 text-white shadow-xs dark:bg-sky-500">
-                    {m.domTarget && (
-                      <div className="mb-1.5 inline-flex items-center gap-1 rounded bg-sky-700/80 px-2 py-0.5 text-[10px] font-mono text-sky-100">
-                        <span>🎯 @DOM</span>
-                        <span>({m.domTarget.tag})</span>
-                      </div>
-                    )}
-                    <div className="whitespace-pre-wrap break-words leading-relaxed text-xs">
-                      {m.content}
-                    </div>
-                  </div>
-                </div>
-              )
-            }
-
-            return (
-              <div key={m.id} className="flex justify-start">
-                <div className="max-w-[95%] rounded-2xl rounded-tl-xs border border-neutral-200/80 bg-neutral-50/90 p-3 text-neutral-800 shadow-xs dark:border-zinc-800 dark:bg-zinc-800/50 dark:text-zinc-100">
-                  {/* Stopped notice */}
-                  {m.isStopped && (
-                    <div className="mb-2 flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50/70 px-2.5 py-1 text-[11px] font-medium text-red-700 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-300">
-                      <span>🛑</span>
-                      <span>修改已被手动中止</span>
-                    </div>
-                  )}
-
-                  {/* Thinking Spinner */}
-                  {m.isThinking && !m.content && (!m.tools || m.tools.length === 0) && (
-                    <div className="flex items-center gap-2 py-2 text-xs text-sky-600 dark:text-sky-400">
-                      <div className="size-3.5 animate-spin rounded-full border-2 border-sky-500 border-t-transparent" />
-                      <span>正在分析代码并规划修改方案…</span>
-                    </div>
-                  )}
-
-                  {/* Collapsible Tool Executions Timeline */}
-                  {m.tools && m.tools.length > 0 && (
-                    <details
-                      className="group my-2 rounded-xl border border-neutral-200 bg-white/80 p-2.5 text-xs text-neutral-700 shadow-2xs dark:border-zinc-700/60 dark:bg-zinc-900/70 dark:text-zinc-300"
-                      open={!m.isDone && !m.isStopped}
-                    >
-                      <summary className="flex cursor-pointer select-none items-center justify-between font-medium outline-none">
-                        <span className="flex items-center gap-1.5">
-                          <span>🛠️</span>
-                          <span>
-                            执行了 <strong>{m.tools.length}</strong> 个操作
-                          </span>
-                          {!m.isDone && !m.isStopped && (
-                            <span className="animate-pulse rounded-full bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-950 dark:text-sky-300">
-                              执行中
-                            </span>
-                          )}
-                        </span>
-                        <span className="text-[11px] text-neutral-400 group-open:rotate-180 transition-transform">
-                          ▾
-                        </span>
-                      </summary>
-                      <div className="mt-2 space-y-1.5 border-t border-neutral-100 pt-2 dark:border-zinc-800">
-                        {m.tools.map((tool, idx) => {
-                          const icon =
-                            tool.type === 'bash' ? '⚡' : tool.type === 'read' ? '📖' : tool.type === 'edit' ? '✏️' : tool.type === 'search' ? '🔍' : '🔧'
-                          const badgeCls =
-                            tool.type === 'edit'
-                              ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
-                              : tool.type === 'bash'
-                              ? 'bg-violet-100 text-violet-800 dark:bg-violet-950/60 dark:text-violet-300'
-                              : 'bg-neutral-100 text-neutral-700 dark:bg-zinc-800 dark:text-zinc-300'
-                          return (
-                            <div key={idx} className="flex items-center gap-2 text-[11px] font-mono">
-                              <span className={cn('shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold', badgeCls)}>
-                                {icon} {tool.name}
-                              </span>
-                              <span className="truncate text-neutral-600 dark:text-zinc-400" title={tool.target}>
-                                {tool.target}
-                              </span>
-                            </div>
-                          )
-                        })}
-                      </div>
-                    </details>
-                  )}
-
-                  {/* Formatted Markdown Body with Diff Styling */}
-                  {m.content && (
-                    <div className="leading-relaxed">
-                      <Markdown remarkPlugins={[remarkGfm]} components={copilotMdComponents}>
-                        {m.content}
-                      </Markdown>
-                    </div>
-                  )}
-
-                  {/* Error display */}
-                  {m.error && (
-                    <div className="mt-2 flex items-center gap-1.5 text-xs text-rose-600 dark:text-rose-400 font-medium">
-                      <AlertCircle className="size-3.5 shrink-0" />
-                      <span>{m.error}</span>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )
-          })
-        )}
-      </div>
-
-      {/* Bottom Input Area */}
-      <div className="border-t border-neutral-100 bg-white/70 p-3.5 dark:border-zinc-800 dark:bg-zinc-900/70">
-        {/* Selected DOM target pill above input */}
-        {selectedDOM && (
-          <div className="group relative mb-2 inline-flex items-center gap-1.5 rounded-lg border border-sky-300 bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-800 shadow-2xs dark:border-sky-800 dark:bg-sky-950/60 dark:text-sky-200">
-            <span className="font-semibold text-sky-600 dark:text-sky-400">🎯 @DOM</span>
-            <span className="max-w-[180px] truncate font-mono text-[11px]">{selectedDOM.tag}{selectedDOM.id ? `#${selectedDOM.id}` : ''}</span>
+    return (
+      <div className="flex flex-1 flex-col overflow-hidden">
+        {/* Navigation Tabs Header */}
+        <div className="flex shrink-0 items-center justify-between border-b border-neutral-200/80 bg-neutral-100/50 px-3 py-1.5 dark:border-zinc-800 dark:bg-zinc-800/40">
+          <div className="flex items-center gap-1">
             <button
               type="button"
-              onClick={() => setSelectedDOM(null)}
-              className="ml-0.5 rounded p-0.5 text-sky-500 hover:bg-sky-200/60 hover:text-sky-800 dark:text-sky-400 dark:hover:bg-sky-900"
-              title={t('common.delete', { defaultValue: '移除' })}
+              onClick={() => setActiveTab('chat')}
+              className={cn(
+                'inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition cursor-pointer',
+                activeTab === 'chat'
+                  ? 'bg-white text-sky-700 shadow-2xs dark:bg-zinc-900 dark:text-sky-400 font-semibold'
+                  : 'text-neutral-500 hover:bg-neutral-200/50 hover:text-neutral-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200'
+              )}
             >
-              <X className="size-3" />
+              <MessageSquare className="size-3.5" />
+              <span>对话调优</span>
             </button>
-
-            {/* Hover details card */}
-            <div className="pointer-events-none absolute bottom-full left-0 z-50 mb-1.5 hidden w-72 rounded-xl border border-neutral-200 bg-white/95 p-3 text-left shadow-xl backdrop-blur-md group-hover:block dark:border-zinc-700 dark:bg-zinc-900/95">
-              <div className="mb-1.5 text-[11px] font-semibold text-neutral-800 dark:text-zinc-200">
-                {t('tasks.previewDrawer.targetContext', { defaultValue: '目标元素定位上下文' })}
-              </div>
-              <div className="space-y-1 font-mono text-[10px] text-neutral-600 break-all dark:text-zinc-400">
-                <div>
-                  <span className="text-neutral-400">{t('tasks.previewDrawer.selector', { defaultValue: '选择器' })}: </span>
-                  {selectedDOM.selector}
-                </div>
-                {selectedDOM.role && (
-                  <div>
-                    <span className="text-neutral-400">role: </span>
-                    {selectedDOM.role}
-                  </div>
-                )}
-                {selectedDOM.type && (
-                  <div>
-                    <span className="text-neutral-400">type: </span>
-                    {selectedDOM.type}
-                  </div>
-                )}
-                {selectedDOM.testId && (
-                  <div>
-                    <span className="text-neutral-400">data-testid: </span>
-                    {selectedDOM.testId}
-                  </div>
-                )}
-              </div>
-            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('turns')
+                void fetchTurns()
+              }}
+              className={cn(
+                'inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition cursor-pointer',
+                activeTab === 'turns'
+                  ? 'bg-white text-sky-700 shadow-2xs dark:bg-zinc-900 dark:text-sky-400 font-semibold'
+                  : 'text-neutral-500 hover:bg-neutral-200/50 hover:text-neutral-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200'
+              )}
+            >
+              <History className="size-3.5" />
+              <span>改动回合</span>
+              {turns.length > 0 && (
+                <span className="rounded-full bg-neutral-200/80 px-1.5 py-0.2 text-[10px] font-mono text-neutral-600 dark:bg-zinc-700 dark:text-zinc-300">
+                  {turns.length}
+                </span>
+              )}
+            </button>
           </div>
-        )}
 
-        {!canOperator && (
-          <div className="mb-2 flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50/80 px-2.5 py-1.5 text-[11px] text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300">
-            <Lock className="size-3 shrink-0" />
-            <span>当前无 Operator 权限，仅可查看调优状态</span>
-          </div>
-        )}
-
-        <div className="relative">
-          <textarea
-            ref={textareaRef}
-            rows={2}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleTextareaKeyDown}
-            disabled={isStreaming || !canOperator}
-            placeholder={
-              !canOperator
-                ? '仅项目 Operator 可发起调优'
-                : (selectedDOM
-                    ? `针对 @DOM(${selectedDOM.tag}${selectedDOM.id ? `#${selectedDOM.id}` : ''}) 输入修改要求 (⌘+Enter 发送)…`
-                    : t('tasks.previewDrawer.inputPlaceholder', { defaultValue: '描述想要修改的页面内容或样式 (⌘+Enter 发送)…' }))
-            }
-            className="w-full resize-none rounded-xl border border-neutral-200 bg-neutral-50/80 p-2.5 text-xs text-neutral-800 outline-none transition focus:border-sky-500 focus:bg-white dark:border-zinc-800 dark:bg-zinc-800/60 dark:text-zinc-100 dark:focus:border-sky-500 dark:focus:bg-zinc-900 disabled:opacity-60 disabled:cursor-not-allowed"
-          />
+          {activeTab === 'turns' && (
+            <button
+              type="button"
+              onClick={() => void fetchTurns()}
+              disabled={loadingTurns}
+              title="刷新回合列表"
+              className="rounded-md p-1 text-neutral-400 hover:bg-neutral-200/60 hover:text-neutral-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200 transition cursor-pointer"
+            >
+              <RotateCw className={cn('size-3.5', loadingTurns && 'animate-spin')} />
+            </button>
+          )}
         </div>
 
-        <div className="mt-2 flex items-center justify-between text-[11px] text-neutral-400 dark:text-zinc-500">
-          <span className="hidden sm:inline">⌘+Enter 发送 · Enter 换行</span>
-          <span className="sm:hidden" />
-          <div className="flex items-center gap-2">
-            {isStreaming ? (
-              <button
-                type="button"
-                onClick={() => void handleStopExecution()}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1 font-semibold text-white shadow-xs hover:bg-red-500 active:scale-95 transition"
-              >
-                <Square className="size-3 fill-white" />
-                <span>{t('tasks.previewDrawer.stopBtn', { defaultValue: '中止' })}</span>
-              </button>
+        {activeTab === 'turns' ? (
+          /* Turns & Diff History View */
+          <div className="flex-1 overflow-y-auto p-3.5 text-xs">
+            {selectedTurnId ? (
+              /* Turn Detail View */
+              <div className="space-y-3">
+                <div className="flex items-center justify-between pb-1">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedTurnId(null)}
+                    className="inline-flex items-center gap-1 text-xs font-medium text-sky-600 hover:text-sky-700 dark:text-sky-400 dark:hover:text-sky-300 cursor-pointer"
+                  >
+                    <ArrowLeft className="size-3.5" />
+                    <span>返回回合列表</span>
+                  </button>
+                  {selectedTurn && renderTurnStatusBadge(selectedTurn.status)}
+                </div>
+
+                {selectedTurn ? (
+                  <div className="space-y-3">
+                    {/* Meta summary card */}
+                    <div className="rounded-xl border border-neutral-200 bg-neutral-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-900/50 space-y-2">
+                      <div className="flex items-center justify-between text-[11px] text-neutral-500 dark:text-zinc-400">
+                        <span className="font-mono font-medium text-neutral-700 dark:text-zinc-300">
+                          {selectedTurn.turnId}
+                        </span>
+                        <span>{formatTurnTime(selectedTurn.createdAt)}</span>
+                      </div>
+
+                      {selectedTurn.redactedPrompt && (
+                        <div>
+                          <div className="text-[10px] font-medium text-neutral-400 dark:text-zinc-500 mb-0.5">
+                            调优需求 (已脱敏)
+                          </div>
+                          <div className="rounded bg-white p-2 text-[11px] text-neutral-800 dark:bg-zinc-950 dark:text-zinc-200 font-mono whitespace-pre-wrap border border-neutral-200/60 dark:border-zinc-800">
+                            {selectedTurn.redactedPrompt}
+                          </div>
+                        </div>
+                      )}
+
+                      {selectedTurn.failureReason && (
+                        <div className="rounded-lg border border-red-200 bg-red-50/80 p-2 text-[11px] text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200">
+                          <span className="font-semibold">失败原因：</span>
+                          <span className="font-mono">{selectedTurn.failureReason}</span>
+                        </div>
+                      )}
+
+                      {selectedTurn.touchedPaths && selectedTurn.touchedPaths.length > 0 && (
+                        <div>
+                          <div className="text-[10px] font-medium text-neutral-400 dark:text-zinc-500 mb-1 flex items-center gap-1">
+                            <FileCode className="size-3" />
+                            <span>改动文件 ({selectedTurn.touchedPaths.length})</span>
+                          </div>
+                          <div className="flex flex-wrap gap-1">
+                            {selectedTurn.touchedPaths.map((p) => (
+                              <span
+                                key={p}
+                                className="rounded bg-neutral-200/70 px-1.5 py-0.5 font-mono text-[10px] text-neutral-700 dark:bg-zinc-800 dark:text-zinc-300"
+                              >
+                                {p}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="flex items-center justify-between pt-1 text-[10px] text-neutral-400 dark:text-zinc-500">
+                        <span>版本修订: Rev {selectedTurn.revision}</span>
+                        {selectedTurn.creator && <span>执行者: {selectedTurn.creator}</span>}
+                      </div>
+                    </div>
+
+                    {/* Diff Viewer */}
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between text-[11px] font-semibold text-neutral-700 dark:text-zinc-300">
+                        <span className="flex items-center gap-1.5">
+                          <Code2 className="size-3.5 text-neutral-500" />
+                          <span>变更详情 (DisplayDiff)</span>
+                        </span>
+                      </div>
+                      {loadingDiff ? (
+                        <div className="flex items-center justify-center py-8 text-neutral-400">
+                          <RotateCw className="size-4 animate-spin mr-2" />
+                          <span>加载 Diff 中…</span>
+                        </div>
+                      ) : currentDiff ? (
+                        renderDiffContent(currentDiff)
+                      ) : (
+                        <div className="rounded-xl border border-neutral-200/70 bg-neutral-50/50 p-4 text-center text-xs text-neutral-400 dark:border-zinc-800 dark:bg-zinc-950/40">
+                          无代码改动内容或该回合未触碰文件
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Read-only Rollback Notice */}
+                    {selectedTurn.status === 'CAPTURED' && (
+                      <div className="rounded-xl border border-neutral-200/80 bg-neutral-50/80 p-2.5 text-[11px] text-neutral-600 dark:border-zinc-800 dark:bg-zinc-800/40 dark:text-zinc-400 flex items-center gap-2">
+                        <Lock className="size-3.5 shrink-0 text-neutral-400" />
+                        <span>写操作目前在只读审查模式下已冻结（MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS=false），禁止触发回滚写操作。</span>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="py-6 text-center text-neutral-400">未找到回合详情</div>
+                )}
+              </div>
             ) : (
-              <button
-                type="button"
-                onClick={() => void handleSend()}
-                disabled={(!input.trim() && !selectedDOM) || !canOperator}
-                title={!canOperator ? '仅项目 Operator 可发起调优' : undefined}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1 font-semibold text-white shadow-xs hover:bg-sky-500 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 transition"
-              >
-                <Send className="size-3" />
-                <span>{t('tasks.previewDrawer.sendBtn', { defaultValue: '发送' })}</span>
-              </button>
+              /* Turns List View */
+              <div className="space-y-2.5">
+                {loadingTurns ? (
+                  <div className="flex flex-col items-center justify-center py-10 text-neutral-400">
+                    <RotateCw className="size-5 animate-spin mb-2" />
+                    <span>加载改动回合中…</span>
+                  </div>
+                ) : turns.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-12 text-center text-neutral-400 dark:text-zinc-500">
+                    <History className="size-8 mb-2 opacity-30" />
+                    <div className="text-xs font-semibold text-neutral-600 dark:text-zinc-400">暂无改动回合记录</div>
+                    <div className="mt-1 text-[11px] max-w-xs text-neutral-400 dark:text-zinc-500 leading-relaxed">
+                      智能调优所执行的每一次沙箱改动均会生成审计回执与快照，供随时核验与审查。
+                    </div>
+                  </div>
+                ) : (
+                  turns.map((t) => (
+                    <div
+                      key={t.turnId}
+                      onClick={() => void handleSelectTurn(t)}
+                      className="cursor-pointer rounded-xl border border-neutral-200/80 bg-white p-3 shadow-2xs hover:border-sky-300 hover:shadow-xs transition dark:border-zinc-800 dark:bg-zinc-900/60 dark:hover:border-sky-700/60"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 overflow-hidden">
+                          <span className="font-mono text-xs font-medium text-neutral-800 dark:text-zinc-200 truncate">
+                            {t.turnId}
+                          </span>
+                        </div>
+                        {renderTurnStatusBadge(t.status)}
+                      </div>
+
+                      {t.redactedPrompt && (
+                        <p className="mt-1.5 line-clamp-2 text-[11px] text-neutral-600 dark:text-zinc-300">
+                          {t.redactedPrompt}
+                        </p>
+                      )}
+
+                      <div className="mt-2 flex items-center justify-between text-[10px] text-neutral-400 dark:text-zinc-500 pt-1 border-t border-neutral-100 dark:border-zinc-800/80">
+                        <div className="flex items-center gap-2">
+                          <span>{formatTurnTime(t.createdAt)}</span>
+                          {t.touchedPaths && t.touchedPaths.length > 0 && (
+                            <span className="rounded bg-neutral-100 px-1.5 py-0.2 font-mono text-[10px] text-neutral-600 dark:bg-zinc-800 dark:text-zinc-400">
+                              {t.touchedPaths.length} 文件
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-sky-600 dark:text-sky-400 font-medium">查看详情 →</span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
             )}
           </div>
-        </div>
+        ) : (
+          /* Chat Body and Input */
+          <>
+            <div ref={chatScrollRef} className="flex-1 space-y-3.5 overflow-y-auto p-4 text-xs">
+              {/* Read-only Banner when Turn Receipts Flag is false */}
+              {!turnReceiptsEnabled && (
+                <div className="rounded-xl border border-sky-200/80 bg-sky-50/80 p-2.5 text-[11px] text-sky-900 shadow-2xs dark:border-sky-800/60 dark:bg-sky-950/40 dark:text-sky-200 flex items-start gap-2">
+                  <AlertCircle className="size-4 shrink-0 text-sky-600 dark:text-sky-400 mt-0.5" />
+                  <div className="space-y-0.5">
+                    <div className="font-semibold">只读审查模式</div>
+                    <div className="text-[10px] leading-relaxed opacity-90">
+                      Receipt Flag 未开启（只读模式），禁止提交调优指令或触发代码写操作。您可切换至「改动回合」标签查看历史代码变更与 Diff 审计记录。
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Workflow Concurrency / Write Lock Warning Banner */}
+              {lockWarning && (
+                <div className="rounded-xl border border-amber-300 bg-amber-50/90 p-3 text-amber-900 shadow-xs dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-200 animate-fade-in">
+                  <div className="flex items-start gap-2">
+                    <Lock className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                    <div className="space-y-1">
+                      <div className="font-semibold">{lockWarning}</div>
+                      <div className="text-[11px] opacity-85 leading-relaxed">
+                        {t('tasks.previewDrawer.workflowLocked', {
+                          defaultValue: '工作流写保护：当前节点正由智能体后台执行中。待流转至人工审核节点后即可提交即时调优。',
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Empty state with helpful prompt chips */}
+              {msgs.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-6 text-center text-neutral-500 dark:text-zinc-400">
+                  <div className="mb-3 flex size-12 items-center justify-center rounded-2xl bg-sky-50 text-sky-600 shadow-xs dark:bg-sky-950/60 dark:text-sky-400">
+                    <Sparkles className="size-6" />
+                  </div>
+                  <h4 className="text-sm font-semibold text-neutral-800 dark:text-zinc-200">
+                    {t('tasks.previewDrawer.copilotTitle', { defaultValue: '智能调优助手' })}
+                  </h4>
+                  <p className="mt-1 max-w-xs text-[11px] text-neutral-400 dark:text-zinc-500">
+                    与任务当前代码分支实时对话，支持点击页面选取 DOM 元素并即时修改。
+                  </p>
+
+                  {/* Quick chips */}
+                  <div className="mt-4 flex flex-col gap-2 w-full max-w-xs text-left">
+                    <button
+                      type="button"
+                      onClick={handleToggleInspect}
+                      disabled={!previewOrigin}
+                      title={!previewOrigin ? '预览源未配置或不匹配，已禁用元素选取' : (isInspectingDOM ? '取消选取 (Esc)' : '在页面上点击选择目标元素')}
+                      className="flex items-center gap-2 rounded-xl border border-sky-200/80 bg-sky-50/70 p-2.5 text-xs text-sky-800 hover:bg-sky-100 disabled:opacity-50 disabled:cursor-not-allowed transition dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-300"
+                    >
+                      <Crosshair className="size-3.5 shrink-0 text-sky-600 dark:text-sky-400" />
+                      <span className="truncate">{t('tasks.previewDrawer.emptyPrompt1', { defaultValue: '🎯 选取页面元素并修改' })}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleSend('请优化当前页面的整体色彩搭配、边距排版和视觉层次')}
+                      disabled={!turnReceiptsEnabled || !canOperator}
+                      title={!turnReceiptsEnabled ? '只读审查模式，禁止发起调优' : undefined}
+                      className="flex items-center gap-2 rounded-xl border border-neutral-200/80 bg-neutral-50/70 p-2.5 text-xs text-neutral-700 hover:bg-neutral-100 disabled:opacity-50 disabled:cursor-not-allowed transition dark:border-zinc-800 dark:bg-zinc-800/40 dark:text-zinc-300"
+                    >
+                      <span>🎨</span>
+                      <span className="truncate">{t('tasks.previewDrawer.emptyPrompt2', { defaultValue: '🎨 调整整体色调与排版' })}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleSend('请检查并修复页面表单输入项的交互逻辑与校验提示')}
+                      disabled={!turnReceiptsEnabled || !canOperator}
+                      title={!turnReceiptsEnabled ? '只读审查模式，禁止发起调优' : undefined}
+                      className="flex items-center gap-2 rounded-xl border border-neutral-200/80 bg-neutral-50/70 p-2.5 text-xs text-neutral-700 hover:bg-neutral-100 disabled:opacity-50 disabled:cursor-not-allowed transition dark:border-zinc-800 dark:bg-zinc-800/40 dark:text-zinc-300"
+                    >
+                      <span>⚡</span>
+                      <span className="truncate">{t('tasks.previewDrawer.emptyPrompt3', { defaultValue: '⚡ 修复表单提交与校验逻辑' })}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleSend('请适配移动端与窄屏幕视口下的排版与流式响应式布局')}
+                      disabled={!turnReceiptsEnabled || !canOperator}
+                      title={!turnReceiptsEnabled ? '只读审查模式，禁止发起调优' : undefined}
+                      className="flex items-center gap-2 rounded-xl border border-neutral-200/80 bg-neutral-50/70 p-2.5 text-xs text-neutral-700 hover:bg-neutral-100 disabled:opacity-50 disabled:cursor-not-allowed transition dark:border-zinc-800 dark:bg-zinc-800/40 dark:text-zinc-300"
+                    >
+                      <span>📱</span>
+                      <span className="truncate">{t('tasks.previewDrawer.emptyPrompt4', { defaultValue: '📱 适配移动端视口宽度' })}</span>
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                msgs.map((m) => {
+                  if (m.role === 'user') {
+                    return (
+                      <div key={m.id} className="flex justify-end">
+                        <div className="max-w-[85%] rounded-2xl rounded-tr-xs bg-sky-600 px-3.5 py-2.5 text-white shadow-xs dark:bg-sky-500">
+                          {m.domTarget && (
+                            <div className="mb-1.5 inline-flex items-center gap-1 rounded bg-sky-700/80 px-2 py-0.5 text-[10px] font-mono text-sky-100">
+                              <span>🎯 @DOM</span>
+                              <span>({m.domTarget.tag})</span>
+                            </div>
+                          )}
+                          <div className="whitespace-pre-wrap break-words leading-relaxed text-xs">
+                            {m.content}
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  }
+
+                  return (
+                    <div key={m.id} className="flex justify-start">
+                      <div className="max-w-[95%] rounded-2xl rounded-tl-xs border border-neutral-200/80 bg-neutral-50/90 p-3 text-neutral-800 shadow-xs dark:border-zinc-800 dark:bg-zinc-800/50 dark:text-zinc-100">
+                        {/* Stopped notice */}
+                        {m.isStopped && (
+                          <div className="mb-2 flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50/70 px-2.5 py-1 text-[11px] font-medium text-red-700 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-300">
+                            <span>🛑</span>
+                            <span>修改已被手动中止</span>
+                          </div>
+                        )}
+
+                        {/* Thinking Spinner */}
+                        {m.isThinking && !m.content && (!m.tools || m.tools.length === 0) && (
+                          <div className="flex items-center gap-2 py-2 text-xs text-sky-600 dark:text-sky-400">
+                            <div className="size-3.5 animate-spin rounded-full border-2 border-sky-500 border-t-transparent" />
+                            <span>正在分析代码并规划修改方案…</span>
+                          </div>
+                        )}
+
+                        {/* Collapsible Tool Executions Timeline */}
+                        {m.tools && m.tools.length > 0 && (
+                          <details
+                            className="group my-2 rounded-xl border border-neutral-200 bg-white/80 p-2.5 text-xs text-neutral-700 shadow-2xs dark:border-zinc-700/60 dark:bg-zinc-900/70 dark:text-zinc-300"
+                            open={!m.isDone && !m.isStopped}
+                          >
+                            <summary className="flex cursor-pointer select-none items-center justify-between font-medium outline-none">
+                              <span className="flex items-center gap-1.5">
+                                <span>🛠️</span>
+                                <span>
+                                  执行了 <strong>{m.tools.length}</strong> 个操作
+                                </span>
+                                {!m.isDone && !m.isStopped && (
+                                  <span className="animate-pulse rounded-full bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-950 dark:text-sky-300">
+                                    执行中
+                                  </span>
+                                )}
+                              </span>
+                              <span className="text-[11px] text-neutral-400 group-open:rotate-180 transition-transform">
+                                ▾
+                              </span>
+                            </summary>
+                            <div className="mt-2 space-y-1.5 border-t border-neutral-100 pt-2 dark:border-zinc-800">
+                              {m.tools.map((tool, idx) => {
+                                const icon =
+                                  tool.type === 'bash' ? '⚡' : tool.type === 'read' ? '📖' : tool.type === 'edit' ? '✏️' : tool.type === 'search' ? '🔍' : '🔧'
+                                const badgeCls =
+                                  tool.type === 'edit'
+                                    ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
+                                    : tool.type === 'bash'
+                                    ? 'bg-violet-100 text-violet-800 dark:bg-violet-950/60 dark:text-violet-300'
+                                    : 'bg-neutral-100 text-neutral-700 dark:bg-zinc-800 dark:text-zinc-300'
+                                return (
+                                  <div key={idx} className="flex items-center gap-2 text-[11px] font-mono">
+                                    <span className={cn('shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold', badgeCls)}>
+                                      {icon} {tool.name}
+                                    </span>
+                                    <span className="truncate text-neutral-600 dark:text-zinc-400" title={tool.target}>
+                                      {tool.target}
+                                    </span>
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          </details>
+                        )}
+
+                        {/* Formatted Markdown Body with Diff Styling */}
+                        {m.content && (
+                          <div className="leading-relaxed">
+                            <Markdown remarkPlugins={[remarkGfm]} components={copilotMdComponents}>
+                              {m.content}
+                            </Markdown>
+                          </div>
+                        )}
+
+                        {/* Error display */}
+                        {m.error && (
+                          <div className="mt-2 flex items-center gap-1.5 text-xs text-rose-600 dark:text-rose-400 font-medium">
+                            <AlertCircle className="size-3.5 shrink-0" />
+                            <span>{m.error}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })
+              )}
+            </div>
+
+            {/* Bottom Input Area */}
+            <div className="border-t border-neutral-100 bg-white/70 p-3.5 dark:border-zinc-800 dark:bg-zinc-900/70">
+              {/* Selected DOM target pill above input */}
+              {selectedDOM && (
+                <div className="group relative mb-2 inline-flex items-center gap-1.5 rounded-lg border border-sky-300 bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-800 shadow-2xs dark:border-sky-800 dark:bg-sky-950/60 dark:text-sky-200">
+                  <span className="font-semibold text-sky-600 dark:text-sky-400">🎯 @DOM</span>
+                  <span className="max-w-[180px] truncate font-mono text-[11px]">{selectedDOM.tag}{selectedDOM.id ? `#${selectedDOM.id}` : ''}</span>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedDOM(null)}
+                    className="ml-0.5 rounded p-0.5 text-sky-500 hover:bg-sky-200/60 hover:text-sky-800 dark:text-sky-400 dark:hover:bg-sky-900"
+                    title={t('common.delete', { defaultValue: '移除' })}
+                  >
+                    <X className="size-3" />
+                  </button>
+
+                  {/* Hover details card */}
+                  <div className="pointer-events-none absolute bottom-full left-0 z-50 mb-1.5 hidden w-72 rounded-xl border border-neutral-200 bg-white/95 p-3 text-left shadow-xl backdrop-blur-md group-hover:block dark:border-zinc-700 dark:bg-zinc-900/95">
+                    <div className="mb-1.5 text-[11px] font-semibold text-neutral-800 dark:text-zinc-200">
+                      {t('tasks.previewDrawer.targetContext', { defaultValue: '目标元素定位上下文' })}
+                    </div>
+                    <div className="space-y-1 font-mono text-[10px] text-neutral-600 break-all dark:text-zinc-400">
+                      <div>
+                        <span className="text-neutral-400">{t('tasks.previewDrawer.selector', { defaultValue: '选择器' })}: </span>
+                        {selectedDOM.selector}
+                      </div>
+                      {selectedDOM.role && (
+                        <div>
+                          <span className="text-neutral-400">role: </span>
+                          {selectedDOM.role}
+                        </div>
+                      )}
+                      {selectedDOM.type && (
+                        <div>
+                          <span className="text-neutral-400">type: </span>
+                          {selectedDOM.type}
+                        </div>
+                      )}
+                      {selectedDOM.testId && (
+                        <div>
+                          <span className="text-neutral-400">data-testid: </span>
+                          {selectedDOM.testId}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {!turnReceiptsEnabled ? (
+                <div className="mb-2 flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-neutral-100/80 px-2.5 py-1.5 text-[11px] text-neutral-600 dark:border-zinc-800 dark:bg-zinc-800/60 dark:text-zinc-400">
+                  <Lock className="size-3 shrink-0" />
+                  <span>只读审查模式：调优写操作暂未开放（可在「改动回合」中审查过往改动）</span>
+                </div>
+              ) : !canOperator ? (
+                <div className="mb-2 flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50/80 px-2.5 py-1.5 text-[11px] text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300">
+                  <Lock className="size-3 shrink-0" />
+                  <span>当前无 Operator 权限，仅可查看调优状态</span>
+                </div>
+              ) : null}
+
+              <div className="relative">
+                <textarea
+                  ref={textareaRef}
+                  rows={2}
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={handleTextareaKeyDown}
+                  disabled={isStreaming || !canOperator || !turnReceiptsEnabled}
+                  placeholder={
+                    !turnReceiptsEnabled
+                      ? '只读审查模式，调优写操作已禁用…'
+                      : !canOperator
+                      ? '仅项目 Operator 可发起调优'
+                      : selectedDOM
+                      ? `针对 @DOM(${selectedDOM.tag}${selectedDOM.id ? `#${selectedDOM.id}` : ''}) 输入修改要求 (⌘+Enter 发送)…`
+                      : t('tasks.previewDrawer.inputPlaceholder', { defaultValue: '描述想要修改的页面内容或样式 (⌘+Enter 发送)…' })
+                  }
+                  className="w-full resize-none rounded-xl border border-neutral-200 bg-neutral-50/80 p-2.5 text-xs text-neutral-800 outline-none transition focus:border-sky-500 focus:bg-white dark:border-zinc-800 dark:bg-zinc-800/60 dark:text-zinc-100 dark:focus:border-sky-500 dark:focus:bg-zinc-900 disabled:opacity-60 disabled:cursor-not-allowed"
+                />
+              </div>
+
+              <div className="mt-2 flex items-center justify-between text-[11px] text-neutral-400 dark:text-zinc-500">
+                <span className="hidden sm:inline">⌘+Enter 发送 · Enter 换行</span>
+                <span className="sm:hidden" />
+                <div className="flex items-center gap-2">
+                  {isStreaming ? (
+                    <button
+                      type="button"
+                      onClick={() => void handleStopExecution()}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1 font-semibold text-white shadow-xs hover:bg-red-500 active:scale-95 transition"
+                    >
+                      <Square className="size-3 fill-white" />
+                      <span>{t('tasks.previewDrawer.stopBtn', { defaultValue: '中止' })}</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => void handleSend()}
+                      disabled={(!input.trim() && !selectedDOM) || !canOperator || !turnReceiptsEnabled}
+                      title={!turnReceiptsEnabled ? '只读审查模式，禁止提交修改' : !canOperator ? '仅项目 Operator 可发起调优' : undefined}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1 font-semibold text-white shadow-xs hover:bg-sky-500 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 transition"
+                    >
+                      <Send className="size-3" />
+                      <span>{t('tasks.previewDrawer.sendBtn', { defaultValue: '发送' })}</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </>
+        )}
       </div>
-    </>
-  )
+    )
+  }
 
   return createPortal(
     <div

@@ -3,7 +3,9 @@ package previewreceipt
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -514,5 +516,165 @@ func TestTurnEngineRollbackReverseApplyFailureTransitionsToRevertFailed(t *testi
 		t.Fatalf("expected ErrSlotOccupied while in REVERT_FAILED, got: %v", err)
 	}
 }
+
+func TestStageAllIn_NeutralizesArbitraryFilterDrivers(t *testing.T) {
+	td := t.TempDir()
+	runGit := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = td
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s failed: %v (%s)", strings.Join(args, " "), err, string(out))
+		}
+	}
+
+	runGit("init")
+	runGit("config", "user.name", "Test")
+	runGit("config", "user.email", "test@example.com")
+
+	canaryFile := filepath.Join(td, "pwned_filter_canary.txt")
+	evilScript := filepath.Join(td, "evil_filter.sh")
+	scriptContent := fmt.Sprintf("#!/bin/sh\necho PWNED > %q\n", canaryFile)
+	if err := os.WriteFile(evilScript, []byte(scriptContent), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Untrusted clone: .gitattributes sets a custom malicious filter driver
+	gitattributes := filepath.Join(td, ".gitattributes")
+	if err := os.WriteFile(gitattributes, []byte("*.txt filter=evil_driver\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Agent pollutes .git/config with custom clean and process commands pointing to evilScript
+	gitConfig := filepath.Join(td, ".git", "config")
+	filterConfig := fmt.Sprintf("\n[filter \"evil_driver\"]\n\tclean = %s\n\tprocess = %s\n\tsmudge = %s\n", evilScript, evilScript, evilScript)
+	f, err := os.OpenFile(gitConfig, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(filterConfig); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+
+	// Write a file matching the filter pattern
+	if err := os.WriteFile(filepath.Join(td, "file.txt"), []byte("payload content\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Execute stageAllIn
+	ctx := context.Background()
+	if err := stageAllIn(ctx, td); err != nil {
+		t.Fatalf("stageAllIn failed: %v", err)
+	}
+
+	// Invariant: Malicious filter script MUST NEVER execute on host; canary file must not exist!
+	if _, err := os.Stat(canaryFile); !os.IsNotExist(err) {
+		t.Fatalf("SECURITY VULNERABILITY: malicious filter driver executed on host! Canary file %s exists", canaryFile)
+	}
+
+	// Invariant: file must be properly staged in Git index
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusCmd.Dir = td
+	out, err := statusCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status failed: %v (%s)", err, string(out))
+	}
+	if !strings.Contains(string(out), "A  file.txt") {
+		t.Fatalf("expected file.txt to be staged (A  file.txt), got: %s", string(out))
+	}
+}
+
+func TestTurnEngineRollbackFinalCASFailureTransitionsToRevertFailed(t *testing.T) {
+	t.Setenv(secretbox.EnvKey, "test-master-key-for-preview-32b!!")
+	repoDir := setupTestGitRepo(t)
+	store := setupTestStore(t)
+	engine := NewTurnEngine(store)
+
+	ctx := context.Background()
+	project := "proj-casfail"
+	taskID := "task-casfail"
+
+	runner := AgentRunnerFunc(func(ctx context.Context, cloneDir string, prompt string) error {
+		return os.WriteFile(filepath.Join(cloneDir, "foo.txt"), []byte("foo modified for cas fail\n"), 0644)
+	})
+
+	receipt, err := engine.ExecuteTurn(ctx, ExecuteTurnParams{
+		WorkspaceID:    "ws-test-engine",
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		WorktreeDir:    repoDir,
+		Prompt:         "modify foo for cas fail",
+		Actor:          "tester",
+		Runner:         runner,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTurn failed: %v", err)
+	}
+
+	// Verify file was modified
+	data, _ := os.ReadFile(filepath.Join(repoDir, "foo.txt"))
+	if string(data) != "foo modified for cas fail\n" {
+		t.Fatalf("expected worktree to have turn modification, got: %s", string(data))
+	}
+
+	// Fault injection: right after reverseApply succeeds, advance revision in store so step 5 (CAS to ROLLED_BACK) conflicts
+	engine.onAfterReverseApply = func(r *PreviewReceipt) {
+		// Advance revision by transitioning to StatusReverting again
+		_, _ = store.Transition(ctx, project, taskID, r.ID, r.Revision, StatusReverting, nil)
+	}
+
+	err = engine.RollbackTurn(ctx, RollbackTurnParams{
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		TurnID:         receipt.ID,
+		WorktreeDir:    repoDir,
+		Actor:          "tester",
+	})
+	if err == nil {
+		t.Fatal("expected RollbackTurn to fail when final CAS fails")
+	}
+
+	// Invariant 1: reverse apply succeeded on disk (worktree restored to original)
+	restored, _ := os.ReadFile(filepath.Join(repoDir, "foo.txt"))
+	if string(restored) != "foo original\n" {
+		t.Fatalf("expected worktree to be reverse-applied on disk, got: %s", string(restored))
+	}
+
+	// Invariant 2: receipt state MUST transition to StatusRevertFailed (not left in REVERTING)
+	updatedReceipt, err := store.Get(ctx, project, taskID, receipt.ID)
+	if err != nil {
+		t.Fatalf("Get receipt failed: %v", err)
+	}
+	if updatedReceipt.Status != StatusRevertFailed {
+		t.Fatalf("expected status %s after final CAS failure, got: %s", StatusRevertFailed, updatedReceipt.Status)
+	}
+
+	// Invariant 3: FailureReason must explain manual inspection required
+	if !strings.Contains(updatedReceipt.FailureReason, "manual inspection required") {
+		t.Fatalf("expected failure reason to mention manual inspection required, got: %s", updatedReceipt.FailureReason)
+	}
+
+	// Invariant 4: Task slot must remain held
+	if !IsActiveHolder(StatusRevertFailed) {
+		t.Fatal("expected StatusRevertFailed to be an active slot holder")
+	}
+	_, err = engine.ExecuteTurn(ctx, ExecuteTurnParams{
+		WorkspaceID:    "ws-test-engine",
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		WorktreeDir:    repoDir,
+		Prompt:         "attempt turn while revert failed",
+		Actor:          "tester",
+		Runner:         runner,
+	})
+	if err == nil || !errors.Is(err, ErrSlotOccupied) {
+		t.Fatalf("expected ErrSlotOccupied while in REVERT_FAILED, got: %v", err)
+	}
+}
+
 
 

@@ -227,8 +227,13 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 		}
 	}
 
+	isolatedPreviewRun := runtimeControlEnv["MULTIGENT_PREVIEW_ISOLATED_RUN"] == "1" || os.Getenv("MULTIGENT_PREVIEW_ISOLATED_RUN") == "1"
+
 	// HTTP agent: bypass CLI subprocess.
 	if entity.NormaliseModel(meta.Model) == entity.ModelHTTPAgent {
+		if isolatedPreviewRun {
+			return nil, errors.New("preview copilot does not support HTTP agents; isolated container sandbox required")
+		}
 		prompt = execBoundary + prompt
 		return r.execPromptHTTP(execAgentDir, meta, prompt)
 	}
@@ -271,7 +276,6 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 		execDir    string
 	)
 
-	isolatedPreviewRun := runtimeControlEnv["MULTIGENT_PREVIEW_ISOLATED_RUN"] == "1" || os.Getenv("MULTIGENT_PREVIEW_ISOLATED_RUN") == "1"
 	if isolatedPreviewRun {
 		if meta.Sandbox == nil || meta.Sandbox.Provider == "" || meta.Sandbox.Provider == entity.SandboxNone {
 			return nil, errors.New("preview copilot requires an isolated container sandbox; host execution is forbidden")

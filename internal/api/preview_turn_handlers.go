@@ -39,6 +39,9 @@ func (r *previewDefaultAgentRunner) RunAgent(ctx context.Context, cloneDir strin
 	if meta == nil || meta.Sandbox == nil || meta.Sandbox.Provider == "" || meta.Sandbox.Provider == entity.SandboxNone {
 		return errors.New("preview copilot requires an isolated container sandbox; host execution is forbidden")
 	}
+	if entity.NormaliseModel(meta.Model) == entity.ModelHTTPAgent {
+		return errors.New("preview copilot does not support HTTP agents; isolated container sandbox required")
+	}
 
 	if meta.Sandbox.Provider == entity.SandboxDocker {
 		if err := sandbox.CheckDocker(); err != nil {

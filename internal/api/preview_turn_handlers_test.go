@@ -594,3 +594,30 @@ func TestPostTaskPreviewChat_SensitiveDataRedactedInCommentAndError(t *testing.T
 	}
 }
 
+func TestPreviewAgentRunner_RejectsHTTPAgent(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	seedSampleAgentsForTest(t, s, workspaceID)
+
+	worker, found, err := s.controlDB.AgentWorkerByID(workspaceID, "aw-pm")
+	if err != nil || !found {
+		t.Fatalf("get worker: %v, found=%v", err, found)
+	}
+	worker.Model = string(entity.ModelHTTPAgent)
+	worker.RuntimeConfigJSON = `{"sandbox":{"provider":"docker"}}`
+	if err := s.controlDB.UpsertAgentWorker(worker); err != nil {
+		t.Fatal(err)
+	}
+
+	s.sched = &SchedulerManager{binPath: "/bin/echo"}
+	runner := s.newPreviewAgentRunner(workspaceID, "sample", "pm", "http://127.0.0.1")
+
+	err = runner.RunAgent(context.Background(), t.TempDir(), "test prompt")
+	if err == nil {
+		t.Fatal("expected runner.RunAgent to reject HTTP agent, but it succeeded")
+	}
+	if !strings.Contains(err.Error(), "does not support HTTP agents") {
+		t.Fatalf("expected error mentioning HTTP agent rejection, got: %v", err)
+	}
+}
+
+

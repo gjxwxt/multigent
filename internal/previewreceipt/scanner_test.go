@@ -148,6 +148,34 @@ func TestScanSensitiveDiff(t *testing.T) {
 +req.Header.Set("Authorization", "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...")
 `,
 		},
+		{
+			name: "JWT token standalone",
+			patch: `diff --git a/jwt.go b/jwt.go
++++ b/jwt.go
++jwt := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.cTJj98m..."
+`,
+		},
+		{
+			name: "Basic auth header",
+			patch: `diff --git a/auth.go b/auth.go
++++ b/auth.go
++Authorization: Basic dXNlcjpwYXNzMTIzNDU2
+`,
+		},
+		{
+			name: "Unquoted secret assignment",
+			patch: `diff --git a/env.go b/env.go
++++ b/env.go
++api_key = supersecrettokenvalue123
+`,
+		},
+		{
+			name: "GitLab PAT",
+			patch: `diff --git a/ci.go b/ci.go
++++ b/ci.go
++glpat-abcdefghijklmnop123
+`,
+		},
 	}
 
 	for _, sc := range sensitiveCases {
@@ -174,3 +202,68 @@ func TestSanitizeDisplayDiff(t *testing.T) {
 		t.Fatalf("expected [REDACTED_SECRET] placeholder, got: %s", sanitized)
 	}
 }
+
+func TestRedactSecretsAndCapAndRedact(t *testing.T) {
+	cases := []struct {
+		input       string
+		mustNotHave string
+		mustHave    string
+	}{
+		{
+			input:       "Here is the token: ghp_123456789012345678901234567890 in log",
+			mustNotHave: "ghp_123456789012345678901234567890",
+			mustHave:    "[REDACTED_SECRET]",
+		},
+		{
+			input:       "Use OpenAI key sk-1234567890123456789012345 here",
+			mustNotHave: "sk-1234567890123456789012345",
+			mustHave:    "[REDACTED_SECRET]",
+		},
+		{
+			input:       "Auth: Authorization: Basic dXNlcjpwYXNzMTIzNDU2",
+			mustNotHave: "dXNlcjpwYXNzMTIzNDU2",
+			mustHave:    "[REDACTED_SECRET]",
+		},
+		{
+			input:       "Proxy-Authorization: Basic dXNlcjpwYXNzMTIzNDU2",
+			mustNotHave: "dXNlcjpwYXNzMTIzNDU2",
+			mustHave:    "[REDACTED_SECRET]",
+		},
+		{
+			input:       "Config has api_key = supersecretvalue123 and password: myhiddenpassword123",
+			mustNotHave: "supersecretvalue123",
+			mustHave:    "[REDACTED_SECRET]",
+		},
+		{
+			input:       "Token is eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.cTJj98m45678901234567890",
+			mustNotHave: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.cTJj98m45678901234567890",
+			mustHave:    "[REDACTED_SECRET]",
+		},
+		{
+			input:       "Gitlab token glpat-12345678901234567890 in config",
+			mustNotHave: "glpat-12345678901234567890",
+			mustHave:    "[REDACTED_SECRET]",
+		},
+	}
+
+	for _, c := range cases {
+		redacted := RedactSecrets(c.input)
+		if strings.Contains(redacted, c.mustNotHave) {
+			t.Fatalf("RedactSecrets leaked %q: %s", c.mustNotHave, redacted)
+		}
+		if !strings.Contains(redacted, c.mustHave) {
+			t.Fatalf("RedactSecrets missing %q: %s", c.mustHave, redacted)
+		}
+	}
+
+	// Test CapAndRedact length capping
+	longInput := "test " + strings.Repeat("A", 5000)
+	capped := CapAndRedact(longInput, 100)
+	if len(capped) > 150 {
+		t.Fatalf("expected capped output, got len %d", len(capped))
+	}
+	if !strings.Contains(capped, "… [truncated]") {
+		t.Fatalf("expected truncation marker, got: %s", capped)
+	}
+}
+

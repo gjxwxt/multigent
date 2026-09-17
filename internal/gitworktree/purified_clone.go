@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -322,3 +324,149 @@ func SanitizedExecutionArgs(args ...string) []string {
 func SanitizedGitEnv(extra ...string) []string {
 	return purifiedGitEnv(extra)
 }
+
+var filterPattern = regexp.MustCompile(`(?i)(?:^|[\s,;])(?:filter|diff)\s*=\s*([a-zA-Z0-9_\-\.]+)`)
+
+// NeutralizeFilterArgsForDir inspects any .gitattributes in dir (and .git/info/attributes)
+// for custom filter and diff driver names, returning CLI overrides (-c filter.<name>.clean=, etc.)
+// that prevent host git from executing external processes defined in git configuration.
+func NeutralizeFilterArgsForDir(dir string) []string {
+	if dir == "" {
+		return nil
+	}
+	drivers := make(map[string]bool)
+	drivers["lfs"] = true
+
+	scanFile := func(path string) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return
+		}
+		matches := filterPattern.FindAllStringSubmatch(string(data), -1)
+		for _, m := range matches {
+			if len(m) > 1 {
+				name := strings.TrimSpace(m[1])
+				if name != "" && name != "none" {
+					drivers[name] = true
+				}
+			}
+		}
+	}
+
+	// 1. Root .gitattributes
+	scanFile(filepath.Join(dir, ".gitattributes"))
+	// 2. .git/info/attributes
+	scanFile(filepath.Join(dir, ".git", "info", "attributes"))
+	// 3. Subdirectories (up to depth 4)
+	_ = filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			base := info.Name()
+			if base == ".git" || base == "node_modules" || base == "vendor" || base == ".multigent" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if info.Name() == ".gitattributes" && p != filepath.Join(dir, ".gitattributes") {
+			scanFile(p)
+		}
+		return nil
+	})
+
+	var sortedDrivers []string
+	for d := range drivers {
+		sortedDrivers = append(sortedDrivers, d)
+	}
+	sort.Strings(sortedDrivers)
+
+	var overrides []string
+	for _, d := range sortedDrivers {
+		overrides = append(overrides,
+			"-c", fmt.Sprintf("filter.%s.clean=", d),
+			"-c", fmt.Sprintf("filter.%s.process=", d),
+			"-c", fmt.Sprintf("filter.%s.smudge=", d),
+			"-c", fmt.Sprintf("filter.%s.required=false", d),
+			"-c", fmt.Sprintf("diff.%s.command=", d),
+			"-c", fmt.Sprintf("diff.%s.textconv=", d),
+		)
+	}
+	return overrides
+}
+
+// SanitizeUntrustedClone scrubs all external hooks, worktree configurations, attributes,
+// and custom filter/diff/include/alias sections from a clone's .git directory.
+// This guarantees that host git operations on an untrusted clone cannot invoke arbitrary processes.
+func SanitizeUntrustedClone(dir string) error {
+	gitDir := filepath.Join(dir, ".git")
+	if fi, err := os.Stat(gitDir); err != nil || !fi.IsDir() {
+		return nil
+	}
+
+	// Remove external hooks, attributes and worktree configs
+	_ = os.RemoveAll(filepath.Join(gitDir, "hooks"))
+	_ = os.Remove(filepath.Join(gitDir, "config.worktree"))
+	_ = os.Remove(filepath.Join(gitDir, "info", "attributes"))
+
+	// Scrub .git/config
+	cfgPath := filepath.Join(gitDir, "config")
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read clone git config: %w", err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var sanitizedLines []string
+	inBannedSection := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			sec := strings.ToLower(trimmed)
+			if strings.HasPrefix(sec, "[filter") ||
+				strings.HasPrefix(sec, "[diff") ||
+				strings.HasPrefix(sec, "[include") ||
+				strings.HasPrefix(sec, "[alias") {
+				inBannedSection = true
+				continue
+			}
+			inBannedSection = false
+		}
+		if inBannedSection {
+			continue
+		}
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "fsmonitor") ||
+			strings.HasPrefix(lower, "hookspath") ||
+			strings.HasPrefix(lower, "attributesfile") ||
+			strings.HasPrefix(lower, "pager") ||
+			strings.HasPrefix(lower, "editor") ||
+			strings.HasPrefix(lower, "sshcommand") ||
+			strings.HasPrefix(lower, "askpass") {
+			continue
+		}
+		sanitizedLines = append(sanitizedLines, line)
+	}
+
+	if err := os.WriteFile(cfgPath, []byte(strings.Join(sanitizedLines, "\n")), 0600); err != nil {
+		return fmt.Errorf("write sanitized clone git config: %w", err)
+	}
+	return nil
+}
+
+// SanitizedExecutionArgsForDir returns SanitizedExecutionArgs plus directory-specific
+// filter/diff neutralization arguments.
+func SanitizedExecutionArgsForDir(dir string, args ...string) []string {
+	base := SanitizedExecutionArgs()
+	neutral := NeutralizeFilterArgsForDir(dir)
+	var full []string
+	full = append(full, base...)
+	full = append(full, neutral...)
+	full = append(full, args...)
+	return full
+}
+

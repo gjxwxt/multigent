@@ -630,10 +630,11 @@ func (s *Server) handleGetTaskPreviewStatus(w http.ResponseWriter, r *http.Reque
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"taskId":    taskID,
-		"busy":      busy,
-		"agent":     agent,
-		"startedAt": startedAt,
+		"taskId":              taskID,
+		"busy":                busy,
+		"agent":               agent,
+		"startedAt":           startedAt,
+		"turnReceiptsEnabled": s.PreviewTurnReceiptsEnabled(),
 	})
 }
 

@@ -33,7 +33,8 @@ func (f AgentRunnerFunc) RunAgent(ctx context.Context, cloneDir string, prompt s
 
 // TurnEngine orchestrates Turn isolation, execution, verification, capture and rollback.
 type TurnEngine struct {
-	Store *Store
+	Store               *Store
+	onAfterReverseApply func(receipt *PreviewReceipt) // test seam for rollback final CAS fault injection
 }
 
 func NewTurnEngine(store *Store) *TurnEngine {
@@ -108,7 +109,7 @@ func (e *TurnEngine) ExecuteTurn(ctx context.Context, params ExecuteTurnParams) 
 		BaselineCommit: baseRes.Commit,
 		BaselineRef:    baseRes.Ref,
 		RequestDigest:  ComputeRequestDigest(params.Prompt),
-		RedactedPrompt: RedactSecrets(params.Prompt),
+		RedactedPrompt: CapAndRedact(params.Prompt, MaxPromptBytes),
 		Creator:        params.Actor,
 		LeaseDuration:  lease,
 	})
@@ -118,7 +119,7 @@ func (e *TurnEngine) ExecuteTurn(ctx context.Context, params ExecuteTurnParams) 
 
 	// Helper to fail receipt cleanly
 	fail := func(reason string) (*PreviewReceipt, error) {
-		redactedReason := RedactSecrets(reason)
+		redactedReason := CapAndRedact(reason, MaxFailureReasonBytes)
 		failed, _ := e.Store.Transition(ctx, params.Project, params.TaskID, receipt.ID, receipt.Revision, StatusFailed, func(r *PreviewReceipt) error {
 			r.FailureReason = redactedReason
 			return nil
@@ -218,7 +219,7 @@ func (e *TurnEngine) ExecuteTurn(ctx context.Context, params ExecuteTurnParams) 
 		revErr := reverseApplyPatchIn(params.WorktreeDir, rawDiff)
 		if revErr != nil {
 			failed, _ := e.Store.Transition(ctx, params.Project, params.TaskID, receipt.ID, receipt.Revision, StatusRevertFailed, func(r *PreviewReceipt) error {
-				r.FailureReason = RedactSecrets(fmt.Sprintf("capture postimages failed (%v) and compensation reverse apply failed (%v)", err, revErr))
+				r.FailureReason = CapAndRedact(fmt.Sprintf("capture postimages failed (%v) and compensation reverse apply failed (%v)", err, revErr), MaxFailureReasonBytes)
 				return nil
 			})
 			return failed, fmt.Errorf("compensation reverse apply failed: %w", revErr)
@@ -232,7 +233,7 @@ func (e *TurnEngine) ExecuteTurn(ctx context.Context, params ExecuteTurnParams) 
 		revErr := reverseApplyPatchIn(params.WorktreeDir, rawDiff)
 		if revErr != nil {
 			failed, _ := e.Store.Transition(ctx, params.Project, params.TaskID, receipt.ID, receipt.Revision, StatusRevertFailed, func(r *PreviewReceipt) error {
-				r.FailureReason = RedactSecrets(fmt.Sprintf("materialize snapshot failed (%v) and compensation reverse apply failed (%v)", err, revErr))
+				r.FailureReason = CapAndRedact(fmt.Sprintf("materialize snapshot failed (%v) and compensation reverse apply failed (%v)", err, revErr), MaxFailureReasonBytes)
 				return nil
 			})
 			return failed, fmt.Errorf("compensation reverse apply failed: %w", revErr)
@@ -254,7 +255,7 @@ func (e *TurnEngine) ExecuteTurn(ctx context.Context, params ExecuteTurnParams) 
 		_ = os.RemoveAll(snapshotDir)
 		if revErr != nil {
 			failed, _ := e.Store.Transition(ctx, params.Project, params.TaskID, receipt.ID, receipt.Revision, StatusRevertFailed, func(r *PreviewReceipt) error {
-				r.FailureReason = RedactSecrets(fmt.Sprintf("cas commit failed (%v) and compensation reverse apply failed (%v)", err, revErr))
+				r.FailureReason = CapAndRedact(fmt.Sprintf("cas commit failed (%v) and compensation reverse apply failed (%v)", err, revErr), MaxFailureReasonBytes)
 				return nil
 			})
 			return failed, fmt.Errorf("compensation reverse apply failed: %w", revErr)
@@ -325,7 +326,7 @@ func (e *TurnEngine) RollbackTurn(ctx context.Context, params RollbackTurnParams
 	if err := reverseApplyPatchIn(params.WorktreeDir, string(patchBytes)); err != nil {
 		// Reverse apply failed: mark as REVERT_FAILED to flag dirty worktree requiring manual inspection
 		_, _ = e.Store.Transition(ctx, params.Project, params.TaskID, receipt.ID, receipt.Revision, StatusRevertFailed, func(r *PreviewReceipt) error {
-			r.FailureReason = RedactSecrets("reverse apply failed: " + err.Error())
+			r.FailureReason = CapAndRedact("reverse apply failed: "+err.Error(), MaxFailureReasonBytes)
 			return nil
 		})
 		return fmt.Errorf("reverse apply patch: %w", err)
@@ -335,10 +336,25 @@ func (e *TurnEngine) RollbackTurn(ctx context.Context, params RollbackTurnParams
 	snapshotDir := TurnSnapshotDir(params.ProjectGitRoot, params.TaskID, receipt.TurnID)
 	_ = os.RemoveAll(snapshotDir)
 
+	if e.onAfterReverseApply != nil {
+		e.onAfterReverseApply(receipt)
+	}
+
 	// 5. Transition to ROLLED_BACK
 	_, err = e.Store.Transition(ctx, params.Project, params.TaskID, receipt.ID, receipt.Revision, StatusRolledBack, nil)
 	if err != nil {
-		return fmt.Errorf("transition to rolled_back: %w", err)
+		failErr := err
+		// Critical fence: reverse apply succeeded on disk, but final CAS to ROLLED_BACK failed.
+		// Transition to StatusRevertFailed so the receipt is marked for manual inspection and slot remains held.
+		targetRev := receipt.Revision
+		if latest, getErr := e.Store.Get(ctx, params.Project, params.TaskID, receipt.ID); getErr == nil && latest != nil {
+			targetRev = latest.Revision
+		}
+		_, _ = e.Store.Transition(ctx, params.Project, params.TaskID, receipt.ID, targetRev, StatusRevertFailed, func(r *PreviewReceipt) error {
+			r.FailureReason = CapAndRedact("reverse apply succeeded on disk but final CAS transition to ROLLED_BACK failed: "+failErr.Error()+" (manual inspection required)", MaxFailureReasonBytes)
+			return nil
+		})
+		return fmt.Errorf("transition to rolled_back failed (receipt marked for manual inspection): %w", failErr)
 	}
 
 	return nil
@@ -419,7 +435,10 @@ func copyDir(src, dst string) error {
 }
 
 func stageAllIn(ctx context.Context, dir string) error {
-	args := gitworktree.SanitizedExecutionArgs("add", "--all")
+	if err := gitworktree.SanitizeUntrustedClone(dir); err != nil {
+		return fmt.Errorf("sanitize untrusted clone: %w", err)
+	}
+	args := gitworktree.SanitizedExecutionArgsForDir(dir, "add", "--all")
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = gitworktree.SanitizedGitEnv()
@@ -430,7 +449,7 @@ func stageAllIn(ctx context.Context, dir string) error {
 }
 
 func generateDiffIn(ctx context.Context, dir, baselineCommit string) (string, error) {
-	args := gitworktree.SanitizedExecutionArgs("diff", "--no-ext-diff", "--no-textconv", "--no-color", baselineCommit)
+	args := gitworktree.SanitizedExecutionArgsForDir(dir, "diff", "--no-ext-diff", "--no-textconv", "--no-color", baselineCommit)
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = gitworktree.SanitizedGitEnv()

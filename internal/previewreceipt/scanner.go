@@ -13,6 +13,12 @@ import (
 const (
 	// MaxPatchBytes limits turn patches to 2MB to protect against unbounded diffs.
 	MaxPatchBytes = 2 * 1024 * 1024
+	// MaxPromptBytes limits persisted prompt text in receipts.
+	MaxPromptBytes = 4096
+	// MaxFailureReasonBytes limits persisted failure reason in receipts.
+	MaxFailureReasonBytes = 2048
+	// MaxCommentBytes limits comments written to tasks.
+	MaxCommentBytes = 2048
 )
 
 // highRiskPathSubstrings are rejected outright in touched paths (deterministic blacklist):
@@ -43,6 +49,10 @@ var sensitivePatterns = []struct {
 		pattern: regexp.MustCompile(`gh[pousr]_[a-zA-Z0-9]{20,}`),
 	},
 	{
+		name:    "GitLab personal access token",
+		pattern: regexp.MustCompile(`glpat-[a-zA-Z0-9_-]{15,}`),
+	},
+	{
 		name:    "Slack token",
 		pattern: regexp.MustCompile(`xox[baprs]-[0-9a-zA-Z]{10,}`),
 	},
@@ -51,12 +61,20 @@ var sensitivePatterns = []struct {
 		pattern: regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
 	},
 	{
+		name:    "JWT token",
+		pattern: regexp.MustCompile(`\bey[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_\-\.]+\b`),
+	},
+	{
+		name:    "authorization header",
+		pattern: regexp.MustCompile(`(?i)\b(?:authorization|proxy-authorization)\s*:\s*(?:bearer\s+|basic\s+)?[a-zA-Z0-9+/=_\-\.]{8,}`),
+	},
+	{
 		name:    "bearer token",
 		pattern: regexp.MustCompile(`(?i)bearer\s+[a-zA-Z0-9_\-\.]{25,}`),
 	},
 	{
 		name:    "hardcoded secret or password assignment",
-		pattern: regexp.MustCompile(`(?i)(password|passwd|secret|apikey|api_key)\s*(?::=|=|:)\s*["'][^"'\s]{8,}["']`),
+		pattern: regexp.MustCompile(`(?i)\b(?:api[_-]?key|secret|token|password|passwd|pwd|credential|private[_-]?key)[a-z0-9_-]*\s*(?::=|=|:)\s*(?:[^\s"']{6,}|["'][^"'\s]{6,}["'])`),
 	},
 }
 
@@ -158,13 +176,35 @@ func SanitizeDisplayDiff(patch string) string {
 	return sanitized
 }
 
+var (
+	secretAssignPattern  = regexp.MustCompile(`(?i)\b((?:api[_-]?key|secret|token|password|passwd|pwd|credential|private[_-]?key)[a-z0-9_-]*\s*(?::=|=|:)\s*)(?:["'][^"'\s]{6,}["']|[^\s"']{6,})`)
+	knownPrefixesPattern = regexp.MustCompile(`(?i)\b(sk-[a-zA-Z0-9_-]{8,}|gh[pousr]_[a-zA-Z0-9]{20,}|xox[bpao]-[a-zA-Z0-9-]{10,}|glpat-[a-zA-Z0-9_-]{15,}|AKIA[0-9A-Z]{16}|ey[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_\-\.]+)`)
+	authHeaderPattern    = regexp.MustCompile(`(?i)\b((?:authorization|proxy-authorization)\s*:\s*)(?:bearer\s+|basic\s+)?(\S{8,})`)
+	privateKeyPattern    = regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`)
+)
+
+// CapAndRedact scrubs secrets from text and ensures it does not exceed maxBytes.
+func CapAndRedact(text string, maxBytes int) string {
+	if text == "" {
+		return ""
+	}
+	redacted := RedactSecrets(text)
+	if maxBytes > 0 && len(redacted) > maxBytes {
+		return redacted[:maxBytes] + "… [truncated]"
+	}
+	return redacted
+}
+
 // RedactSecrets scans arbitrary text (prompts, errors, comments) and redacts
-// any sensitive credentials, tokens, API keys, or private keys.
+// any sensitive credentials, tokens, API keys, passwords, JWTs, or private keys.
 func RedactSecrets(text string) string {
 	if text == "" {
 		return ""
 	}
-	res := text
+	res := privateKeyPattern.ReplaceAllString(text, "[REDACTED_SECRET]")
+	res = knownPrefixesPattern.ReplaceAllString(res, "[REDACTED_SECRET]")
+	res = secretAssignPattern.ReplaceAllString(res, "${1}[REDACTED_SECRET]")
+	res = authHeaderPattern.ReplaceAllString(res, "${1}[REDACTED_SECRET]")
 	for _, sp := range sensitivePatterns {
 		res = sp.pattern.ReplaceAllString(res, "[REDACTED_SECRET]")
 	}

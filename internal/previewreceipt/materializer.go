@@ -262,7 +262,7 @@ func VerifyWorktreeMatchesPostimages(projectRoot string, entries []PostimageEntr
 }
 
 func runGitIn(ctx context.Context, dir string, env []string, args ...string) (string, error) {
-	sanitizedArgs := gitworktree.SanitizedExecutionArgs(args...)
+	sanitizedArgs := gitworktree.SanitizedExecutionArgsForDir(dir, args...)
 	cmd := exec.CommandContext(ctx, "git", sanitizedArgs...)
 	cmd.Dir = dir
 	cmd.Env = env
