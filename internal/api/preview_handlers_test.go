@@ -349,6 +349,8 @@ func TestPreviewChatRejectsWhenOriginsMissingOrMismatched(t *testing.T) {
 func TestPreviewChatTerminalTaskRejected(t *testing.T) {
 	s := newPreviewControlServer(t)
 	s.SetPreviewCopilotDrawerEnabled(true)
+	s.consoleOrigin = "http://console.example.com"
+	s.previewOrigin = "http://preview.example.com"
 	newPreviewOperator(t, s, "opuser")
 
 	// Seed completed task
@@ -364,6 +366,126 @@ func TestPreviewChatTerminalTaskRejected(t *testing.T) {
 	s.handlePostTaskPreviewChat(w, authedReq)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("expected 409 Conflict for terminal task, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "task is not in progress") {
+		t.Fatalf("expected 'task is not in progress' message, got: %s", w.Body.String())
+	}
+}
+
+func TestPreviewFeedbackDisabledFailsWith409FeatureDisabled(t *testing.T) {
+	s := newPreviewControlServer(t)
+	s.SetPreviewCopilotDrawerEnabled(true)
+	s.consoleOrigin = "http://console.example.com"
+	s.previewOrigin = "http://preview.example.com"
+	newPreviewOperator(t, s, "opuser")
+
+	// Seed task in progress
+	task := &entity.Task{ID: "t-1", Status: entity.TaskStatusInProgress}
+	_ = s.ts.AddTask("proj", "agent", task)
+
+	w := httptest.NewRecorder()
+	authedReq := previewAuthedRequest(s, http.MethodPost, "/api/v1/projects/proj/tasks/t-1/preview/feedback", "opuser", "")
+	authedReq.SetPathValue("name", "proj")
+	authedReq.SetPathValue("taskId", "t-1")
+	authedReq.Body = io.NopCloser(strings.NewReader(`{"feedback":"change button color"}`))
+
+	s.handlePostTaskPreviewFeedback(w, authedReq)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict for preview feedback when Slice B is disabled, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "feature_disabled") {
+		t.Fatalf("expected feature_disabled error code, got: %s", w.Body.String())
+	}
+
+	comments, _ := s.ts.ListComments("proj", "agent", "t-1")
+	if len(comments) != 0 {
+		t.Fatalf("expected 0 task comments created on rejected feedback, got %d", len(comments))
+	}
+}
+
+func TestPreviewFeedbackTerminalTaskRejected(t *testing.T) {
+	s := newPreviewControlServer(t)
+	s.SetPreviewCopilotDrawerEnabled(true)
+	s.consoleOrigin = "http://console.example.com"
+	s.previewOrigin = "http://preview.example.com"
+	newPreviewOperator(t, s, "opuser")
+
+	// Seed completed task
+	task := &entity.Task{ID: "t-completed", Status: entity.TaskStatusDoneSuccess}
+	_ = s.ts.AddTask("proj", "agent", task)
+
+	w := httptest.NewRecorder()
+	authedReq := previewAuthedRequest(s, http.MethodPost, "/api/v1/projects/proj/tasks/t-completed/preview/feedback", "opuser", "")
+	authedReq.SetPathValue("name", "proj")
+	authedReq.SetPathValue("taskId", "t-completed")
+	authedReq.Body = io.NopCloser(strings.NewReader(`{"feedback":"change button color"}`))
+
+	s.handlePostTaskPreviewFeedback(w, authedReq)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict for terminal task, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "task is not in progress") {
+		t.Fatalf("expected 'task is not in progress' message, got: %s", w.Body.String())
+	}
+
+	comments, _ := s.ts.ListComments("proj", "agent", "t-completed")
+	if len(comments) != 0 {
+		t.Fatalf("expected 0 task comments created on rejected feedback, got %d", len(comments))
+	}
+}
+
+func TestPreviewFeedbackRejectsWhenDrawerDisabled(t *testing.T) {
+	s := newPreviewControlServer(t)
+	s.SetPreviewCopilotDrawerEnabled(false) // Drawer explicitly disabled
+	newPreviewOperator(t, s, "opuser")
+
+	w := httptest.NewRecorder()
+	authedReq := previewAuthedRequest(s, http.MethodPost, "/api/v1/projects/proj/tasks/t-1/preview/feedback", "opuser", "")
+	authedReq.SetPathValue("name", "proj")
+	authedReq.SetPathValue("taskId", "t-1")
+	authedReq.Body = io.NopCloser(strings.NewReader(`{"feedback":"change button color"}`))
+
+	s.handlePostTaskPreviewFeedback(w, authedReq)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict when drawer is disabled, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "feature_disabled") {
+		t.Fatalf("expected feature_disabled error code, got: %s", w.Body.String())
+	}
+}
+
+func TestPreviewFeedbackRejectsWhenOriginsMissingOrMismatched(t *testing.T) {
+	s := newPreviewControlServer(t)
+	s.SetPreviewCopilotDrawerEnabled(true)
+	newPreviewOperator(t, s, "opuser")
+
+	task := &entity.Task{ID: "t-1", Status: entity.TaskStatusInProgress}
+	_ = s.ts.AddTask("proj", "agent", task)
+
+	// Missing origins
+	s.consoleOrigin = ""
+	s.previewOrigin = ""
+	w := httptest.NewRecorder()
+	authedReq := previewAuthedRequest(s, http.MethodPost, "/api/v1/projects/proj/tasks/t-1/preview/feedback", "opuser", "")
+	authedReq.SetPathValue("name", "proj")
+	authedReq.SetPathValue("taskId", "t-1")
+	authedReq.Body = io.NopCloser(strings.NewReader(`{"feedback":"change button color"}`))
+	s.handlePostTaskPreviewFeedback(w, authedReq)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict when origins are missing, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Mismatched origins
+	s.consoleOrigin = "https://console.company-a.com"
+	s.previewOrigin = "https://preview.company-b.com"
+	w2 := httptest.NewRecorder()
+	authedReq2 := previewAuthedRequest(s, http.MethodPost, "/api/v1/projects/proj/tasks/t-1/preview/feedback", "opuser", "")
+	authedReq2.SetPathValue("name", "proj")
+	authedReq2.SetPathValue("taskId", "t-1")
+	authedReq2.Body = io.NopCloser(strings.NewReader(`{"feedback":"change button color"}`))
+	s.handlePostTaskPreviewFeedback(w2, authedReq2)
+	if w2.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict when origins mismatch, got %d: %s", w2.Code, w2.Body.String())
 	}
 }
 
@@ -395,6 +517,11 @@ func TestRewriteHTMLSanitizesDOMAndSetsExpectedConsoleOrigin(t *testing.T) {
 	// 4. Security: extractElementContext must NOT extract outerHTML or parent:
 	if strings.Contains(rewritten, `outerHTML`) || strings.Contains(rewritten, `parent:`) {
 		t.Fatal("SECURITY VIOLATION: injected script must not extract raw outerHTML or parent tree")
+	}
+
+	// 5. Security: getCssSelector must NOT concatenate raw #id or .class
+	if strings.Contains(rewritten, `selector += '#'`) || strings.Contains(rewritten, `selector += '.'`) {
+		t.Fatal("SECURITY VIOLATION: getCssSelector must not concatenate raw element ID or class name")
 	}
 }
 

@@ -421,80 +421,38 @@ func (s *Server) handlePostTaskPreviewFeedback(w http.ResponseWriter, r *http.Re
 			project = inst.Project
 		}
 	}
-	// Task 1.1: write surface — Bearer-only principal, operator + approver
-	// gates; share tokens are view-only and get 403 here.
-	authReq, principal, ok := s.previewWritePrincipal(w, r, project, taskID)
+	_, _, ok := s.previewWritePrincipal(w, r, project, taskID)
 	if !ok {
 		return
 	}
-	r = authReq
+	// Guard 1: Drawer feature flag gate (server-controlled rollout, fail-closed)
+	if !s.PreviewCopilotDrawerEnabled() {
+		s.jsonErrorCode(w, http.StatusConflict, "feature_disabled", "preview copilot drawer is disabled")
+		return
+	}
+
+	// Guard 2: Task status gate (fail-closed check on task.Status, regardless of container lifecycle)
+	task, _, err := s.findTaskInProject(project, taskID)
+	if err != nil || task == nil {
+		s.jsonError(w, http.StatusNotFound, "task not found")
+		return
+	}
+	if task.Status != entity.TaskStatusInProgress {
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "task is not in progress; modifying completed or inactive task code is forbidden")
+		return
+	}
+
+	if !s.allowPreviewChat(taskID) {
+		s.jsonErrorCode(w, http.StatusTooManyRequests, ErrCodeConflict, "preview feedback rate limit exceeded; retry shortly")
+		return
+	}
 	if s.previewInstanceReadOnly(taskID) {
 		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "completed-task snapshot is read-only; create a follow-up task to modify it")
 		return
 	}
 
-	var body previewFeedbackBody
-	if err := s.readJSON(w, r, &body); err != nil {
-		s.jsonError(w, http.StatusBadRequest, "invalid JSON body")
-		return
-	}
-
-	feedback := strings.TrimSpace(body.Feedback)
-	if feedback == "" {
-		s.jsonError(w, http.StatusBadRequest, "feedback content is required")
-		return
-	}
-
-	task, agentName, err := s.findTaskInProject(project, taskID)
-	if err != nil {
-		s.jsonError(w, http.StatusNotFound, "task not found")
-		return
-	}
-
-	workspaceID, err := s.currentWorkspaceID()
-	if err != nil {
-		s.serverError(w, err)
-		return
-	}
-
-	// Round-11: feedback wakes the agent to modify code — same execution lock
-	// as chat. While an agent is actively executing a background step, the
-	// wakeup write is refused instead of queueing a concurrent mutation
-	// (human_review steps and confirmation waits stay interactive).
-	if task.Status == entity.TaskStatusInProgress && !s.isTaskAtHumanReviewStep(workspaceID, project, taskID) {
-		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "当前节点正由智能体后台执行中。待流转至人工审核节点后即可提交修改反馈。")
-		return
-	}
-
-	feedbackPrompt := fmt.Sprintf(
-		"【预览界面即时修改反馈】用户在特性分支 (Worktree) 的实时预览环境中提出了以下修改要求：\n\n%s\n\n请严格在当前 Worktree 目录 (/workspace) 内完成代码修改，并确保本地服务热重载正常，严禁切换分支。",
-		feedback,
-	)
-
-	// Comment authorship carries the authenticated principal — no fallback
-	// literal (Task 1.1 principal-threading requirement).
-	author := principal.Username
-
-	// Append feedback to task comments
-	_ = s.ts.AddComment(project, agentName, &entity.TaskComment{
-		ID:        entity.NewCommentID(),
-		TaskID:    taskID,
-		Author:    author,
-		Body:      "[Preview Feedback] " + feedback,
-		CreatedAt: time.Now().UTC(),
-	})
-
-	// Wake up agent in current worktree
-	signalID := s.recordTaskAttentionSignal(workspaceID, project, agentName, task, "preview_feedback")
-	s.requestTaskAttentionWakeup(workspaceID, project, agentName, task, "preview_feedback", signalID)
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"ok":      true,
-		"taskId":  taskID,
-		"prompt":  feedbackPrompt,
-		"message": "Feedback submitted to agent",
-	})
+	// Guard 3: Slice B gate — legacy feedback and direct worktree modifications are disabled until Receipt is implemented
+	s.jsonErrorCode(w, http.StatusConflict, "feature_disabled", "preview feedback code modification is disabled until receipt and isolated clone are implemented")
 }
 
 func (s *Server) handlePostTaskPreviewChat(w http.ResponseWriter, r *http.Request) {
@@ -957,24 +915,22 @@ func rewriteHTML(html, taskID, projectName string, consoleOrigins ...string) str
   function getCssSelector(el) {
     var path = [];
     while (el && el.nodeType === 1 && el !== document.body && el !== document.documentElement) {
-      var selector = el.nodeName.toLowerCase();
-      if (el.id) {
-        selector += '#' + el.id;
-        path.unshift(selector);
-        break;
-      } else if (el.className && typeof el.className === 'string' && el.className.trim()) {
-        selector += '.' + el.className.trim().split(/\s+/)[0];
+      var tag = (el.tagName || el.nodeName || '').toLowerCase();
+      if (!/^[a-z][a-z0-9-]{0,31}$/.test(tag)) {
+        return '';
       }
-      var parent = el.parentNode;
+      var seg = tag;
+      var parent = el.parentElement;
       if (parent) {
-        var siblings = Array.prototype.filter.call(parent.children, function(e) { return e.nodeName === el.nodeName; });
+        var siblings = Array.prototype.filter.call(parent.children, function(e) { return e.tagName === el.tagName; });
         if (siblings.length > 1) {
           var index = Array.prototype.indexOf.call(siblings, el) + 1;
-          selector += ':nth-of-type(' + index + ')';
+          seg += ':nth-of-type(' + index + ')';
         }
       }
-      path.unshift(selector);
-      el = el.parentElement;
+      path.unshift(seg);
+      el = parent;
+      if (path.length >= 15) break;
     }
     return path.join(' > ');
   }
@@ -1001,9 +957,13 @@ func rewriteHTML(html, taskID, projectName string, consoleOrigins ...string) str
     inspectorOverlay.style.height = rect.height + 'px';
 
     var tagStr = el.tagName.toLowerCase();
-    if (el.id) tagStr += '#' + el.id;
-    else if (el.className && typeof el.className === 'string' && el.className.trim()) {
-      tagStr += '.' + el.className.trim().split(/\s+/).slice(0, 2).join('.');
+    if (el.id && /^[A-Za-z][A-Za-z0-9_:-]{0,63}$/.test(el.id)) {
+      tagStr += '#' + el.id;
+    } else if (el.className && typeof el.className === 'string' && el.className.trim()) {
+      var safeBadgeClasses = el.className.trim().split(/\s+/)
+        .filter(function(c) { return /^[a-zA-Z0-9_\-:]+$/.test(c); })
+        .slice(0, 2);
+      if (safeBadgeClasses.length) tagStr += '.' + safeBadgeClasses.join('.');
     }
     inspectorBadge.textContent = '<' + tagStr + '> ' + Math.round(rect.width) + '×' + Math.round(rect.height);
 
@@ -1018,6 +978,9 @@ func rewriteHTML(html, taskID, projectName string, consoleOrigins ...string) str
 
   function extractElementContext(el) {
     var tag = (el.tagName || '').toLowerCase();
+    if (!/^[a-z][a-z0-9-]{0,31}$/.test(tag)) {
+      return null;
+    }
     var id = '';
     if (el.id && /^[A-Za-z][A-Za-z0-9_:-]{0,63}$/.test(el.id)) {
       id = el.id;
@@ -1034,13 +997,13 @@ func rewriteHTML(html, taskID, projectName string, consoleOrigins ...string) str
     var role = '';
     if (el.getAttribute && el.getAttribute('role')) {
       var rVal = (el.getAttribute('role') || '').trim();
-      if (/^[a-zA-Z0-9_\-]+$/.test(rVal)) role = rVal;
+      if (/^[a-zA-Z0-9_\-]{1,32}$/.test(rVal)) role = rVal;
     }
 
     var type = '';
     if (el.getAttribute && el.getAttribute('type')) {
       var tVal = (el.getAttribute('type') || '').trim();
-      if (/^[a-zA-Z0-9_\-]+$/.test(tVal)) type = tVal;
+      if (/^[a-zA-Z0-9_\-]{1,32}$/.test(tVal)) type = tVal;
     }
 
     var testId = '';
@@ -1082,7 +1045,9 @@ func rewriteHTML(html, taskID, projectName string, consoleOrigins ...string) str
 
     if (el !== document.body && el !== document.documentElement && (!el.closest || !el.closest('.mg-inspector-overlay'))) {
       var targetCtx = extractElementContext(el);
-      notifyHost({ type: 'MG_DOM_SELECTED', target: targetCtx });
+      if (targetCtx) {
+        notifyHost({ type: 'MG_DOM_SELECTED', target: targetCtx });
+      }
       stopInspector(false);
     }
   }

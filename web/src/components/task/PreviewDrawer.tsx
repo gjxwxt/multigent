@@ -35,6 +35,69 @@ export type DOMTarget = {
   selector: string
 }
 
+const SAFE_TAG_REGEX = /^[a-z][a-z0-9-]{0,31}$/
+const SAFE_ID_REGEX = /^[A-Za-z][A-Za-z0-9_:-]{0,63}$/
+const SAFE_ROLE_TYPE_REGEX = /^[a-zA-Z0-9_\-]{1,32}$/
+const SAFE_SELECTOR_SEGMENT_REGEX = /^[a-z][a-z0-9-]{0,31}(?::nth-of-type\(\d+\))?$/
+
+export function decodeDOMTarget(raw: unknown): DOMTarget | null {
+  if (!raw || typeof raw !== 'object') return null
+  const obj = raw as Record<string, unknown>
+
+  const tag = typeof obj.tag === 'string' ? obj.tag.trim().toLowerCase() : ''
+  const tagName = typeof obj.tagName === 'string' ? obj.tagName.trim().toLowerCase() : tag
+  const selector = typeof obj.selector === 'string' ? obj.selector.trim() : ''
+
+  if (!SAFE_TAG_REGEX.test(tag) || !SAFE_TAG_REGEX.test(tagName)) {
+    return null
+  }
+
+  if (!selector) return null
+  const segments = selector.split(' > ')
+  if (segments.length === 0 || segments.length > 20) return null
+  for (const seg of segments) {
+    if (!SAFE_SELECTOR_SEGMENT_REGEX.test(seg)) {
+      return null
+    }
+  }
+
+  const result: DOMTarget = {
+    tag,
+    tagName,
+    selector,
+  }
+
+  if (typeof obj.id === 'string' && obj.id.trim()) {
+    const cleanId = obj.id.trim()
+    if (SAFE_ID_REGEX.test(cleanId)) {
+      result.id = cleanId
+    }
+  }
+
+  if (typeof obj.role === 'string' && obj.role.trim()) {
+    const cleanRole = obj.role.trim()
+    if (SAFE_ROLE_TYPE_REGEX.test(cleanRole)) {
+      result.role = cleanRole
+    }
+  }
+
+  if (typeof obj.type === 'string' && obj.type.trim()) {
+    const cleanType = obj.type.trim()
+    if (SAFE_ROLE_TYPE_REGEX.test(cleanType)) {
+      result.type = cleanType
+    }
+  }
+
+  if (typeof obj.testId === 'string' && obj.testId.trim()) {
+    const cleanTestId = obj.testId.trim()
+    if (SAFE_ROLE_TYPE_REGEX.test(cleanTestId)) {
+      result.testId = cleanTestId
+    }
+  }
+
+  return result
+}
+
 export type CopilotTool = {
   type: 'bash' | 'read' | 'edit' | 'search' | 'other'
   name: string
@@ -195,7 +258,16 @@ export function PreviewDrawer({
   const [msgs, setMsgs] = useState<CopilotMsg[]>(() => {
     try {
       const saved = localStorage.getItem(`multigent_preview_copilot_chat_${taskId}`)
-      if (saved) return JSON.parse(saved)
+      if (saved) {
+        const parsed = JSON.parse(saved)
+        if (Array.isArray(parsed)) {
+          return parsed.map((m: any) => {
+            if (!m || typeof m !== 'object') return m
+            const { domTarget: _unused, ...rest } = m
+            return rest
+          })
+        }
+      }
     } catch {}
     return []
   })
@@ -333,14 +405,17 @@ export function PreviewDrawer({
           postToPreview({ type: 'MG_START_INSPECTOR' })
         }
       } else if (t === 'MG_DOM_SELECTED' && e.data.target) {
-        setSelectedDOM(e.data.target as DOMTarget)
-        setIsInspectingDOM(false)
-        setInspectorConnected(false)
-        setCopilotOpen(true)
-        setCopilotMinimized(false)
-        setTimeout(() => {
-          textareaRef.current?.focus()
-        }, 60)
+        const decoded = decodeDOMTarget(e.data.target)
+        if (decoded) {
+          setSelectedDOM(decoded)
+          setIsInspectingDOM(false)
+          setInspectorConnected(false)
+          setCopilotOpen(true)
+          setCopilotMinimized(false)
+          setTimeout(() => {
+            textareaRef.current?.focus()
+          }, 60)
+        }
       } else if (t === 'MG_DOM_CANCELLED') {
         setIsInspectingDOM(false)
         setInspectorConnected(false)

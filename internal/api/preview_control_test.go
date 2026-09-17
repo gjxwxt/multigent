@@ -237,7 +237,7 @@ func TestLegacyTokenWithoutCapRejectedEverywhere(t *testing.T) {
 	}
 }
 
-func TestPreviewCommentAuthorIsPrincipal(t *testing.T) {
+func TestPreviewFeedbackDisabledNoCommentOrWakeup(t *testing.T) {
 	s := newPreviewControlServer(t)
 	newPreviewOperator(t, s, "opuser")
 	workspaceID := s.currentWorkspaceIDValue(nil)
@@ -246,7 +246,7 @@ func TestPreviewCommentAuthorIsPrincipal(t *testing.T) {
 		ID:        "t-author",
 		Title:     "author check",
 		Assignee:  "proj/pm",
-		Status:    entity.TaskStatusDoneSuccess,
+		Status:    entity.TaskStatusInProgress,
 		Prompt:    "author check",
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
@@ -264,17 +264,13 @@ func TestPreviewCommentAuthorIsPrincipal(t *testing.T) {
 	dispatchPreviewControl(s, "feedback", w, req)
 
 	after, _ := s.ts.ListComments("proj", "pm", "t-author")
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict, got %d: %s", w.Code, w.Body.String())
 	}
-	if len(after) != len(before)+1 {
-		t.Fatalf("expected +1 comment, got %d -> %d", len(before), len(after))
+	if !strings.Contains(w.Body.String(), "feature_disabled") {
+		t.Fatalf("expected feature_disabled error, got: %s", w.Body.String())
 	}
-	last := after[len(after)-1]
-	if last.Author != "opuser" {
-		t.Fatalf("comment author must be the authenticated principal, got %q", last.Author)
-	}
-	if !strings.HasPrefix(last.Body, "[Preview Feedback] ") {
-		t.Fatalf("unexpected comment body: %q", last.Body)
+	if len(after) != len(before) {
+		t.Fatalf("feedback must not create comments while disabled, got %d -> %d", len(before), len(after))
 	}
 }
