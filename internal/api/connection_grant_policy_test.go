@@ -26,7 +26,7 @@ func newConnectionGrantPolicyServer(t *testing.T) (*Server, string) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	st := store.NewDB(root, db)
 	ts := taskstore.NewDB(root, db)
-	s := &Server{root: root, controlDB: db, st: st, ts: ts, users: newUserStore(db), agentDirectory: agentdir.New(db)}
+	s := &Server{root: root, controlDB: db, st: st, ts: ts, users: newUserStore(db), agentDirectory: agentdir.New(db), previewSessions: make(map[string]*previewChatSession)}
 	s.triggers = newTriggerManager(root, "", ts, s.controlDB)
 	workspaceID, err := s.currentWorkspaceID()
 	if err != nil {

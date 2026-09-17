@@ -19,6 +19,7 @@ import {
   Minimize2,
   Minus,
   PanelRight,
+  RotateCcw,
   RotateCw,
   Send,
   Sparkles,
@@ -307,6 +308,9 @@ export function PreviewDrawer({
   const [selectedTurnId, setSelectedTurnId] = useState<string | null>(null)
   const [turnDiffMap, setTurnDiffMap] = useState<Record<string, string>>({})
   const [loadingDiff, setLoadingDiff] = useState(false)
+  const [isRollingBack, setIsRollingBack] = useState(false)
+  const [rollbackError, setRollbackError] = useState<string | null>(null)
+  const [showRollbackConfirm, setShowRollbackConfirm] = useState(false)
 
   const abortCtrlRef = useRef<AbortController | null>(null)
   const chatScrollRef = useRef<HTMLDivElement>(null)
@@ -439,6 +443,42 @@ export function PreviewDrawer({
       }
     },
     [project, taskId, turnDiffMap]
+  )
+
+  useEffect(() => {
+    setShowRollbackConfirm(false)
+    setRollbackError(null)
+  }, [selectedTurnId])
+
+  const handleRollbackTurn = useCallback(
+    async (turnId: string) => {
+      if (!turnReceiptsEnabled || !canOperator || isRollingBack) return
+      setIsRollingBack(true)
+      setRollbackError(null)
+      try {
+        const token = getStoredToken()
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+        if (token) headers['Authorization'] = `Bearer ${token}`
+        const res = await fetch(
+          apiUrl(
+            `/api/v1/projects/${encodeURIComponent(project || 'current')}/tasks/${encodeURIComponent(taskId)}/preview/turns/${encodeURIComponent(turnId)}/rollback`
+          ),
+          { method: 'POST', headers }
+        )
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}))
+          throw new Error(data.error || `回滚失败 (${res.status})`)
+        }
+        setShowRollbackConfirm(false)
+        await fetchTurns()
+        setIframeKey((k) => k + 1)
+      } catch (err: any) {
+        setRollbackError(err?.message || '回滚执行失败')
+      } finally {
+        setIsRollingBack(false)
+      }
+    },
+    [turnReceiptsEnabled, canOperator, isRollingBack, project, taskId, fetchTurns]
   )
 
   useEffect(() => {
@@ -850,6 +890,7 @@ export function PreviewDrawer({
       setIsBusy(false)
       abortCtrlRef.current = null
       setIframeKey((k) => k + 1)
+      void fetchTurns()
     }
   }
 
@@ -1044,11 +1085,82 @@ export function PreviewDrawer({
                       )}
                     </div>
 
-                    {/* Read-only Rollback Notice */}
+                    {/* Turn Actions: Rollback */}
                     {selectedTurn.status === 'CAPTURED' && (
-                      <div className="rounded-xl border border-neutral-200/80 bg-neutral-50/80 p-2.5 text-[11px] text-neutral-600 dark:border-zinc-800 dark:bg-zinc-800/40 dark:text-zinc-400 flex items-center gap-2">
-                        <Lock className="size-3.5 shrink-0 text-neutral-400" />
-                        <span>写操作目前在只读审查模式下已冻结（MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS=false），禁止触发回滚写操作。</span>
+                      <div className="rounded-xl border border-neutral-200/80 bg-neutral-50/80 p-3 dark:border-zinc-800 dark:bg-zinc-900/40 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-semibold text-neutral-800 dark:text-zinc-200 flex items-center gap-1.5">
+                            <RotateCcw className="size-3.5 text-amber-600 dark:text-amber-400" />
+                            <span>回合操作</span>
+                          </span>
+                          {turnReceiptsEnabled && canOperator && !showRollbackConfirm && (
+                            <button
+                              type="button"
+                              onClick={() => setShowRollbackConfirm(true)}
+                              disabled={isRollingBack}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800 hover:bg-amber-100 transition dark:border-amber-800/80 dark:bg-amber-950/40 dark:text-amber-300 dark:hover:bg-amber-900/60 cursor-pointer"
+                            >
+                              <RotateCcw className="size-3.5" />
+                              <span>回滚此回合</span>
+                            </button>
+                          )}
+                        </div>
+
+                        {!turnReceiptsEnabled ? (
+                          <div className="flex items-center gap-2 text-[11px] text-neutral-500 dark:text-zinc-400">
+                            <Lock className="size-3.5 shrink-0 text-neutral-400" />
+                            <span>写操作目前在只读审查模式下已冻结（MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS=false），禁止触发回滚写操作。</span>
+                          </div>
+                        ) : !canOperator ? (
+                          <div className="flex items-center gap-2 text-[11px] text-neutral-500 dark:text-zinc-400">
+                            <Lock className="size-3.5 shrink-0 text-neutral-400" />
+                            <span>当前用户权限不足，仅项目 Operator 可回滚改动。</span>
+                          </div>
+                        ) : showRollbackConfirm ? (
+                          <div className="rounded-lg border border-amber-200 bg-amber-50/60 p-2.5 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200 space-y-2">
+                            <div className="font-medium">确认回滚此回合的所有代码修改？</div>
+                            <p className="text-[11px] text-amber-700 dark:text-amber-300/80">
+                              系统将执行逆向补丁将 Worktree 还原至此回合前的基线状态，并同步释放回合快照。
+                            </p>
+                            {rollbackError && (
+                              <div className="text-[11px] text-red-600 dark:text-red-400 font-mono">
+                                {rollbackError}
+                              </div>
+                            )}
+                            <div className="flex items-center gap-2 pt-1">
+                              <button
+                                type="button"
+                                onClick={() => void handleRollbackTurn(selectedTurn.turnId)}
+                                disabled={isRollingBack}
+                                className="inline-flex items-center gap-1 rounded-md bg-amber-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-amber-700 transition disabled:opacity-50 cursor-pointer"
+                              >
+                                {isRollingBack ? (
+                                  <>
+                                    <RotateCw className="size-3 animate-spin" />
+                                    <span>回滚中…</span>
+                                  </>
+                                ) : (
+                                  <span>确认回滚</span>
+                                )}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setShowRollbackConfirm(false)
+                                  setRollbackError(null)
+                                }}
+                                disabled={isRollingBack}
+                                className="rounded-md border border-neutral-300 bg-white px-2.5 py-1 text-xs font-medium text-neutral-700 hover:bg-neutral-50 transition dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 cursor-pointer"
+                              >
+                                取消
+                              </button>
+                            </div>
+                          </div>
+                        ) : rollbackError ? (
+                          <div className="text-[11px] text-red-600 dark:text-red-400 font-mono">
+                            {rollbackError}
+                          </div>
+                        ) : null}
                       </div>
                     )}
                   </div>

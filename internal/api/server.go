@@ -328,15 +328,28 @@ func (s *Server) SetDaemonStatus(fn DaemonStatusFunc) { s.daemonStatus = fn }
 
 // receiptStore resolves the preview receipt store for the current workspace.
 func (s *Server) receiptStore(r *http.Request) *previewreceipt.Store {
+	return s.receiptStoreForWorkspace(s.currentWorkspaceIDValue(r))
+}
+
+// receiptStoreForWorkspace resolves the preview receipt store for a specific workspaceID.
+func (s *Server) receiptStoreForWorkspace(workspaceID string) *previewreceipt.Store {
 	if s == nil || s.controlDB == nil {
 		return nil
 	}
-	return previewreceipt.NewStore(s.controlDB, s.currentWorkspaceIDValue(r))
+	if strings.TrimSpace(workspaceID) == "" {
+		workspaceID, _ = s.currentWorkspaceID()
+	}
+	return previewreceipt.NewStore(s.controlDB, workspaceID)
 }
 
 // turnEngine resolves the turn engine for the current workspace.
 func (s *Server) turnEngine(r *http.Request) *previewreceipt.TurnEngine {
-	store := s.receiptStore(r)
+	return s.turnEngineForWorkspace(s.currentWorkspaceIDValue(r))
+}
+
+// turnEngineForWorkspace resolves the turn engine for a specific workspaceID.
+func (s *Server) turnEngineForWorkspace(workspaceID string) *previewreceipt.TurnEngine {
+	store := s.receiptStoreForWorkspace(workspaceID)
 	if store == nil {
 		return nil
 	}

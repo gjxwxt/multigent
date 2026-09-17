@@ -577,10 +577,11 @@ func (s *Server) handleGetTaskPreviewLive(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handlePostTaskPreviewStop(w http.ResponseWriter, r *http.Request) {
+	project := strings.TrimSpace(r.PathValue("name"))
 	taskID := strings.TrimSpace(r.PathValue("taskId"))
 	// Task 1.1: stop kills a running Copilot session — a real principal with
 	// operator rights only; share tokens are view-only (403 here).
-	if _, _, ok := s.previewWritePrincipal(w, r, r.PathValue("name"), taskID); !ok {
+	if _, _, ok := s.previewWritePrincipal(w, r, project, taskID); !ok {
 		return
 	}
 	s.previewMu.Lock()
@@ -593,6 +594,12 @@ func (s *Server) handlePostTaskPreviewStop(w http.ResponseWriter, r *http.Reques
 		session.finish(true)
 	}
 	s.previewMu.Unlock()
+
+	// Also cancel any active in-flight preview turn receipt
+	engine := s.turnEngine(r)
+	if engine != nil {
+		_ = engine.CancelActiveTurn(r.Context(), project, taskID, "stopped by operator")
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{

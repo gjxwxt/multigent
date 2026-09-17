@@ -138,7 +138,33 @@ func (s *Server) executePreviewChatTurn(w http.ResponseWriter, r *http.Request, 
 
 	runner := s.newPreviewAgentRunner(workspaceID, project, agentName, localRuntimeAPIURLForRequest(r))
 
-	receipt, err := engine.ExecuteTurn(r.Context(), previewreceipt.ExecuteTurnParams{
+	execCtx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	session := &previewChatSession{
+		TaskID:    taskID,
+		Project:   project,
+		Agent:     agentName,
+		StartedAt: time.Now().UTC(),
+		Cancel:    cancel,
+	}
+	s.previewMu.Lock()
+	if s.previewSessions == nil {
+		s.previewSessions = make(map[string]*previewChatSession)
+	}
+	s.previewSessions[taskID] = session
+	s.previewMu.Unlock()
+
+	defer func() {
+		s.previewMu.Lock()
+		if s.previewSessions != nil && s.previewSessions[taskID] == session {
+			delete(s.previewSessions, taskID)
+		}
+		session.finish(false)
+		s.previewMu.Unlock()
+	}()
+
+	receipt, err := engine.ExecuteTurn(execCtx, previewreceipt.ExecuteTurnParams{
 		WorkspaceID:    workspaceID,
 		Project:        project,
 		ProjectGitRoot: projectGitRoot,

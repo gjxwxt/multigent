@@ -19,7 +19,9 @@ import (
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/gitworktree"
+	"github.com/multigent/multigent/internal/previewreceipt"
 	"github.com/multigent/multigent/internal/store"
+	"github.com/multigent/multigent/internal/taskstore"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
 
@@ -718,6 +720,14 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 	}
 
 	if isApprovalDecision(outputs["decision"]) {
+		workspaceID, _ := s.currentWorkspaceID()
+		store := s.receiptStoreForWorkspace(workspaceID)
+		if store != nil {
+			_, activeRec, err := store.GetActiveSlot(context.Background(), project, t.ID)
+			if err == nil && activeRec != nil && previewreceipt.IsActiveHolder(activeRec.Status) {
+				return taskWorkflowResponse{}, http.StatusConflict, fmt.Errorf("cannot approve task while preview turn %s is actively %s; wait for the turn to finish or cancel it", activeRec.TurnID, activeRec.Status)
+			}
+		}
 		s.commitAndPushReviewChanges(project, agent, t)
 	}
 	transition, err := wfStore.CompleteAndAdvance(project, taskID, summary, "", outputs, "completed")
@@ -1198,6 +1208,25 @@ func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Tas
 	}
 	defer unlock()
 
+	// Prepare any CAPTURED turn receipts for commit.
+	// If any turn is in a mutating state, PrepareCommitReceipts rejects with ErrConflict.
+	var committingReceipts []*previewreceipt.PreviewReceipt
+	engine := s.turnEngineForWorkspace("")
+	if engine != nil {
+		intentID := fmt.Sprintf("review-commit-%s-%d", t.ID, time.Now().UnixNano())
+		committing, prepErr := engine.PrepareCommitReceipts(context.Background(), previewreceipt.PrepareCommitReceiptsParams{
+			Project:        project,
+			ProjectGitRoot: projectRoot,
+			TaskID:         t.ID,
+			CommitIntentID: intentID,
+		})
+		if prepErr != nil {
+			log.Printf("[review-commit] prepare commit receipts failed for task %s (project %s): %v", t.ID, project, prepErr)
+			return
+		}
+		committingReceipts = committing
+	}
+
 	// 1. Check for uncommitted working tree changes from in-context preview copilot
 	// (all git calls bounded — this runs on the approve request path)
 	// status must read stdout only: CombinedOutput would fold stderr warnings
@@ -1205,7 +1234,16 @@ func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Tas
 	// clean tree look dirty → a phantom commit with no changes.
 	statusOut, statusErr := git.runStdout(10*time.Second, "status", "--porcelain")
 	if statusErr != nil || len(bytes.TrimSpace(statusOut)) == 0 {
-		return // working tree is clean (or unreadable — do not guess-commit)
+		// Working tree is clean (or unreadable — do not guess-commit)
+		if len(committingReceipts) > 0 && engine != nil {
+			headOut, headErr := git.runStdout(10*time.Second, "rev-parse", "HEAD")
+			if headErr == nil && len(bytes.TrimSpace(headOut)) == 40 {
+				_ = engine.FinalizeCommitReceipts(context.Background(), project, t.ID, committingReceipts, strings.TrimSpace(string(headOut)), projectRoot)
+			} else {
+				_ = engine.AbortCommitReceipts(context.Background(), project, t.ID, committingReceipts, "working tree clean but no HEAD commit found")
+			}
+		}
+		return
 	}
 
 	// Preimage anchor (step-1 收编): the HEAD SHA the checkpoint commit will
@@ -1223,6 +1261,9 @@ func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Tas
 	addOut, addErr := git.run(30*time.Second, "add", "-A")
 	if addErr != nil {
 		log.Printf("[review-commit] git add failed for task %s (project %s): %v (%s)", t.ID, project, addErr, strings.TrimSpace(string(addOut)))
+		if len(committingReceipts) > 0 && engine != nil {
+			_ = engine.AbortCommitReceipts(context.Background(), project, t.ID, committingReceipts, "git add failed: "+addErr.Error())
+		}
 		return
 	}
 
@@ -1230,12 +1271,23 @@ func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Tas
 	commitOut, commitErr := git.run(30*time.Second, "commit", "-m", commitMsg)
 	if commitErr != nil {
 		log.Printf("[review-commit] git commit failed for task %s (project %s): %v (%s)", t.ID, project, commitErr, strings.TrimSpace(string(commitOut)))
+		if len(committingReceipts) > 0 && engine != nil {
+			_ = engine.AbortCommitReceipts(context.Background(), project, t.ID, committingReceipts, "git commit failed: "+commitErr.Error())
+		}
 		return
 	}
 	checkpointOut, cpErr := git.runStdout(10*time.Second, "rev-parse", "HEAD")
 	checkpointSHA := strings.TrimSpace(string(checkpointOut))
 	if cpErr != nil || len(checkpointSHA) != 40 {
 		checkpointSHA = ""
+		if len(committingReceipts) > 0 && engine != nil {
+			_ = engine.AbortCommitReceipts(context.Background(), project, t.ID, committingReceipts, "rev-parse HEAD failed after commit")
+		}
+	} else {
+		// Finalize receipts: transition to COMMITTED with checkpointSHA and clean up snapshots
+		if len(committingReceipts) > 0 && engine != nil {
+			_ = engine.FinalizeCommitReceipts(context.Background(), project, t.ID, committingReceipts, checkpointSHA, projectRoot)
+		}
 	}
 
 	// 3. Push if remote is configured
@@ -1705,6 +1757,9 @@ func (s *Server) recoverActiveWorkflowRunsWithDelay(delay time.Duration) int {
 		return 0
 	}
 
+	// Sweep and recover any stale preview turn receipts left in flight across server restart
+	s.recoverStalePreviewReceipts(workspaceID, records)
+
 	resumedCount := 0
 	for _, rec := range records {
 		task := rec.Task
@@ -1778,3 +1833,36 @@ func (s *Server) recoverActiveWorkflowRunsWithDelay(delay time.Duration) int {
 	}
 	return resumedCount
 }
+
+func (s *Server) recoverStalePreviewReceipts(workspaceID string, records []taskstore.TaskRecord) {
+	engine := s.turnEngineForWorkspace(workspaceID)
+	if engine == nil {
+		return
+	}
+	for _, rec := range records {
+		task := rec.Task
+		if task == nil {
+			continue
+		}
+		projectName := strings.TrimSpace(rec.Project)
+		if projectName == "" {
+			continue
+		}
+		gitRoot := strings.TrimSpace(task.WorktreeDir)
+		if gitRoot == "" {
+			gitRoot = s.resolveProjectGitRoot(projectName)
+		}
+		projectRoot := gitworktree.ProjectRootForWorktree(gitRoot)
+
+		res, err := engine.RecoverStaleReceipts(context.Background(), projectName, task.ID, gitRoot, projectRoot)
+		if err != nil {
+			log.Printf("[stale-recovery] error recovering receipts for task %s (project %s): %v", task.ID, projectName, err)
+			continue
+		}
+		if res.RecoveredFailedCount > 0 || res.RecoveredCommittedCount > 0 || res.RecoveredRevertFailedCount > 0 {
+			log.Printf("[stale-recovery] recovered receipts for task %s: %d failed, %d committed, %d revert_failed",
+				task.ID, res.RecoveredFailedCount, res.RecoveredCommittedCount, res.RecoveredRevertFailedCount)
+		}
+	}
+}
+

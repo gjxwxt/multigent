@@ -620,4 +620,236 @@ func TestPreviewAgentRunner_RejectsHTTPAgent(t *testing.T) {
 	}
 }
 
+func TestPreviewTurn_CommitReceiptsOnReviewApproval(t *testing.T) {
+	t.Setenv(secretbox.EnvKey, "test-master-key-for-preview-32b!!")
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	seedSampleAgentsForTest(t, s, workspaceID)
+
+	repoDir := setupTestWorktreeRepo(t)
+	task := setupHumanReviewTask(t, s, workspaceID, "sample", "t-review-commit", repoDir)
+
+	store := s.receiptStoreForWorkspace(workspaceID)
+	if store == nil {
+		t.Fatal("receipt store nil")
+	}
+
+	// 1. Create a CAPTURED receipt
+	rec, err := store.Create(context.Background(), previewreceipt.CreateParams{
+		Project:        "sample",
+		TaskID:         task.ID,
+		TurnID:         "turn-commit-1",
+		BaselineTree:   "tree1",
+		BaselineCommit: "commit1",
+	})
+	if err != nil {
+		t.Fatalf("create receipt: %v", err)
+	}
+	rec, err = store.Transition(context.Background(), "sample", task.ID, rec.ID, rec.Revision, previewreceipt.StatusExecuting, nil)
+	if err != nil {
+		t.Fatalf("transition to executing: %v", err)
+	}
+	rec, err = store.Transition(context.Background(), "sample", task.ID, rec.ID, rec.Revision, previewreceipt.StatusCapturing, nil)
+	if err != nil {
+		t.Fatalf("transition to capturing: %v", err)
+	}
+	rec, err = store.Transition(context.Background(), "sample", task.ID, rec.ID, rec.Revision, previewreceipt.StatusCaptured, nil)
+	if err != nil {
+		t.Fatalf("transition to captured: %v", err)
+	}
+
+	// Create snapshot dir
+	snapDir := previewreceipt.TurnSnapshotDir(repoDir, task.ID, rec.TurnID)
+	if err := os.MkdirAll(snapDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(snapDir, "snapshot.txt"), []byte("snap"), 0644)
+
+	// Make worktree dirty so commit has something to commit
+	if err := os.WriteFile(filepath.Join(repoDir, "code.txt"), []byte("modified by copilot\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Run commitAndPushReviewChanges
+	s.commitAndPushReviewChanges("sample", "pm", task)
+
+	// 3. Verify receipt is now COMMITTED
+	updated, err := store.Get(context.Background(), "sample", task.ID, rec.ID)
+	if err != nil {
+		t.Fatalf("get updated receipt: %v", err)
+	}
+	if updated.Status != previewreceipt.StatusCommitted {
+		t.Fatalf("expected receipt status COMMITTED, got %s", updated.Status)
+	}
+	if updated.CommittedSHA == "" {
+		t.Fatal("expected CommittedSHA to be set")
+	}
+
+	// 4. Verify snapshot dir is removed
+	if _, err := os.Stat(snapDir); !os.IsNotExist(err) {
+		t.Fatalf("expected snapshot dir to be cleaned up, got: %v", err)
+	}
+}
+
+func TestPreviewTurn_ApprovalRejectedWhenTurnIsMutating(t *testing.T) {
+	t.Setenv(secretbox.EnvKey, "test-master-key-for-preview-32b!!")
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	seedSampleAgentsForTest(t, s, workspaceID)
+
+	repoDir := setupTestWorktreeRepo(t)
+	task := setupHumanReviewTask(t, s, workspaceID, "sample", "t-mutating-reject", repoDir)
+
+	store := s.receiptStoreForWorkspace(workspaceID)
+	if store == nil {
+		t.Fatal("receipt store nil")
+	}
+
+	// Create an EXECUTING receipt (holding active slot)
+	rec, err := store.Create(context.Background(), previewreceipt.CreateParams{
+		Project:        "sample",
+		TaskID:         task.ID,
+		TurnID:         "turn-active-mutating",
+		BaselineTree:   "tree1",
+		BaselineCommit: "commit1",
+	})
+	if err != nil {
+		t.Fatalf("create receipt: %v", err)
+	}
+	_, err = store.Transition(context.Background(), "sample", task.ID, rec.ID, rec.Revision, previewreceipt.StatusExecuting, nil)
+	if err != nil {
+		t.Fatalf("transition to executing: %v", err)
+	}
+
+	// Setup review approve request
+	req := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/t-mutating-reject/workflow/review", "admin", map[string]any{
+		"decision": "approved",
+		"summary":  "LGTM",
+	})
+	req.SetPathValue("name", "sample")
+	req.SetPathValue("taskId", task.ID)
+	w := httptest.NewRecorder()
+
+	s.handlePostTaskWorkflowReview(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict when approving during active turn, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "actively EXECUTING") {
+		t.Fatalf("expected error mentioning active turn, got: %s", w.Body.String())
+	}
+}
+
+func TestPreviewTurn_StopPreviewCancelsActiveTurn(t *testing.T) {
+	t.Setenv(secretbox.EnvKey, "test-master-key-for-preview-32b!!")
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	seedSampleAgentsForTest(t, s, workspaceID)
+
+	repoDir := setupTestWorktreeRepo(t)
+	task := setupHumanReviewTask(t, s, workspaceID, "sample", "t-stop-cancel", repoDir)
+
+	store := s.receiptStoreForWorkspace(workspaceID)
+	if store == nil {
+		t.Fatal("receipt store nil")
+	}
+
+	// Create an EXECUTING receipt
+	rec, err := store.Create(context.Background(), previewreceipt.CreateParams{
+		Project:        "sample",
+		TaskID:         task.ID,
+		TurnID:         "turn-to-stop",
+		BaselineTree:   "tree1",
+		BaselineCommit: "commit1",
+	})
+	if err != nil {
+		t.Fatalf("create receipt: %v", err)
+	}
+	_, err = store.Transition(context.Background(), "sample", task.ID, rec.ID, rec.Revision, previewreceipt.StatusExecuting, nil)
+	if err != nil {
+		t.Fatalf("transition to executing: %v", err)
+	}
+
+	// Call stop endpoint
+	req := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/t-stop-cancel/preview/stop", "admin", nil)
+	req.SetPathValue("name", "sample")
+	req.SetPathValue("taskId", task.ID)
+	w := httptest.NewRecorder()
+
+	s.handlePostTaskPreviewStop(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from stop, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	// Verify receipt transitioned to FAILED with "stopped by operator"
+	updated, err := store.Get(context.Background(), "sample", task.ID, rec.ID)
+	if err != nil {
+		t.Fatalf("get receipt: %v", err)
+	}
+	if updated.Status != previewreceipt.StatusFailed {
+		t.Fatalf("expected receipt to be FAILED, got %s", updated.Status)
+	}
+	if !strings.Contains(updated.FailureReason, "stopped by operator") {
+		t.Fatalf("expected failure reason 'stopped by operator', got: %s", updated.FailureReason)
+	}
+
+	// Slot must be released
+	slot, holder, err := store.GetActiveSlot(context.Background(), "sample", task.ID)
+	if err != nil {
+		t.Fatalf("GetActiveSlot: %v", err)
+	}
+	if holder != nil || (slot != nil && slot.ReceiptID != "") {
+		t.Fatalf("expected slot to be released, got slot=%+v, holder=%+v", slot, holder)
+	}
+}
+
+func TestPreviewTurn_StaleRecoverySweepsOrphanedTurns(t *testing.T) {
+	t.Setenv(secretbox.EnvKey, "test-master-key-for-preview-32b!!")
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	seedSampleAgentsForTest(t, s, workspaceID)
+
+	repoDir := setupTestWorktreeRepo(t)
+	task := setupHumanReviewTask(t, s, workspaceID, "sample", "t-stale-restart", repoDir)
+
+	store := s.receiptStoreForWorkspace(workspaceID)
+	if store == nil {
+		t.Fatal("receipt store nil")
+	}
+
+	// Create an EXECUTING receipt with snapshot
+	rec, err := store.Create(context.Background(), previewreceipt.CreateParams{
+		Project:        "sample",
+		TaskID:         task.ID,
+		TurnID:         "turn-stale-crash",
+		BaselineTree:   "tree1",
+		BaselineCommit: "commit1",
+	})
+	if err != nil {
+		t.Fatalf("create receipt: %v", err)
+	}
+	_, err = store.Transition(context.Background(), "sample", task.ID, rec.ID, rec.Revision, previewreceipt.StatusExecuting, nil)
+	if err != nil {
+		t.Fatalf("transition: %v", err)
+	}
+
+	snapDir := previewreceipt.TurnSnapshotDir(repoDir, task.ID, rec.TurnID)
+	_ = os.MkdirAll(snapDir, 0755)
+
+	// Run recovery
+	s.recoverActiveWorkflowRunsWithDelay(0)
+
+	// Verify receipt is FAILED
+	updated, err := store.Get(context.Background(), "sample", task.ID, rec.ID)
+	if err != nil {
+		t.Fatalf("get updated: %v", err)
+	}
+	if updated.Status != previewreceipt.StatusFailed {
+		t.Fatalf("expected receipt FAILED, got %s", updated.Status)
+	}
+	if !strings.Contains(updated.FailureReason, "server restarted") {
+		t.Fatalf("expected failure reason mentioning server restart, got: %s", updated.FailureReason)
+	}
+
+	// Snapshot dir should be removed
+	if _, err := os.Stat(snapDir); !os.IsNotExist(err) {
+		t.Fatalf("snapshot dir should be cleaned up on recovery: %v", err)
+	}
+}
+
 

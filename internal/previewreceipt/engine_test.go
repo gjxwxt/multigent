@@ -676,5 +676,295 @@ func TestTurnEngineRollbackFinalCASFailureTransitionsToRevertFailed(t *testing.T
 	}
 }
 
+func TestTurnEngine_SupersedesOlderOverlappingCapturedTurn(t *testing.T) {
+	t.Setenv(secretbox.EnvKey, "test-master-key-for-preview-32b!!")
+	repoDir := setupTestGitRepo(t)
+	store := setupTestStore(t)
+	engine := NewTurnEngine(store)
+
+	ctx := context.Background()
+	project := "proj-supersede"
+	taskID := "task-supersede"
+
+	// Turn 1 modifies foo.txt
+	runner1 := AgentRunnerFunc(func(ctx context.Context, cloneDir string, prompt string) error {
+		return os.WriteFile(filepath.Join(cloneDir, "foo.txt"), []byte("foo turn 1\n"), 0644)
+	})
+
+	turn1, err := engine.ExecuteTurn(ctx, ExecuteTurnParams{
+		WorkspaceID:    "ws-test-engine",
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		WorktreeDir:    repoDir,
+		Prompt:         "turn 1",
+		Actor:          "tester",
+		Runner:         runner1,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTurn 1 failed: %v", err)
+	}
+	if turn1.Status != StatusCaptured {
+		t.Fatalf("expected Turn 1 to be CAPTURED, got %s", turn1.Status)
+	}
+
+	snap1 := TurnSnapshotDir(repoDir, taskID, turn1.TurnID)
+	if _, err := os.Stat(snap1); err != nil {
+		t.Fatalf("expected Turn 1 snapshot to exist: %v", err)
+	}
+
+	// Turn 2 also modifies foo.txt (overlapping path)
+	runner2 := AgentRunnerFunc(func(ctx context.Context, cloneDir string, prompt string) error {
+		return os.WriteFile(filepath.Join(cloneDir, "foo.txt"), []byte("foo turn 2\n"), 0644)
+	})
+
+	turn2, err := engine.ExecuteTurn(ctx, ExecuteTurnParams{
+		WorkspaceID:    "ws-test-engine",
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		WorktreeDir:    repoDir,
+		Prompt:         "turn 2",
+		Actor:          "tester",
+		Runner:         runner2,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTurn 2 failed: %v", err)
+	}
+	if turn2.Status != StatusCaptured {
+		t.Fatalf("expected Turn 2 to be CAPTURED, got %s", turn2.Status)
+	}
+
+	// Invariant: Turn 1 must now be SUPERSEDED
+	updatedTurn1, err := store.Get(ctx, project, taskID, turn1.ID)
+	if err != nil {
+		t.Fatalf("Get Turn 1 failed: %v", err)
+	}
+	if updatedTurn1.Status != StatusSuperseded {
+		t.Fatalf("expected Turn 1 status to be %s, got %s", StatusSuperseded, updatedTurn1.Status)
+	}
+
+	// Invariant: Turn 1 snapshot directory should be cleaned up
+	if _, err := os.Stat(snap1); !os.IsNotExist(err) {
+		t.Fatalf("expected Turn 1 snapshot to be removed after being superseded, but stat gave: %v", err)
+	}
+
+	// Turn 2 snapshot should still exist
+	snap2 := TurnSnapshotDir(repoDir, taskID, turn2.TurnID)
+	if _, err := os.Stat(snap2); err != nil {
+		t.Fatalf("expected Turn 2 snapshot to exist: %v", err)
+	}
+}
+
+func TestTurnEngine_CommitReceiptsLifecycle(t *testing.T) {
+	t.Setenv(secretbox.EnvKey, "test-master-key-for-preview-32b!!")
+	repoDir := setupTestGitRepo(t)
+	store := setupTestStore(t)
+	engine := NewTurnEngine(store)
+
+	ctx := context.Background()
+	project := "proj-commit"
+	taskID := "task-commit"
+
+	runner := AgentRunnerFunc(func(ctx context.Context, cloneDir string, prompt string) error {
+		return os.WriteFile(filepath.Join(cloneDir, "foo.txt"), []byte("foo committed\n"), 0644)
+	})
+
+	turn, err := engine.ExecuteTurn(ctx, ExecuteTurnParams{
+		WorkspaceID:    "ws-test-engine",
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		WorktreeDir:    repoDir,
+		Prompt:         "turn to commit",
+		Actor:          "tester",
+		Runner:         runner,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTurn failed: %v", err)
+	}
+
+	snapDir := TurnSnapshotDir(repoDir, taskID, turn.TurnID)
+	if _, err := os.Stat(snapDir); err != nil {
+		t.Fatalf("snapshot should exist: %v", err)
+	}
+
+	// 1. Prepare commit
+	intentID := "intent-12345"
+	committing, err := engine.PrepareCommitReceipts(ctx, PrepareCommitReceiptsParams{
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		CommitIntentID: intentID,
+	})
+	if err != nil {
+		t.Fatalf("PrepareCommitReceipts failed: %v", err)
+	}
+	if len(committing) != 1 {
+		t.Fatalf("expected 1 committing receipt, got %d", len(committing))
+	}
+	if committing[0].Status != StatusCommitting || committing[0].CommitIntentID != intentID {
+		t.Fatalf("unexpected committing state: %+v", committing[0])
+	}
+
+	// Invariant: Rollback during COMMITTING must be rejected
+	err = engine.RollbackTurn(ctx, RollbackTurnParams{
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		TurnID:         turn.ID,
+		WorktreeDir:    repoDir,
+		Actor:          "tester",
+	})
+	if err == nil || !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict when rolling back during COMMITTING, got: %v", err)
+	}
+
+	// 2. Finalize commit
+	fakeCommitSHA := "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+	err = engine.FinalizeCommitReceipts(ctx, project, taskID, committing, fakeCommitSHA, repoDir)
+	if err != nil {
+		t.Fatalf("FinalizeCommitReceipts failed: %v", err)
+	}
+
+	committed, err := store.Get(ctx, project, taskID, turn.ID)
+	if err != nil {
+		t.Fatalf("Get receipt failed: %v", err)
+	}
+	if committed.Status != StatusCommitted || committed.CommittedSHA != fakeCommitSHA {
+		t.Fatalf("expected COMMITTED with SHA %s, got: %+v", fakeCommitSHA, committed)
+	}
+
+	// Invariant: snapshot directory is cleaned up
+	if _, err := os.Stat(snapDir); !os.IsNotExist(err) {
+		t.Fatalf("snapshot dir should be cleaned up on commit, but stat: %v", err)
+	}
+}
+
+func TestTurnEngine_PrepareCommitRejectsActiveMutatingTurn(t *testing.T) {
+	store := setupTestStore(t)
+	engine := NewTurnEngine(store)
+
+	ctx := context.Background()
+	project := "proj-mutating"
+	taskID := "task-mutating"
+
+	// Create a receipt in EXECUTING state
+	rec, err := store.Create(ctx, CreateParams{
+		Project:        project,
+		TaskID:         taskID,
+		TurnID:         "turn-active",
+		BaselineTree:   "tree1",
+		BaselineCommit: "commit1",
+	})
+	if err != nil {
+		t.Fatalf("create receipt: %v", err)
+	}
+	_, err = store.Transition(ctx, project, taskID, rec.ID, rec.Revision, StatusExecuting, nil)
+	if err != nil {
+		t.Fatalf("transition to executing: %v", err)
+	}
+
+	// PrepareCommitReceipts must fail with ErrConflict
+	_, err = engine.PrepareCommitReceipts(ctx, PrepareCommitReceiptsParams{
+		Project:        project,
+		ProjectGitRoot: "/tmp/fake",
+		TaskID:         taskID,
+		CommitIntentID: "intent-1",
+	})
+	if err == nil || !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict when a turn is actively executing, got: %v", err)
+	}
+}
+
+func TestTurnEngine_RecoverStaleReceipts(t *testing.T) {
+	store := setupTestStore(t)
+	engine := NewTurnEngine(store)
+	tmpDir := t.TempDir()
+
+	ctx := context.Background()
+	project := "proj-recover"
+	taskID := "task-recover"
+
+	// 1. Create stale EXECUTING receipt
+	rExec, err := store.Create(ctx, CreateParams{
+		Project:        project,
+		TaskID:         taskID,
+		TurnID:         "turn-stale-exec",
+		BaselineTree:   "tree1",
+		BaselineCommit: "commit1",
+	})
+	if err != nil {
+		t.Fatalf("create rExec: %v", err)
+	}
+	_, _ = store.Transition(ctx, project, taskID, rExec.ID, rExec.Revision, StatusExecuting, nil)
+
+	// Create snapshot dir for it
+	snapDir := TurnSnapshotDir(tmpDir, taskID, rExec.TurnID)
+	_ = os.MkdirAll(snapDir, 0755)
+
+	res, err := engine.RecoverStaleReceipts(ctx, project, taskID, "", tmpDir)
+	if err != nil {
+		t.Fatalf("RecoverStaleReceipts failed: %v", err)
+	}
+	if res.RecoveredFailedCount != 1 {
+		t.Fatalf("expected 1 recovered failed, got %d", res.RecoveredFailedCount)
+	}
+
+	updated, err := store.Get(ctx, project, taskID, rExec.ID)
+	if err != nil {
+		t.Fatalf("get updated: %v", err)
+	}
+	if updated.Status != StatusFailed || !strings.Contains(updated.FailureReason, "server restarted") {
+		t.Fatalf("expected FAILED status with restart reason, got: %+v", updated)
+	}
+	if _, err := os.Stat(snapDir); !os.IsNotExist(err) {
+		t.Fatalf("snapshot dir should be removed on stale recovery: %v", err)
+	}
+}
+
+func TestTurnEngine_CancelActiveTurn(t *testing.T) {
+	store := setupTestStore(t)
+	engine := NewTurnEngine(store)
+
+	ctx := context.Background()
+	project := "proj-cancel"
+	taskID := "task-cancel"
+
+	rec, err := store.Create(ctx, CreateParams{
+		Project:        project,
+		TaskID:         taskID,
+		TurnID:         "turn-cancel",
+		BaselineTree:   "tree1",
+		BaselineCommit: "commit1",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	_, _ = store.Transition(ctx, project, taskID, rec.ID, rec.Revision, StatusExecuting, nil)
+
+	err = engine.CancelActiveTurn(ctx, project, taskID, "operator aborted from UI")
+	if err != nil {
+		t.Fatalf("CancelActiveTurn failed: %v", err)
+	}
+
+	updated, err := store.Get(ctx, project, taskID, rec.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if updated.Status != StatusFailed || !strings.Contains(updated.FailureReason, "operator aborted from UI") {
+		t.Fatalf("expected StatusFailed with cancel reason, got: %+v", updated)
+	}
+
+	// Slot must be free
+	slot, holder, err := store.GetActiveSlot(ctx, project, taskID)
+	if err != nil {
+		t.Fatalf("GetActiveSlot failed: %v", err)
+	}
+	if holder != nil || (slot != nil && slot.ReceiptID != "") {
+		t.Fatalf("expected slot to be released after cancellation, got slot: %+v, holder: %+v", slot, holder)
+	}
+}
+
 
 
