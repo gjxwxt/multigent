@@ -230,6 +230,7 @@ func (s *Store) Transition(ctx context.Context, project, taskID, receiptID strin
 			return nil, err
 		}
 
+		priorCommitIntentID := current.CommitIntentID
 		if mutate != nil {
 			if err := mutate(&current); err != nil {
 				return nil, err
@@ -261,17 +262,22 @@ func (s *Store) Transition(ctx context.Context, project, taskID, receiptID strin
 			slotPayload, _, sFound, err := tx.GetRecordWithRevision(slotTable, s.workspace, slotKey(project, taskID))
 			if err == nil && sFound && strings.TrimSpace(slotPayload) != "" {
 				var slot TaskSlot
-				if err := json.Unmarshal([]byte(slotPayload), &slot); err == nil && slot.ReceiptID == receiptID {
-					slot.ReceiptID = ""
-					slot.UpdatedAt = now
-					slotBytes, err := json.Marshal(slot)
-					if err == nil {
-						writes = append(writes, controldb.KVWrite{
-							Table:     slotTable,
-							Workspace: s.workspace,
-							Key:       slotKey(project, taskID),
-							Payload:   string(slotBytes),
-						})
+				if err := json.Unmarshal([]byte(slotPayload), &slot); err == nil {
+					isHolder := slot.ReceiptID == receiptID ||
+						(priorCommitIntentID != "" && slot.ReceiptID == priorCommitIntentID) ||
+						(current.CommitIntentID != "" && slot.ReceiptID == current.CommitIntentID)
+					if isHolder {
+						slot.ReceiptID = ""
+						slot.UpdatedAt = now
+						slotBytes, err := json.Marshal(slot)
+						if err == nil {
+							writes = append(writes, controldb.KVWrite{
+								Table:     slotTable,
+								Workspace: s.workspace,
+								Key:       slotKey(project, taskID),
+								Payload:   string(slotBytes),
+							})
+						}
 					}
 				}
 			}
@@ -283,7 +289,9 @@ func (s *Store) Transition(ctx context.Context, project, taskID, receiptID strin
 			if err == nil && sFound && strings.TrimSpace(slotPayload) != "" {
 				_ = json.Unmarshal([]byte(slotPayload), &slot)
 			}
-			if slot.ReceiptID != "" && slot.ReceiptID != receiptID && now.Before(slot.LeaseExpiresAt) {
+			isOurIntent := (priorCommitIntentID != "" && slot.ReceiptID == priorCommitIntentID) ||
+				(current.CommitIntentID != "" && slot.ReceiptID == current.CommitIntentID)
+			if slot.ReceiptID != "" && slot.ReceiptID != receiptID && !isOurIntent && now.Before(slot.LeaseExpiresAt) {
 				return nil, fmt.Errorf("%w: active receipt %s holds slot until %s", ErrSlotOccupied, slot.ReceiptID, slot.LeaseExpiresAt.Format(time.RFC3339))
 			}
 			slot.ReceiptID = receiptID
@@ -396,3 +404,141 @@ func (s *Store) List(ctx context.Context, project, taskID string) ([]*PreviewRec
 	}
 	return out, nil
 }
+
+type BatchPrepareCommitParams struct {
+	Project        string
+	TaskID         string
+	CommitIntentID string
+	PreCommitSHA   string
+}
+
+// BatchTransitionToCommitting atomically transitions all CAPTURED receipts for a task
+// to COMMITTING state in a single guarded database transaction, binding CommitIntentID and PreCommitSHA.
+// If any receipt for the task is in a mutating state (PENDING, EXECUTING, CAPTURING, REVERTING),
+// or if an active receipt holds the task slot, it aborts the entire transaction with ErrConflict.
+func (s *Store) BatchTransitionToCommitting(ctx context.Context, params BatchPrepareCommitParams) ([]*PreviewReceipt, error) {
+	if params.Project == "" || params.TaskID == "" || params.CommitIntentID == "" || params.PreCommitSHA == "" {
+		return nil, fmt.Errorf("project, taskID, commitIntentID, and preCommitSHA are required")
+	}
+
+	allReceipts, err := s.List(ctx, params.Project, params.TaskID)
+	if err != nil {
+		return nil, fmt.Errorf("list receipts: %w", err)
+	}
+
+	for _, rec := range allReceipts {
+		if rec.Status == StatusPending || rec.Status == StatusExecuting || rec.Status == StatusCapturing || rec.Status == StatusReverting {
+			return nil, fmt.Errorf("%w: turn %s is actively %s", ErrConflict, rec.TurnID, rec.Status)
+		}
+	}
+
+	var capturedTargets []*PreviewReceipt
+	for _, rec := range allReceipts {
+		if rec.Status == StatusCaptured {
+			capturedTargets = append(capturedTargets, rec)
+		}
+	}
+	if len(capturedTargets) == 0 {
+		return nil, nil
+	}
+
+	var transitioned []*PreviewReceipt
+	now := time.Now().UTC()
+
+	txErr := s.db.CommitRecordWritesGuardedTx(s.workspace, func(tx controldb.KVTxReader) ([]controldb.KVWrite, error) {
+		slotPayload, _, sFound, err := tx.GetRecordWithRevision(slotTable, s.workspace, slotKey(params.Project, params.TaskID))
+		if err == nil && sFound && strings.TrimSpace(slotPayload) != "" {
+			var slot TaskSlot
+			if err := json.Unmarshal([]byte(slotPayload), &slot); err == nil && slot.ReceiptID != "" && now.Before(slot.LeaseExpiresAt) {
+				isOurCaptured := false
+				for _, c := range capturedTargets {
+					if c.ID == slot.ReceiptID {
+						isOurCaptured = true
+						break
+					}
+				}
+				if !isOurCaptured {
+					return nil, fmt.Errorf("%w: slot held by active receipt %s until %s", ErrConflict, slot.ReceiptID, slot.LeaseExpiresAt.Format(time.RFC3339))
+				}
+			}
+		}
+
+		var writes []controldb.KVWrite
+		var batchResult []*PreviewReceipt
+
+		for _, target := range capturedTargets {
+			payload, rev, found, err := tx.GetRecordWithRevision(receiptTable, s.workspace, receiptKey(params.Project, params.TaskID, target.ID))
+			if err != nil {
+				return nil, fmt.Errorf("read receipt %s: %w", target.ID, err)
+			}
+			if !found || strings.TrimSpace(payload) == "" {
+				return nil, fmt.Errorf("receipt %s not found: %w", target.ID, ErrReceiptNotFound)
+			}
+			if rev != target.Revision {
+				return nil, fmt.Errorf("%w: receipt %s revision changed (expected %d, got %d)", ErrCASConflict, target.ID, target.Revision, rev)
+			}
+
+			var rec receiptRecord
+			if err := json.Unmarshal([]byte(payload), &rec); err != nil {
+				return nil, fmt.Errorf("unmarshal receipt %s: %w", target.ID, err)
+			}
+
+			current := rec.PreviewReceipt
+			current.OperationalPatch = rec.StoredPatch
+			current.Revision = rev
+
+			if current.Status != StatusCaptured {
+				return nil, fmt.Errorf("%w: receipt %s is in status %s (must be CAPTURED)", ErrConflict, current.ID, current.Status)
+			}
+
+			current.Status = StatusCommitting
+			current.CommitIntentID = params.CommitIntentID
+			current.PreCommitSHA = params.PreCommitSHA
+			current.UpdatedAt = now
+			current.Revision = rev + 1
+
+			rec.PreviewReceipt = current
+			rec.StoredPatch = current.OperationalPatch
+
+			recBytes, err := json.Marshal(rec)
+			if err != nil {
+				return nil, fmt.Errorf("marshal updated receipt %s: %w", target.ID, err)
+			}
+
+			writes = append(writes, controldb.KVWrite{
+				Table:     receiptTable,
+				Workspace: s.workspace,
+				Key:       receiptKey(params.Project, params.TaskID, target.ID),
+				Payload:   string(recBytes),
+			})
+			batchResult = append(batchResult, &current)
+		}
+
+		newSlot := TaskSlot{
+			ReceiptID:      params.CommitIntentID,
+			Project:        params.Project,
+			TaskID:         params.TaskID,
+			UpdatedAt:      now,
+			LeaseExpiresAt: now.Add(DefaultLeaseDuration),
+		}
+		slotBytes, err := json.Marshal(newSlot)
+		if err != nil {
+			return nil, fmt.Errorf("marshal task slot: %w", err)
+		}
+		writes = append(writes, controldb.KVWrite{
+			Table:     slotTable,
+			Workspace: s.workspace,
+			Key:       slotKey(params.Project, params.TaskID),
+			Payload:   string(slotBytes),
+		})
+
+		transitioned = batchResult
+		return writes, nil
+	})
+
+	if txErr != nil {
+		return nil, txErr
+	}
+	return transitioned, nil
+}
+

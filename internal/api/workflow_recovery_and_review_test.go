@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -12,6 +13,8 @@ import (
 
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
+	"github.com/multigent/multigent/internal/previewreceipt"
+	"github.com/multigent/multigent/internal/secretbox"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
 
@@ -172,7 +175,9 @@ func TestCommitAndPushReviewChanges(t *testing.T) {
 	}
 
 	// 1. Clean workspace -> nothing committed
-	s.commitAndPushReviewChanges("sample", "pm", task)
+	if err := s.commitAndPushReviewChanges("sample", "pm", task); err != nil {
+		t.Fatalf("commit clean workspace: %v", err)
+	}
 	logCmd := exec.Command("git", "log", "-n", "1", "--oneline")
 	logCmd.Dir = tmpDir
 	out, _ := logCmd.Output()
@@ -182,7 +187,9 @@ func TestCommitAndPushReviewChanges(t *testing.T) {
 
 	// 2. Modified workspace from Preview Copilot -> automatically committed
 	_ = os.WriteFile(filepath.Join(tmpDir, "copilot_fix.txt"), []byte("reviewed and fixed"), 0644)
-	s.commitAndPushReviewChanges("sample", "pm", task)
+	if err := s.commitAndPushReviewChanges("sample", "pm", task); err != nil {
+		t.Fatalf("commit modified workspace: %v", err)
+	}
 
 	logCmd = exec.Command("git", "log", "-n", "1", "--oneline")
 	logCmd.Dir = tmpDir
@@ -458,3 +465,177 @@ func TestQARejectionWorkflow_EndToEnd(t *testing.T) {
 		t.Fatalf("passed item UI-01 should not be in rework comments, got: %s", receivedComments)
 	}
 }
+
+// Batch 4.1 regression: add/commit/receipt failure must block workflow CompleteAndAdvance.
+// Push failure remains non-blocking (logs and records rollback anchor comment).
+func TestWorkflowReview_CommitOrReceiptFailureBlocksAdvancement(t *testing.T) {
+	t.Setenv(secretbox.EnvKey, "test-master-key-for-preview-32b!!")
+	repo := newReviewCommitRepo(t)
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	seedSampleAgentsForTest(t, s, workspaceID)
+	now := time.Now().UTC()
+
+	taskID := "t-review-block-adv"
+	task := &entity.Task{
+		ID:          taskID,
+		Title:       "Review block advancement test",
+		Priority:    2,
+		Assignee:    "sample/pm",
+		Status:      entity.TaskStatusInProgress,
+		WorktreeDir: repo,
+		BranchName:  "main",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := s.ts.AddTask("sample", "pm", task); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
+
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	def := &entity.WorkflowDefinition{
+		ID:          "wf-review-adv-test",
+		Name:        "Review Advancement Test",
+		Version:     1,
+		Scope:       "workspace",
+		StartStepID: "human_review",
+		Steps: []entity.WorkflowStep{
+			{
+				ID:    "human_review",
+				Type:  "human_review",
+				Title: "Human Review",
+				OutputFields: []entity.WorkflowField{
+					{Name: "decision"},
+					{Name: "comments"},
+				},
+			},
+			{
+				ID:    "deploy",
+				Type:  "agent_task",
+				Title: "Deploy",
+			},
+		},
+		Edges: []entity.WorkflowEdge{
+			{
+				ID:   "e-review-to-deploy",
+				From: "human_review",
+				To:   "deploy",
+				Condition: &entity.WorkflowEdgeCondition{
+					Field:    "decision",
+					Operator: "eq",
+					Value:    "approved",
+				},
+			},
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := wfStore.SaveDefinition(def); err != nil {
+		t.Fatalf("save def: %v", err)
+	}
+
+	_, _, err := wfStore.StartRun("sample", taskID, def.ID, nil)
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+
+	receiptStore := s.receiptStoreForWorkspace(workspaceID)
+	if receiptStore == nil {
+		t.Fatal("expected non-nil receiptStore")
+	}
+
+	// 1. Active mutating turn blocks approval (returns 409 Conflict)
+	activeRec, err := receiptStore.Create(context.Background(), previewreceipt.CreateParams{
+		Project:        "sample",
+		TaskID:         taskID,
+		TurnID:         "turn-active-mutating",
+		BaselineTree:   "tree-dummy",
+		BaselineCommit: "commit-dummy",
+	})
+	if err != nil {
+		t.Fatalf("create active receipt: %v", err)
+	}
+	_, err = receiptStore.Transition(context.Background(), "sample", taskID, activeRec.ID, activeRec.Revision, previewreceipt.StatusExecuting, nil)
+	if err != nil {
+		t.Fatalf("transition to EXECUTING: %v", err)
+	}
+
+	req, _ := http.NewRequest("POST", "/test", nil)
+	body := workflowReviewBody{
+		Decision: "approved",
+		Comments: "trying to approve while turn is executing",
+	}
+
+	_, status, err := s.submitTaskWorkflowReview(req, workspaceID, "sample", taskID, body)
+	if err == nil || status != http.StatusConflict {
+		t.Fatalf("expected 409 StatusConflict while turn executing, got status=%d err=%v", status, err)
+	}
+
+	// Verify run did NOT advance: still on human_review
+	run, found, err := wfStore.RunForTask("sample", taskID)
+	if err != nil || !found {
+		t.Fatal(err)
+	}
+	if run.ActiveStepID != "human_review" {
+		t.Fatalf("expected run to remain at human_review, got: %s", run.ActiveStepID)
+	}
+
+	// Release the active turn
+	activeRec, _ = receiptStore.Get(context.Background(), "sample", taskID, activeRec.ID)
+	_, _ = receiptStore.Transition(context.Background(), "sample", taskID, activeRec.ID, activeRec.Revision, previewreceipt.StatusFailed, nil)
+
+	// 2. Add/commit failure blocks approval (returns 500 error, does not advance)
+	// Create an uncommitted change in repo:
+	if err := os.WriteFile(filepath.Join(repo, "reviewed_change.txt"), []byte("reviewed content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate git lock conflict preventing git add / commit:
+	lockPath := filepath.Join(repo, ".git", "index.lock")
+	if err := os.WriteFile(lockPath, []byte("fake-lock"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, status, err = s.submitTaskWorkflowReview(req, workspaceID, "sample", taskID, body)
+	if err == nil || status != http.StatusInternalServerError {
+		t.Fatalf("expected 500 StatusInternalServerError on commit failure, got status=%d err=%v", status, err)
+	}
+
+	// Verify run did NOT advance: still on human_review
+	run, found, err = wfStore.RunForTask("sample", taskID)
+	if err != nil || !found {
+		t.Fatal(err)
+	}
+	if run.ActiveStepID != "human_review" {
+		t.Fatalf("expected run to remain at human_review after commit failure, got: %s", run.ActiveStepID)
+	}
+
+	// 3. Once git index lock is cleared, approval succeeds and advances the workflow
+	_ = os.Remove(lockPath)
+	_, status, err = s.submitTaskWorkflowReview(req, workspaceID, "sample", taskID, body)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("expected 200 OK after resolving commit failure, got status=%d err=%v", status, err)
+	}
+
+	// Verify run has advanced to 'deploy'
+	run, found, err = wfStore.RunForTask("sample", taskID)
+	if err != nil || !found {
+		t.Fatal(err)
+	}
+	if run.ActiveStepID != "deploy" {
+		t.Fatalf("expected run to advance to 'deploy', got: %s", run.ActiveStepID)
+	}
+
+	// Verify git log contains the review commit and Multigent-Commit-Intent trailer
+	logCmd := exec.Command("git", "log", "-n", "1", "--format=%B")
+	logCmd.Dir = repo
+	logOut, err := logCmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logOut), "user in-context preview feedback fixes") {
+		t.Fatalf("expected review commit message, got: %s", string(logOut))
+	}
+	if !strings.Contains(string(logOut), previewreceipt.CommitIntentTrailerKey) {
+		t.Fatalf("expected commit intent trailer %s in commit message, got: %s", previewreceipt.CommitIntentTrailerKey, string(logOut))
+	}
+}
+

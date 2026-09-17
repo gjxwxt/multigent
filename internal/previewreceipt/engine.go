@@ -527,100 +527,103 @@ func checkPatchIn(dir, patch string) error {
 	return nil
 }
 
+const CommitIntentTrailerKey = "Multigent-Commit-Intent"
+
 type PrepareCommitReceiptsParams struct {
 	Project        string
 	ProjectGitRoot string
 	TaskID         string
 	CommitIntentID string
+	PreCommitSHA   string
 }
 
-// PrepareCommitReceipts transitions all CAPTURED receipts for a task to COMMITTING state.
+// PrepareCommitReceipts transitions all CAPTURED receipts for a task to COMMITTING state
+// in a single atomic database transaction, binding CommitIntentID and PreCommitSHA.
 // It returns an error if any receipt is currently in a mutating state (PENDING, EXECUTING, CAPTURING, REVERTING).
 func (e *TurnEngine) PrepareCommitReceipts(ctx context.Context, params PrepareCommitReceiptsParams) ([]*PreviewReceipt, error) {
-	if params.Project == "" || params.TaskID == "" {
-		return nil, errors.New("invalid prepare commit parameters")
+	if params.Project == "" || params.TaskID == "" || params.CommitIntentID == "" || params.PreCommitSHA == "" {
+		return nil, errors.New("invalid prepare commit parameters: project, taskID, commitIntentID, preCommitSHA required")
 	}
 
-	receipts, err := e.Store.List(ctx, params.Project, params.TaskID)
-	if err != nil {
-		return nil, fmt.Errorf("list receipts: %w", err)
-	}
-
-	// Invariant: cannot commit while a turn is actively executing or reverting
-	for _, rec := range receipts {
-		if rec.Status == StatusPending || rec.Status == StatusExecuting || rec.Status == StatusCapturing || rec.Status == StatusReverting {
-			return nil, fmt.Errorf("%w: turn %s is actively %s", ErrConflict, rec.TurnID, rec.Status)
-		}
-	}
-
-	var committing []*PreviewReceipt
-	for _, rec := range receipts {
-		if rec.Status != StatusCaptured {
-			continue
-		}
-		cRec, err := e.Store.Transition(ctx, params.Project, params.TaskID, rec.ID, rec.Revision, StatusCommitting, func(r *PreviewReceipt) error {
-			r.CommitIntentID = params.CommitIntentID
-			return nil
-		})
-		if err != nil {
-			// If any transition fails, abort and flag all already-transitioned receipts
-			_ = e.AbortCommitReceipts(ctx, params.Project, params.TaskID, committing, "failed transitioning to committing: "+err.Error())
-			return nil, fmt.Errorf("transition receipt %s to committing failed: %w", rec.ID, err)
-		}
-		committing = append(committing, cRec)
-	}
-	return committing, nil
+	return e.Store.BatchTransitionToCommitting(ctx, BatchPrepareCommitParams{
+		Project:        params.Project,
+		TaskID:         params.TaskID,
+		CommitIntentID: params.CommitIntentID,
+		PreCommitSHA:   params.PreCommitSHA,
+	})
 }
 
 // FinalizeCommitReceipts transitions all COMMITTING receipts for a task to COMMITTED state
 // with the resulting Git commit SHA and cleans up their snapshot directories.
+// It returns any error encountered during CAS transitions or snapshot removal.
+// Under no circumstance is a snapshot removed if the database transition failed.
 func (e *TurnEngine) FinalizeCommitReceipts(ctx context.Context, project, taskID string, receipts []*PreviewReceipt, commitSHA, projectGitRoot string) error {
+	var errs []error
 	for _, rec := range receipts {
 		latest, err := e.Store.Get(ctx, project, taskID, rec.ID)
 		if err != nil {
+			errs = append(errs, fmt.Errorf("get receipt %s: %w", rec.ID, err))
 			continue
 		}
 		if latest.Status != StatusCommitting {
+			errs = append(errs, fmt.Errorf("receipt %s is in status %s (expected %s)", latest.ID, latest.Status, StatusCommitting))
 			continue
 		}
-		_, _ = e.Store.Transition(ctx, project, taskID, latest.ID, latest.Revision, StatusCommitted, func(r *PreviewReceipt) error {
+		_, transErr := e.Store.Transition(context.Background(), project, taskID, latest.ID, latest.Revision, StatusCommitted, func(r *PreviewReceipt) error {
 			r.CommittedSHA = commitSHA
 			return nil
 		})
+		if transErr != nil {
+			errs = append(errs, fmt.Errorf("transition receipt %s to COMMITTED: %w", rec.ID, transErr))
+			continue // Critical fence: never remove snapshot if transition failed!
+		}
 		if projectGitRoot != "" {
-			_ = os.RemoveAll(TurnSnapshotDir(projectGitRoot, taskID, latest.TurnID))
+			snapDir := TurnSnapshotDir(projectGitRoot, taskID, latest.TurnID)
+			if remErr := os.RemoveAll(snapDir); remErr != nil && !os.IsNotExist(remErr) {
+				errs = append(errs, fmt.Errorf("remove snapshot dir %s: %w", snapDir, remErr))
+			}
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // AbortCommitReceipts transitions all COMMITTING receipts to REVERT_FAILED (requiring manual inspection)
-// with the failure reason.
+// with the failure reason. Under no circumstance are snapshots removed on abort.
 func (e *TurnEngine) AbortCommitReceipts(ctx context.Context, project, taskID string, receipts []*PreviewReceipt, reason string) error {
+	var errs []error
 	for _, rec := range receipts {
 		latest, err := e.Store.Get(ctx, project, taskID, rec.ID)
 		if err != nil {
+			errs = append(errs, fmt.Errorf("get receipt %s: %w", rec.ID, err))
 			continue
 		}
 		if latest.Status != StatusCommitting {
 			continue
 		}
-		_, _ = e.Store.Transition(ctx, project, taskID, latest.ID, latest.Revision, StatusRevertFailed, func(r *PreviewReceipt) error {
+		_, transErr := e.Store.Transition(context.Background(), project, taskID, latest.ID, latest.Revision, StatusRevertFailed, func(r *PreviewReceipt) error {
 			r.FailureReason = CapAndRedact("review commit failed: "+reason, MaxFailureReasonBytes)
 			return nil
 		})
+		if transErr != nil {
+			errs = append(errs, fmt.Errorf("transition receipt %s to REVERT_FAILED: %w", rec.ID, transErr))
+		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 type StaleRecoveryResult struct {
 	RecoveredFailedCount       int
 	RecoveredRevertFailedCount int
 	RecoveredCommittedCount    int
+	RecoveredCapturedCount     int
 }
 
 // RecoverStaleReceipts sweeps through receipts for a task and cleans up any stale or orphaned
 // states after server restart.
+// For COMMITTING receipts, it precisely distinguishes:
+// 1. "已提交但未 Finalize": HEAD commit carries the exact commit intent trailer -> finalize to COMMITTED, clean snapshot.
+// 2. "尚未提交": HEAD commit matches PreCommitSHA -> revert to CAPTURED, preserve snapshot for retry.
+// 3. "无法归因": HEAD moved to an unknown commit without matching trailer -> transition to REVERT_FAILED, hold slot.
 func (e *TurnEngine) RecoverStaleReceipts(ctx context.Context, project, taskID, worktreeDir, projectGitRoot string) (StaleRecoveryResult, error) {
 	var res StaleRecoveryResult
 	receipts, err := e.Store.List(ctx, project, taskID)
@@ -631,7 +634,7 @@ func (e *TurnEngine) RecoverStaleReceipts(ctx context.Context, project, taskID, 
 	for _, rec := range receipts {
 		switch rec.Status {
 		case StatusPending, StatusExecuting, StatusCapturing:
-			_, _ = e.Store.Transition(ctx, project, taskID, rec.ID, rec.Revision, StatusFailed, func(r *PreviewReceipt) error {
+			_, _ = e.Store.Transition(context.Background(), project, taskID, rec.ID, rec.Revision, StatusFailed, func(r *PreviewReceipt) error {
 				r.FailureReason = "server restarted during turn execution; recovered stale turn"
 				return nil
 			})
@@ -645,33 +648,63 @@ func (e *TurnEngine) RecoverStaleReceipts(ctx context.Context, project, taskID, 
 			res.RecoveredFailedCount++
 
 		case StatusReverting:
-			_, _ = e.Store.Transition(ctx, project, taskID, rec.ID, rec.Revision, StatusRevertFailed, func(r *PreviewReceipt) error {
+			_, _ = e.Store.Transition(context.Background(), project, taskID, rec.ID, rec.Revision, StatusRevertFailed, func(r *PreviewReceipt) error {
 				r.FailureReason = "server restarted during rollback; manual inspection required"
 				return nil
 			})
 			res.RecoveredRevertFailedCount++
 
 		case StatusCommitting:
-			// Check if worktree git HEAD has a commit ahead of baseline
 			var headSHA string
+			var headMsg string
 			if worktreeDir != "" {
-				out, err := exec.Command("git", "-C", worktreeDir, "rev-parse", "HEAD").Output()
-				if err == nil {
+				if out, err := exec.Command("git", "-C", worktreeDir, "rev-parse", "HEAD").Output(); err == nil {
 					headSHA = strings.TrimSpace(string(out))
 				}
+				if out, err := exec.Command("git", "-C", worktreeDir, "log", "-1", "--format=%B").Output(); err == nil {
+					headMsg = string(out)
+				}
 			}
-			if headSHA != "" && headSHA != rec.BaselineCommit {
-				_, _ = e.Store.Transition(ctx, project, taskID, rec.ID, rec.Revision, StatusCommitted, func(r *PreviewReceipt) error {
+
+			intentTrailer := fmt.Sprintf("%s: %s", CommitIntentTrailerKey, rec.CommitIntentID)
+
+			switch {
+			case rec.CommitIntentID != "" && strings.Contains(headMsg, intentTrailer):
+				// 1. "已提交但未 Finalize": HEAD commit carries the exact commit intent trailer
+				_, transErr := e.Store.Transition(context.Background(), project, taskID, rec.ID, rec.Revision, StatusCommitted, func(r *PreviewReceipt) error {
 					r.CommittedSHA = headSHA
 					return nil
 				})
-				if projectGitRoot != "" {
-					_ = os.RemoveAll(TurnSnapshotDir(projectGitRoot, taskID, rec.TurnID))
+				if transErr == nil {
+					if projectGitRoot != "" {
+						_ = os.RemoveAll(TurnSnapshotDir(projectGitRoot, taskID, rec.TurnID))
+					}
+					res.RecoveredCommittedCount++
+				} else {
+					res.RecoveredRevertFailedCount++
 				}
-				res.RecoveredCommittedCount++
-			} else {
-				_, _ = e.Store.Transition(ctx, project, taskID, rec.ID, rec.Revision, StatusRevertFailed, func(r *PreviewReceipt) error {
-					r.FailureReason = "server restarted during review commit; checkpoint commit not found in HEAD"
+
+			case headSHA != "" && rec.PreCommitSHA != "" && headSHA == rec.PreCommitSHA:
+				// 2. "尚未提交": HEAD commit has not moved past PreCommitSHA. The server crashed before git commit was executed.
+				// Revert receipt back to CAPTURED so it can be re-committed on next review approval.
+				_, transErr := e.Store.Transition(context.Background(), project, taskID, rec.ID, rec.Revision, StatusCaptured, func(r *PreviewReceipt) error {
+					r.CommitIntentID = ""
+					r.PreCommitSHA = ""
+					return nil
+				})
+				if transErr == nil {
+					res.RecoveredCapturedCount++
+				} else {
+					res.RecoveredRevertFailedCount++
+				}
+
+			default:
+				// 3. "无法归因": HEAD has changed but does NOT contain the commit intent trailer, or git state is unreadable.
+				// Transition to StatusRevertFailed with detailed reason; slot remains held for manual inspection.
+				reason := fmt.Sprintf("server crashed during commit; HEAD moved from %s to %s without commit intent trailer %s (manual inspection required)",
+					rec.PreCommitSHA, headSHA, rec.CommitIntentID)
+				_, _ = e.Store.Transition(context.Background(), project, taskID, rec.ID, rec.Revision, StatusRevertFailed, func(r *PreviewReceipt) error {
+					r.FailureReason = CapAndRedact(reason, MaxFailureReasonBytes)
 					return nil
 				})
 				res.RecoveredRevertFailedCount++

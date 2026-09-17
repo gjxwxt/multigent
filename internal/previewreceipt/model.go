@@ -49,8 +49,7 @@ func IsActiveHolder(status string) bool {
 }
 
 // ValidateTransition validates state machine transitions.
-// Note: COMMITTING -> CAPTURED is strictly forbidden in the general state machine
-// (a rollback or compensation requires proof from a CommitIntent checkpoint).
+// Note: COMMITTING -> CAPTURED is permitted during crash recovery when pre-commit HEAD is unchanged.
 func ValidateTransition(from, to string) error {
 	if IsTerminal(from) {
 		return fmt.Errorf("%w: terminal state %s cannot transition to %s", ErrInvalidState, from, to)
@@ -72,7 +71,7 @@ func ValidateTransition(from, to string) error {
 	case StatusReverting:
 		valid = to == StatusRolledBack || to == StatusRevertFailed
 	case StatusCommitting:
-		valid = to == StatusCommitted || to == StatusRevertFailed
+		valid = to == StatusCommitted || to == StatusRevertFailed || to == StatusCaptured
 	case StatusRevertFailed:
 		valid = to == StatusFailed
 	}
@@ -115,6 +114,7 @@ type PreviewReceipt struct {
 	Postimages       []PostimageEntry `json:"postimages,omitempty"`
 	FailureReason    string           `json:"failureReason,omitempty"`
 	CommitIntentID   string           `json:"commitIntentId,omitempty"`
+	PreCommitSHA     string           `json:"preCommitSha,omitempty"`
 	CommittedSHA     string           `json:"committedSha,omitempty"`
 }
 

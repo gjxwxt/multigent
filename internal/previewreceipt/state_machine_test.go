@@ -27,6 +27,7 @@ func TestValidateTransition(t *testing.T) {
 		{StatusReverting, StatusRevertFailed},
 		{StatusCommitting, StatusCommitted},
 		{StatusCommitting, StatusRevertFailed},
+		{StatusCommitting, StatusCaptured},
 		{StatusRevertFailed, StatusFailed},
 	}
 
@@ -42,8 +43,7 @@ func TestValidateTransition(t *testing.T) {
 		{StatusPending, StatusRolledBack},
 		{StatusExecuting, StatusCaptured},
 		{StatusCapturing, StatusReverting},
-		// Strict contract: COMMITTING -> CAPTURED is forbidden in general state machine
-		{StatusCommitting, StatusCaptured},
+		{StatusCommitting, StatusRolledBack},
 		{StatusRolledBack, StatusPending},
 		{StatusSuperseded, StatusCaptured},
 		{StatusCommitted, StatusReverting},

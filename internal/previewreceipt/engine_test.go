@@ -791,11 +791,13 @@ func TestTurnEngine_CommitReceiptsLifecycle(t *testing.T) {
 
 	// 1. Prepare commit
 	intentID := "intent-12345"
+	preSHA := "0123456789012345678901234567890123456789"
 	committing, err := engine.PrepareCommitReceipts(ctx, PrepareCommitReceiptsParams{
 		Project:        project,
 		ProjectGitRoot: repoDir,
 		TaskID:         taskID,
 		CommitIntentID: intentID,
+		PreCommitSHA:   preSHA,
 	})
 	if err != nil {
 		t.Fatalf("PrepareCommitReceipts failed: %v", err)
@@ -871,6 +873,7 @@ func TestTurnEngine_PrepareCommitRejectsActiveMutatingTurn(t *testing.T) {
 		ProjectGitRoot: "/tmp/fake",
 		TaskID:         taskID,
 		CommitIntentID: "intent-1",
+		PreCommitSHA:   "pre-sha-fake",
 	})
 	if err == nil || !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected ErrConflict when a turn is actively executing, got: %v", err)
@@ -965,6 +968,340 @@ func TestTurnEngine_CancelActiveTurn(t *testing.T) {
 		t.Fatalf("expected slot to be released after cancellation, got slot: %+v, holder: %+v", slot, holder)
 	}
 }
+
+func TestTurnEngine_RecoverStale_CrashBeforeCommit_RevertsToCaptured(t *testing.T) {
+	t.Setenv(secretbox.EnvKey, "test-master-key-for-preview-32b!!")
+	repoDir := setupTestGitRepo(t)
+	store := setupTestStore(t)
+	engine := NewTurnEngine(store)
+
+	ctx := context.Background()
+	project := "proj-crash-pre"
+	taskID := "task-crash-pre"
+
+	runner := AgentRunnerFunc(func(ctx context.Context, cloneDir string, prompt string) error {
+		return os.WriteFile(filepath.Join(cloneDir, "foo.txt"), []byte("modified for pre-crash\n"), 0644)
+	})
+
+	turn, err := engine.ExecuteTurn(ctx, ExecuteTurnParams{
+		WorkspaceID:    "ws-test-engine",
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		WorktreeDir:    repoDir,
+		Prompt:         "turn pre crash",
+		Actor:          "tester",
+		Runner:         runner,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTurn failed: %v", err)
+	}
+
+	snapDir := TurnSnapshotDir(repoDir, taskID, turn.TurnID)
+	if _, err := os.Stat(snapDir); err != nil {
+		t.Fatalf("snapshot should exist before crash: %v", err)
+	}
+
+	headBytes, err := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseSHA := strings.TrimSpace(string(headBytes))
+
+	// Prepare commit in single atomic DB transaction
+	intentID := "intent-pre-crash-123"
+	committing, err := engine.PrepareCommitReceipts(ctx, PrepareCommitReceiptsParams{
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		CommitIntentID: intentID,
+		PreCommitSHA:   baseSHA,
+	})
+	if err != nil {
+		t.Fatalf("PrepareCommitReceipts failed: %v", err)
+	}
+	if len(committing) != 1 || committing[0].Status != StatusCommitting {
+		t.Fatalf("expected 1 committing receipt: %+v", committing)
+	}
+
+	// Simulating crash: git commit was NEVER executed. HEAD is still baseSHA.
+	// Server restarts and runs RecoverStaleReceipts:
+	res, err := engine.RecoverStaleReceipts(ctx, project, taskID, repoDir, repoDir)
+	if err != nil {
+		t.Fatalf("RecoverStaleReceipts failed: %v", err)
+	}
+	if res.RecoveredCapturedCount != 1 {
+		t.Fatalf("expected RecoveredCapturedCount == 1, got %+v", res)
+	}
+
+	// Invariant: Receipt reverted back to CAPTURED
+	updated, err := store.Get(ctx, project, taskID, turn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != StatusCaptured {
+		t.Fatalf("expected status CAPTURED after pre-commit crash recovery, got %s", updated.Status)
+	}
+	if updated.CommitIntentID != "" || updated.PreCommitSHA != "" {
+		t.Fatalf("expected CommitIntentID and PreCommitSHA to be cleared, got intent=%s pre=%s", updated.CommitIntentID, updated.PreCommitSHA)
+	}
+
+	// Invariant: Snapshot directory is PRESERVED so review changes are not lost
+	if _, err := os.Stat(snapDir); err != nil {
+		t.Fatalf("expected snapshot dir to remain intact after pre-commit crash, but stat gave: %v", err)
+	}
+
+	// Invariant: Task slot is released
+	slot, holder, err := store.GetActiveSlot(ctx, project, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if holder != nil || (slot != nil && slot.ReceiptID != "") {
+		t.Fatalf("expected slot to be released, got: %+v, holder: %+v", slot, holder)
+	}
+}
+
+func TestTurnEngine_RecoverStale_CrashAfterCommitBeforeFinalize_FinalizesToCommitted(t *testing.T) {
+	t.Setenv(secretbox.EnvKey, "test-master-key-for-preview-32b!!")
+	repoDir := setupTestGitRepo(t)
+	store := setupTestStore(t)
+	engine := NewTurnEngine(store)
+
+	ctx := context.Background()
+	project := "proj-crash-post"
+	taskID := "task-crash-post"
+
+	runner := AgentRunnerFunc(func(ctx context.Context, cloneDir string, prompt string) error {
+		return os.WriteFile(filepath.Join(cloneDir, "foo.txt"), []byte("modified for post-crash\n"), 0644)
+	})
+
+	turn, err := engine.ExecuteTurn(ctx, ExecuteTurnParams{
+		WorkspaceID:    "ws-test-engine",
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		WorktreeDir:    repoDir,
+		Prompt:         "turn post crash",
+		Actor:          "tester",
+		Runner:         runner,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTurn failed: %v", err)
+	}
+
+	snapDir := TurnSnapshotDir(repoDir, taskID, turn.TurnID)
+	if _, err := os.Stat(snapDir); err != nil {
+		t.Fatalf("snapshot should exist before crash: %v", err)
+	}
+
+	headBytes, err := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseSHA := strings.TrimSpace(string(headBytes))
+
+	// 1. Prepare commit
+	intentID := "intent-post-crash-456"
+	committing, err := engine.PrepareCommitReceipts(ctx, PrepareCommitReceiptsParams{
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		CommitIntentID: intentID,
+		PreCommitSHA:   baseSHA,
+	})
+	if err != nil {
+		t.Fatalf("PrepareCommitReceipts failed: %v", err)
+	}
+	if len(committing) != 1 {
+		t.Fatalf("expected 1 committing receipt")
+	}
+
+	// 2. git commit SUCCEEDS with trailer
+	commitMsg := fmt.Sprintf("chore(review): user in-context preview feedback fixes\n\n%s: %s", CommitIntentTrailerKey, intentID)
+	_ = exec.Command("git", "-C", repoDir, "add", "-A").Run()
+	if out, err := exec.Command("git", "-C", repoDir, "commit", "-m", commitMsg).CombinedOutput(); err != nil {
+		t.Fatalf("git commit failed: %v (%s)", err, string(out))
+	}
+	committedHeadBytes, err := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointSHA := strings.TrimSpace(string(committedHeadBytes))
+
+	// 3. Simulating crash before FinalizeCommitReceipts!
+	// Server restarts and runs RecoverStaleReceipts:
+	res, err := engine.RecoverStaleReceipts(ctx, project, taskID, repoDir, repoDir)
+	if err != nil {
+		t.Fatalf("RecoverStaleReceipts failed: %v", err)
+	}
+	if res.RecoveredCommittedCount != 1 {
+		t.Fatalf("expected RecoveredCommittedCount == 1, got %+v", res)
+	}
+
+	// Invariant: Receipt transitioned to COMMITTED with exact commit SHA
+	updated, err := store.Get(ctx, project, taskID, turn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != StatusCommitted || updated.CommittedSHA != checkpointSHA {
+		t.Fatalf("expected COMMITTED with SHA %s, got status=%s, sha=%s", checkpointSHA, updated.Status, updated.CommittedSHA)
+	}
+
+	// Invariant: Snapshot directory is cleaned up
+	if _, err := os.Stat(snapDir); !os.IsNotExist(err) {
+		t.Fatalf("expected snapshot dir to be cleaned up, but stat gave: %v", err)
+	}
+
+	// Invariant: Slot is released
+	slot, holder, err := store.GetActiveSlot(ctx, project, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if holder != nil || (slot != nil && slot.ReceiptID != "") {
+		t.Fatalf("expected slot to be released, got: %+v, holder: %+v", slot, holder)
+	}
+}
+
+func TestTurnEngine_RecoverStale_UnrelatedHeadChange_TransitionsToRevertFailed(t *testing.T) {
+	t.Setenv(secretbox.EnvKey, "test-master-key-for-preview-32b!!")
+	repoDir := setupTestGitRepo(t)
+	store := setupTestStore(t)
+	engine := NewTurnEngine(store)
+
+	ctx := context.Background()
+	project := "proj-crash-unrelated"
+	taskID := "task-crash-unrelated"
+
+	runner := AgentRunnerFunc(func(ctx context.Context, cloneDir string, prompt string) error {
+		return os.WriteFile(filepath.Join(cloneDir, "foo.txt"), []byte("modified for unrelated\n"), 0644)
+	})
+
+	turn, err := engine.ExecuteTurn(ctx, ExecuteTurnParams{
+		WorkspaceID:    "ws-test-engine",
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		WorktreeDir:    repoDir,
+		Prompt:         "turn unrelated",
+		Actor:          "tester",
+		Runner:         runner,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTurn failed: %v", err)
+	}
+
+	snapDir := TurnSnapshotDir(repoDir, taskID, turn.TurnID)
+
+	headBytes, err := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseSHA := strings.TrimSpace(string(headBytes))
+
+	// 1. Prepare commit
+	intentID := "intent-unrelated-789"
+	_, err = engine.PrepareCommitReceipts(ctx, PrepareCommitReceiptsParams{
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		CommitIntentID: intentID,
+		PreCommitSHA:   baseSHA,
+	})
+	if err != nil {
+		t.Fatalf("PrepareCommitReceipts failed: %v", err)
+	}
+
+	// 2. An unrelated commit lands without the intent trailer!
+	_ = os.WriteFile(filepath.Join(repoDir, "other.txt"), []byte("unrelated change\n"), 0644)
+	_ = exec.Command("git", "-C", repoDir, "add", "-A").Run()
+	_ = exec.Command("git", "-C", repoDir, "commit", "-m", "unrelated commit without trailer").Run()
+
+	// 3. Server restarts and runs RecoverStaleReceipts:
+	res, err := engine.RecoverStaleReceipts(ctx, project, taskID, repoDir, repoDir)
+	if err != nil {
+		t.Fatalf("RecoverStaleReceipts failed: %v", err)
+	}
+	if res.RecoveredRevertFailedCount != 1 {
+		t.Fatalf("expected RecoveredRevertFailedCount == 1, got %+v", res)
+	}
+
+	// Invariant: Receipt transitioned to REVERT_FAILED (manual inspection required)
+	updated, err := store.Get(ctx, project, taskID, turn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != StatusRevertFailed {
+		t.Fatalf("expected REVERT_FAILED status, got: %s", updated.Status)
+	}
+	if !strings.Contains(updated.FailureReason, "without commit intent trailer") {
+		t.Fatalf("expected failure reason mentioning missing intent trailer, got: %s", updated.FailureReason)
+	}
+
+	// Invariant: Snapshot directory is preserved for operator inspection
+	if _, err := os.Stat(snapDir); err != nil {
+		t.Fatalf("snapshot dir should be preserved when unattributable: %v", err)
+	}
+}
+
+func TestTurnEngine_FinalizeFailureDoesNotDeleteSnapshot(t *testing.T) {
+	t.Setenv(secretbox.EnvKey, "test-master-key-for-preview-32b!!")
+	repoDir := setupTestGitRepo(t)
+	store := setupTestStore(t)
+	engine := NewTurnEngine(store)
+
+	ctx := context.Background()
+	project := "proj-finalize-fail"
+	taskID := "task-finalize-fail"
+
+	runner := AgentRunnerFunc(func(ctx context.Context, cloneDir string, prompt string) error {
+		return os.WriteFile(filepath.Join(cloneDir, "foo.txt"), []byte("finalize fail test\n"), 0644)
+	})
+
+	turn, err := engine.ExecuteTurn(ctx, ExecuteTurnParams{
+		WorkspaceID:    "ws-test-engine",
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		WorktreeDir:    repoDir,
+		Prompt:         "turn finalize fail",
+		Actor:          "tester",
+		Runner:         runner,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTurn failed: %v", err)
+	}
+
+	snapDir := TurnSnapshotDir(repoDir, taskID, turn.TurnID)
+
+	headBytes, _ := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD").Output()
+	baseSHA := strings.TrimSpace(string(headBytes))
+
+	committing, err := engine.PrepareCommitReceipts(ctx, PrepareCommitReceiptsParams{
+		Project:        project,
+		ProjectGitRoot: repoDir,
+		TaskID:         taskID,
+		CommitIntentID: "intent-fail",
+		PreCommitSHA:   baseSHA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Artificially clobber receipt revision in DB to simulate a CAS conflict during Finalize
+	_, _ = store.Transition(ctx, project, taskID, committing[0].ID, committing[0].Revision, StatusRevertFailed, nil)
+
+	// Now attempt FinalizeCommitReceipts with the old committing slice (which has stale revision)
+	err = engine.FinalizeCommitReceipts(ctx, project, taskID, committing, "fake-sha", repoDir)
+	if err == nil {
+		t.Fatal("expected FinalizeCommitReceipts to return error on CAS failure, got nil")
+	}
+
+	// Invariant: Snapshot MUST NOT be deleted when Finalize fails!
+	if _, err := os.Stat(snapDir); err != nil {
+		t.Fatalf("snapshot was deleted despite Finalize transition failure: %v", err)
+	}
+}
+
 
 
 

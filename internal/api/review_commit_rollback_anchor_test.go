@@ -56,7 +56,7 @@ func TestReviewCommitPushFailureRecordsRollbackAnchor(t *testing.T) {
 	}
 	base := preImage()
 
-	s.commitAndPushReviewChanges("sample", "pm", task)
+	_ = s.commitAndPushReviewChanges("sample", "pm", task)
 
 	// The commit DID land locally.
 	after := preImage()

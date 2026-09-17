@@ -670,7 +670,9 @@ func TestPreviewTurn_CommitReceiptsOnReviewApproval(t *testing.T) {
 	}
 
 	// 2. Run commitAndPushReviewChanges
-	s.commitAndPushReviewChanges("sample", "pm", task)
+	if err := s.commitAndPushReviewChanges("sample", "pm", task); err != nil {
+		t.Fatalf("commitAndPushReviewChanges failed: %v", err)
+	}
 
 	// 3. Verify receipt is now COMMITTED
 	updated, err := store.Get(context.Background(), "sample", task.ID, rec.ID)
