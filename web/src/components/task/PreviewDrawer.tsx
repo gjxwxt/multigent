@@ -44,14 +44,27 @@ export function decodeDOMTarget(raw: unknown): DOMTarget | null {
   if (!raw || typeof raw !== 'object') return null
   const obj = raw as Record<string, unknown>
 
-  const tag = typeof obj.tag === 'string' ? obj.tag.trim().toLowerCase() : ''
-  const tagName = typeof obj.tagName === 'string' ? obj.tagName.trim().toLowerCase() : tag
-  const selector = typeof obj.selector === 'string' ? obj.selector.trim() : ''
+  // 1. Authoritative tagName extraction & validation
+  // Extract tagName (or fallback to tag), must be string and match SAFE_TAG_REGEX
+  const rawTagName = typeof obj.tagName === 'string' && obj.tagName.trim()
+    ? obj.tagName.trim().toLowerCase()
+    : (typeof obj.tag === 'string' ? obj.tag.trim().toLowerCase() : '')
 
-  if (!SAFE_TAG_REGEX.test(tag) || !SAFE_TAG_REGEX.test(tagName)) {
+  if (!SAFE_TAG_REGEX.test(rawTagName)) {
     return null
   }
 
+  // If a separate obj.tag was provided, it must also be a pure safe tag name.
+  // Forged strings containing '#' or '.' (e.g. "button#secret") fail-closed reject the message.
+  if (typeof obj.tag === 'string') {
+    const rawTag = obj.tag.trim().toLowerCase()
+    if (!SAFE_TAG_REGEX.test(rawTag)) {
+      return null
+    }
+  }
+
+  // 2. Validate selector: non-empty sequence of segments separated by " > ", each matching SAFE_SELECTOR_SEGMENT_REGEX
+  const selector = typeof obj.selector === 'string' ? obj.selector.trim() : ''
   if (!selector) return null
   const segments = selector.split(' > ')
   if (segments.length === 0 || segments.length > 20) return null
@@ -61,9 +74,10 @@ export function decodeDOMTarget(raw: unknown): DOMTarget | null {
     }
   }
 
+  // 3. Parent takes validated tagName as authoritative sole basis for tag
   const result: DOMTarget = {
-    tag,
-    tagName,
+    tag: rawTagName,
+    tagName: rawTagName,
     selector,
   }
 
@@ -594,10 +608,12 @@ export function PreviewDrawer({
     let displayContent = text
     let finalPrompt = text
     if (dom) {
-      displayContent = `@DOM(${dom.tag}) ${text || '请针对该元素进行审查'}`
+      const domLabel = dom.id ? `${dom.tag}#${dom.id}` : dom.tag
+      displayContent = `@DOM(${domLabel}) ${text || '请针对该元素进行审查'}`
       const structuralInfo = [
         `- 选择器: ${dom.selector}`,
-        `- 标签与类: <${dom.tag}>`,
+        `- 标签: <${dom.tag}>`,
+        dom.id ? `- 标识 (id): ${dom.id}` : null,
         dom.role ? `- 角色 (role): ${dom.role}` : null,
         dom.type ? `- 类型 (type): ${dom.type}` : null,
         dom.testId ? `- 测试标识 (data-testid): ${dom.testId}` : null,
@@ -952,7 +968,7 @@ export function PreviewDrawer({
         {selectedDOM && (
           <div className="group relative mb-2 inline-flex items-center gap-1.5 rounded-lg border border-sky-300 bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-800 shadow-2xs dark:border-sky-800 dark:bg-sky-950/60 dark:text-sky-200">
             <span className="font-semibold text-sky-600 dark:text-sky-400">🎯 @DOM</span>
-            <span className="max-w-[180px] truncate font-mono text-[11px]">{selectedDOM.tag}</span>
+            <span className="max-w-[180px] truncate font-mono text-[11px]">{selectedDOM.tag}{selectedDOM.id ? `#${selectedDOM.id}` : ''}</span>
             <button
               type="button"
               onClick={() => setSelectedDOM(null)}
@@ -1014,7 +1030,7 @@ export function PreviewDrawer({
               !canOperator
                 ? '仅项目 Operator 可发起调优'
                 : (selectedDOM
-                    ? `针对 @DOM(${selectedDOM.tag}) 输入修改要求 (⌘+Enter 发送)…`
+                    ? `针对 @DOM(${selectedDOM.tag}${selectedDOM.id ? `#${selectedDOM.id}` : ''}) 输入修改要求 (⌘+Enter 发送)…`
                     : t('tasks.previewDrawer.inputPlaceholder', { defaultValue: '描述想要修改的页面内容或样式 (⌘+Enter 发送)…' }))
             }
             className="w-full resize-none rounded-xl border border-neutral-200 bg-neutral-50/80 p-2.5 text-xs text-neutral-800 outline-none transition focus:border-sky-500 focus:bg-white dark:border-zinc-800 dark:bg-zinc-800/60 dark:text-zinc-100 dark:focus:border-sky-500 dark:focus:bg-zinc-900 disabled:opacity-60 disabled:cursor-not-allowed"

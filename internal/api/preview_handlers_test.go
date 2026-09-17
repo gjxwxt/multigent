@@ -523,6 +523,14 @@ func TestRewriteHTMLSanitizesDOMAndSetsExpectedConsoleOrigin(t *testing.T) {
 	if strings.Contains(rewritten, `selector += '#'`) || strings.Contains(rewritten, `selector += '.'`) {
 		t.Fatal("SECURITY VIOLATION: getCssSelector must not concatenate raw element ID or class name")
 	}
+
+	// 6. DOM Contract P1: extractElementContext must send pure tag and tagName, not tagDisplay
+	if strings.Contains(rewritten, `tag: tagDisplay`) || strings.Contains(rewritten, `tagDisplay = `) {
+		t.Fatal("CONTRACT VIOLATION: extractElementContext must not send tagDisplay; tag and tagName must both be pure tag name")
+	}
+	if !strings.Contains(rewritten, `tag: tag`) || !strings.Contains(rewritten, `tagName: tag`) {
+		t.Fatal("CONTRACT VIOLATION: extractElementContext must return pure tag and tagName")
+	}
 }
 
 func TestRewriteHTMLOmitsInspectorWhenConsoleOriginMissing(t *testing.T) {

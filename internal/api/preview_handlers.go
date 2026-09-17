@@ -985,15 +985,6 @@ func rewriteHTML(html, taskID, projectName string, consoleOrigins ...string) str
     if (el.id && /^[A-Za-z][A-Za-z0-9_:-]{0,63}$/.test(el.id)) {
       id = el.id;
     }
-    var classes = '';
-    if (typeof el.className === 'string' && el.className.trim()) {
-      var safeClasses = el.className.trim().split(/\s+/)
-        .filter(function(c) { return /^[a-zA-Z0-9_\-:]+$/.test(c); })
-        .slice(0, 3);
-      if (safeClasses.length) classes = '.' + safeClasses.join('.');
-    }
-    var tagDisplay = tag + (id ? '#' + id : classes);
-
     var role = '';
     if (el.getAttribute && el.getAttribute('role')) {
       var rVal = (el.getAttribute('role') || '').trim();
@@ -1014,9 +1005,10 @@ func rewriteHTML(html, taskID, projectName string, consoleOrigins ...string) str
 
     var selector = getCssSelector(el);
 
-    // SECURITY (Phase 0): Absolutely zero input values, placeholders, text snippets, hrefs, raw markup, or parent trees
+    // SECURITY (Phase 0): Absolutely zero input values, placeholders, text snippets, hrefs, raw markup, or parent trees.
+    // DOM contract P1: send pure tag name for both tag and tagName; parent independently constructs display labels.
     return {
-      tag: tagDisplay,
+      tag: tag,
       tagName: tag,
       id: id,
       role: role,
