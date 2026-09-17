@@ -294,6 +294,15 @@ func (s *Store) Get(ctx context.Context, project, taskID, receiptID string) (*Pr
 		return nil, err
 	}
 	if len(recs) == 0 {
+		// Fallback: check if receiptID was specified as TurnID
+		all, listErr := s.List(ctx, project, taskID)
+		if listErr == nil {
+			for _, item := range all {
+				if item.TurnID == receiptID {
+					return s.Get(ctx, project, taskID, item.ID)
+				}
+			}
+		}
 		return nil, ErrReceiptNotFound
 	}
 

@@ -159,6 +159,7 @@ type Server struct {
 	designReadRateSeen     map[string]*previewChatBucket
 	designWriteRateSeen    map[string]*previewChatBucket
 	threadProjections      *imbridge.TaskThreadProjectionService
+	previewAgentRunnerFunc func(workspaceID, project, agentName, runtimeURL string) previewreceipt.AgentRunner
 }
 
 // NewServer builds an API server for the given workspace root.
@@ -331,6 +332,15 @@ func (s *Server) receiptStore(r *http.Request) *previewreceipt.Store {
 		return nil
 	}
 	return previewreceipt.NewStore(s.controlDB, s.currentWorkspaceIDValue(r))
+}
+
+// turnEngine resolves the turn engine for the current workspace.
+func (s *Server) turnEngine(r *http.Request) *previewreceipt.TurnEngine {
+	store := s.receiptStore(r)
+	if store == nil {
+		return nil
+	}
+	return previewreceipt.NewTurnEngine(store)
 }
 
 // SetLocalRuntimeAPIURL sets the loopback Runtime API URL for internally
@@ -655,6 +665,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/stop", s.handlePostTaskPreviewStop)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/remote-sync/retry", s.handlePostTaskRemoteSyncRetry)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/feedback", s.handlePostTaskPreviewFeedback)
+	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview/turns", s.handleGetTaskPreviewTurns)
+	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview/turns/{turnId}/diff", s.handleGetTaskPreviewTurnDiff)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/turns/{turnId}/rollback", s.handlePostTaskPreviewTurnRollback)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/turns/{turnId}/preview/start", s.handlePostTaskPreviewTurnPreviewStart)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/turns/{turnId}/preview/stop", s.handlePostTaskPreviewTurnPreviewStop)
+	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview/turns/{turnId}/preview/status", s.handleGetTaskPreviewTurnPreviewStatus)
 	mux.HandleFunc("GET /api/v1/integrations/gitlab/status", s.handleGitLabStatus)
 	mux.HandleFunc("GET /api/v1/integrations/gitlab/namespaces", s.handleGitLabNamespaces)
 	mux.HandleFunc("POST /api/v1/integrations/gitlab/projects", s.handleGitLabCreateProject)

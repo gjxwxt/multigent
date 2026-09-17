@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -56,6 +57,20 @@ func (f *fakePreviewEngine) StopEphemeralPreview(taskID string) error {
 	f.stopped = append(f.stopped, taskID)
 	delete(f.instances, taskID)
 	return nil
+}
+
+func (f *fakePreviewEngine) StartTurnPreviewWithRuntime(_ context.Context, taskID, turnID, projectName, cloneDir string, _ preview.RuntimeSelection) (*preview.PreviewInstance, error) {
+	return nil, nil
+}
+
+func (f *fakePreviewEngine) StopTurnPreview(taskID, turnID string) error {
+	turnKey := fmt.Sprintf("turn:%s:%s", taskID, turnID)
+	return f.StopEphemeralPreview(turnKey)
+}
+
+func (f *fakePreviewEngine) GetTurnInstance(taskID, turnID string) (*preview.PreviewInstance, bool) {
+	turnKey := fmt.Sprintf("turn:%s:%s", taskID, turnID)
+	return f.GetInstance(turnKey)
 }
 
 func (f *fakePreviewEngine) Reconcile(_ context.Context) error { return nil }

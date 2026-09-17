@@ -334,6 +334,25 @@ func extractPreviewTaskIDFromReferer(ref string) string {
 	return extractPreviewTaskID(u.Path)
 }
 
+func extractPreviewPrefixFromReferer(ref string) string {
+	if ref == "" {
+		return ""
+	}
+	u, err := url.Parse(ref)
+	if err != nil || !strings.HasPrefix(u.Path, "/preview/") {
+		return ""
+	}
+	trimmed := strings.TrimPrefix(u.Path, "/preview/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) >= 3 && parts[1] == "turn" && isValidPreviewTaskID(parts[0]) && isValidPreviewTaskID(parts[2]) {
+		return fmt.Sprintf("/preview/%s/turn/%s/", parts[0], parts[2])
+	}
+	if len(parts) >= 1 && isValidPreviewTaskID(parts[0]) {
+		return fmt.Sprintf("/preview/%s/", parts[0])
+	}
+	return ""
+}
+
 // IsPreviewSessionRequest reports whether a request belongs to the preview surface
 // (arrived on the preview origin, carries a Referer from a /preview/ URL, or
 // carries a preview token cookie).
@@ -369,12 +388,14 @@ func (s *Server) handlePreviewOriginRootFallback(w http.ResponseWriter, r *http.
 		return false
 	}
 
+	prefix := extractPreviewPrefixFromReferer(r.Header.Get("Referer"))
 	taskID := extractPreviewTaskIDFromReferer(r.Header.Get("Referer"))
 	if taskID == "" && s.requestOnPreviewOrigin(r) {
 		// On dedicated preview origin, if Referer was omitted or stripped, check for preview cookies
 		for _, c := range r.Cookies() {
 			if strings.HasPrefix(c.Name, previewTokenCookiePrefix) {
 				taskID = strings.TrimPrefix(c.Name, previewTokenCookiePrefix)
+				prefix = fmt.Sprintf("/preview/%s/", taskID)
 				break
 			}
 		}
@@ -385,12 +406,26 @@ func (s *Server) handlePreviewOriginRootFallback(w http.ResponseWriter, r *http.
 	}
 
 	if s.previewEngine != nil {
-		if _, ok := s.previewEngine.GetInstance(taskID); !ok {
-			return false
+		instanceKey := taskID
+		if strings.Contains(prefix, "/turn/") {
+			parts := strings.Split(strings.Trim(strings.TrimPrefix(prefix, "/preview/"), "/"), "/")
+			if len(parts) >= 3 && parts[1] == "turn" {
+				instanceKey = fmt.Sprintf("turn:%s:%s", parts[0], parts[2])
+			}
+		}
+		if _, ok := s.previewEngine.GetInstance(instanceKey); !ok {
+			if _, ok := s.previewEngine.GetInstance(taskID); !ok {
+				return false
+			}
+			prefix = fmt.Sprintf("/preview/%s/", taskID)
 		}
 	}
 
-	target := fmt.Sprintf("/preview/%s%s", taskID, r.URL.RequestURI())
+	if prefix == "" {
+		prefix = fmt.Sprintf("/preview/%s/", taskID)
+	}
+
+	target := fmt.Sprintf("%s%s", prefix, strings.TrimPrefix(r.URL.RequestURI(), "/"))
 	http.Redirect(w, r, target, http.StatusTemporaryRedirect)
 	return true
 }

@@ -511,7 +511,8 @@ func (s *Server) handlePostTaskPreviewChat(w http.ResponseWriter, r *http.Reques
 		s.jsonErrorCode(w, http.StatusConflict, "feature_disabled", s.PreviewTurnReceiptsDisabledReason())
 		return
 	}
-	s.jsonErrorCode(w, http.StatusConflict, "feature_disabled", "preview code modification is disabled until receipt and isolated clone are implemented")
+
+	s.executePreviewChatTurn(w, r, project, taskID, task, principal)
 }
 
 func (s *Server) handleGetTaskPreviewLive(w http.ResponseWriter, r *http.Request) {
@@ -652,6 +653,22 @@ func (s *Server) handleTaskPreviewProxy(w http.ResponseWriter, r *http.Request) 
 		subpath = "/" + parts[1]
 	}
 
+	instanceKey := taskID
+	turnID := ""
+	effectiveTaskPath := taskID
+	if strings.HasPrefix(subpath, "/turn/") {
+		turnParts := strings.SplitN(strings.TrimPrefix(subpath, "/turn/"), "/", 2)
+		if turnParts[0] != "" {
+			turnID = turnParts[0]
+			instanceKey = "turn:" + taskID + ":" + turnID
+			effectiveTaskPath = taskID + "/turn/" + turnID
+			subpath = "/"
+			if len(turnParts) > 1 {
+				subpath = "/" + turnParts[1]
+			}
+		}
+	}
+
 	if s.previewEngine == nil {
 		s.previewEngine = preview.NewEngine()
 	}
@@ -677,9 +694,13 @@ func (s *Server) handleTaskPreviewProxy(w http.ResponseWriter, r *http.Request) 
 	// origin-routing wrapper before reaching this handler (§2.0.3) — no
 	// document request ever renders with the token in location.search.
 
-	inst, ok := s.previewEngine.GetInstance(taskID)
+	inst, ok := s.previewEngine.GetInstance(instanceKey)
 	if !ok || inst.Status != "running" || inst.Port <= 0 {
-		http.Error(w, fmt.Sprintf("Preview environment for task %q is not running. Please launch it from the task review panel.", taskID), http.StatusServiceUnavailable)
+		if turnID != "" {
+			http.Error(w, fmt.Sprintf("Preview environment for turn %q is not running.", turnID), http.StatusServiceUnavailable)
+		} else {
+			http.Error(w, fmt.Sprintf("Preview environment for task %q is not running. Please launch it from the task review panel.", taskID), http.StatusServiceUnavailable)
+		}
 		return
 	}
 
@@ -725,7 +746,7 @@ func (s *Server) handleTaskPreviewProxy(w http.ResponseWriter, r *http.Request) 
 		if s.PreviewCopilotDrawerEnabled() {
 			consoleOrigin = s.consoleOrigin
 		}
-		html := rewriteHTML(string(bodyBytes), taskID, inst.Project, consoleOrigin)
+		html := rewriteHTML(string(bodyBytes), effectiveTaskPath, inst.Project, consoleOrigin)
 
 		newBodyBytes := []byte(html)
 		if isGzip {

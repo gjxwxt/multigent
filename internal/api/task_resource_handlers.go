@@ -25,6 +25,9 @@ type previewEngineAPI interface {
 	StartEphemeralPreviewWithRuntime(ctx context.Context, taskID, projectName, worktreeDir string, runtime preview.RuntimeSelection) (*preview.PreviewInstance, error)
 	StartSnapshotPreviewWithRuntime(ctx context.Context, taskID, projectName, worktreeDir string, runtime preview.RuntimeSelection) (*preview.PreviewInstance, error)
 	StopEphemeralPreview(taskID string) error
+	StartTurnPreviewWithRuntime(ctx context.Context, taskID, turnID, projectName, cloneDir string, runtime preview.RuntimeSelection) (*preview.PreviewInstance, error)
+	StopTurnPreview(taskID, turnID string) error
+	GetTurnInstance(taskID, turnID string) (*preview.PreviewInstance, bool)
 	Reconcile(ctx context.Context) error
 	SeedInstanceForTest(inst *preview.PreviewInstance)
 }

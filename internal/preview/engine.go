@@ -219,6 +219,26 @@ func (e *Engine) StartSnapshotPreviewWithRuntime(ctx context.Context, taskID, pr
 	return e.startPreview(ctx, taskID, projectName, worktreeDir, true, runtime)
 }
 
+// StartTurnPreviewWithRuntime starts a dedicated preview instance for a turn.
+// It keys the instance as "turn:<taskID>:<turnID>" so it does not collide with
+// or replace the task-level preview container.
+func (e *Engine) StartTurnPreviewWithRuntime(ctx context.Context, taskID, turnID, projectName, cloneDir string, runtime RuntimeSelection) (*PreviewInstance, error) {
+	turnKey := fmt.Sprintf("turn:%s:%s", taskID, turnID)
+	return e.startPreview(ctx, turnKey, projectName, cloneDir, true, runtime)
+}
+
+// StopTurnPreview stops the preview instance for a turn.
+func (e *Engine) StopTurnPreview(taskID, turnID string) error {
+	turnKey := fmt.Sprintf("turn:%s:%s", taskID, turnID)
+	return e.StopEphemeralPreview(turnKey)
+}
+
+// GetTurnInstance returns the preview instance for a turn if active.
+func (e *Engine) GetTurnInstance(taskID, turnID string) (*PreviewInstance, bool) {
+	turnKey := fmt.Sprintf("turn:%s:%s", taskID, turnID)
+	return e.GetInstance(turnKey)
+}
+
 func (e *Engine) taskLock(taskID string) func() {
 	val, _ := e.taskMu.LoadOrStore(taskID, &sync.Mutex{})
 	mtx := val.(*sync.Mutex)
