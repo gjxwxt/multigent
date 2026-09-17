@@ -530,6 +530,11 @@ type DockerSandboxConfig struct {
 	// of root (Linux only). This keeps bind-mounted workspace files owned by
 	// the unprivileged multigent service account. Default: true.
 	RunAsHostUser *bool `yaml:"run_as_host_user,omitempty" json:"run_as_host_user,omitempty"`
+
+	// IsolatedPreview marks this configuration as an isolated preview run.
+	// When true, ExtraVolumes, CredentialMounts, auto credentials, host mounts,
+	// and Docker socket are strictly forbidden and rejected fail-closed.
+	IsolatedPreview bool `yaml:"isolated_preview,omitempty" json:"isolated_preview,omitempty"`
 }
 
 // ─────────────────────────────────────────────

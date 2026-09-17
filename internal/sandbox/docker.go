@@ -14,6 +14,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -86,6 +87,23 @@ var dockerImageExists = imageExists
 // model is used to select defaults when cfg fields are empty.
 // innerArgs are the agent CLI arguments to run inside the container.
 func BuildArgs(agentDir string, model entity.AgentModel, cfg *entity.DockerSandboxConfig, innerArgs []string) ([]string, error) {
+	isIsolated := cfg != nil && cfg.IsolatedPreview
+	if isIsolated {
+		if cfg != nil && len(cfg.ExtraVolumes) > 0 {
+			return nil, fmt.Errorf("isolated preview sandbox rejects ExtraVolumes: %v", cfg.ExtraVolumes)
+		}
+		if cfg != nil && len(cfg.CredentialMounts) > 0 {
+			return nil, fmt.Errorf("isolated preview sandbox rejects CredentialMounts: %v", cfg.CredentialMounts)
+		}
+		if cfg != nil {
+			for _, env := range cfg.ExtraEnv {
+				if strings.Contains(env, "docker.sock") {
+					return nil, errors.New("isolated preview sandbox strictly forbids Docker socket")
+				}
+			}
+		}
+	}
+
 	args := []string{"run", "--rm", "-i"}
 
 	// ── Run as host user ─────────────────────────────────────────────────────
@@ -151,8 +169,10 @@ func BuildArgs(agentDir string, model entity.AgentModel, cfg *entity.DockerSandb
 	// parent gitdir as an absolute host path that is otherwise invisible in
 	// the container — git then fails outright and marks sibling worktrees as
 	// prunable. Mount the parent repo at its recorded path so git resolves it.
-	if parentMount := WorktreeParentMount(absAgentDir, false); parentMount != "" {
-		args = append(args, "-v", parentMount)
+	if !isIsolated {
+		if parentMount := WorktreeParentMount(absAgentDir, false); parentMount != "" {
+			args = append(args, "-v", parentMount)
+		}
 	}
 
 	// ── User bin directory ────────────────────────────────────────────────────
@@ -166,7 +186,7 @@ func BuildArgs(agentDir string, model entity.AgentModel, cfg *entity.DockerSandb
 		workspaceRoot,
 		"bin",
 	)
-	if isWorkspaceRoot(workspaceRoot) {
+	if !isIsolated && isWorkspaceRoot(workspaceRoot) {
 		if fi, err := os.Stat(binHostDir); err == nil && fi.IsDir() {
 			args = append(args, "-v", binHostDir+":"+UserBin)
 			args = append(args, "-e", "PATH="+UserBin+":"+containerPATHForHostUser(ContainerDefaultPATH, hostUser))
@@ -174,12 +194,14 @@ func BuildArgs(agentDir string, model entity.AgentModel, cfg *entity.DockerSandb
 	}
 
 	// ── Agent-scoped credential/session mounts ───────────────────────────────
-	mounts := resolveCredentialMounts(model, cfg, agentDir)
-	for _, m := range mounts {
-		expanded := expandTilde(m)
-		hostPath := strings.SplitN(expanded, ":", 2)[0]
-		if ensureRuntimeMountPath(hostPath) == nil {
-			args = append(args, "-v", remapHostUserMount(expanded, hostUser))
+	if !isIsolated {
+		mounts := resolveCredentialMounts(model, cfg, agentDir)
+		for _, m := range mounts {
+			expanded := expandTilde(m)
+			hostPath := strings.SplitN(expanded, ":", 2)[0]
+			if ensureRuntimeMountPath(hostPath) == nil {
+				args = append(args, "-v", remapHostUserMount(expanded, hostUser))
+			}
 		}
 	}
 
@@ -189,7 +211,7 @@ func BuildArgs(agentDir string, model entity.AgentModel, cfg *entity.DockerSandb
 	// directory to locate sibling files, so we must mount the entire version
 	// directory at a fixed container path and rewrite innerArgs to use the
 	// full path so SCRIPT_DIR resolves correctly.
-	if entity.NormaliseModel(model) == entity.ModelCursor {
+	if !isIsolated && entity.NormaliseModel(model) == entity.ModelCursor {
 		if agentBin, err := findCursorAgentBinary(); err == nil {
 			if realBin, err := filepath.EvalSymlinks(agentBin); err == nil {
 				realDir := filepath.Dir(realBin)
@@ -208,7 +230,7 @@ func BuildArgs(agentDir string, model entity.AgentModel, cfg *entity.DockerSandb
 	}
 
 	// ── Extra volumes ────────────────────────────────────────────────────────
-	if cfg != nil {
+	if cfg != nil && !isIsolated {
 		for _, v := range cfg.ExtraVolumes {
 			args = append(args, "-v", remapHostUserMount(expandTilde(v), hostUser))
 		}
@@ -269,6 +291,31 @@ func BuildArgs(agentDir string, model entity.AgentModel, cfg *entity.DockerSandb
 		innerArgs = wrapInlineCommand(innerArgs, hostUserPrecreateScript())
 	}
 	args = append(args, innerArgs...)
+
+	if isIsolated {
+		// Strict invariant: verify that the workspace mount is the ONLY volume mount
+		volumeCount := 0
+		for i := 0; i < len(args); i++ {
+			if args[i] == "-v" && i+1 < len(args) {
+				volumeCount++
+				vol := args[i+1]
+				if strings.Contains(vol, "docker.sock") {
+					return nil, errors.New("isolated preview sandbox strictly forbids Docker socket mount")
+				}
+				// Verify target is exactly /workspace or /workspace:rw
+				parts := strings.Split(vol, ":")
+				if len(parts) < 2 || (parts[1] != WorkspaceMount && parts[1] != WorkspaceMount+":rw") {
+					return nil, fmt.Errorf("isolated preview sandbox forbidden mount: %s", vol)
+				}
+			}
+			if strings.Contains(args[i], "docker.sock") {
+				return nil, errors.New("isolated preview sandbox strictly forbids Docker socket in arguments")
+			}
+		}
+		if volumeCount != 1 {
+			return nil, fmt.Errorf("isolated preview sandbox must have exactly 1 mount (workspace clone), got %d", volumeCount)
+		}
+	}
 
 	return args, nil
 }

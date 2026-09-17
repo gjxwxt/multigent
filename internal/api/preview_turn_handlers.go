@@ -43,10 +43,33 @@ func (r *previewDefaultAgentRunner) RunAgent(ctx context.Context, cloneDir strin
 		return errors.New("preview copilot does not support HTTP agents; isolated container sandbox required")
 	}
 
-	if meta.Sandbox.Provider == entity.SandboxDocker {
-		if err := sandbox.CheckDocker(); err != nil {
-			return fmt.Errorf("docker sandbox unavailable: %w", err)
+	if meta.Sandbox.Provider != entity.SandboxDocker {
+		return fmt.Errorf("preview copilot requires docker sandbox, got %q", meta.Sandbox.Provider)
+	}
+	if len(meta.Sandbox.Mounts) > 0 {
+		return fmt.Errorf("preview copilot isolated run rejects custom mounts: %d mounts configured", len(meta.Sandbox.Mounts))
+	}
+	if meta.Sandbox.Docker != nil {
+		for _, v := range meta.Sandbox.Docker.ExtraVolumes {
+			if strings.Contains(v, "docker.sock") {
+				return errors.New("preview copilot isolated run strictly forbids Docker socket")
+			}
 		}
+		for _, e := range meta.Sandbox.Docker.ExtraEnv {
+			if strings.Contains(e, "docker.sock") {
+				return errors.New("preview copilot isolated run strictly forbids Docker socket in environment")
+			}
+		}
+		if len(meta.Sandbox.Docker.ExtraVolumes) > 0 {
+			return fmt.Errorf("preview copilot isolated run rejects ExtraVolumes: %v", meta.Sandbox.Docker.ExtraVolumes)
+		}
+		if len(meta.Sandbox.Docker.CredentialMounts) > 0 {
+			return fmt.Errorf("preview copilot isolated run rejects CredentialMounts: %v", meta.Sandbox.Docker.CredentialMounts)
+		}
+	}
+
+	if err := sandbox.CheckDocker(); err != nil {
+		return fmt.Errorf("docker sandbox unavailable: %w", err)
 	}
 
 	args := []string{"--dir", r.server.root, "exec", "--project", r.project, "--agent", r.agentName, "--prompt", prompt, "--no-save-session", "--no-session"}

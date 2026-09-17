@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -327,6 +328,106 @@ func TestRuntimeDockerSystemMountsDoNotExposeWorkspaceRoot(t *testing.T) {
 		if volume == root+":"+root || strings.HasPrefix(volume, root+":"+root+":") {
 			t.Fatalf("workspace root leaked into docker mounts: %#v", cfg.Docker.ExtraVolumes)
 		}
+	}
+}
+
+func TestIsolatedPreviewRun_FailClosedRejection(t *testing.T) {
+	cases := []struct {
+		name    string
+		meta    *entity.AgentMeta
+		wantErr string
+	}{
+		{
+			name: "no sandbox fails closed",
+			meta: &entity.AgentMeta{
+				Name:  "a",
+				Model: entity.ModelClaudeCode,
+			},
+			wantErr: "requires an isolated container sandbox",
+		},
+		{
+			name: "sandbox none fails closed",
+			meta: &entity.AgentMeta{
+				Name:    "a",
+				Model:   entity.ModelClaudeCode,
+				Sandbox: &entity.SandboxConfig{Provider: entity.SandboxNone},
+			},
+			wantErr: "requires an isolated container sandbox",
+		},
+		{
+			name: "custom mounts rejected",
+			meta: &entity.AgentMeta{
+				Name:  "a",
+				Model: entity.ModelClaudeCode,
+				Sandbox: &entity.SandboxConfig{
+					Provider: entity.SandboxDocker,
+					Mounts:   []entity.RuntimeMount{{Source: "/host", Target: "/container"}},
+				},
+			},
+			wantErr: "rejects custom mounts",
+		},
+		{
+			name: "extra volumes rejected",
+			meta: &entity.AgentMeta{
+				Name:  "a",
+				Model: entity.ModelClaudeCode,
+				Sandbox: &entity.SandboxConfig{
+					Provider: entity.SandboxDocker,
+					Docker: &entity.DockerSandboxConfig{
+						ExtraVolumes: []string{"/host:/container"},
+					},
+				},
+			},
+			wantErr: "rejects ExtraVolumes",
+		},
+		{
+			name: "credential mounts rejected",
+			meta: &entity.AgentMeta{
+				Name:  "a",
+				Model: entity.ModelClaudeCode,
+				Sandbox: &entity.SandboxConfig{
+					Provider: entity.SandboxDocker,
+					Docker: &entity.DockerSandboxConfig{
+						CredentialMounts: []string{"/host/cred:/root/.cred"},
+					},
+				},
+			},
+			wantErr: "rejects CredentialMounts",
+		},
+		{
+			name: "docker socket strictly forbidden",
+			meta: &entity.AgentMeta{
+				Name:  "a",
+				Model: entity.ModelClaudeCode,
+				Sandbox: &entity.SandboxConfig{
+					Provider: entity.SandboxDocker,
+					Docker: &entity.DockerSandboxConfig{
+						ExtraVolumes: []string{"/var/run/docker.sock:/var/run/docker.sock"},
+					},
+				},
+			},
+			wantErr: "strictly forbids Docker socket",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &Runner{
+				root: t.TempDir(),
+				agentMetaOverrides: map[string]*entity.AgentMeta{
+					"p/a": tc.meta,
+				},
+			}
+			_, err := r.ExecPromptWithRuntimeControlEnvContext(context.Background(), "p", "a", "prompt", "", map[string]string{
+				"MULTIGENT_PREVIEW_ISOLATED_RUN": "1",
+			})
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
+			}
+		})
 	}
 }
 

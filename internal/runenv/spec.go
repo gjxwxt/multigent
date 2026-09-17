@@ -2,6 +2,7 @@
 package runenv
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,6 +34,8 @@ type ProcessSpec struct {
 	AgentCLI *entity.AgentCLIConfig
 	Mounts   []entity.RuntimeMount
 	Limits   entity.RuntimeResourceLimits
+
+	IsolatedPreview bool
 }
 
 // Provider prepares and starts an isolated runtime.
@@ -55,44 +58,77 @@ func (DockerProvider) Name() entity.SandboxProvider { return entity.SandboxDocke
 func (DockerProvider) Available() error { return sandbox.CheckDocker() }
 
 func (DockerProvider) Command(spec ProcessSpec) (string, []string, error) {
-	cfg := DockerConfig(spec.Runtime)
-	cfg.ExtraVolumes = append(cfg.ExtraVolumes,
-		// Cache volumes mount under /tmp/multigent-cache, NOT under HOME:
-		// Docker auto-creates mount destinations (and missing parents) as
-		// root:root, which would make the run-as-host-user HOME unwritable
-		// and break gradle's $HOME/.gradle lock-file creation.
-		"multigent-toolchains:"+agentcli.ToolchainHome,
-		"multigent-npm-cache:"+sandbox.HostUserCacheHome+"/npm",
-		"multigent-go-cache:"+sandbox.HostUserCacheHome+"/go/pkg/mod",
-		"multigent-go-build-cache:"+sandbox.HostUserCacheHome+"/go-build",
-	)
-	pathParts := []string{}
-	if toolBin := runtimeEnvValue(spec.Runtime, "MULTIGENT_TOOL_BIN_DIR"); toolBin != "" {
-		pathParts = append(pathParts, dockerWorkspacePath(spec.AgentDir, toolBin))
-	}
-	if toolCacheBin := runtimeEnvValue(spec.Runtime, "MULTIGENT_TOOL_CACHE_BIN_DIR"); toolCacheBin != "" {
-		if cacheMount := dockerRuntimeToolCacheVolume(spec.WorkspaceRoot, toolCacheBin); cacheMount != "" {
-			cfg.ExtraVolumes = append(cfg.ExtraVolumes, cacheMount)
+	isIsolated := spec.IsolatedPreview || (spec.Runtime != nil && spec.Runtime.Docker != nil && spec.Runtime.Docker.IsolatedPreview)
+	if isIsolated {
+		if len(spec.Mounts) > 0 {
+			return "", nil, fmt.Errorf("isolated preview sandbox rejects Mounts: %d mounts provided", len(spec.Mounts))
 		}
-		pathParts = append(pathParts, dockerWorkspacePath(spec.AgentDir, toolCacheBin))
+		if spec.Runtime != nil && spec.Runtime.Docker != nil {
+			if len(spec.Runtime.Docker.ExtraVolumes) > 0 {
+				return "", nil, fmt.Errorf("isolated preview sandbox rejects ExtraVolumes: %v", spec.Runtime.Docker.ExtraVolumes)
+			}
+			if len(spec.Runtime.Docker.CredentialMounts) > 0 {
+				return "", nil, fmt.Errorf("isolated preview sandbox rejects CredentialMounts: %v", spec.Runtime.Docker.CredentialMounts)
+			}
+			for _, v := range spec.Runtime.Docker.ExtraVolumes {
+				if strings.Contains(v, "docker.sock") {
+					return "", nil, errors.New("isolated preview sandbox strictly forbids Docker socket")
+				}
+			}
+		}
+	}
+
+	cfg := DockerConfig(spec.Runtime)
+	if isIsolated {
+		cfg.IsolatedPreview = true
+		cfg.NoAutoCredentials = true
+		cfg.ExtraVolumes = nil
+		cfg.CredentialMounts = nil
+	} else {
+		cfg.ExtraVolumes = append(cfg.ExtraVolumes,
+			// Cache volumes mount under /tmp/multigent-cache, NOT under HOME:
+			// Docker auto-creates mount destinations (and missing parents) as
+			// root:root, which would make the run-as-host-user HOME unwritable
+			// and break gradle's $HOME/.gradle lock-file creation.
+			"multigent-toolchains:"+agentcli.ToolchainHome,
+			"multigent-npm-cache:"+sandbox.HostUserCacheHome+"/npm",
+			"multigent-go-cache:"+sandbox.HostUserCacheHome+"/go/pkg/mod",
+			"multigent-go-build-cache:"+sandbox.HostUserCacheHome+"/go-build",
+		)
+	}
+	pathParts := []string{}
+	if !isIsolated {
+		if toolBin := runtimeEnvValue(spec.Runtime, "MULTIGENT_TOOL_BIN_DIR"); toolBin != "" {
+			pathParts = append(pathParts, dockerWorkspacePath(spec.AgentDir, toolBin))
+		}
+		if toolCacheBin := runtimeEnvValue(spec.Runtime, "MULTIGENT_TOOL_CACHE_BIN_DIR"); toolCacheBin != "" {
+			if cacheMount := dockerRuntimeToolCacheVolume(spec.WorkspaceRoot, toolCacheBin); cacheMount != "" {
+				cfg.ExtraVolumes = append(cfg.ExtraVolumes, cacheMount)
+			}
+			pathParts = append(pathParts, dockerWorkspacePath(spec.AgentDir, toolCacheBin))
+		}
 	}
 	pathParts = append(pathParts, runtimecli.ManagedBinDir, runtimecli.BinDir, agentcli.ToolchainBin, sandbox.UserBin, sandbox.ContainerDefaultPATH)
 	cfg.ExtraEnv = append(cfg.ExtraEnv, "PATH="+strings.Join(pathParts, ":"))
-	for _, mount := range spec.Mounts {
-		volume := DockerVolume(mount)
-		if volume != "" {
-			cfg.ExtraVolumes = append(cfg.ExtraVolumes, volume)
+	if !isIsolated {
+		for _, mount := range spec.Mounts {
+			volume := DockerVolume(mount)
+			if volume != "" {
+				cfg.ExtraVolumes = append(cfg.ExtraVolumes, volume)
+			}
 		}
 	}
 	command := agentcli.WrapCommand(spec.Command, spec.AgentCLI)
-	if runtimeBootstrap := runtimecli.BootstrapScript(os.Getenv(runtimecli.ServerVersionEnv)); runtimeBootstrap != "" {
-		command = wrapInlineScript(command, runtimeBootstrap)
-	}
-	// Apply the per-run bootstrap last so it becomes the outer wrapper and runs
-	// before the generic version check. It may provide mga itself, for example
-	// from a mounted host binary, when the runtime image is minimal.
-	if bootstrap := runtimeEnvValue(spec.Runtime, "MULTIGENT_TOOL_BOOTSTRAP_FILE"); bootstrap != "" {
-		command = wrapBootstrapScript(command, dockerWorkspacePath(spec.AgentDir, bootstrap))
+	if !isIsolated {
+		if runtimeBootstrap := runtimecli.BootstrapScript(os.Getenv(runtimecli.ServerVersionEnv)); runtimeBootstrap != "" {
+			command = wrapInlineScript(command, runtimeBootstrap)
+		}
+		// Apply the per-run bootstrap last so it becomes the outer wrapper and runs
+		// before the generic version check. It may provide mga itself, for example
+		// from a mounted host binary, when the runtime image is minimal.
+		if bootstrap := runtimeEnvValue(spec.Runtime, "MULTIGENT_TOOL_BOOTSTRAP_FILE"); bootstrap != "" {
+			command = wrapBootstrapScript(command, dockerWorkspacePath(spec.AgentDir, bootstrap))
+		}
 	}
 	return sandbox.RunArgs(spec.AgentDir, spec.Model, cfg, command)
 }

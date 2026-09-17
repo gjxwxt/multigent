@@ -541,3 +541,79 @@ func TestCheckImageArchitectureMissingImageIsFine(t *testing.T) {
 		t.Fatalf("empty image should not error, got %v", err)
 	}
 }
+
+func TestBuildArgs_IsolatedPreview_OnlyMountsWorkspace(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := &entity.DockerSandboxConfig{
+		IsolatedPreview:   true,
+		NoAutoCredentials: true,
+		NetworkMode:       "none",
+	}
+	args, err := BuildArgs(tempDir, entity.ModelClaudeCode, cfg, []string{"echo", "hi"})
+	if err != nil {
+		t.Fatalf("BuildArgs failed: %v", err)
+	}
+
+	volumeCount := 0
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-v" && i+1 < len(args) {
+			volumeCount++
+			vol := args[i+1]
+			if !strings.HasSuffix(vol, ":/workspace") {
+				t.Fatalf("unexpected volume mount in isolated preview: %s", vol)
+			}
+		}
+		if strings.Contains(args[i], "docker.sock") {
+			t.Fatalf("unexpected docker.sock in args: %s", args[i])
+		}
+	}
+	if volumeCount != 1 {
+		t.Fatalf("expected exactly 1 volume mount for isolated preview, got %d", volumeCount)
+	}
+}
+
+func TestBuildArgs_IsolatedPreview_RejectsExtraVolumes(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := &entity.DockerSandboxConfig{
+		IsolatedPreview: true,
+		ExtraVolumes:    []string{"/tmp/host:/tmp/container"},
+	}
+	_, err := BuildArgs(tempDir, entity.ModelClaudeCode, cfg, []string{"echo", "hi"})
+	if err == nil {
+		t.Fatal("expected error rejecting ExtraVolumes in isolated preview mode, got nil")
+	}
+	if !strings.Contains(err.Error(), "rejects ExtraVolumes") {
+		t.Fatalf("expected 'rejects ExtraVolumes' error, got: %v", err)
+	}
+}
+
+func TestBuildArgs_IsolatedPreview_RejectsCredentialMounts(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := &entity.DockerSandboxConfig{
+		IsolatedPreview:  true,
+		CredentialMounts: []string{"/host/cred:/root/.cred"},
+	}
+	_, err := BuildArgs(tempDir, entity.ModelClaudeCode, cfg, []string{"echo", "hi"})
+	if err == nil {
+		t.Fatal("expected error rejecting CredentialMounts in isolated preview mode, got nil")
+	}
+	if !strings.Contains(err.Error(), "rejects CredentialMounts") {
+		t.Fatalf("expected 'rejects CredentialMounts' error, got: %v", err)
+	}
+}
+
+func TestBuildArgs_IsolatedPreview_RejectsDockerSocket(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := &entity.DockerSandboxConfig{
+		IsolatedPreview: true,
+		ExtraEnv:        []string{"DOCKER_SOCKET=/var/run/docker.sock"},
+	}
+	_, err := BuildArgs(tempDir, entity.ModelClaudeCode, cfg, []string{"echo", "hi"})
+	if err == nil {
+		t.Fatal("expected error rejecting docker.sock in isolated preview mode, got nil")
+	}
+	if !strings.Contains(err.Error(), "strictly forbids Docker socket") {
+		t.Fatalf("expected 'strictly forbids Docker socket' error, got: %v", err)
+	}
+}
+

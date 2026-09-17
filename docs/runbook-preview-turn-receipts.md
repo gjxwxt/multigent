@@ -79,9 +79,9 @@ Preview Copilot Turn Receipts 在人工审核阶段（`human_review` 节点）�
 
 ---
 
-## 4. REVERT_FAILED 故障排查与恢复 SOP
+## 4. REVERT_FAILED 故障排查与人工处置 SOP
 
-当回执进入 `REVERT_FAILED` 时，表明逆向补丁应用失败、Git 合并冲突或服务异常崩溃。系统会保持槽位加锁（Fail-Closed），防止后续操作造成代码二次污染。
+当回执进入 `REVERT_FAILED` 时，表明逆向补丁应用失败、Git 合并冲突或收编提交失败。系统对任务槽位实行 **Fail-Closed 永久加锁**：在此状态下，系统**严禁任何新的 Turn 写入或租赁超时接管**，杜绝并发覆写与代码污染。同时，系统**不暴露任何自动恢复接口**，必须由开发或运维人员人工介入排查。
 
 ### 排查步骤
 1. **获取故障回执信息**：
@@ -89,15 +89,14 @@ Preview Copilot Turn Receipts 在人工审核阶段（`human_review` 节点）�
    - 检查 `status`（`REVERT_FAILED`）及 `failureReason` 错误原因。
    - 记录 `turnId`、`baselineCommit`、`preCommitSHA`、`commitIntentId`。
 2. **检查物理快照目录**：
-   快照安全保存在项目 Git 根目录下的 `.git/mg-turns/<taskId>/<turnId>/`：
+   快照物理保存在项目 Git 根目录下的 `.multigent/turns/<taskId>/<turnId>/snapshot/`：
    ```text
-   .git/mg-turns/<taskId>/<turnId>/
-   ├── preimages/      # 修改前文件基线
-   └── postimages/     # 修改后文件副本
+   .multigent/turns/<taskId>/<turnId>/snapshot/
+   ├── <modified_files...>      # 该回合修改时的完整文件快照
    ```
    快照完整保留，绝不被自动删除。
 3. **查看当前 Worktree 状态**：
-   在任务对应的 Worktree 目录下执行：
+   在任务对应的 Worktree 目录下执行非破坏性检查：
    ```bash
    git status --porcelain
    git diff
@@ -105,19 +104,30 @@ Preview Copilot Turn Receipts 在人工审核阶段（`human_review` 节点）�
    ```
    确认是否有未提交的手工修改或冲突残留。
 
-### 恢复操作方案
-- **场景 A：人工确认放弃该回合修改并恢复干净基线**
-  1. 在 Worktree 中重置到基线：
+### 人工处置方案
+> [!CAUTION]
+> **严禁执行全局破坏性命令**（例如 `git reset --hard HEAD` 或 `git clean -fd`），否则会误删同一 Worktree 内其他未提交的手工修改或未跟踪的工作文件。
+
+- **场景 A：人工确认放弃该回合修改并还原代码**
+  1. 依据快照与 Git diff，逐文件确认受影响的文件路径：
      ```bash
-     git reset --hard HEAD
-     git clean -fd
+     # 逐路径比对工作区与快照
+     diff -u .multigent/turns/<taskId>/<turnId>/snapshot/<path_to_file> <path_to_file>
      ```
-  2. 重启 Multigent 服务或通过运维脚本调用恢复接口，系统启动扫描自愈机制会将无法归因的异常回合安全重置或终结。
+  2. 针对受影响的文件，使用精准的单文件命令还原至基线版本：
+     ```bash
+     git checkout HEAD -- <path_to_file>
+     ```
+  3. 若该回合产生了新增文件，逐个确认后手工删除对应的新增文件：
+     ```bash
+     rm <path_to_unwanted_new_file>
+     ```
+  4. 确认工作树恢复整洁且无冲突后，由具备管理权限的运维人员在数据库或后台人工解除任务槽位占用。
 - **场景 B：审核收编时由于 Git 冲突失败**
   1. 检查 `failureReason` 中的冲突提示。
   2. 人工在 Worktree 中解决代码冲突并完成提交：
      ```bash
-     git add -A
+     git add <conflicted_files...>
      git commit -m "chore(review): resolve conflict for task <taskId>"
      ```
   3. 再次在工作流界面点击“通过审核”，系统识别干净工作树后将自动完成任务流转。

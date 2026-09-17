@@ -280,6 +280,30 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 		if meta.Sandbox == nil || meta.Sandbox.Provider == "" || meta.Sandbox.Provider == entity.SandboxNone {
 			return nil, errors.New("preview copilot requires an isolated container sandbox; host execution is forbidden")
 		}
+		if meta.Sandbox.Provider != entity.SandboxDocker {
+			return nil, fmt.Errorf("preview copilot requires docker sandbox, got %q", meta.Sandbox.Provider)
+		}
+		if len(meta.Sandbox.Mounts) > 0 {
+			return nil, fmt.Errorf("preview copilot isolated run rejects custom mounts: %d mounts configured", len(meta.Sandbox.Mounts))
+		}
+		if meta.Sandbox.Docker != nil {
+			for _, v := range meta.Sandbox.Docker.ExtraVolumes {
+				if strings.Contains(v, "docker.sock") {
+					return nil, errors.New("preview copilot isolated run strictly forbids Docker socket")
+				}
+			}
+			for _, e := range meta.Sandbox.Docker.ExtraEnv {
+				if strings.Contains(e, "docker.sock") {
+					return nil, errors.New("preview copilot isolated run strictly forbids Docker socket in environment")
+				}
+			}
+			if len(meta.Sandbox.Docker.ExtraVolumes) > 0 {
+				return nil, fmt.Errorf("preview copilot isolated run rejects ExtraVolumes: %v", meta.Sandbox.Docker.ExtraVolumes)
+			}
+			if len(meta.Sandbox.Docker.CredentialMounts) > 0 {
+				return nil, fmt.Errorf("preview copilot isolated run rejects CredentialMounts: %v", meta.Sandbox.Docker.CredentialMounts)
+			}
+		}
 	}
 
 	if meta.Sandbox != nil && meta.Sandbox.Provider != entity.SandboxNone {
@@ -290,39 +314,67 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 		if err := provider.Available(); err != nil {
 			return nil, err
 		}
-		runtimeCfg := cloneRuntimeCfg(meta.Sandbox)
-		r.applyProjectRuntimeProfile(project, runtimeCfg)
+		var (
+			runtimeCfg *entity.SandboxConfig
+			mounts     []entity.RuntimeMount
+		)
+		if isolatedPreviewRun {
+			dockerCfg := &entity.DockerSandboxConfig{
+				IsolatedPreview:   true,
+				NoAutoCredentials: true,
+			}
+			if meta.Sandbox.Docker != nil {
+				dockerCfg.Image = meta.Sandbox.Docker.Image
+				dockerCfg.Profile = meta.Sandbox.Docker.Profile
+				dockerCfg.NetworkMode = meta.Sandbox.Docker.NetworkMode
+				dockerCfg.MemoryMB = meta.Sandbox.Docker.MemoryMB
+				dockerCfg.CPUs = meta.Sandbox.Docker.CPUs
+				dockerCfg.RunAsHostUser = meta.Sandbox.Docker.RunAsHostUser
+				dockerCfg.ExtraEnv = append([]string(nil), meta.Sandbox.Docker.ExtraEnv...)
+			}
+			if dockerCfg.NetworkMode == "" {
+				dockerCfg.NetworkMode = "none"
+			}
+			runtimeCfg = &entity.SandboxConfig{
+				Provider:    meta.Sandbox.Provider,
+				Image:       meta.Sandbox.Image,
+				NetworkMode: dockerCfg.NetworkMode,
+				Resources:   meta.Sandbox.Resources,
+				AgentCLI:    meta.Sandbox.AgentCLI,
+				Docker:      dockerCfg,
+			}
+			r.applyProjectRuntimeProfile(project, runtimeCfg)
+			mounts = nil
+		} else {
+			runtimeCfg = cloneRuntimeCfg(meta.Sandbox)
+			r.applyProjectRuntimeProfile(project, runtimeCfg)
+			mounts = append([]entity.RuntimeMount(nil), runtimeCfg.Mounts...)
+			mounts = r.appendWorkspaceFilesMount(mounts, meta.Sandbox.Provider, runtimeCfg)
+			r.addRuntimeDockerSystemMounts(runtimeCfg)
+		}
 		agentCLI := agentcli.Effective(model, runtimeCfg.AgentCLI)
 		processRuntimeEnv := runtimeControlEnvForProvider(runtimeEnv, meta.Sandbox.Provider, execAgentDir)
 		effectiveEnv = mergeEnv(effectiveEnv, processRuntimeEnv)
 		injectProviderEnvIntoRuntime(runtimeCfg, agentEnv)
 		injectRuntimeControlEnvIntoRuntime(runtimeCfg, processRuntimeEnv)
-		var mounts []entity.RuntimeMount
-		if isolatedPreviewRun {
-			// Zero trust: preview copilot in isolated clone runs with strictly NO custom mounts and NO host system mounts
-			mounts = nil
-		} else {
-			mounts = append([]entity.RuntimeMount(nil), runtimeCfg.Mounts...)
-			mounts = r.appendWorkspaceFilesMount(mounts, meta.Sandbox.Provider, runtimeCfg)
-			r.addRuntimeDockerSystemMounts(runtimeCfg)
-		}
 		containerPromptFile := containerRuntimePath(promptFile, execAgentDir)
 		remappedInner := remapPromptFile(innerArgs, promptFile, containerPromptFile)
 		remappedInner = adaptSandboxArgs(model, remappedInner)
 
 		var err error
 		executable, args, err = provider.Command(runenv.ProcessSpec{
-			WorkspaceRoot: r.root,
-			Project:       project,
-			Agent:         agentName,
-			AgentDir:      execAgentDir,
-			Model:         model,
-			Command:       remappedInner,
-			Env:           agentEnv,
-			Runtime:       runtimeCfg,
-			AgentCLI:      agentCLI,
-			Mounts:        mounts,
-			Limits:        runtimeCfg.Resources,
+			WorkspaceRoot:   r.root,
+			Project:         project,
+			Agent:           agentName,
+			AgentDir:        execAgentDir,
+			Model:           model,
+			Command:         remappedInner,
+			Env:             agentEnv,
+			Runtime:         runtimeCfg,
+			AgentCLI:        agentCLI,
+			Mounts:          mounts,
+			Limits:          runtimeCfg.Resources,
+			IsolatedPreview: isolatedPreviewRun,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("runtime %s: build command: %w", meta.Sandbox.Provider, err)

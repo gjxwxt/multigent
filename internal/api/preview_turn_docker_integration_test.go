@@ -10,12 +10,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/multigent/multigent/internal/agentdir"
+	controldb "github.com/multigent/multigent/internal/db"
+	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/previewreceipt"
 	"github.com/multigent/multigent/internal/secretbox"
+	"github.com/multigent/multigent/internal/store"
+	"github.com/multigent/multigent/internal/taskstore"
 )
 
 // TestPreviewTurn_DockerSandboxExecution_RealContainer validates the end-to-end
-// preview turn lifecycle executed inside a real Docker container.
+// preview turn lifecycle executed through the REAL production runner chain:
+// previewDefaultAgentRunner -> multigent exec -> runner.Runner -> runenv.DockerProvider -> sandbox.BuildArgs -> real Docker container.
+//
 // This is an explicit opt-in integration test. It is skipped if MULTIGENT_RUN_DOCKER_INTEGRATION!=1
 // or if MULTIGENT_PREVIEW_DOCKER_TEST_IMAGE is not set / not available locally.
 func TestPreviewTurn_DockerSandboxExecution_RealContainer(t *testing.T) {
@@ -48,7 +55,72 @@ func TestPreviewTurn_DockerSandboxExecution_RealContainer(t *testing.T) {
 
 	t.Setenv(secretbox.EnvKey, "test-master-key-for-preview-32b!!")
 
-	// 1. Setup local git repo
+	// 1. Compile real multigent binary for the test
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	multigentBin := filepath.Join(binDir, "multigent")
+	buildCmd := exec.Command("go", "build", "-o", multigentBin, "./cmd/multigent")
+	buildCmd.Dir = repoRoot
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("compile multigent binary: %v (%s)", err, string(out))
+	}
+
+	// 2. Setup Server with shared SQLite control DB
+	workspaceRoot := filepath.Join(t.TempDir(), "workspace")
+	t.Setenv("MULTIGENT_CONTROL_DATA_DIR", workspaceRoot)
+	if err := os.MkdirAll(filepath.Join(workspaceRoot, ".multigent"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceRoot, ".multigent", "agency.yaml"), []byte("name: docker-test-workspace\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(workspaceRoot, ".multigent", "multigent.db")
+	db, err := controldb.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	st := store.NewDB(workspaceRoot, db)
+	ts := taskstore.NewDB(workspaceRoot, db)
+	s := &Server{
+		root:            workspaceRoot,
+		controlDB:       db,
+		st:              st,
+		ts:              ts,
+		users:           newUserStore(db),
+		agentDirectory:  agentdir.New(db),
+		previewSessions: make(map[string]*previewChatSession),
+		sched: &SchedulerManager{
+			binPath: multigentBin,
+			root:    workspaceRoot,
+		},
+	}
+	s.triggers = newTriggerManager(workspaceRoot, multigentBin, ts, s.controlDB)
+
+	workspaceID, err := s.currentWorkspaceID()
+	if err != nil {
+		t.Fatalf("workspace id: %v", err)
+	}
+	if err := s.controlDB.UpsertWorkspace(controldb.Workspace{
+		ID:   workspaceID,
+		Name: "Docker Test Workspace",
+		Slug: "docker-test-workspace",
+		Root: workspaceRoot,
+	}); err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+
+	project := "proj-docker-integration"
+	taskID := "task-docker-001"
+	if err := st.SaveProject(project, &entity.Project{Name: project}); err != nil {
+		t.Fatalf("save project: %v", err)
+	}
+
+	// 3. Setup local git repo
 	gitRoot := t.TempDir()
 	runGit := func(args ...string) string {
 		t.Helper()
@@ -74,60 +146,188 @@ func TestPreviewTurn_DockerSandboxExecution_RealContainer(t *testing.T) {
 	runGit("commit", "-m", "initial commit")
 	baseSHA := runGit("rev-parse", "HEAD")
 
-	// 2. Setup Server, Store & TurnEngine
-	s, workspaceID := newConnectionGrantPolicyServer(t)
+	// 4. Configure agent with isolated Docker sandbox
+	agentName := "docker-dev"
+	agentMeta := &entity.AgentMeta{
+		Name:       agentName,
+		Project:    project,
+		Model:      entity.ModelGenericCLI,
+		RunCommand: "sh -c 'echo \"// modified by docker agent\" >> /workspace/app.js'",
+		Sandbox: &entity.SandboxConfig{
+			Provider: entity.SandboxDocker,
+			Docker: &entity.DockerSandboxConfig{
+				Image:       testImage,
+				NetworkMode: "none",
+			},
+		},
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	runtimeCfgJSON := encodeAgentWorkerRuntimeConfig(agentWorkerRuntimeConfig{
+		Sandbox:    agentMeta.Sandbox,
+		RunCommand: agentMeta.RunCommand,
+	})
+	if err := s.controlDB.UpsertAgentWorker(controldb.AgentWorker{
+		ID:                "aw-" + agentName,
+		WorkspaceID:       workspaceID,
+		Name:              agentName,
+		DisplayName:       agentName,
+		Model:             "custom",
+		Status:            "available",
+		RuntimeConfigJSON: runtimeCfgJSON,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}); err != nil {
+		t.Fatalf("upsert agent worker: %v", err)
+	}
+	if err := s.controlDB.UpsertProjectMembership(controldb.ProjectMembership{
+		ID:          "pm-" + agentName,
+		WorkspaceID: workspaceID,
+		ProjectID:   project,
+		MemberType:  "agent_worker",
+		MemberID:    "aw-" + agentName,
+		Title:       agentName,
+		Role:        "developer",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("upsert project membership: %v", err)
+	}
+
+	// 5. Test fail-closed validation of sandbox configuration
+	t.Run("FailClosed_ExtraVolumesRejected", func(t *testing.T) {
+		badAgent := "bad-extra-vol"
+		badMeta := &entity.AgentMeta{
+			Name:       badAgent,
+			Project:    project,
+			Model:      entity.ModelGenericCLI,
+			RunCommand: "echo test",
+			Sandbox: &entity.SandboxConfig{
+				Provider: entity.SandboxDocker,
+				Docker: &entity.DockerSandboxConfig{
+					Image:        testImage,
+					ExtraVolumes: []string{"/tmp:/tmp"},
+				},
+			},
+		}
+		_ = s.controlDB.UpsertAgentWorker(controldb.AgentWorker{
+			ID:                "aw-" + badAgent,
+			WorkspaceID:       workspaceID,
+			Name:              badAgent,
+			Model:             "custom",
+			RuntimeConfigJSON: encodeAgentWorkerRuntimeConfig(agentWorkerRuntimeConfig{Sandbox: badMeta.Sandbox, RunCommand: badMeta.RunCommand}),
+			CreatedAt:         now,
+			UpdatedAt:         now,
+		})
+		_ = s.controlDB.UpsertProjectMembership(controldb.ProjectMembership{
+			ID:          "pm-" + badAgent,
+			WorkspaceID: workspaceID,
+			ProjectID:   project,
+			MemberType:  "agent_worker",
+			MemberID:    "aw-" + badAgent,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		})
+		badRunner := s.newPreviewAgentRunner(workspaceID, project, badAgent, "http://127.0.0.1:27892")
+		err := badRunner.RunAgent(context.Background(), t.TempDir(), "test prompt")
+		if err == nil || !strings.Contains(err.Error(), "rejects ExtraVolumes") {
+			t.Fatalf("expected error rejecting ExtraVolumes, got: %v", err)
+		}
+	})
+
+	t.Run("FailClosed_DockerSocketRejected", func(t *testing.T) {
+		badAgent := "bad-docker-sock"
+		badMeta := &entity.AgentMeta{
+			Name:       badAgent,
+			Project:    project,
+			Model:      entity.ModelGenericCLI,
+			RunCommand: "echo test",
+			Sandbox: &entity.SandboxConfig{
+				Provider: entity.SandboxDocker,
+				Docker: &entity.DockerSandboxConfig{
+					Image:        testImage,
+					ExtraVolumes: []string{"/var/run/docker.sock:/var/run/docker.sock"},
+				},
+			},
+		}
+		_ = s.controlDB.UpsertAgentWorker(controldb.AgentWorker{
+			ID:                "aw-" + badAgent,
+			WorkspaceID:       workspaceID,
+			Name:              badAgent,
+			Model:             "custom",
+			RuntimeConfigJSON: encodeAgentWorkerRuntimeConfig(agentWorkerRuntimeConfig{Sandbox: badMeta.Sandbox, RunCommand: badMeta.RunCommand}),
+			CreatedAt:         now,
+			UpdatedAt:         now,
+		})
+		_ = s.controlDB.UpsertProjectMembership(controldb.ProjectMembership{
+			ID:          "pm-" + badAgent,
+			WorkspaceID: workspaceID,
+			ProjectID:   project,
+			MemberType:  "agent_worker",
+			MemberID:    "aw-" + badAgent,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		})
+		badRunner := s.newPreviewAgentRunner(workspaceID, project, badAgent, "http://127.0.0.1:27892")
+		err := badRunner.RunAgent(context.Background(), t.TempDir(), "test prompt")
+		if err == nil || !strings.Contains(err.Error(), "strictly forbids Docker socket") {
+			t.Fatalf("expected error rejecting Docker socket, got: %v", err)
+		}
+	})
+
+	t.Run("FailClosed_CredentialMountsRejected", func(t *testing.T) {
+		badAgent := "bad-cred-mounts"
+		badMeta := &entity.AgentMeta{
+			Name:       badAgent,
+			Project:    project,
+			Model:      entity.ModelGenericCLI,
+			RunCommand: "echo test",
+			Sandbox: &entity.SandboxConfig{
+				Provider: entity.SandboxDocker,
+				Docker: &entity.DockerSandboxConfig{
+					Image:            testImage,
+					CredentialMounts: []string{"/host:/root/.cred"},
+				},
+			},
+		}
+		_ = s.controlDB.UpsertAgentWorker(controldb.AgentWorker{
+			ID:                "aw-" + badAgent,
+			WorkspaceID:       workspaceID,
+			Name:              badAgent,
+			Model:             "custom",
+			RuntimeConfigJSON: encodeAgentWorkerRuntimeConfig(agentWorkerRuntimeConfig{Sandbox: badMeta.Sandbox, RunCommand: badMeta.RunCommand}),
+			CreatedAt:         now,
+			UpdatedAt:         now,
+		})
+		_ = s.controlDB.UpsertProjectMembership(controldb.ProjectMembership{
+			ID:          "pm-" + badAgent,
+			WorkspaceID: workspaceID,
+			ProjectID:   project,
+			MemberType:  "agent_worker",
+			MemberID:    "aw-" + badAgent,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		})
+		badRunner := s.newPreviewAgentRunner(workspaceID, project, badAgent, "http://127.0.0.1:27892")
+		err := badRunner.RunAgent(context.Background(), t.TempDir(), "test prompt")
+		if err == nil || !strings.Contains(err.Error(), "rejects CredentialMounts") {
+			t.Fatalf("expected error rejecting CredentialMounts, got: %v", err)
+		}
+	})
+
+	// 6. Execute turn through the REAL production runner chain
 	store := s.receiptStoreForWorkspace(workspaceID)
 	if store == nil {
 		t.Fatal("receipt store unavailable for workspace")
 	}
 	engine := previewreceipt.NewTurnEngine(store)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	project := "proj-docker-integration"
-	taskID := "task-docker-001"
+	// Real production preview runner
+	prodRunner := s.newPreviewAgentRunner(workspaceID, project, agentName, "http://127.0.0.1:27892")
 
-	// 3. Define deterministic, zero-network Docker runner and verify mount arguments
-	dockerRunner := previewreceipt.AgentRunnerFunc(func(ctx context.Context, cloneDir string, prompt string) error {
-		// Strict invariant checks:
-		// cloneDir must be isolated and must not be gitRoot
-		if cloneDir == gitRoot || strings.HasPrefix(cloneDir, gitRoot+string(filepath.Separator)) {
-			return fmt.Errorf("isolation breach: cloneDir %s is inside gitRoot %s", cloneDir, gitRoot)
-		}
-
-		mountSpec := fmt.Sprintf("%s:/workspace:rw", cloneDir)
-		dockerArgs := []string{
-			"run", "--rm",
-			"--network", "none",
-			"-v", mountSpec,
-			"-w", "/workspace",
-			testImage,
-			"sh", "-c", "echo \"// modified by docker agent\" >> /workspace/app.js",
-		}
-
-		// Security assertion on argv:
-		for _, arg := range dockerArgs {
-			if strings.Contains(arg, "/var/run/docker.sock") {
-				return fmt.Errorf("security invariant violated: docker.sock mounted: %s", arg)
-			}
-			if strings.HasPrefix(arg, gitRoot+":") {
-				return fmt.Errorf("security invariant violated: host worktree mounted directly: %s", arg)
-			}
-			if arg == "/:/workspace" || strings.HasPrefix(arg, "/:/") {
-				return fmt.Errorf("security invariant violated: host root mounted: %s", arg)
-			}
-		}
-
-		cmd := exec.CommandContext(ctx, dockerPath, dockerArgs...)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("container execution failed: %w (output: %s)", err, string(out))
-		}
-		return nil
-	})
-
-	// 4. Execute turn inside real Docker container
 	turn, err := engine.ExecuteTurn(ctx, previewreceipt.ExecuteTurnParams{
 		WorkspaceID:    workspaceID,
 		Project:        project,
@@ -136,10 +336,10 @@ func TestPreviewTurn_DockerSandboxExecution_RealContainer(t *testing.T) {
 		WorktreeDir:    gitRoot,
 		Prompt:         "deterministic docker prompt",
 		Actor:          "docker-tester",
-		Runner:         dockerRunner,
+		Runner:         prodRunner,
 	})
 	if err != nil {
-		t.Fatalf("ExecuteTurn in container failed: %v", err)
+		t.Fatalf("ExecuteTurn through production runner failed: %v", err)
 	}
 
 	if turn.Status != previewreceipt.StatusCaptured {
@@ -148,12 +348,18 @@ func TestPreviewTurn_DockerSandboxExecution_RealContainer(t *testing.T) {
 	if !strings.Contains(turn.DisplayDiff, "+// modified by docker agent") {
 		t.Fatalf("displayDiff missing expected container modification: %s", turn.DisplayDiff)
 	}
+
+	// 7. Verify snapshot directory exists under .multigent/turns/<taskID>/<turnID>/snapshot
 	snapDir := previewreceipt.TurnSnapshotDir(gitRoot, taskID, turn.TurnID)
 	if _, err := os.Stat(snapDir); err != nil {
-		t.Fatalf("expected snapshot directory to exist: %v", err)
+		t.Fatalf("expected snapshot directory to exist at %s: %v", snapDir, err)
+	}
+	snapshotAppFile := filepath.Join(snapDir, "app.js")
+	if snapContent, err := os.ReadFile(snapshotAppFile); err != nil || !strings.Contains(string(snapContent), "// modified by docker agent") {
+		t.Fatalf("snapshot app.js missing container modification: %v (content: %s)", err, string(snapContent))
 	}
 
-	// 5. Review & Commit flow
+	// 8. Review & Commit flow
 	intentID := fmt.Sprintf("review-docker-%d", time.Now().UnixNano())
 	committing, err := engine.PrepareCommitReceipts(ctx, previewreceipt.PrepareCommitReceiptsParams{
 		Project:        project,
@@ -189,7 +395,7 @@ func TestPreviewTurn_DockerSandboxExecution_RealContainer(t *testing.T) {
 		t.Fatalf("FinalizeCommitReceipts failed: %v", err)
 	}
 
-	// 6. Verify terminal state
+	// 9. Verify terminal state
 	finalRec, err := store.Get(ctx, project, taskID, turn.TurnID)
 	if err != nil {
 		t.Fatal(err)
