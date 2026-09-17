@@ -13,17 +13,33 @@ if (!match) {
 }
 
 const rawInspectorScript = match[1];
-const PORT = 28991;
-const CONSOLE_ORIGIN = `http://127.0.0.1:${PORT}`;
-const PREVIEW_ORIGIN = `http://127.0.0.1:${PORT}`;
+// Two completely distinct Origins (different ports enforce browser cross-origin boundaries)
+const CONSOLE_PORT = 28991;
+const PREVIEW_PORT = 28992;
+const CONSOLE_ORIGIN = `http://127.0.0.1:${CONSOLE_PORT}`;
+const PREVIEW_ORIGIN = `http://127.0.0.1:${PREVIEW_PORT}`;
 
-// Format template with console origin (Go uses %q which adds double quotes)
+// Injected script in preview iframe is configured with expectedConsoleOrigin
 const injectedScript = rawInspectorScript.replace('%q', JSON.stringify(CONSOLE_ORIGIN));
 
-// 2. Start HTTP server
-const server = http.createServer((req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host}`);
-  
+// 2. Transpile web/src/lib/domTarget.ts so test harness shares EXACT source code without duplication
+const tsModule = await import(path.resolve('web/node_modules/typescript/lib/typescript.js'));
+const ts = tsModule.default || tsModule;
+const tsSource = await fs.readFile(path.resolve('web/src/lib/domTarget.ts'), 'utf8');
+const { outputText: domTargetJs } = ts.transpileModule(tsSource, {
+  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 }
+});
+
+// 3. Start Console HTTP server (origin: CONSOLE_ORIGIN)
+const consoleServer = http.createServer((req, res) => {
+  const url = new URL(req.url, CONSOLE_ORIGIN);
+
+  if (url.pathname === '/domTarget.js') {
+    res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
+    res.end(domTargetJs);
+    return;
+  }
+
   if (url.pathname === '/parent') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(`<!DOCTYPE html>
@@ -31,83 +47,31 @@ const server = http.createServer((req, res) => {
 <head>
   <meta charset="utf-8">
   <title>PreviewDrawer Parent Harness</title>
-  <script type="module">
-    // EXACT decodeDOMTarget from PreviewDrawer.tsx
-    const SAFE_TAG_REGEX = /^[a-z][a-z0-9-]{0,31}$/;
-    const SAFE_ID_REGEX = /^[A-Za-z][A-Za-z0-9_:-]{0,63}$/;
-    const SAFE_ROLE_TYPE_REGEX = /^[a-zA-Z0-9_\\-]{1,32}$/;
-    const SAFE_SELECTOR_SEGMENT_REGEX = /^[a-z][a-z0-9-]{0,31}(?::nth-of-type\\(\\d+\\))?$/;
-
-    export function decodeDOMTarget(raw) {
-      if (!raw || typeof raw !== 'object') return null;
-      const obj = raw;
-
-      const rawTagName = typeof obj.tagName === 'string' && obj.tagName.trim()
-        ? obj.tagName.trim().toLowerCase()
-        : (typeof obj.tag === 'string' ? obj.tag.trim().toLowerCase() : '');
-
-      if (!SAFE_TAG_REGEX.test(rawTagName)) {
-        return null;
-      }
-
-      if (typeof obj.tag === 'string') {
-        const rawTag = obj.tag.trim().toLowerCase();
-        if (!SAFE_TAG_REGEX.test(rawTag)) {
-          return null;
-        }
-      }
-
-      const selector = typeof obj.selector === 'string' ? obj.selector.trim() : '';
-      if (!selector) return null;
-      const segments = selector.split(' > ');
-      if (segments.length === 0 || segments.length > 20) return null;
-      for (const seg of segments) {
-        if (!SAFE_SELECTOR_SEGMENT_REGEX.test(seg)) {
-          return null;
-        }
-      }
-
-      const result = {
-        tag: rawTagName,
-        tagName: rawTagName,
-        selector,
-      };
-
-      if (typeof obj.id === 'string' && obj.id.trim()) {
-        const cleanId = obj.id.trim();
-        if (SAFE_ID_REGEX.test(cleanId)) {
-          result.id = cleanId;
-        }
-      }
-
-      if (typeof obj.role === 'string' && obj.role.trim()) {
-        const cleanRole = obj.role.trim();
-        if (SAFE_ROLE_TYPE_REGEX.test(cleanRole)) {
-          result.role = cleanRole;
-        }
-      }
-
-      if (typeof obj.type === 'string' && obj.type.trim()) {
-        const cleanType = obj.type.trim();
-        if (SAFE_ROLE_TYPE_REGEX.test(cleanType)) {
-          result.type = cleanType;
-        }
-      }
-
-      if (typeof obj.testId === 'string' && obj.testId.trim()) {
-        const cleanTestId = obj.testId.trim();
-        if (SAFE_ROLE_TYPE_REGEX.test(cleanTestId)) {
-          result.testId = cleanTestId;
-        }
-      }
-
-      return result;
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { padding: 20px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f8fafc; }
+    #preview-iframe {
+      position: absolute;
+      left: 20px;
+      top: 160px;
+      width: 600px;
+      height: 540px;
+      border: 2px solid #cbd5e1;
+      background: #ffffff;
+      border-radius: 6px;
     }
-
+  </style>
+  <script type="module">
+    // Load authoritative decodeDOMTarget directly from transpiled domTarget.ts
+    import { decodeDOMTarget } from '/domTarget.js';
     window.decodeDOMTarget = decodeDOMTarget;
 
     const previewOrigin = '${PREVIEW_ORIGIN}';
     window.testLogs = [];
+    window.inspectorMounted = false;
+    window.inspectorActive = false;
+    window.lastDecoded = null;
+
     function recordLog(msg) {
       window.testLogs.push(msg);
       const logsEl = document.getElementById('logs');
@@ -119,24 +83,53 @@ const server = http.createServer((req, res) => {
       console.log('[Parent Harness]', msg);
     }
 
+    // Explicit cross-origin isolation assertion helper
+    window.checkCrossOriginBlocked = function() {
+      const iframe = document.getElementById('preview-iframe');
+      let contentDocBlocked = false;
+      let contentWinBlocked = false;
+      try {
+        const d = iframe.contentDocument;
+        if (d === null) contentDocBlocked = true;
+      } catch(e) {
+        contentDocBlocked = true;
+      }
+      try {
+        const loc = iframe.contentWindow.location.href;
+        contentWinBlocked = false;
+      } catch(e) {
+        contentWinBlocked = true;
+      }
+      return { contentDocBlocked, contentWinBlocked };
+    };
+
     window.addEventListener('message', (e) => {
       if (!e || !e.data || typeof e.data !== 'object') return;
+      if (e.source === window) {
+        // Self window message (extensions/CDP internal), ignore
+        return;
+      }
       const iframeEl = document.getElementById('preview-iframe');
       if (!previewOrigin || e.origin !== previewOrigin) {
         recordLog('REJECTED_ORIGIN: ' + e.origin);
         return;
       }
       if (!iframeEl || (e.source !== iframeEl.contentWindow && e.source !== window.frames[0])) {
-        if (e.source === window) {
-          // Message from self (e.g. ego-browser internal / extensions), ignore silently
-          return;
-        }
-        recordLog('REJECTED_SOURCE: isContentWin=' + (e.source === iframeEl.contentWindow) + ' isFrames0=' + (e.source === window.frames[0]) + ' isSelf=' + (e.source === window) + ' data=' + JSON.stringify(e.data));
+        recordLog('REJECTED_SOURCE');
         return;
       }
 
       const t = e.data.type;
-      if (t === 'MG_DOM_SELECTED' && e.data.target) {
+      if (t === 'MG_INSPECTOR_MOUNTED') {
+        window.inspectorMounted = true;
+        recordLog('MG_INSPECTOR_MOUNTED');
+      } else if (t === 'MG_INSPECTOR_ACTIVE') {
+        window.inspectorActive = true;
+        recordLog('MG_INSPECTOR_ACTIVE');
+      } else if (t === 'MG_INSPECTOR_INACTIVE') {
+        window.inspectorActive = false;
+        recordLog('MG_INSPECTOR_INACTIVE');
+      } else if (t === 'MG_DOM_SELECTED' && e.data.target) {
         const decoded = decodeDOMTarget(e.data.target);
         if (decoded) {
           window.lastDecoded = decoded;
@@ -161,18 +154,26 @@ const server = http.createServer((req, res) => {
     };
   </script>
 </head>
-<body style="padding: 20px; font-family: sans-serif;">
-  <h2>Parent PreviewDrawer Harness</h2>
-  <button id="btn-inspect" onclick="startInspector()">选元素</button>
+<body>
+  <h2>Parent PreviewDrawer Harness (Console Origin: ${CONSOLE_ORIGIN})</h2>
+  <button id="btn-inspect" onclick="startInspector()" style="padding: 6px 12px; margin-top: 8px;">选元素</button>
   <div id="dom-pill" style="display:none; margin: 10px 0; padding: 4px 8px; border: 1px solid skyblue; background: #e0f2fe; border-radius: 4px;">
     🎯 @DOM <span id="pill-text" style="font-weight: bold; font-family: monospace;"></span>
   </div>
-  <div id="logs" style="font-family: monospace; font-size: 11px; margin-top: 10px; color: #555;"></div>
-  <iframe id="preview-iframe" src="/iframe" style="width: 100%; height: 350px; border: 1px solid #ccc; margin-top: 10px;"></iframe>
+  <div id="logs" style="font-family: monospace; font-size: 11px; margin-top: 8px; color: #555; height: 50px; overflow-y: auto;"></div>
+  <iframe id="preview-iframe" src="${PREVIEW_ORIGIN}/iframe"></iframe>
 </body>
 </html>`);
     return;
   }
+
+  res.writeHead(404);
+  res.end('Not Found');
+});
+
+// 4. Start Preview HTTP server (origin: PREVIEW_ORIGIN)
+const previewServer = http.createServer((req, res) => {
+  const url = new URL(req.url, PREVIEW_ORIGIN);
 
   if (url.pathname === '/iframe') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -183,17 +184,25 @@ const server = http.createServer((req, res) => {
   <title>Injected Preview Document</title>
   ${injectedScript}
   <style>
-    body { padding: 30px; font-family: sans-serif; }
-    .card { padding: 20px; border: 2px solid #6366f1; background: #eef2ff; margin: 15px 0; }
-    .btn { padding: 10px 20px; background: #0284c7; color: white; border: none; border-radius: 6px; cursor: pointer; }
-    p { color: #333; font-size: 16px; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { padding: 20px; font-family: sans-serif; position: relative; width: 100%; height: 100%; background: #ffffff; }
+    #save { position: absolute; left: 30px; top: 20px; width: 150px; height: 40px; background: #0284c7; color: white; border: none; border-radius: 6px; cursor: pointer; }
+    .card { position: absolute; left: 30px; top: 80px; width: 300px; height: 50px; padding: 12px; border: 2px solid #6366f1; background: #eef2ff; border-radius: 6px; }
+    p { position: absolute; left: 30px; top: 150px; width: 300px; height: 40px; color: #333; font-size: 16px; margin: 0; }
+    #btn-forge-tag { position: absolute; left: 30px; top: 210px; width: 220px; height: 35px; background: #ef4444; color: white; border: none; border-radius: 4px; cursor: pointer; }
+    #btn-forge-sel-id { position: absolute; left: 30px; top: 260px; width: 220px; height: 35px; background: #f97316; color: white; border: none; border-radius: 4px; cursor: pointer; }
+    #btn-forge-sel-class { position: absolute; left: 30px; top: 310px; width: 220px; height: 35px; background: #eab308; color: white; border: none; border-radius: 4px; cursor: pointer; }
   </style>
 </head>
 <body>
-  <h3>Preview Sandbox Content</h3>
   <button id="save" class="btn btn-primary" role="button" data-testid="save-button">Save Changes</button>
   <div class="card" role="region" data-testid="main-card">Card Component with class</div>
   <p>Plain text paragraph with no ID</p>
+
+  <!-- Native buttons inside child origin used to emit forged payloads to parent -->
+  <button id="btn-forge-tag" onclick="window.parent.postMessage({ type: 'MG_DOM_SELECTED', target: { tag: 'button#secret', tagName: 'button', selector: 'button:nth-of-type(1)' } }, '${CONSOLE_ORIGIN}')">Forge Tag: button#secret</button>
+  <button id="btn-forge-sel-id" onclick="window.parent.postMessage({ type: 'MG_DOM_SELECTED', target: { tag: 'button', tagName: 'button', selector: 'button#save' } }, '${CONSOLE_ORIGIN}')">Forge Sel: #id</button>
+  <button id="btn-forge-sel-class" onclick="window.parent.postMessage({ type: 'MG_DOM_SELECTED', target: { tag: 'div', tagName: 'div', selector: 'div.card' } }, '${CONSOLE_ORIGIN}')">Forge Sel: .class</button>
 </body>
 </html>`);
     return;
@@ -203,16 +212,20 @@ const server = http.createServer((req, res) => {
   res.end('Not Found');
 });
 
-await new Promise((resolve) => server.listen(PORT, '127.0.0.1', resolve));
-console.log(`Test server running at http://127.0.0.1:${PORT}`);
+await Promise.all([
+  new Promise((resolve) => consoleServer.listen(CONSOLE_PORT, '127.0.0.1', resolve)),
+  new Promise((resolve) => previewServer.listen(PREVIEW_PORT, '127.0.0.1', resolve)),
+]);
+console.log(`Console server running at ${CONSOLE_ORIGIN}`);
+console.log(`Preview server running at ${PREVIEW_ORIGIN}`);
 
 // 3. Launch ego-browser automation script to execute the browser regression
+// 5. Automation script for ego-browser
 const egoScript = `
 const task = await taskSpace("preview-dom-bridge-regression");
 const page = task.page("p1");
 await page.goto("${CONSOLE_ORIGIN}/parent");
 
-// Helper to wait for predicate in page
 async function poll(fn, timeoutMs = 4000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -225,31 +238,25 @@ async function poll(fn, timeoutMs = 4000) {
   throw new Error("Polling timeout for: " + fn.toString());
 }
 
-// Wait for iframe to load completely
-await poll(() => {
-  const iframe = document.getElementById("preview-iframe");
-  return iframe && iframe.contentDocument && iframe.contentDocument.readyState === "complete";
-});
-console.log("Iframe loaded completely.");
+// 0. Wait for child iframe to mount and post MG_INSPECTOR_MOUNTED via cross-origin bridge
+await poll(() => window.inspectorMounted === true);
+console.log("Iframe mounted and bridge communication established.");
 
-// 1. Test button#save
-console.log("--- TEST 1: Click button#save inside iframe ---");
-await page.evaluate(() => {
-  window.startInspector();
-});
-await new Promise(r => setTimeout(r, 200));
+// 0.1 Explicitly assert cross-origin isolation
+const crossOriginCheck = await page.evaluate(() => window.checkCrossOriginBlocked());
+console.log("Cross-origin boundary assertion:", JSON.stringify(crossOriginCheck));
+if (!crossOriginCheck.contentDocBlocked || !crossOriginCheck.contentWinBlocked) {
+  throw new Error("Cross-origin security boundary failed: iframe contentDocument or window was accessible!");
+}
+console.log("PASS: Cross-origin security boundary verified (contentDocument and window access strictly blocked).");
 
-// Click button#save in iframe
-await page.evaluate(() => {
-  const iframe = document.getElementById("preview-iframe");
-  const doc = iframe.contentDocument;
-  const btn = doc.getElementById("save");
-  const rect = btn.getBoundingClientRect();
-  const x = rect.left + rect.width / 2;
-  const y = rect.top + rect.height / 2;
-  doc.dispatchEvent(new MouseEvent("mousemove", { clientX: x, clientY: y }));
-  btn.dispatchEvent(new MouseEvent("click", { clientX: x, clientY: y, bubbles: true }));
-});
+// 1. Test button#save via Chromium native mouse input (iframe: left=20, top=160; save: left=30, top=20, w=150, h=40 -> center=(125, 200))
+console.log("--- TEST 1: Click button#save inside iframe via page.mouse.click ---");
+await page.evaluate(() => window.startInspector());
+await poll(() => window.inspectorActive === true);
+
+await page.mouse.move(125, 200);
+await page.mouse.click(125, 200);
 
 await poll(() => document.getElementById("pill-text")?.textContent === "button#save");
 const decoded1 = await page.evaluate(() => window.lastDecoded);
@@ -258,23 +265,13 @@ if (decoded1.tag !== "button" || decoded1.tagName !== "button" || decoded1.id !=
   throw new Error("TEST 1 FAILED: expected tag=button, tagName=button, id=save, got " + JSON.stringify(decoded1));
 }
 
-// 2. Test div.card
-console.log("--- TEST 2: Click div.card inside iframe ---");
-await page.evaluate(() => {
-  window.startInspector();
-});
-await new Promise(r => setTimeout(r, 200));
+// 2. Test div.card via Chromium native mouse input (card: left=30, top=80, w=300, h=50 -> center=(200, 265))
+console.log("--- TEST 2: Click div.card inside iframe via page.mouse.click ---");
+await page.evaluate(() => window.startInspector());
+await poll(() => window.inspectorActive === true);
 
-await page.evaluate(() => {
-  const iframe = document.getElementById("preview-iframe");
-  const doc = iframe.contentDocument;
-  const div = doc.querySelector("div.card");
-  const rect = div.getBoundingClientRect();
-  const x = rect.left + rect.width / 2;
-  const y = rect.top + rect.height / 2;
-  doc.dispatchEvent(new MouseEvent("mousemove", { clientX: x, clientY: y }));
-  div.dispatchEvent(new MouseEvent("click", { clientX: x, clientY: y, bubbles: true }));
-});
+await page.mouse.move(200, 265);
+await page.mouse.click(200, 265);
 
 await poll(() => document.getElementById("pill-text")?.textContent === "div");
 const decoded2 = await page.evaluate(() => window.lastDecoded);
@@ -283,23 +280,13 @@ if (decoded2.tag !== "div" || decoded2.tagName !== "div" || decoded2.id !== unde
   throw new Error("TEST 2 FAILED: expected tag=div, tagName=div, id=undefined, got " + JSON.stringify(decoded2));
 }
 
-// 3. Test plain <p>
-console.log("--- TEST 3: Click plain <p> inside iframe ---");
-await page.evaluate(() => {
-  window.startInspector();
-});
-await new Promise(r => setTimeout(r, 200));
+// 3. Test plain <p> via Chromium native mouse input (para: left=30, top=150, w=300, h=40 -> center=(200, 330))
+console.log("--- TEST 3: Click plain <p> inside iframe via page.mouse.click ---");
+await page.evaluate(() => window.startInspector());
+await poll(() => window.inspectorActive === true);
 
-await page.evaluate(() => {
-  const iframe = document.getElementById("preview-iframe");
-  const doc = iframe.contentDocument;
-  const p = doc.querySelector("p");
-  const rect = p.getBoundingClientRect();
-  const x = rect.left + rect.width / 2;
-  const y = rect.top + rect.height / 2;
-  doc.dispatchEvent(new MouseEvent("mousemove", { clientX: x, clientY: y }));
-  p.dispatchEvent(new MouseEvent("click", { clientX: x, clientY: y, bubbles: true }));
-});
+await page.mouse.move(200, 330);
+await page.mouse.click(200, 330);
 
 await poll(() => document.getElementById("pill-text")?.textContent === "p");
 const decoded3 = await page.evaluate(() => window.lastDecoded);
@@ -308,15 +295,10 @@ if (decoded3.tag !== "p" || decoded3.tagName !== "p") {
   throw new Error("TEST 3 FAILED: expected tag=p, tagName=p, got " + JSON.stringify(decoded3));
 }
 
-// 4. Forged payload: tag: 'button#secret'
+// 4. Forged payload: tag: 'button#secret' emitted natively by clicking child button (center=(160, 387))
 console.log("--- TEST 4: Forged payload tag: button#secret ---");
-await page.evaluate(() => {
-  const iframe = document.getElementById("preview-iframe");
-  iframe.contentWindow.postMessage({
-    type: "MG_DOM_SELECTED",
-    target: { tag: "button#secret", tagName: "button", selector: "button:nth-of-type(1)" }
-  }, "${PREVIEW_ORIGIN}");
-});
+await page.mouse.move(160, 387);
+await page.mouse.click(160, 387);
 await new Promise(r => setTimeout(r, 300));
 const pillTextAfterForgedTag = await page.evaluate(() => document.getElementById("pill-text")?.textContent);
 console.log("Pill text after forged tag:", pillTextAfterForgedTag);
@@ -325,15 +307,10 @@ if (pillTextAfterForgedTag !== "p") {
 }
 console.log("PASS TEST 4: forged tag 'button#secret' successfully rejected fail-closed");
 
-// 5. Forged selector containing id: selector: 'button#save'
+// 5. Forged selector containing id: selector: 'button#save' (center=(160, 437))
 console.log("--- TEST 5: Forged selector containing #id ---");
-await page.evaluate(() => {
-  const iframe = document.getElementById("preview-iframe");
-  iframe.contentWindow.postMessage({
-    type: "MG_DOM_SELECTED",
-    target: { tag: "button", tagName: "button", selector: "button#save" }
-  }, "${PREVIEW_ORIGIN}");
-});
+await page.mouse.move(160, 437);
+await page.mouse.click(160, 437);
 await new Promise(r => setTimeout(r, 300));
 const pillTextAfterForgedSel1 = await page.evaluate(() => document.getElementById("pill-text")?.textContent);
 if (pillTextAfterForgedSel1 !== "p") {
@@ -341,15 +318,10 @@ if (pillTextAfterForgedSel1 !== "p") {
 }
 console.log("PASS TEST 5: forged selector with #id successfully rejected fail-closed");
 
-// 6. Forged selector containing class: selector: 'div.card'
+// 6. Forged selector containing class: selector: 'div.card' (center=(160, 487))
 console.log("--- TEST 6: Forged selector containing .class ---");
-await page.evaluate(() => {
-  const iframe = document.getElementById("preview-iframe");
-  iframe.contentWindow.postMessage({
-    type: "MG_DOM_SELECTED",
-    target: { tag: "div", tagName: "div", selector: "div.card" }
-  }, "${PREVIEW_ORIGIN}");
-});
+await page.mouse.move(160, 487);
+await page.mouse.click(160, 487);
 await new Promise(r => setTimeout(r, 300));
 const pillTextAfterForgedSel2 = await page.evaluate(() => document.getElementById("pill-text")?.textContent);
 if (pillTextAfterForgedSel2 !== "p") {
@@ -357,7 +329,19 @@ if (pillTextAfterForgedSel2 !== "p") {
 }
 console.log("PASS TEST 6: forged selector with .class successfully rejected fail-closed");
 
-console.log("ALL 6 BROWSER REGRESSION TESTS PASSED!");
+// 7. Forged message from untrusted origin (simulated via untrusted data URI iframe)
+console.log("--- TEST 7: Untrusted origin message ---");
+await page.evaluate(() => {
+  const badFrame = document.createElement('iframe');
+  badFrame.id = 'untrusted-attacker-iframe';
+  badFrame.style.display = 'none';
+  badFrame.src = 'data:text/html,<script>window.parent.postMessage({ type: "MG_DOM_SELECTED", target: { tag: "button", tagName: "button", selector: "button:nth-of-type(1)" } }, "*");<\/script>';
+  document.body.appendChild(badFrame);
+});
+await poll(() => window.testLogs && window.testLogs.some(l => l.startsWith("REJECTED_ORIGIN: null")));
+console.log("PASS TEST 7: untrusted origin postMessage rejected fail-closed");
+
+console.log("ALL 7 CROSS-ORIGIN BROWSER REGRESSION TESTS PASSED!");
 await task.finish({ keep: [] });
 `;
 
@@ -368,12 +352,12 @@ proc.stdin.write(egoScript);
 proc.stdin.end();
 
 proc.on('close', async (code) => {
-  server.close();
-  try { await fs.unlink('scripts/run_ego_regression.js'); } catch {}
+  consoleServer.close();
+  previewServer.close();
   if (code !== 0) {
     console.error(`ego-browser exited with code ${code}`);
     process.exit(code || 1);
   }
-  console.log('Browser regression suite completed successfully.');
+  console.log('True cross-origin browser regression suite completed successfully.');
   process.exit(0);
 });
