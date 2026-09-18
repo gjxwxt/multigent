@@ -1369,7 +1369,25 @@
       "targetContext": "Target Element Context",
       "selector": "Selector",
       "elementText": "Text/Value",
-      "parentContainer": "Parent Container"
+      "parentContainer": "Parent Container",
+      "sandbox": {
+        "btnText": "Data Sandbox",
+        "btnTitle": "Test Data Sandbox: Private DB, Fast Reset & Scenario Switching",
+        "panelTitle": "Test Data Sandbox",
+        "sqliteBadge": "SQLite Isolated",
+        "storageLabel": "Storage Path",
+        "scenarioLabel": "Test Scenario",
+        "scenarioDesc": "Select baseline datasets to verify edge cases",
+        "resetBtn": "Fast Reset (<100ms)",
+        "resetting": "Restoring baseline...",
+        "resetDesc": "Instantly wipe write drift and restore clean snapshot. Auto-reloads preview.",
+        "resetCount": "Reset {{count}} times",
+        "operatorRequired": "Project Operator role required to reset or switch scenario",
+        "resetSuccess": "Restored to clean baseline artifact in milliseconds",
+        "scenarioSuccess": "Switched scenario to: {{scenario}}",
+        "leaseInfo": "Lease",
+        "expiry": "{{mins}}m remaining"
+      }
     },
     "resources": {
       "title": "Task resources",

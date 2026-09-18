@@ -793,21 +793,27 @@ func TestMattermostDialogSubmit_RejectRework(t *testing.T) {
 
 	// Verify thread projection updated the card post with "打回修改"
 	foundUpdate := false
-	for _, p := range *receivedPosts {
-		if msg, ok := p["message"].(string); ok && strings.Contains(msg, "打回修改") {
-			foundUpdate = true
-			break
-		}
-		if props, ok := p["props"].(map[string]any); ok {
-			if atts, ok := props["attachments"].([]any); ok && len(atts) > 0 {
-				if att, ok := atts[0].(map[string]any); ok {
-					if text, ok := att["text"].(string); ok && strings.Contains(text, "打回修改") {
-						foundUpdate = true
-						break
+	for attempt := 0; attempt < 20; attempt++ {
+		for _, p := range *receivedPosts {
+			if msg, ok := p["message"].(string); ok && strings.Contains(msg, "打回修改") {
+				foundUpdate = true
+				break
+			}
+			if props, ok := p["props"].(map[string]any); ok {
+				if atts, ok := props["attachments"].([]any); ok && len(atts) > 0 {
+					if att, ok := atts[0].(map[string]any); ok {
+						if text, ok := att["text"].(string); ok && strings.Contains(text, "打回修改") {
+							foundUpdate = true
+							break
+						}
 					}
 				}
 			}
 		}
+		if foundUpdate {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	if !foundUpdate {
 		t.Fatalf("expected updated card post containing '打回修改', posts: %+v", *receivedPosts)

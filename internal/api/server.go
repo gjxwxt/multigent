@@ -688,6 +688,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/turns/{turnId}/preview/start", s.handlePostTaskPreviewTurnPreviewStart)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/turns/{turnId}/preview/stop", s.handlePostTaskPreviewTurnPreviewStop)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview/turns/{turnId}/preview/status", s.handleGetTaskPreviewTurnPreviewStatus)
+	// ── Test-Data Fixture Sandbox (Direction C Phase 2): private database state,
+	// fast reset (<100ms) and scenario switching. Main mux only (token auth);
+	// state-mutating reset and scenario switch routes enforce project operator.
+	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/fixture-sandbox", s.handleGetTaskFixtureSandbox)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/fixture-sandbox/reset", s.handleResetTaskFixtureSandbox)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/fixture-sandbox/scenario", s.handleSwitchTaskFixtureSandboxScenario)
 	mux.HandleFunc("GET /api/v1/integrations/gitlab/status", s.handleGitLabStatus)
 	mux.HandleFunc("GET /api/v1/integrations/gitlab/namespaces", s.handleGitLabNamespaces)
 	mux.HandleFunc("POST /api/v1/integrations/gitlab/projects", s.handleGitLabCreateProject)

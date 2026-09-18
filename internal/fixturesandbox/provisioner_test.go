@@ -163,5 +163,197 @@ func TestProvisionForPreviewContractLessWorktree(t *testing.T) {
 	if len(env) != 0 {
 		t.Fatalf("contract-less project must return empty env, got %v", env)
 	}
+
+	st, err := p.TaskStatus(context.Background(), "t-empty", "proj", root)
+	if err != nil {
+		t.Fatalf("TaskStatus error: %v", err)
+	}
+	if st.HasContract {
+		t.Fatalf("expected HasContract=false for empty worktree")
+	}
 }
+
+func writeContractWithScenarios(t *testing.T, root string) *Contract {
+	t.Helper()
+	dir := filepath.Join(root, ".multigent")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	doc := `{
+  "version": 1,
+  "engine": "sqlite",
+  "storage": "server/data/app.db",
+  "defaultFixtureVersion": "1.0.0",
+  "schemaFingerprintPaths": ["server/migrations/*.sql"],
+  "generator": {"command": "npm run db:seed:baseline", "timeoutSeconds": 60},
+  "scenarios": {
+    "default": {"description": "Standard baseline data", "command": "npm run db:seed:scenario -- --name default"},
+    "edge_cases": {"description": "Edge case records", "command": "npm run db:seed:scenario -- --name edge_cases"}
+  }
+}`
+	if err := os.WriteFile(filepath.Join(dir, "fixtures.json"), []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mig := filepath.Join(root, "server", "migrations")
+	if err := os.MkdirAll(mig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mig, "0001_baseline.sql"), []byte("CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT NOT NULL);\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadContract(root)
+	if err != nil {
+		t.Fatalf("load contract: %v", err)
+	}
+	return c
+}
+
+func TestProvisionerTaskStatusAndReset(t *testing.T) {
+	s, _ := newTestStore(t)
+	root := t.TempDir()
+	writeContractWithScenarios(t, root)
+	gen := fakeGenerator(`CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT NOT NULL); INSERT INTO items (id, label) VALUES (1, 'initial');`)
+	p := NewProvisioner(s, gen)
+
+	// Before provisioning: HasContract=true, activeScenario=default, no lease
+	status, err := p.TaskStatus(context.Background(), "t-task-1", "proj", root)
+	if err != nil {
+		t.Fatalf("TaskStatus: %v", err)
+	}
+	if !status.HasContract {
+		t.Fatalf("expected HasContract=true")
+	}
+	if status.ActiveScenario != "default" || status.LeaseID != "" {
+		t.Fatalf("unexpected unprovisioned status: %+v", status)
+	}
+	if len(status.AvailableScenarios) < 2 {
+		t.Fatalf("expected at least 2 scenarios, got %d", len(status.AvailableScenarios))
+	}
+
+	// Provision
+	env, err := p.ProvisionForPreview(context.Background(), "t-task-1", "proj", root)
+	if err != nil {
+		t.Fatalf("ProvisionForPreview: %v", err)
+	}
+	if len(env) != 1 {
+		t.Fatalf("expected 1 env var, got %v", env)
+	}
+
+	// Status after provisioning: lease present
+	status, err = p.TaskStatus(context.Background(), "t-task-1", "proj", root)
+	if err != nil {
+		t.Fatalf("TaskStatus after provision: %v", err)
+	}
+	if status.LeaseID == "" || status.State != StateActive || status.ResetCount != 0 {
+		t.Fatalf("unexpected status after provision: %+v", status)
+	}
+
+	// Mutate the private DB
+	dbPath := strings.TrimPrefix(env[0], "APP_DB_PATH=")
+	db, err := OpenPrivateDB(dbPath)
+	if err != nil {
+		t.Fatalf("open private db: %v", err)
+	}
+	db.Close()
+	// Overwrite with empty
+	if err := os.WriteFile(dbPath, []byte("corrupted"), 0o644); err != nil {
+		t.Fatalf("corrupt private db: %v", err)
+	}
+
+	// ResetTask
+	res, err := p.ResetTask(context.Background(), "t-task-1", "proj", root)
+	if err != nil {
+		t.Fatalf("ResetTask: %v", err)
+	}
+	if res.Lease.ResetCount != 1 {
+		t.Fatalf("expected ResetCount=1, got %d", res.Lease.ResetCount)
+	}
+
+	// Verify database was restored
+	dbRestored, err := OpenPrivateDB(res.DBPath)
+	if err != nil {
+		t.Fatalf("open restored db: %v", err)
+	}
+	defer dbRestored.Close()
+	var label string
+	if err := dbRestored.QueryRow("SELECT label FROM items WHERE id = 1").Scan(&label); err != nil {
+		t.Fatalf("query restored item: %v", err)
+	}
+	if label != "initial" {
+		t.Fatalf("expected item label 'initial', got %q", label)
+	}
+
+	// Verify status reports resetCount=1
+	status, err = p.TaskStatus(context.Background(), "t-task-1", "proj", root)
+	if err != nil {
+		t.Fatalf("TaskStatus after reset: %v", err)
+	}
+	if status.ResetCount != 1 {
+		t.Fatalf("expected status.ResetCount=1, got %d", status.ResetCount)
+	}
+}
+
+func TestProvisionerSwitchScenario(t *testing.T) {
+	s, _ := newTestStore(t)
+	root := t.TempDir()
+	writeContractWithScenarios(t, root)
+	gen := func(ctx context.Context, worktreeDir, argv string, timeout time.Duration) (string, error) {
+		out := filepath.Join(worktreeDir, "server", "data", "app.db")
+		_ = os.Remove(out)
+		_ = os.MkdirAll(filepath.Dir(out), 0o755)
+		db, err := sql.Open("sqlite", out)
+		if err != nil {
+			return "", err
+		}
+		defer db.Close()
+		sqlStmt := `CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT NOT NULL); INSERT INTO items (id, label) VALUES (1, 'default-label');`
+		if strings.Contains(argv, "edge_cases") {
+			sqlStmt = `CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT NOT NULL); INSERT INTO items (id, label) VALUES (1, 'edge-label');`
+		}
+		if _, err := db.Exec(sqlStmt); err != nil {
+			return "", err
+		}
+		return out, nil
+	}
+	p := NewProvisioner(s, gen)
+
+	// Provision default scenario
+	res1, err := p.ProvisionForPreview(context.Background(), "t-task-sc", "proj", root)
+	if err != nil {
+		t.Fatalf("provision default: %v", err)
+	}
+	if len(res1) != 1 {
+		t.Fatalf("expected 1 env var")
+	}
+
+	// Switch to edge_cases
+	res2, err := p.SwitchScenario(context.Background(), "t-task-sc", "proj", root, "edge_cases")
+	if err != nil {
+		t.Fatalf("switch to edge_cases: %v", err)
+	}
+	if res2.Lease.Scenario != "edge_cases" {
+		t.Fatalf("expected scenario edge_cases, got %s", res2.Lease.Scenario)
+	}
+
+	// Verify edge_cases data
+	db, err := OpenPrivateDB(res2.DBPath)
+	if err != nil {
+		t.Fatalf("open edge_cases db: %v", err)
+	}
+	defer db.Close()
+	var label string
+	if err := db.QueryRow("SELECT label FROM items WHERE id = 1").Scan(&label); err != nil {
+		t.Fatalf("query edge item: %v", err)
+	}
+	if label != "edge-label" {
+		t.Fatalf("expected 'edge-label', got %q", label)
+	}
+
+	// Reject undeclared scenario
+	if _, err := p.SwitchScenario(context.Background(), "t-task-sc", "proj", root, "nonexistent"); err == nil {
+		t.Fatalf("expected error switching to nonexistent scenario")
+	}
+}
+
+
 

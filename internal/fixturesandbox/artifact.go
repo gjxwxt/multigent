@@ -268,10 +268,11 @@ func (s *Store) Reset(leaseID string) (*ProvisionResult, error) {
 	if err := copyFile(artifactPath, dbPath); err != nil {
 		return rollback(fmt.Errorf("re-copy private db: %w", err))
 	}
-	if _, err := s.CompleteReset(leaseID, l.ArtifactDigest, l.TemplateSchemaDigest); err != nil {
+	updated, err := s.CompleteReset(leaseID, l.ArtifactDigest, l.TemplateSchemaDigest)
+	if err != nil {
 		return nil, fmt.Errorf("complete reset: %w (directory rebuilt; lease stuck in resetting)", err)
 	}
-	return &ProvisionResult{Lease: l, DBPath: dbPath, EnvVar: l.EnvVar, ArtifactDigest: l.ArtifactDigest}, nil
+	return &ProvisionResult{Lease: updated, DBPath: dbPath, EnvVar: l.EnvVar, ArtifactDigest: l.ArtifactDigest}, nil
 }
 
 // Reclaim tears down one expired lease: CAS active->reclaiming, then remove

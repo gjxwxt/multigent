@@ -6,8 +6,10 @@ import remarkGfm from 'remark-gfm'
 import {
   AlertCircle,
   ArrowLeft,
+  Check,
   Code2,
   Crosshair,
+  Database,
   ExternalLink,
   FileCode,
   Globe,
@@ -34,6 +36,24 @@ import { type DOMTarget, decodeDOMTarget } from '../../lib/domTarget'
 
 export type { DOMTarget }
 export { decodeDOMTarget }
+
+export type FixtureScenario = {
+  name: string
+  description?: string
+}
+
+export type TaskSandboxStatus = {
+  hasContract: boolean
+  engine?: string
+  storage?: string
+  fixtureVersion?: string
+  activeScenario?: string
+  availableScenarios?: FixtureScenario[]
+  leaseId?: string
+  state?: string
+  resetCount?: number
+  expiresAt?: string
+}
 
 export type TurnReceipt = {
   id: string
@@ -321,6 +341,15 @@ export function PreviewDrawer({
   const [showRollbackConfirm, setShowRollbackConfirm] = useState(false)
   const [availableProfiles, setAvailableProfiles] = useState<PreviewSkillProfile[]>([])
   const [selectedProfile, setSelectedProfile] = useState<string | null>(null)
+
+  // Test-data fixture sandbox states (Direction C Phase 2)
+  const [sandboxStatus, setSandboxStatus] = useState<TaskSandboxStatus | null>(null)
+  const [loadingSandbox, setLoadingSandbox] = useState(false)
+  const [resettingSandbox, setResettingSandbox] = useState(false)
+  const [switchingScenario, setSwitchingScenario] = useState(false)
+  const [sandboxPopoverOpen, setSandboxPopoverOpen] = useState(false)
+  const [sandboxMsg, setSandboxMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const sandboxPopoverRef = useRef<HTMLDivElement>(null)
 
   const abortCtrlRef = useRef<AbortController | null>(null)
   const chatScrollRef = useRef<HTMLDivElement>(null)
@@ -690,6 +719,113 @@ export function PreviewDrawer({
       setIframeKey((k) => k + 1)
     } finally {
       setStartBusy(false)
+    }
+  }
+
+  // Fetch fixture sandbox status
+  const fetchSandboxStatus = useCallback(async () => {
+    if (!taskId) return
+    setLoadingSandbox(true)
+    try {
+      const token = getStoredToken()
+      const headers: Record<string, string> = {}
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      const res = await fetch(
+        apiUrl(`/api/v1/projects/${encodeURIComponent(project || 'current')}/tasks/${encodeURIComponent(taskId)}/fixture-sandbox`),
+        { headers }
+      )
+      if (!res.ok) return
+      const data = await res.json()
+      if (data && typeof data === 'object') {
+        setSandboxStatus(data)
+      }
+    } catch {} finally {
+      setLoadingSandbox(false)
+    }
+  }, [project, taskId])
+
+  useEffect(() => {
+    fetchSandboxStatus()
+  }, [fetchSandboxStatus])
+
+  // Dismiss sandbox popover on outside click
+  useEffect(() => {
+    if (!sandboxPopoverOpen) return
+    const handleClickOutside = (e: MouseEvent) => {
+      if (sandboxPopoverRef.current && !sandboxPopoverRef.current.contains(e.target as Node)) {
+        setSandboxPopoverOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [sandboxPopoverOpen])
+
+  // Fast reset (<100ms) restoring private DB to immutable baseline
+  const handleResetSandbox = async () => {
+    if (!canOperator || resettingSandbox) return
+    setResettingSandbox(true)
+    setSandboxMsg(null)
+    try {
+      const token = getStoredToken()
+      const headers: Record<string, string> = {}
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      const res = await fetch(
+        apiUrl(`/api/v1/projects/${encodeURIComponent(project || 'current')}/tasks/${encodeURIComponent(taskId)}/fixture-sandbox/reset`),
+        {
+          method: 'POST',
+          headers,
+        }
+      )
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'reset failed' }))
+        setSandboxMsg({ type: 'error', text: err.error || err.message || '重置失败' })
+        return
+      }
+      setSandboxMsg({
+        type: 'success',
+        text: t('tasks.previewDrawer.sandbox.resetSuccess', { defaultValue: '已秒级恢复至干净基准工件' }),
+      })
+      handleReload()
+      await fetchSandboxStatus()
+    } catch (e: any) {
+      setSandboxMsg({ type: 'error', text: e?.message || '重置失败' })
+    } finally {
+      setResettingSandbox(false)
+    }
+  }
+
+  // Switch active scenario
+  const handleSwitchScenario = async (scenario: string) => {
+    if (!canOperator || switchingScenario) return
+    setSwitchingScenario(true)
+    setSandboxMsg(null)
+    try {
+      const token = getStoredToken()
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      const res = await fetch(
+        apiUrl(`/api/v1/projects/${encodeURIComponent(project || 'current')}/tasks/${encodeURIComponent(taskId)}/fixture-sandbox/scenario`),
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ scenario }),
+        }
+      )
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'switch failed' }))
+        setSandboxMsg({ type: 'error', text: err.error || err.message || '切换场景失败' })
+        return
+      }
+      setSandboxMsg({
+        type: 'success',
+        text: t('tasks.previewDrawer.sandbox.scenarioSuccess', { scenario, defaultValue: `已切换至场景：${scenario}` }),
+      })
+      handleReload()
+      await fetchSandboxStatus()
+    } catch (e: any) {
+      setSandboxMsg({ type: 'error', text: e?.message || '切换场景失败' })
+    } finally {
+      setSwitchingScenario(false)
     }
   }
 
@@ -1661,6 +1797,156 @@ export function PreviewDrawer({
           </div>
 
           <div className="flex items-center gap-1.5">
+            {sandboxStatus?.hasContract && (
+              <div className="relative" ref={sandboxPopoverRef}>
+                <button
+                  type="button"
+                  onClick={() => setSandboxPopoverOpen((v) => !v)}
+                  title={t('tasks.previewDrawer.sandbox.btnTitle', {
+                    defaultValue: '测试数据沙盒：私有数据库、一键重置与场景切换',
+                  })}
+                  className={cn(
+                    'flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition-colors',
+                    sandboxPopoverOpen
+                      ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
+                      : 'text-neutral-600 hover:bg-neutral-200/60 dark:text-zinc-400 dark:hover:bg-zinc-800'
+                  )}
+                >
+                  <Database className={cn('size-3.5 text-amber-600 dark:text-amber-400', loadingSandbox && 'animate-pulse')} />
+                  <span>{t('tasks.previewDrawer.sandbox.btnText', { defaultValue: '数据沙盒' })}</span>
+                  {typeof sandboxStatus.resetCount === 'number' && sandboxStatus.resetCount > 0 && (
+                    <span className="rounded bg-amber-200/70 px-1 py-0.2 text-[10px] font-mono font-semibold text-amber-800 dark:bg-amber-900/80 dark:text-amber-200">
+                      ↺{sandboxStatus.resetCount}
+                    </span>
+                  )}
+                </button>
+
+                {sandboxPopoverOpen && (
+                  <div className="absolute right-0 top-full z-50 mt-1.5 w-80 rounded-xl border border-neutral-200 bg-white p-3.5 shadow-xl backdrop-blur-md dark:border-zinc-800 dark:bg-zinc-900 animate-in fade-in zoom-in-95 duration-150">
+                    <div className="flex items-center justify-between border-b border-neutral-100 pb-2.5 dark:border-zinc-800">
+                      <div className="flex items-center gap-2">
+                        <Database className="size-4 text-amber-600 dark:text-amber-400" />
+                        <span className="text-xs font-semibold text-neutral-900 dark:text-zinc-100">
+                          {t('tasks.previewDrawer.sandbox.panelTitle', { defaultValue: '测试数据沙盒' })}
+                        </span>
+                      </div>
+                      <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] font-mono text-neutral-600 dark:bg-zinc-800 dark:text-zinc-400">
+                        {sandboxStatus.engine || 'sqlite'}
+                      </span>
+                    </div>
+
+                    <div className="my-2.5 space-y-2 text-xs">
+                      {sandboxStatus.storage && (
+                        <div className="flex items-center justify-between text-neutral-500 dark:text-zinc-400">
+                          <span>{t('tasks.previewDrawer.sandbox.storageLabel', { defaultValue: '存储路径' })}</span>
+                          <span className="truncate max-w-44 font-mono text-[11px] text-neutral-800 dark:text-zinc-200" title={sandboxStatus.storage}>
+                            {sandboxStatus.storage}
+                          </span>
+                        </div>
+                      )}
+
+                      {sandboxStatus.leaseId && (
+                        <div className="flex items-center justify-between text-neutral-500 dark:text-zinc-400">
+                          <span>{t('tasks.previewDrawer.sandbox.leaseInfo', { defaultValue: '沙盒租期' })}</span>
+                          <span className="font-mono text-[11px] text-neutral-800 dark:text-zinc-200">
+                            {sandboxStatus.expiresAt ? (
+                              (() => {
+                                const diff = Math.max(0, Math.round((new Date(sandboxStatus.expiresAt).getTime() - Date.now()) / 60000))
+                                return t('tasks.previewDrawer.sandbox.expiry', { mins: diff, defaultValue: `剩余 ${diff} 分钟` })
+                              })()
+                            ) : (
+                              sandboxStatus.leaseId
+                            )}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Scenario Switcher */}
+                    {sandboxStatus.availableScenarios && sandboxStatus.availableScenarios.length > 0 && (
+                      <div className="border-t border-neutral-100 pt-2.5 dark:border-zinc-800">
+                        <label className="block mb-1.5 text-[11px] font-medium text-neutral-700 dark:text-zinc-300">
+                          {t('tasks.previewDrawer.sandbox.scenarioLabel', { defaultValue: '测试场景' })}
+                        </label>
+                        <div className="space-y-1 max-h-36 overflow-y-auto">
+                          {sandboxStatus.availableScenarios.map((sc) => {
+                            const isActive = (sandboxStatus.activeScenario || 'default') === sc.name
+                            return (
+                              <button
+                                key={sc.name}
+                                type="button"
+                                disabled={!canOperator || switchingScenario || isActive}
+                                onClick={() => void handleSwitchScenario(sc.name)}
+                                className={cn(
+                                  'flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-xs transition-colors',
+                                  isActive
+                                    ? 'bg-amber-50 font-semibold text-amber-900 dark:bg-amber-950/40 dark:text-amber-200'
+                                    : 'text-neutral-700 hover:bg-neutral-100 dark:text-zinc-300 dark:hover:bg-zinc-800/60',
+                                  (!canOperator || switchingScenario) && !isActive && 'opacity-50 cursor-not-allowed'
+                                )}
+                              >
+                                <div className="min-w-0 pr-2">
+                                  <div className="truncate">{sc.name}</div>
+                                  {sc.description && (
+                                    <div className="truncate text-[10px] text-neutral-400 dark:text-zinc-500 font-normal">
+                                      {sc.description}
+                                    </div>
+                                  )}
+                                </div>
+                                {isActive && <Check className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Reset Button */}
+                    <div className="border-t border-neutral-100 pt-2.5 mt-2.5 dark:border-zinc-800">
+                      <button
+                        type="button"
+                        disabled={!canOperator || resettingSandbox}
+                        onClick={() => void handleResetSandbox()}
+                        className={cn(
+                          'flex w-full items-center justify-center gap-1.5 rounded-lg bg-amber-600 px-3 py-2 text-xs font-semibold text-white shadow-xs transition hover:bg-amber-500 disabled:opacity-50'
+                        )}
+                      >
+                        <RotateCcw className={cn('size-3.5', resettingSandbox && 'animate-spin')} />
+                        <span>
+                          {resettingSandbox
+                            ? t('tasks.previewDrawer.sandbox.resetting', { defaultValue: '正在恢复基线…' })
+                            : t('tasks.previewDrawer.sandbox.resetBtn', { defaultValue: '一键重置沙盒 (<100ms)' })}
+                        </span>
+                      </button>
+                      <p className="mt-1.5 text-[10px] text-neutral-400 dark:text-zinc-500 leading-tight text-center">
+                        {t('tasks.previewDrawer.sandbox.resetDesc', {
+                          defaultValue: '秒级抹除写污染，恢复至初始基准快照。重置后自动重载预览页面。',
+                        })}
+                      </p>
+                    </div>
+
+                    {/* Status feedback & RBAC notice */}
+                    {sandboxMsg && (
+                      <div
+                        className={cn(
+                          'mt-2 rounded-lg px-2.5 py-1.5 text-[11px]',
+                          sandboxMsg.type === 'success'
+                            ? 'bg-emerald-50 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300'
+                            : 'bg-rose-50 text-rose-800 dark:bg-rose-950/40 dark:text-rose-300'
+                        )}
+                      >
+                        {sandboxMsg.text}
+                      </div>
+                    )}
+                    {!canOperator && (
+                      <div className="mt-2 text-[10px] text-amber-600 dark:text-amber-400 text-center">
+                        {t('tasks.previewDrawer.sandbox.operatorRequired', { defaultValue: '需要项目 Operator 权限方可重置或切换场景' })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
             <button
               type="button"
               onClick={handleReload}

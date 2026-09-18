@@ -1369,7 +1369,25 @@
       "targetContext": "目标元素上下文",
       "selector": "选择器路径",
       "elementText": "内容/文本",
-      "parentContainer": "父级容器"
+      "parentContainer": "父级容器",
+      "sandbox": {
+        "btnText": "数据沙盒",
+        "btnTitle": "测试数据沙盒：私有数据库、一键重置与场景切换",
+        "panelTitle": "测试数据沙盒",
+        "sqliteBadge": "SQLite 私有隔离",
+        "storageLabel": "存储路径",
+        "scenarioLabel": "测试场景",
+        "scenarioDesc": "选择不同的基线数据集以走查边缘情况",
+        "resetBtn": "一键重置沙盒 (<100ms)",
+        "resetting": "正在恢复基线…",
+        "resetDesc": "秒级抹除写污染，恢复至初始基准快照。重置后自动重载预览页面。",
+        "resetCount": "已重置 {{count}} 次",
+        "operatorRequired": "需要项目 Operator 权限方可重置或切换场景",
+        "resetSuccess": "已秒级恢复至干净基准工件",
+        "scenarioSuccess": "已切换至场景：{{scenario}}",
+        "leaseInfo": "租期",
+        "expiry": "剩余 {{mins}} 分钟"
+      }
     },
     "resources": {
       "title": "任务资源",
