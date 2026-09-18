@@ -3,8 +3,9 @@
 ## Start here
 
 Branch: `dev`.
-Status: Preview Copilot Turn Receipts 切片 B（Batch 0 至 Batch 5.1，commit `b114bd9b`）已全面完成、全量自动化回归通过、真实生产链路 Docker 验证通过，并已获用户正式审批放行。
+Status: Preview Copilot Turn Receipts 切片 B（Batch 0 至 Batch 5.1）与 Guarded Skill Profiles（Task 3.2 及 Batch 3.2.1，commit `a48f9c42`）已全部完成收官，自动化回归全绿，代码已合入 dev。
 Feature Flag `MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS` 维持默认严格关闭 (`false`)，受控灰度已具备服务端项目白名单硬门禁。
+独立工具箱解耦方案文档已归档至 `docs/standalone-toolbox-decoupling-plan.md`，等待下一阶段目标计划统一审批。
 
 Key status & deliverables:
 0. **Preview Copilot Turn Receipts 切片 B（已正式放行）**:
