@@ -1,12 +1,18 @@
 package api
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/multigent/multigent/internal/ciready"
+	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
@@ -218,4 +224,161 @@ func TestBatchCPilotGreenfieldVNextOverRealRepo(t *testing.T) {
 		t.Fatal("worktree integrity lost after the pilot")
 	}
 	_ = workspaceID
+}
+
+// Batch C-2 runner pilot (acceptance-test-design-plan §7 Batch C item 5):
+// asserts that GitLab CI pipeline evidence executed by runners and QA matrix
+// evidence strictly anchor to the exact same commit SHA.
+//
+// Verifies:
+//  1. Positive case: Pipeline SHA == Worktree Completion SHA -> pipeline evidence passes,
+//     retrieving runner job details.
+//  2. Negative case 1 (SHA Drift): Unpushed commit on worktree without CI run -> fail-closed.
+//  3. Negative case 2 (Runner Job Failure): Pipeline failure -> fail-closed.
+func TestBatchC2RunnerPipelineEvidenceAndSHAAnchor(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+
+	// 1. Setup real git repo representing task completion worktree
+	repo := t.TempDir()
+	gitEnv := append(os.Environ(),
+		"GIT_AUTHOR_NAME=pilot", "GIT_AUTHOR_EMAIL=pilot@example.com",
+		"GIT_COMMITTER_NAME=pilot", "GIT_COMMITTER_EMAIL=pilot@example.com")
+	runGit := func(args ...string) string {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		cmd.Env = gitEnv
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %v (%s)", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		}
+		return strings.TrimSpace(string(out))
+	}
+	runGit("init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(repo, "server.go"), []byte("package main\n\nfunc Version() string { return \"v2\" }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", ".")
+	runGit("commit", "-m", "feat: task completion commit")
+	completionSHA := runGit("rev-parse", "HEAD")
+
+	// 2. Mock GitLab server simulating GitLab CI Runner execution
+	var mu sync.Mutex
+	pipelineStatus := "success"
+
+	gitlabMux := http.NewServeMux()
+	gitlabMux.HandleFunc("GET /api/v4/projects/58", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":58,"name":"c2-pilot","path_with_namespace":"root/c2-pilot","http_url_to_repo":"http://gitlab.internal/root/c2-pilot.git","default_branch":"main"}`))
+	})
+	gitlabMux.HandleFunc("GET /api/v4/projects/58/pipelines", func(w http.ResponseWriter, r *http.Request) {
+		sha := r.URL.Query().Get("sha")
+		w.Header().Set("Content-Type", "application/json")
+		mu.Lock()
+		status := pipelineStatus
+		mu.Unlock()
+		if sha == completionSHA {
+			_, _ = w.Write([]byte(fmt.Sprintf(`[{"id":101,"sha":"%s","ref":"main","status":"%s","source":"push","web_url":"http://gitlab.internal/root/c2-pilot/-/pipelines/101"}]`, sha, status)))
+			return
+		}
+		_, _ = w.Write([]byte(`[]`))
+	})
+	gitlabMux.HandleFunc("GET /api/v4/projects/58/pipelines/101/jobs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[
+			{"id":201,"name":"build:backend","status":"success","stage":"build"},
+			{"id":202,"name":"test:backend","status":"success","stage":"test"}
+		]`))
+	})
+	fakeGitLab := httptest.NewServer(gitlabMux)
+	defer fakeGitLab.Close()
+
+	seedGitLabConnection(t, s, workspaceID, "conn-gitlab", fakeGitLab.URL)
+
+	// Bind project with verified remote binding
+	projectName := "c2-pilot"
+	if err := s.st.SaveProject(projectName, &entity.Project{
+		Name:                   projectName,
+		Repo:                   repo,
+		RemotePipelineRequired: "required",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.controlDB.UpsertVerifiedRemoteBinding(controldb.VerifiedRemoteBinding{
+		WorkspaceID:       workspaceID,
+		ProjectID:         projectName,
+		Provider:          "gitlab",
+		ConnectionID:      "conn-gitlab",
+		RemoteProjectID:   "58",
+		PathWithNamespace: "root/c2-pilot",
+		Source:            controldb.BindingSourceExplicitVerify,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// ── Positive Case: CI & QA evidence anchored to the exact same SHA ────
+	code, resp := runCIReady(s, projectName, "2")
+	if code != http.StatusOK {
+		t.Fatalf("ci-ready status=%d", code)
+	}
+	if resp.Overall != ciready.OverallReady {
+		t.Fatalf("overall=%s, want ready", resp.Overall)
+	}
+	if resp.Pipeline == nil {
+		t.Fatal("pipeline evidence must be present")
+	}
+	if resp.Pipeline.SHA != completionSHA {
+		t.Fatalf("Item 5: Pipeline SHA %s does not match completion commit SHA %s", resp.Pipeline.SHA, completionSHA)
+	}
+	if resp.Pipeline.ID != 101 || resp.Pipeline.Status != "success" {
+		t.Fatalf("unexpected pipeline evidence: %+v", resp.Pipeline)
+	}
+	if len(resp.Pipeline.Jobs) != 2 {
+		t.Fatalf("expected 2 jobs, got %d", len(resp.Pipeline.Jobs))
+	}
+	if resp.Pipeline.Jobs[0].Name != "build:backend" || resp.Pipeline.Jobs[1].Name != "test:backend" {
+		t.Fatalf("unexpected pipeline jobs: %+v", resp.Pipeline.Jobs)
+	}
+
+	// ── Negative Case 1: SHA Drift (HEAD changed without CI run) ────
+	if err := os.WriteFile(filepath.Join(repo, "drift.go"), []byte("package main\n\nfunc Drift() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", ".")
+	runGit("commit", "-m", "drift commit")
+
+	code, resp = runCIReady(s, projectName, "1")
+	if code != http.StatusOK {
+		t.Fatalf("ci-ready status=%d", code)
+	}
+	if resp.Overall != ciready.OverallNotReady {
+		t.Fatal("SHA drift without pipeline must fail closed (overall not_ready)")
+	}
+	if !strings.Contains(resp.PipelineError, "no pipeline observed for the current HEAD") {
+		t.Fatalf("expected no pipeline error on drifted SHA, got: %s", resp.PipelineError)
+	}
+
+	// Revert drift commit
+	runGit("reset", "--hard", completionSHA)
+
+	// ── Negative Case 2: Pipeline failure on runner execution ────
+	mu.Lock()
+	pipelineStatus = "failed"
+	mu.Unlock()
+
+	code, resp = runCIReady(s, projectName, "1")
+	if code != http.StatusOK {
+		t.Fatalf("ci-ready status=%d", code)
+	}
+	if resp.Overall != ciready.OverallNotReady {
+		t.Fatal("pipeline failure on runner must fail closed (overall not_ready)")
+	}
+	var evidenceCheck *ciready.Check
+	for i := range resp.Checks {
+		if resp.Checks[i].Name == "pipeline_evidence" {
+			evidenceCheck = &resp.Checks[i]
+		}
+	}
+	if evidenceCheck == nil || evidenceCheck.Status != ciready.StatusFail {
+		t.Fatalf("pipeline_evidence check must fail on failed pipeline: %+v", evidenceCheck)
+	}
 }

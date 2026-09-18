@@ -48,8 +48,13 @@ Key status & deliverables:
      - **B-a 返工可追溯**（commit `5acbe42e`）：`qa_signoff` 打回时服务端自动把测试矩阵中 `failed`/`blocked`/`unexecuted` 项聚合为结构化 `qa_rework_items`（逐项富化 `manifest.expected_result`），经 `e-qa-rework` 送返 `implementation`；同时在 `review_comments` 前追加人类可读失败清单，即使审批人留空也不会丢失失败上下文；
      - **B-b QA checkpoint 权限与白名单门禁**（commits `981153fd`, `75bdfdff`, `50e61e88`）：QA 步骤声明 `touched_paths`，服务端校验严格执行白名单控制（仅限测试源码/夹具/探针，严禁碰触业务代码与 CI/配置）；`verifyQATouchedPathsAgainstWorktree` 强比对真实 worktree 的 `git status --porcelain -z`，双向严格一致且 fail-closed；
      - **全链路研发映射**：`test_implementation_evidence`（Case ID $\to$ 测试文件/结果映射）从实现节点贯通初审、代码审、QA 到打回返工。
-   - **Batch C-1 本地真实仓库试点 (`internal/api/batch_c_pilot_test.go`, commit `62340a12`)**：
+   - **Batch C-1 本地真实仓库试点 (`internal/api/batch_c_pilot_test.go:TestBatchCPilotGreenfieldVNextOverRealRepo`)**：
      - 基于真实 git 仓库 fixture 驱动 Greenfield vNext 全生命周期，验证验收测试规格在真实工程结构下的流转。
+   - **Batch C-2 CI Runner 流水线证据与 SHA 强锚定验证 (`internal/api/batch_c_pilot_test.go:TestBatchC2RunnerPipelineEvidenceAndSHAAnchor`)**：
+     - 验收测试方案 §7 Batch C 条目 5 自动化闭环：验证 CI Runner 执行流水线与 QA 矩阵证据严格锚定到不可变的同一完成提交 SHA：
+       1. **正向锚定通过**：Pipeline SHA == Worktree Completion SHA $\to$ `pipeline_evidence` 判定通过，提取 Runner 执行的 Job 详情（如 `build:backend`, `test:backend`）；
+       2. **SHA 漂移硬拦截（Fail-Closed 1）**：Worktree 产生未推送或未构建的新 Commit $\to$ 立即 400 阻断（`no pipeline observed for current HEAD`），杜绝坏代码偷跑；
+       3. **Runner 作业失败硬拦截（Fail-Closed 2）**：CI 流水线执行失败 $\to$ 立即判定 `overall: not_ready`（`terminal status required: success`）。
    - **平台级自动化接缝全闭环验证 (`internal/api/runtime_workflow_seam_test.go`, `TestRuntimeWorkflowSeam_GreenfieldVNextPromptAndStepDone`)**：
      - 针对此前 Reviewer 切片时留下的未闭环边界（`BuildTaskPrompt` 运行时渲染 $\to$ `mga task step done` HTTP 完成端点 $\to$ 引擎状态机 $\to$ 研发返工提示词携带上下文），实现单一全自动化集成测试：
        - `acceptance_test_design`：`runner.BuildTaskPrompt` 动态渲染步骤契约 $\to$ 非法 manifest 被服务端 400 拦截 $\to$ 合法 manifest 经 HTTP `POST /api/v1/runtime/tasks/{id}/workflow/step/complete` 成功入库并推进；
@@ -60,11 +65,12 @@ Key status & deliverables:
        - `qa_signoff`：留空 comments 提交打回 $\to$ 服务端 `enrichQARejectionComments` 自动富化失败清单，生成带 `expected_result` 的结构化 `qa_rework_items`；
        - 返工 `implementation`：`runner.BuildTaskPrompt` 验证研发 Agent 提示词精准注入 `qa_rework_items`、富化后的打回审阅意见及原始规格基线。
    - **诚实边界与未验证范围声明 (Honest Boundaries & Caveats)**：
-     - **Batch C-2（真实 GitLab CI runner 联调）**：需依赖真实环境的 GitLab Runner 调度执行，保持在后续部署窗口进行实地联调，不得在无 runner 环境下标记为已通过；
+     - **Batch C-2（真实环境部署级联调）**：平台侧 CI 契约、SHA 锚定校验与 Runner 证据处理已由 `TestBatchC2RunnerPipelineEvidenceAndSHAAnchor` 全自动化覆盖；目标 VM 生产环境的真机部署与触发联调保持在部署窗口执行；
      - **Roadmap 第 1 步状态保持「待现场验证 (unverified on live VM)」**。
    - **自动化验证证据**：
+     - `go test -race -v ./internal/api -run 'TestBatchC'`：PASS (10.84s, 2/2 tests passed, 0 races)；
      - `go test -race -v ./internal/api -run 'TestRuntimeWorkflowSeam_GreenfieldVNextPromptAndStepDone'`：PASS (0 races, 3.88s)；
-     - `go test -race ./internal/workflow/... ./internal/api/... -run 'TestGreenfield|TestValidateTestSpec|TestValidateQATouchedPaths|TestBatchC|TestQASignoff|TestRuntimeWorkflowSeam'`：100% PASS (26.04s, 0 failures, 0 races)。
+     - `make test`：全仓库 52 个包 100% PASS (0 failure, 0 races)。
 -0.1. **Reviewer 独立基线契约 (`de917d62`) 真实验证切片全量闭环**:
    - **活库基线与断代核实**：确认 SQLite 数据库（`~/.multigent/multigent.db`）中 `workflow_runs` 表由于环境重建历史运行记录为 0；为防范“只改模板文本、无实测运行闭环”的断代风险，插队完成真实执行切片。
    - **工作流状态机四路流转全覆盖 (`internal/workflow/reviewer_contract_verification_test.go`)**：
