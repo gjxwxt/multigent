@@ -3,11 +3,29 @@
 ## Start here
 
 Branch: `dev`.
-Status: 交付流水线物理双轨制分工与验收测试规格前置（ATD）必要性判定已定案并沉淀 ADR（`docs/agent/decisions/2026-09-18-delivery-pipeline-duality-and-atd-necessity.md`）；方向 E Brownfield 存量仓库接入与受控就绪门禁（P0）纯函数探测引擎、6步受控就绪流水线（`brownfield-onboarding-v1`）及 RBAC 门禁全量闭环（-race 0 告警，5 条裁决修订全部到位）；方向 B Batch B / Batch C-1 及 Greenfield vNext 平台级自动化接缝验证（`TestRuntimeWorkflowSeam_GreenfieldVNextPromptAndStepDone`）已全量闭环（-race 0 告警）；Reviewer 独立基线契约 (`de917d62`) 真实验证切片全量闭环；方向 A Phase 1（`mgt deploy` & `mgt` CLI）已依据架构与价值审计正式挂起；Preview Copilot Turn Receipts 切片 B 与 Guarded Skill Profiles 已合入；Phase 0 降级 Runbook 与 `tools/ciready-check` 已合入（commits `37f610cb`, `893b62e6`, `fc5b8742`, `b3d998e5`）。
+Status: 生产环境部署与现场实测已全量完成（提交 `a7741433`，控制台与分布式节点零版本漂移）；方向 E Brownfield 存量仓库接入与受控就绪门禁在真实存量项目完成只读扫描、阻断识别与 RBAC 实测闭环；方向 B Batch C-2（真实 GitLab CI runner 证据与 SHA 锚定）在部署环境通过 API 与 `mga ci ready` CLI 实测闭环（14/14 项通过）；交付流水线物理双轨制分工与验收测试规格前置（ATD）必要性判定已定案并沉淀 ADR（`docs/agent/decisions/2026-09-18-delivery-pipeline-duality-and-atd-necessity.md`）；平台级自动化接缝验证已全量闭环。
 Feature Flag `MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS` 维持默认严格关闭 (`false`)，受控灰度具备服务端项目白名单硬门禁。
-下一阶段排期：推进方向 B Batch C-2（真实 GitLab CI runner 联调与 Greenfield vNext 带 ATD 实测，待部署窗口）与双人 Mattermost 真实环境流转终验。
+下一阶段排期：推进 Greenfield vNext 带 ATD 的真实全流程跑通（含双人 Mattermost 真实环境流转终验）。
 
 Key status & deliverables:
+-0.5. **真实环境部署与现场实测全闭环 (Live Deployment & Verification, Commit `a7741433`)**:
+   - **双节点零漂移部署与心跳验证**：
+     - 控制面（`amd64`）：服务正常运行，`/api/v1/version` 精确返回 `{"ok":true,"version":"a7741433"}`；
+     - 运行节点（`arm64`）：`multigent-runtime-node.service` 重启成功，版本精确返回 `multigent a7741433`；
+     - 拓扑一致性：控制面数据库 `runtime_nodes` 验证节点状态为 `online`，版本 `a7741433`，心跳实时刷新，双端无版本漂移。
+   - **方向 E Brownfield 存量项目现场实测**：
+     - 实测存量项目（`api-key-hub`，Java 21 Spring Boot + Gradle + React 18 / Vite / NPM）：纯函数扫描精确识别双服务架构、Gradle Wrapper 权限及锁文件完整性，评估为 `status: "ready"`，推导合法 `.multigent/runtime.json` 契约；
+     - 实测缺失锁文件项目（`todo-api`, `ias-auth-center`）：精确阻断并报告 2 项 `SeverityBlocking` 缺陷，给出精准修复建议（`go mod tidy`、`npm install --package-lock-only`），符合 Fail-Closed 预期；
+     - RBAC 门禁实测：未认证请求严格返回 401；项目访客（Viewer）调用严格返回 403 `project_operator_required`；项目执行者（Operator）调用返回 200 正常就绪报告。
+   - **方向 B Batch C-2 真实 GitLab CI Runner 流水线证据与 CLI 实测**：
+     - 通过 `POST /api/v1/projects/{name}/remote/verify` 完成项目远端只读校验并固化绑定；
+     - 颁发携带 `task.use` 的 Agent 运行时 Token，调用 `POST /api/v1/runtime/ci-ready?wait_seconds=10`：14/14 项检查全绿通过；
+     - 关键闸门 `pipeline_evidence` 成功命中 HEAD 提交的真实 GitLab CI Runner 流水线（Pipeline 1042），精确提取 `build:backend`、`build:frontend`、`test:backend`、`lint:backend` 4 项作业成功状态；
+     - 沙箱 CLI 实测：在运行环境中直接执行 `mga ci ready --wait 10`，结果 100% 吻合。
+   - **诚实边界与未验证范围声明 (Honest Boundaries & Caveats)**：
+     - 本次已实地验证 CI Runner 真实证据提取、Brownfield 存量扫描与 RBAC 闸门；
+     - Greenfield vNext 带 ATD 的从零端到端流水线（包含前置 OpenDesign 原型设计门、ATD 用例生成与双人审批）留作下一步综合验收。
+
 -0.4. **交付流水线物理双轨制分工与验收测试规格前置 (ATD) 必要性判定 (ADR 2026-09-18)**:
    - **双轨制物理隔离架构确立**：
      - **日常快速迭代流水线 (`unified-delivery-pipeline`)**：保持精简高效（澄清 $\to$ 澄清审 $\to$ 编码 $\to$ 初审 $\to$ CI 闸门 $\to$ 代码审 $\to$ 合并 $\to$ 后置 QA $\to$ 发布；此处为关键主干摘要，完整 13 步拓扑以 `internal/workflow/store.go` 为准）；坚决不插入前置测试规格设计（ATD）节点与前置设计门，杜绝日常开发阻力与模型上下文膨胀。
@@ -65,8 +83,9 @@ Key status & deliverables:
        - `qa_signoff`：留空 comments 提交打回 $\to$ 服务端 `enrichQARejectionComments` 自动富化失败清单，生成带 `expected_result` 的结构化 `qa_rework_items`；
        - 返工 `implementation`：`runner.BuildTaskPrompt` 验证研发 Agent 提示词精准注入 `qa_rework_items`、富化后的打回审阅意见及原始规格基线。
    - **诚实边界与未验证范围声明 (Honest Boundaries & Caveats)**：
-     - **Batch C-2（真实环境部署级联调）**：平台侧 CI 契约、SHA 锚定校验与 Runner 证据处理已由 `TestBatchC2RunnerPipelineEvidenceAndSHAAnchor` 全自动化覆盖；目标 VM 生产环境的真机部署与触发联调保持在部署窗口执行；
-     - **Roadmap 第 1 步状态保持「待现场验证 (unverified on live VM)」**。
+      - **诚实边界与现场实测闭环 (Honest Boundaries & Live Verification)**：
+        - **Batch C-2（真实环境部署级联调）**：已在部署环境中由实测闭环（见 §-0.5）。通过 `POST /api/v1/projects/{name}/remote/verify`、`POST /api/v1/runtime/ci-ready?wait_seconds=10` 及 `mga ci ready --wait 10` 成功联动真实 GitLab CI Runner，提取 Pipeline 1042 与 4 项 Job 成功证据；
+        - **Roadmap 第 1 步已在真实 VM 环境完成实证闭环**。
    - **自动化验证证据**：
      - `go test -race -v ./internal/api -run 'TestBatchC'`：PASS (10.84s, 2/2 tests passed, 0 races)；
      - `go test -race -v ./internal/api -run 'TestRuntimeWorkflowSeam_GreenfieldVNextPromptAndStepDone'`：PASS (0 races, 3.88s)；
