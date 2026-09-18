@@ -40,6 +40,7 @@ func Templates(locale string) []entity.WorkflowTemplate {
 		softwareDeliveryTemplate(locale),
 		unifiedDeliveryPipelineTemplate(locale),
 		greenfieldDeliveryTemplate(locale),
+		brownfieldOnboardingTemplate(locale),
 		garryStyleDeliveryTemplate(locale),
 		mattPocockStyleEngineeringTemplate(locale),
 		tddReviewLoopTemplate(locale),
@@ -85,7 +86,10 @@ func (s *Store) SeedDefaults() error {
 	if def, ok, err := s.Definition("software-delivery-v1"); err != nil {
 		return err
 	} else if ok && def.Scope == "workspace" && def.Project == "" && def.Version >= 5 && def.StartStepID == "requirement_draft" {
-		return s.EnsureProjectInitializationDefinition()
+		if err := s.EnsureProjectInitializationDefinition(); err != nil {
+			return err
+		}
+		return s.EnsureBrownfieldOnboardingDefinition()
 	}
 	now := time.Now().UTC()
 	def := entity.WorkflowDefinition{
@@ -265,7 +269,10 @@ func (s *Store) SeedDefaults() error {
 	if err := s.SaveDefinition(&def); err != nil {
 		return err
 	}
-	return s.EnsureProjectInitializationDefinition()
+	if err := s.EnsureProjectInitializationDefinition(); err != nil {
+		return err
+	}
+	return s.EnsureBrownfieldOnboardingDefinition()
 }
 
 const ProjectInitializationWorkflowID = "project-initialization-v1"

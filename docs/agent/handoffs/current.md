@@ -3,11 +3,31 @@
 ## Start here
 
 Branch: `dev`.
-Status: 方向 B Batch B / Batch C-1 及 Greenfield vNext 平台级自动化接缝验证（`TestRuntimeWorkflowSeam_GreenfieldVNextPromptAndStepDone`）已全量闭环（-race 0 告警）；Reviewer 独立基线契约 (`de917d62`) 真实验证切片全量闭环（包含工作流管道流转、三轮上限打回、案卷升级、Fail-closed 防御、双语 Prompt 下发，以及真实大模型「带负荷」审查 5 大指标全绿，-race 0 告警）；方向 A Phase 1（`mgt deploy` & `mgt` CLI）已依据架构与价值审计正式挂起；Preview Copilot Turn Receipts 切片 B 与 Guarded Skill Profiles 已合入；Phase 0 降级 Runbook 与 `tools/ciready-check` 已合入（commits `37f610cb`, `893b62e6`, `fc5b8742`, `b3d998e5`）。
+Status: 方向 E Brownfield 存量仓库接入与受控就绪门禁（P0）纯函数探测引擎、6步受控就绪流水线（`brownfield-onboarding-v1`）及 RBAC 门禁全量闭环（-race 0 告警，5 条裁决修订全部到位）；方向 B Batch B / Batch C-1 及 Greenfield vNext 平台级自动化接缝验证（`TestRuntimeWorkflowSeam_GreenfieldVNextPromptAndStepDone`）已全量闭环（-race 0 告警）；Reviewer 独立基线契约 (`de917d62`) 真实验证切片全量闭环；方向 A Phase 1（`mgt deploy` & `mgt` CLI）已依据架构与价值审计正式挂起；Preview Copilot Turn Receipts 切片 B 与 Guarded Skill Profiles 已合入；Phase 0 降级 Runbook 与 `tools/ciready-check` 已合入（commits `37f610cb`, `893b62e6`, `fc5b8742`, `b3d998e5`）。
 Feature Flag `MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS` 维持默认严格关闭 (`false`)，受控灰度具备服务端项目白名单硬门禁。
-下一阶段排期：推进方向 B Batch C-2（真实 GitLab CI runner 联调，待部署窗口）与方向 E（Brownfield 存量项目接入）。
+下一阶段排期：推进方向 B Batch C-2（真实 GitLab CI runner 联调，待部署窗口）与双人 Mattermost 真实环境流转终验。
 
 Key status & deliverables:
+-0.3. **方向 E Brownfield 存量仓库受控接入与就绪门禁 (P0, 5 条裁决修订全闭环)**:
+   - **纯函数探测与评估引擎 (`internal/brownfield`)**:
+     - **多语言栈零副作用探测**：`Detect` 纯函数只读扫描 Node (npm/pnpm/yarn/bun)、JVM (Gradle/Maven/wrapper 权限)、Go (go.mod/go.sum)、Python (poetry/pipfile/requirements)、Rust (Cargo) 技术栈、构建脚本、CI/CD 与容器编排；
+     - **分层确定性就绪判定（P2 修订 4）**：强制锁文件生态（npm/go/rust）缺锁文件或 Java 缺 wrapper/无执行权限时，判定为 `SeverityBlocking` (`not_ready`) 并给出可解释修复指引；Python `requirements.txt` 无哈希判定为 `SeverityWarning`（弱确定性），给出建议但不阻断存量接入；
+     - **契约推导与 Conformance 校验（P2 修订 5）**：`SynthesizeRuntimeSpec` 依据探测结果自动推导合法的 `.multigent/runtime.json` 契约（前端/后端服务目录、启动命令、端口、健康检查与超时）；在单测中严格通过 `preview.LoadRuntimeSpec` 反解析与字段校验。
+   - **6 步受控就绪流水线 (`internal/workflow/brownfield.go`, `brownfield-onboarding-v1`)**:
+     - **受控流转拓扑**：`readonly_scan -> baseline_pin -> verify_build -> evaluate_readiness -> human_signoff -> materialize_contract`；
+     - **沙箱契约落盘与零触碰仓库原则（P1 修订 1）**：服务端在 `evaluate_readiness` 步骤仅产出结构化 `readiness_report` 与 `synthesized_runtime_json` 工件；人工审核确认后，由 `materialize_contract` 步骤在 **Docker 沙箱内** 由 Agent 落盘 `.multigent/runtime.json` 并提交基线 commit，100% 恪守“平台进程不碰仓库工作区”架构红线；
+     - **沙箱隔离构建红线（P1 修订 3）**：`verify_build` 严格限定在 Docker 容器沙箱内执行（采用 `Detector` 推荐的 `ProfileBase` 或 `ProfileJVM21`），严禁在平台主进程或控制面宿主机执行任意构建脚本；
+     - **审核规则合规**：经 `TestHumanReviewGateOutputsAreNeverHandRequired` 回归约束，`human_signoff` 步骤的 `approved_runtime_json` 标记为 `Optional: true`，杜绝要求人类手填产物。
+   - **端点路由与 RBAC 严格分级（P1 修订 2）**:
+     - `POST /api/v1/projects/{name}/brownfield/scan` 注册在主 mux（`withTokenAuth`）并强门禁 `checkProjectOperator`（未认证 401，Viewer 403 `project_operator_required`，Operator / Manager 200 正常扫描）；
+     - `POST /api/v1/runtime/brownfield/evaluate` 注册在 `runtimeMux`（校验 `task.use` capability）。
+   - **诚实边界与未验证范围声明 (Honest Boundaries & Caveats)**:
+     - 引擎纯函数、状态机流转与 API 权限已全部由本地自动化单测通过；但在真实内网环境下涉及企业私有 Nexus/Maven 401 凭据缺失与外部中间件（MySQL/Redis）依赖的实际排查，需在首个真实 Brownfield 业务仓库试点时做场景闭环。
+   - **自动化验证证据**:
+     - `go test -race -v ./internal/brownfield/...`：7/7 PASS；
+     - `go test -race -v ./internal/workflow -run 'TestBrownfield'`：2/2 PASS；
+     - `go test -race -v ./internal/api -run 'TestBrownfield'`：3/3 PASS；
+     - `go test -race ./internal/workflow/...`：全量 PASS（17.18s）。
 -0.2. **方向 B 前置验收测试设计 Batch B / Batch C-1 及平台全链路接缝闭环**:
    - **真实代码与提交事实核实 (Audit & Reality Reconciliation)**：
      - 核查确认 Batch B 全部条目（commits `5acbe42e`, `981153fd`, `75bdfdff`, `50e61e88`）与 Batch C-1 本地真实仓库试点（commit `62340a12`，`internal/api/batch_c_pilot_test.go`）均已在 `dev` 分支合入并有完备单测保障；
