@@ -2,11 +2,19 @@
 
 ## 1. 状态与前置条件
 
-**状态：Batch A 已实施（2026-09-15，commit 8b428c69）；Batch B/C 未开始。**
+**状态：Batch A 已实施（2026-09-15，commit 8b428c69）；Batch B 已实施（2026-09-16，commits 5acbe42e, 981153fd, 75bdfdff, 50e61e88）；Batch C-1 本地真实仓库试点已实施（2026-09-16，commit 62340a12）；平台全链路接缝自动化验证已实施（2026-09-18，TestRuntimeWorkflowSeam_GreenfieldVNextPromptAndStepDone）；Batch C-2（真实 GitLab CI runner 联调）待部署窗口。**
 
 Batch A 交付（§7 Batch A 全部条目）：`acceptance_test_design` 节点 + 字段 + 边映射；研发/初审/QA 节点双语 Prompt 契约（含 `test_implementation_evidence` 映射要求与 spec-vs-diff-vs-evidence 对账要求）；manifest 最小结构校验（`internal/workflow/testspec.go`，含占位词拒绝）；CompleteAndAdvance 内的 manifest 闸门（拒绝即释放 claim、步骤保持 pending）；§8 全部三类测试（模板结构 / manifest 校验矩阵 / 工作流端到端含 QA 打回断言）。E2E 测试抓出并修复了 happy path 的 spec 转发断链（QA 必填输入原先不可达），新增 `TestGreenfieldHappyPathForwardsTestSpec` 锁边。直接实例化模板（不建 vNext 副本）：`DefinitionFromTemplate("greenfield-delivery-pipeline", ...)` 即得到 12 步 vNext 形态，存量运行实例不受影响（run 使用定义快照）。
 
-Batch A 边界：返工可追溯工件聚合（§5.1）、QA 测试 checkpoint 权限（§8 第 4 条）属 Batch B；真实项目试点属 Batch C。
+Batch B 交付（§7 Batch B 全部条目）：
+- **B-a 返工可追溯**（commits `5acbe42e`）：qa_signoff 打回时服务端自动把矩阵 failed/blocked/unexecuted 项聚合为结构化 `qa_rework_items`（含 manifest expected_result 逐项富化），经 `e-qa-rework` 送返 implementation；同时在 `review_comments` 前追加人类可读失败清单，即使人类留空也不会丢失失败上下文。
+- **B-b QA checkpoint**（commits `981153fd`, `75bdfdff`, `50e61e88`）：QA 步骤声明 `touched_paths`，平台执行确定性白名单校验（仅限测试源码/夹具/探针，拒绝业务实现与 CI/配置）；`verifyQATouchedPathsAgainstWorktree` 强比对真实 worktree 的 git porcelain delta，双向严格一致且 fail-closed。
+- **全链路研发映射**：`test_implementation_evidence`（Case ID -> 测试文件/结果映射）贯通 `implementation -> self_review -> code_review -> qa -> qa_signoff -> rework`。
+
+Batch C 交付：
+- **C-1 本地真实仓库试点**（commit `62340a12`，`internal/api/batch_c_pilot_test.go`）：针对真实 git 仓库 fixture 驱动 Greenfield vNext 全流程，覆盖高风险鉴权用例、QA 打回返工、设计豁免及基线 SHA 锚定。
+- **自动化平台接缝闭环**（`internal/api/runtime_workflow_seam_test.go`）：验证 `runner.BuildTaskPrompt` 运行时动态渲染 $\to$ `mga task step done` HTTP 端点 $\to$ 引擎推进 $\to$ QA 准出打回 $\to$ 研发返工提示词携带结构化案卷与原始规格的全自动闭环。
+- **C-2 部署级验证**：待真实部署窗口联调 GitLab CI runner。
 
 以下为原设计约束（仍有效）：
 

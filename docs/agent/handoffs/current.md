@@ -3,11 +3,36 @@
 ## Start here
 
 Branch: `dev`.
-Status: Reviewer 独立基线契约 (`de917d62`) 真实验证切片全量闭环（包含工作流管道流转、三轮上限打回、案卷升级、Fail-closed 防御、双语 Prompt 下发，以及真实大模型「带负荷」审查 5 大指标全绿，-race 0 告警）；方向 A Phase 1（`mgt deploy` & `mgt` CLI）已依据架构与价值审计正式挂起；Preview Copilot Turn Receipts 切片 B 与 Guarded Skill Profiles 已合入；Phase 0 降级 Runbook 与 `tools/ciready-check` 已合入（commits `37f610cb`, `893b62e6`, `fc5b8742`, `b3d998e5`）。
+Status: 方向 B Batch B / Batch C-1 及 Greenfield vNext 平台级自动化接缝验证（`TestRuntimeWorkflowSeam_GreenfieldVNextPromptAndStepDone`）已全量闭环（-race 0 告警）；Reviewer 独立基线契约 (`de917d62`) 真实验证切片全量闭环（包含工作流管道流转、三轮上限打回、案卷升级、Fail-closed 防御、双语 Prompt 下发，以及真实大模型「带负荷」审查 5 大指标全绿，-race 0 告警）；方向 A Phase 1（`mgt deploy` & `mgt` CLI）已依据架构与价值审计正式挂起；Preview Copilot Turn Receipts 切片 B 与 Guarded Skill Profiles 已合入；Phase 0 降级 Runbook 与 `tools/ciready-check` 已合入（commits `37f610cb`, `893b62e6`, `fc5b8742`, `b3d998e5`）。
 Feature Flag `MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS` 维持默认严格关闭 (`false`)，受控灰度具备服务端项目白名单硬门禁。
-下一阶段排期：推进方向 B Batch B/C（前置 QA 规格设计，把测试规格前移至设计确认后）与方向 E（Brownfield 存量项目接入）。
+下一阶段排期：推进方向 B Batch C-2（真实 GitLab CI runner 联调，待部署窗口）与方向 E（Brownfield 存量项目接入）。
 
 Key status & deliverables:
+-0.2. **方向 B 前置验收测试设计 Batch B / Batch C-1 及平台全链路接缝闭环**:
+   - **真实代码与提交事实核实 (Audit & Reality Reconciliation)**：
+     - 核查确认 Batch B 全部条目（commits `5acbe42e`, `981153fd`, `75bdfdff`, `50e61e88`）与 Batch C-1 本地真实仓库试点（commit `62340a12`，`internal/api/batch_c_pilot_test.go`）均已在 `dev` 分支合入并有完备单测保障；
+     - 纠正了 `docs/acceptance-test-design-plan.md` 中滞后的“Batch B/C 未开始”状态，对齐代码与提交历史客观事实。
+   - **Batch B 关键能力确认**：
+     - **B-a 返工可追溯**（commit `5acbe42e`）：`qa_signoff` 打回时服务端自动把测试矩阵中 `failed`/`blocked`/`unexecuted` 项聚合为结构化 `qa_rework_items`（逐项富化 `manifest.expected_result`），经 `e-qa-rework` 送返 `implementation`；同时在 `review_comments` 前追加人类可读失败清单，即使审批人留空也不会丢失失败上下文；
+     - **B-b QA checkpoint 权限与白名单门禁**（commits `981153fd`, `75bdfdff`, `50e61e88`）：QA 步骤声明 `touched_paths`，服务端校验严格执行白名单控制（仅限测试源码/夹具/探针，严禁碰触业务代码与 CI/配置）；`verifyQATouchedPathsAgainstWorktree` 强比对真实 worktree 的 `git status --porcelain -z`，双向严格一致且 fail-closed；
+     - **全链路研发映射**：`test_implementation_evidence`（Case ID $\to$ 测试文件/结果映射）从实现节点贯通初审、代码审、QA 到打回返工。
+   - **Batch C-1 本地真实仓库试点 (`internal/api/batch_c_pilot_test.go`, commit `62340a12`)**：
+     - 基于真实 git 仓库 fixture 驱动 Greenfield vNext 全生命周期，验证验收测试规格在真实工程结构下的流转。
+   - **平台级自动化接缝全闭环验证 (`internal/api/runtime_workflow_seam_test.go`, `TestRuntimeWorkflowSeam_GreenfieldVNextPromptAndStepDone`)**：
+     - 针对此前 Reviewer 切片时留下的未闭环边界（`BuildTaskPrompt` 运行时渲染 $\to$ `mga task step done` HTTP 完成端点 $\to$ 引擎状态机 $\to$ 研发返工提示词携带上下文），实现单一全自动化集成测试：
+       - `acceptance_test_design`：`runner.BuildTaskPrompt` 动态渲染步骤契约 $\to$ 非法 manifest 被服务端 400 拦截 $\to$ 合法 manifest 经 HTTP `POST /api/v1/runtime/tasks/{id}/workflow/step/complete` 成功入库并推进；
+       - `implementation`：`BuildTaskPrompt` 校验收到结构化 `test_spec_manifest`，必须提供 `test_implementation_evidence` $\to$ HTTP 提交证据推进；
+       - `self_review`：`BuildTaskPrompt` 校验收到测试证据与规格 $\to$ HTTP 提交 `self_review_verdict: "pass"` 推进；
+       - `code_review`：人工审核批准推进；
+       - `qa`：`BuildTaskPrompt` 校验收到研发证据与测试规格 $\to$ QA 尝试篡改业务源码（`server.go`）被 HTTP 400 fail-closed 拦截 $\to$ 合法探针测试（`tests/revocation_probe_test.go`）匹配真实 git porcelain 成功推进；
+       - `qa_signoff`：留空 comments 提交打回 $\to$ 服务端 `enrichQARejectionComments` 自动富化失败清单，生成带 `expected_result` 的结构化 `qa_rework_items`；
+       - 返工 `implementation`：`runner.BuildTaskPrompt` 验证研发 Agent 提示词精准注入 `qa_rework_items`、富化后的打回审阅意见及原始规格基线。
+   - **诚实边界与未验证范围声明 (Honest Boundaries & Caveats)**：
+     - **Batch C-2（真实 GitLab CI runner 联调）**：需依赖真实环境的 GitLab Runner 调度执行，保持在后续部署窗口进行实地联调，不得在无 runner 环境下标记为已通过；
+     - **Roadmap 第 1 步状态保持「待现场验证 (unverified on live VM)」**。
+   - **自动化验证证据**：
+     - `go test -race -v ./internal/api -run 'TestRuntimeWorkflowSeam_GreenfieldVNextPromptAndStepDone'`：PASS (0 races, 3.88s)；
+     - `go test -race ./internal/workflow/... ./internal/api/... -run 'TestGreenfield|TestValidateTestSpec|TestValidateQATouchedPaths|TestBatchC|TestQASignoff|TestRuntimeWorkflowSeam'`：100% PASS (26.04s, 0 failures, 0 races)。
 -0.1. **Reviewer 独立基线契约 (`de917d62`) 真实验证切片全量闭环**:
    - **活库基线与断代核实**：确认 SQLite 数据库（`~/.multigent/multigent.db`）中 `workflow_runs` 表由于环境重建历史运行记录为 0；为防范“只改模板文本、无实测运行闭环”的断代风险，插队完成真实执行切片。
    - **工作流状态机四路流转全覆盖 (`internal/workflow/reviewer_contract_verification_test.go`)**：
