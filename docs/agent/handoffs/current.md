@@ -25,6 +25,10 @@ Key status & deliverables:
        3. **缺陷捕获**：超额抓出 403 违约、明文 Token 泄漏、端点漏写及单测反向掩盖错误 4 处缺陷；
        4. **单一词元**：严格输出单一词元 `"issues_fixed"`，无自然语言污染；
        5. **案卷结构化**：输出标准的 4 项包含契约、行号、影响、最小修复与缺失验证的标准 JSON 案卷。
+   - **诚实边界与未验证范围声明 (Honest Boundaries & Caveats)**：
+     - **模型侧单测 vs 平台端到端**：本次测试确证了“大语言模型能高度遵从该契约并精准识别缺陷”，但平台级自动化接缝（`BuildTaskPrompt` 运行时渲染 $\to$ Runner SSE $\to$ 容器内 `mga task step done` $\to$ 引擎自动解析并推进）未在单个 live loop 串联。接缝闭环纳入 Batch C 真实项目试点；
+     - **“亲自重跑构建”验证形态**：模型在虚假断言下正确以 `unverified` 拒绝放行，但“真跑构建无误后予以放行”的正面形态未被实测；
+     - **Roadmap 第 1 步状态保持「待验证」**：`runtime_probe_test.go` 单测通过，但本交付无真机 probe 联调与 VM conf 审计证据，不得从清单划掉。
    - **自动化验证证据**：
      - `go test -race -v ./internal/workflow -run 'TestReviewerContract'`：4/4 PASS；
      - `go test -race -v ./internal/runner -run 'TestReviewerPromptContract'`：2/2 PASS；
