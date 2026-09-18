@@ -1535,6 +1535,9 @@ func copyLocalSkillDir(src, dst string) error {
 }
 
 func (s *Server) handlePutSkillPrompt(w http.ResponseWriter, r *http.Request) {
+	if !s.checkCurrentWorkspaceAdmin(w, r) {
+		return
+	}
 	name := r.PathValue("name")
 	sk, err := s.st.Skill(name)
 	if err != nil {

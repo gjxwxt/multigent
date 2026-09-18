@@ -109,22 +109,25 @@ Deployment and the live callback's actual rejection stage remain unverified. A l
    - `go test -race -count=1 ./internal/api -run 'Test(WorkflowReview_Commit|ReviewCommit|PreviewTurn|PreviewOrigin)'`: PASS
    - `make test` & `make build`: PASS
 
-## Completed: Preview Copilot Guarded Skill Profiles (Task 3.2)
+## Completed: Preview Copilot Guarded Skill Profiles (Task 3.2 & Batch 3.2.1)
 
 1. **服务端受控技能画像白名单 (Curated Allowlisted Profiles)**:
    - 定义 4 组预置 Skill Profiles：`ui-polish`、`a11y-remediation`、`responsive-layout`、`form-logic`；
    - 未在白名单内的 Profile 严格 Fail-Closed（返回 400 Bad Request）。
-2. **内置技能与 SHA-256 完整性摘要保护 (Integrity Digest)**:
-   - 内置 `modern-web-guidance` 与 `a11y-debugging` 核心专业工程规范；
-   - `ComputeSkillDigest` 计算全目录文件 SHA-256，防御文件篡改并提供版本溯源指纹。
+2. **不可变可信基线摘要比对与防篡改 (Baseline Digest Verification · Batch 3.2.1)**:
+   - `DefaultTrustedBuiltinSkillDigests` 固化受控内置技能的官方 SHA-256 基线清单；
+   - `ResolveSkillProfileGuidance` 强制比对磁盘实际计算摘要与基准清单，未配置基准或摘要不匹配时严格 Fail-Closed 阻断（返回包含 `digest mismatch` 的错误，阻止提示词注入并向客户端返回 400 Bad Request）。
 3. **脚本执行中立化防线 (Script Neutralization Invariant)**:
-   - 严格落实架构红线：预览 Copilot 严禁挂载或执行脚本附件（`.sh`），仅提取纯声明式 Markdown 指引注入提示词。
-4. **端点与前端交互集成 (API & Web Console)**:
+   - 严格落实架构红线：预览 Copilot 严禁挂载或执行脚本附件（`.sh`），仅提取纯声明式 Markdown 指引注入提示词；技能目录下任何新增未授权脚本都会破坏目录摘要导致加载失败。
+4. **Skill 内容修改 RBAC 权限硬化 (Workspace Admin Guard · Batch 3.2.1)**:
+   - `PUT /api/v1/skills/{name}` (`handlePutSkillPrompt`) 增加 `checkCurrentWorkspaceAdmin` 校验；
+   - 普通登录用户（非工作区管理员）修改技能内容直接被拦截并返回 `403 Forbidden` (`workspace_admin_required`)。
+5. **端点与前端交互集成 (API & Web Console)**:
    - 暴露 `GET /api/v1/projects/{name}/tasks/{taskId}/preview/profiles` 端点；
    - `PreviewDrawer.tsx` 支持技能药丸徽标（Chips）单点切换、快捷操作自动附带画像、消息气泡清晰呈现当前生效技能。
-5. **验证证据**:
-   - `go test -race -v ./internal/api -run 'TestPreviewSkillProfiles'`: PASS (6/6)
-   - `go test -race -count=1 ./internal/api -run 'Test(WorkflowReview_Commit|ReviewCommit|PreviewTurn|PreviewOrigin)'`: PASS
+6. **验证证据**:
+   - `go test -race -v ./internal/api -run 'TestPreviewSkillProfiles|TestPutSkillPrompt'`: PASS (10/10)
+   - `go test -race -count=1 ./internal/api -run 'Test(WorkflowReview_Commit|ReviewCommit|PreviewTurn|PreviewOrigin|PreviewSkill)'`: PASS (23.28s)
    - `cd web && npm run build`: PASS (TypeScript 0 错误)
    - `make test`: PASS (全仓库 40+ 包)
    - `make build`: PASS (二进制全量嵌入完成)

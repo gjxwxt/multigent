@@ -14,11 +14,12 @@ Key status & deliverables:
    - **零泄漏审计与生产 Runbook**：输出 `docs/runbook-preview-turn-receipts.md`，彻底排除破坏性命令（`reset --hard` / `clean -fd`），明确 Fail-Closed 永久加锁与无自动恢复接口的逐路径处置 SOP。
    - **发布审批状态**：用户已确认放行 Batch 5.1。当前处于受控灰度就绪状态。
 
-0.1. **Preview Copilot Guarded Skill Profiles (Task 3.2, 规范就绪)**:
-   - **服务端受控技能白名单与防篡改摘要**：预置 4 类技能 Profile (`ui-polish`、`a11y-remediation`、`responsive-layout`、`form-logic`)，`ComputeSkillDigest` 计算 SHA-256 完整性摘要并校验；非白名单请求严格 400 Bad Request fail-closed。
-   - **脚本执行中立化安全红线**：预览 Copilot 严禁将技能执行附件（`.sh`）挂载进沙箱或执行；仅提取纯声明式 Markdown 规范指引注入提示词。
+0.1. **Preview Copilot Guarded Skill Profiles (Task 3.2 & Batch 3.2.1, 完整性与权限硬化闭环)**:
+   - **服务端受控技能白名单与固定基线摘要**：预置 4 类技能 Profile (`ui-polish`、`a11y-remediation`、`responsive-layout`、`form-logic`)，`DefaultTrustedBuiltinSkillDigests` 固化官方 SHA-256 基线；`ResolveSkillProfileGuidance` 强制比对磁盘实际计算摘要与基准清单，摘要不匹配或未配置基准时严格 400 Bad Request fail-closed 阻断注入。
+   - **Skill 修改接口 RBAC 硬化**：`PUT /api/v1/skills/{name}` 补齐 `checkCurrentWorkspaceAdmin`，普通登录用户调用直接 403 Forbidden (`workspace_admin_required`) 拦截，杜绝越权修改 Profile 依赖的 Skill 内容。
+   - **脚本执行中立化安全红线**：预览 Copilot 严禁将技能执行附件（`.sh`）挂载进沙箱或执行；仅提取纯声明式 Markdown 规范指引注入提示词；技能目录下添加未授权脚本会自动破坏摘要导致加载阻断。
    - **全链路前端可视化集成**：`PreviewDrawer.tsx` 动态加载 Profile 列表，提供直观的技能药丸徽标切换、快捷操作自动匹配 Profile、用户消息徽标实时展示生效 Profile。
-   - **自动化验证证据**：`TestPreviewSkillProfiles` (6/6 PASS)、`npm run build` (PASS)、`make test` (PASS)、`make build` (PASS)。
+   - **自动化验证证据**：`TestPreviewSkillProfiles` + `TestPutSkillPrompt` (10/10 PASS)、回归套件 (23.28s PASS)、`npm run build` (PASS)、`make test` (PASS)、`make build` (PASS)。
 
 1. **ChatOps Channel Automation & Cascade Cleanup (产品边界明确)**:
    - Strictly scoped to IM instance; 409 conflict intercept prevents channel hijacking; link mode strictly finds existing channels (404 if missing).

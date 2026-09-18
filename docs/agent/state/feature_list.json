@@ -91,9 +91,10 @@
       "id": "preview-guarded-skill-profiles",
       "status": "completed",
       "dependsOn": ["preview-turn-receipts-slice-b"],
-      "summary": "Guarded Skill Profiles for Preview Copilot with server allowlist, SHA-256 integrity digest validation, script execution neutralization, endpoint GET /api/v1/projects/{name}/tasks/{taskId}/preview/profiles, and UI profile chips selector.",
+      "summary": "Guarded Skill Profiles for Preview Copilot with server allowlist, SHA-256 fixed baseline integrity digest verification, script execution neutralization, endpoint GET /api/v1/projects/{name}/tasks/{taskId}/preview/profiles, UI profile chips selector, and RBAC admin guard on PUT /api/v1/skills/{name}.",
       "verification": [
-        "go test -race -v ./internal/api -run 'TestPreviewSkillProfiles'",
+        "go test -race -v ./internal/api -run 'TestPreviewSkillProfiles|TestPutSkillPrompt'",
+        "go test -race -count=1 ./internal/api -run 'Test(WorkflowReview_Commit|ReviewCommit|PreviewTurn|PreviewOrigin|PreviewSkill)'",
         "cd web && npm run build",
         "make test",
         "make build"
@@ -101,7 +102,8 @@
       "boundaries": [
         "Preview Copilot strictly disables script execution (.sh) attachments; only pure declarative markdown guidance is injected.",
         "Unlisted skill profiles fail closed with 400 Bad Request.",
-        "Tampering with skill directory files invalidates digest and triggers failure."
+        "Tampering with skill directory files or untrusted digest causes ResolveSkillProfileGuidance to fail closed with 400 Bad Request.",
+        "PUT /api/v1/skills/{name} strictly requires workspace admin privilege (403 Forbidden for non-admin users)."
       ]
     }
   ]

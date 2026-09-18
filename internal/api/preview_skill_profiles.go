@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/multigent/multigent/internal/store"
 )
@@ -71,6 +72,49 @@ func ListPreviewSkillProfiles() []PreviewSkillProfile {
 func LookupPreviewSkillProfile(id string) (PreviewSkillProfile, bool) {
 	p, ok := defaultPreviewSkillProfiles[strings.TrimSpace(id)]
 	return p, ok
+}
+
+// DefaultTrustedBuiltinSkillDigests defines the trusted baseline SHA-256 digests for allowlisted preview skills.
+// Any on-disk skill whose files do not match this baseline is rejected fail-closed to prevent tampering.
+var DefaultTrustedBuiltinSkillDigests = map[string]string{
+	"modern-web-guidance": "6e8d1c6600cd019a9dade38a258aa67ddda711dabd59a05e7e67dd38db97f689",
+	"a11y-debugging":      "a92c204bf1488985bb500325cdbc91894be88af6448035f55bdd523a9c91d563",
+}
+
+var (
+	trustedBuiltinSkillDigestsMu sync.RWMutex
+	trustedBuiltinSkillDigests   = func() map[string]string {
+		m := make(map[string]string, len(DefaultTrustedBuiltinSkillDigests))
+		for k, v := range DefaultTrustedBuiltinSkillDigests {
+			m[k] = v
+		}
+		return m
+	}()
+)
+
+// LookupTrustedSkillDigest returns the trusted baseline digest for a skill ID.
+func LookupTrustedSkillDigest(skillID string) (string, bool) {
+	trustedBuiltinSkillDigestsMu.RLock()
+	defer trustedBuiltinSkillDigestsMu.RUnlock()
+	d, ok := trustedBuiltinSkillDigests[strings.TrimSpace(skillID)]
+	return d, ok
+}
+
+// SetTrustedSkillDigestForTest overrides or sets a trusted digest for testing, returning a cleanup func.
+func SetTrustedSkillDigestForTest(skillID, digest string) func() {
+	trustedBuiltinSkillDigestsMu.Lock()
+	defer trustedBuiltinSkillDigestsMu.Unlock()
+	old, had := trustedBuiltinSkillDigests[skillID]
+	trustedBuiltinSkillDigests[skillID] = digest
+	return func() {
+		trustedBuiltinSkillDigestsMu.Lock()
+		defer trustedBuiltinSkillDigestsMu.Unlock()
+		if had {
+			trustedBuiltinSkillDigests[skillID] = old
+		} else {
+			delete(trustedBuiltinSkillDigests, skillID)
+		}
+	}
 }
 
 // ComputeSkillDigest calculates a SHA-256 digest of the skill files (SKILL.md and assets).
@@ -157,6 +201,15 @@ func ResolveSkillProfileGuidance(st store.Store, profileID string) (string, erro
 		if err != nil {
 			return "", fmt.Errorf("compute skill digest for %q: %w", skillID, err)
 		}
+
+		expectedDigest, ok := LookupTrustedSkillDigest(skillID)
+		if !ok {
+			return "", fmt.Errorf("skill %q has no trusted baseline digest configured", skillID)
+		}
+		if digest != expectedDigest {
+			return "", fmt.Errorf("skill %q digest mismatch: expected %s, got %s (content tampered or untrusted)", skillID, expectedDigest, digest)
+		}
+
 		prompt, err := st.SkillPrompt(skillID)
 		if err != nil {
 			return "", fmt.Errorf("load skill prompt for %q: %w", skillID, err)
