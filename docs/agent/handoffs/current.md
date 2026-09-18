@@ -3,12 +3,12 @@
 ## Start here
 
 Branch: `dev`.
-Status: Reviewer 独立基线契约 (`de917d62`) 真实验证切片已完成全量验证（包含工作流路由、三轮上限打回、案卷升级、Fail-closed 防御及双语 Prompt 契约下发，-race 0 告警）；Preview Copilot Turn Receipts 切片 B 与 Guarded Skill Profiles 已完成并合入；方向 A（独立工具箱）Phase 0（零代码手工降级 Runbook 与 `tools/ciready-check`）已收口合入 `dev` 基线（commits `37f610cb`, `893b62e6`, `fc5b8742`）。
-Feature Flag `MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS` 维持默认严格关闭 (`false`)，受控灰度已具备服务端项目白名单硬门禁。
-下一阶段排期：Reviewer 契约验证切片收官并呈批，随后启动方向 A Phase 1（`mgt deploy` & `ci ready --local`）与方向 B 剩余批次。
+Status: Reviewer 独立基线契约 (`de917d62`) 真实验证切片全量闭环（包含工作流管道流转、三轮上限打回、案卷升级、Fail-closed 防御、双语 Prompt 下发，以及真实大模型「带负荷」审查 5 大指标全绿，-race 0 告警）；方向 A Phase 1（`mgt deploy` & `mgt` CLI）已依据架构与价值审计正式挂起；Preview Copilot Turn Receipts 切片 B 与 Guarded Skill Profiles 已合入；Phase 0 降级 Runbook 与 `tools/ciready-check` 已合入（commits `37f610cb`, `893b62e6`, `fc5b8742`, `b3d998e5`）。
+Feature Flag `MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS` 维持默认严格关闭 (`false`)，受控灰度具备服务端项目白名单硬门禁。
+下一阶段排期：推进方向 B Batch B/C（前置 QA 规格设计，把测试规格前移至设计确认后）与方向 E（Brownfield 存量项目接入）。
 
 Key status & deliverables:
--0.1. **Reviewer 独立基线契约 (`de917d62`) 真实验证切片闭环**:
+-0.1. **Reviewer 独立基线契约 (`de917d62`) 真实验证切片全量闭环**:
    - **活库基线与断代核实**：确认 SQLite 数据库（`~/.multigent/multigent.db`）中 `workflow_runs` 表由于环境重建历史运行记录为 0；为防范“只改模板文本、无实测运行闭环”的断代风险，插队完成真实执行切片。
    - **工作流状态机四路流转全覆盖 (`internal/workflow/reviewer_contract_verification_test.go`)**：
      - **Pass 路由**：评审员按独立预期基线完成比对，提交单一词元 `pass`，准确进入下一阶段 `ci_ready_gate`；
@@ -16,21 +16,22 @@ Key status & deliverables:
      - **Escalate 达限升级**：达到 3 轮上限后提交 `escalate`，工作流准确升级至人工 `code_review`，并原子传递结构化 `escalation_case` JSON 案卷；
      - **Fail-Closed 词表防御**：针对自然语言结论（如 `"approved"` / `"LGTM"`）实施硬拦截并报错，任务严格停留在 `agent_self_review` 步骤，拒绝非法放行。
    - **执行时提示词契约下发验证 (`internal/runner/reviewer_prompt_contract_test.go`)**：
-     - 在中英双语（`zh-CN` / `en`）模板下，通过 `runner.BuildTaskPrompt` 验证评审员 Agent 任务提示词完整注入：
-       1. 独立写出预期基线（先于查看 diff）；
-       2. 从 implementation 记下 base SHA 与 HEAD SHA 并仅核对该区间；
-       3. 亲自重跑构建测试，未跑标 `unverified`；
-       4. 逐条核对验收标准与范围外改动；
-       5. 单一词元结论词表（`pass` / `issues_fixed` / `escalate`）；
-       6. 结构化问题案卷格式（`escalation_case`）；
-       7. 思考链隔离（不读作者思考链，只裁决 diff 与可观察行为）；
-       8. 持续 2 轮以上环境故障直升人工规则；
-     - 验证前置输入（`approved_scope`、`implementation`、`review_rounds`）及必填输出规范（带 backtick 格式）100% 准确渲染。
+     - 在中英双语（`zh-CN` / `en`）模板下，通过 `runner.BuildTaskPrompt` 验证评审员 Agent 任务提示词完整注入 7+1 条款、前置输入与必填输出规范。
+   - **真实大模型「带负荷」审查实测验证 (Live Model Load Verification)**：
+     - 搭建包含 AC-1 ~ AC-4 的令牌撤销任务，并在 Diff 中故意埋入 2 处真实缺陷（403 替代 401 破坏契约、Bearer Token 明文日志泄漏）及单测断言掩盖；
+     - 调动真实 Reviewer Agent 执行审查，5 大严苛指标全达标：
+       1. **独立基线**：正文第 1 部分完全独立推演行为、数据流、边界与测试切面，不被作者实现带跑偏；
+       2. **区间逐条比对**：锁定 Base/HEAD SHA 区间逐一比对 AC-1 ~ AC-4；
+       3. **缺陷捕获**：超额抓出 403 违约、明文 Token 泄漏、端点漏写及单测反向掩盖错误 4 处缺陷；
+       4. **单一词元**：严格输出单一词元 `"issues_fixed"`，无自然语言污染；
+       5. **案卷结构化**：输出标准的 4 项包含契约、行号、影响、最小修复与缺失验证的标准 JSON 案卷。
    - **自动化验证证据**：
      - `go test -race -v ./internal/workflow -run 'TestReviewerContract'`：4/4 PASS；
      - `go test -race -v ./internal/runner -run 'TestReviewerPromptContract'`：2/2 PASS；
-     - 全包回归 `go test ./internal/workflow ./internal/runner`：0 报错。
--0. **方向 A 独立工具箱 Phase 0 收口与整改闭环 (commits `37f610cb`, `893b62e6`, `fc5b8742`)**:
+     - 真实模型实测产物 JSON 原件留存并经审查核准；全包回归 `go test ./internal/workflow ./internal/runner`：0 报错。
+-0. **方向 A 独立工具箱 Phase 0 收口与价值审计 (commits `37f610cb`, `893b62e6`, `fc5b8742`)**:
+   - **Phase 1 挂起决策**：依据 zcode 审查意见，Phase 0 降级手册已打通 6 步手工发版路径；当前单团队单部署场景下开发 `mgt` CLI 成本收益倒挂，且容易脱离核心业务质量进入工程舒适区；正式挂起 Phase 1，待分布式拆分或出现真实发布阻断时触发。
+   - **零代码平台离线降级手册整改**：§1.1 修复表格中 `$CI_COMMIT_TAG` 说明；§1.2 交付可用的 `tools/ciready-check` 工具；§3.3 纠正缓存卷挂载点为真实 `/tmp/multigent-cache` 体系并注明 fallback 链对应关系。
    - **选型与规划基线锁定**：`docs/roadmap-reprioritized-2026-09-12.md`、`docs/standalone-toolbox-decoupling-plan.md`、`docs/test-data-fixture-sandbox-plan.md` 已提交入 `dev` 分支，决策依据永久纳入代码历史。
    - **零代码平台离线降级手册整改与参数真实化**：
      - §1.1 修复表格中被转义吞掉的 `$CI_COMMIT_TAG` 规则门禁说明；
