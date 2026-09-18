@@ -3,11 +3,15 @@
 ## Start here
 
 Branch: `dev`.
-Status: Preview Copilot Turn Receipts 切片 B（Batch 0 至 Batch 5.1）与 Guarded Skill Profiles（Task 3.2 及 Batch 3.2.1，commit `a48f9c42`）已全部完成收官，自动化回归全绿，代码已合入 dev。
+Status: Preview Copilot Turn Receipts 切片 B 与 Guarded Skill Profiles 已完成并合入；方向 A（独立工具箱）Phase 0（零代码手工降级 Runbook）与三份决策基线规划文档已进入 `dev` 基线（commits `37f610cb`, `893b62e6`）。
 Feature Flag `MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS` 维持默认严格关闭 (`false`)，受控灰度已具备服务端项目白名单硬门禁。
-独立工具箱解耦方案文档已归档至 `docs/standalone-toolbox-decoupling-plan.md`，等待下一阶段目标计划统一审批。
+下一阶段排期已确立：插队进行 Reviewer 独立基线契约 (`de917d62`) 的半天真实验证切片，随后推进方向 A Phase 1 与方向 B 剩余批次。
 
 Key status & deliverables:
+-0. **方向 A 独立工具箱 Phase 0 与决策基线进树 (commit `37f610cb`, `893b62e6`)**:
+   - **选型与规划基线锁定**：`docs/roadmap-reprioritized-2026-09-12.md`、`docs/standalone-toolbox-decoupling-plan.md`、`docs/test-data-fixture-sandbox-plan.md` 已提交入 `dev` 分支，决策依据永久纳入代码历史。
+   - **零代码平台离线降级手册**：输出 `docs/runbook-platform-offline-fallback.md`，明确平台宕机/维护场景下的 10 项本地 CI Ready 纯函数检查、Git 附注 Tag 合规发布与 GitLab CI 监控、以及基于 `.multigent/runtime.json` 的独立容器本地预览 SOP；凭据永不导出，发布基于主干不可变 SHA。
+   - **后续插队行动**：实测确认 `de917d62`（Reviewer 独立基线契约）在 SQLite 数据库中真实运行记录为 0；在投入 Batch B/C 编码前，插队半天进行真实运行验证切片。
 0. **Preview Copilot Turn Receipts 切片 B（已正式放行）**:
    - **事务性回执与 Group-Slot 单事务原子化**：`internal/previewreceipt` 支持状态机 `CAPTURED → COMMITTING → COMMITTED / REVERTING → REVERTED / REVERT_FAILED`；`Prepare`、`Finalize`、`Abort`、`Recover` 均在单 DB 事务原子批处理中完成；租赁防御杜绝租期超时误抢占。
    - **人工审核收编与不可变基线保障**：审核通过时自动收编，生成携带 `Multigent-Commit-Intent` Trailer 的 Checkpoint Commit；启动自愈按行严格校验 Intent Trailer，准确区分已提交与未提交。
