@@ -3,11 +3,36 @@
 ## Start here
 
 Branch: `dev`.
-Status: 生产环境部署与现场实测已全量完成（提交 `a7741433`，控制台与分布式节点零版本漂移）；方向 E Brownfield 存量仓库接入与受控就绪门禁在真实存量项目完成只读扫描、阻断识别与 RBAC 实测闭环；方向 B Batch C-2（真实 GitLab CI runner 证据与 SHA 锚定）在部署环境通过 API 与 `mga ci ready` CLI 实测闭环（14/14 项通过）；交付流水线物理双轨制分工与验收测试规格前置（ATD）必要性判定已定案并沉淀 ADR（`docs/agent/decisions/2026-09-18-delivery-pipeline-duality-and-atd-necessity.md`）；平台级自动化接缝验证已全量闭环。
+Status: 方向 C Phase 2（测试数据沙盒 REST API、秒级重置、场景切换与 PreviewDrawer 交互控制台）全量完成并实机部署验证（提交 `6e110b81`，控制台与分布式节点零版本漂移）；生产环境部署与现场实测已全量闭环（方向 E Brownfield 存量只读扫描、阻断识别与 RBAC 闭环；方向 B Batch C-2 真实 GitLab CI runner 证据与 SHA 锚定 14/14 项全绿通过）；交付流水线物理双轨制分工与验收测试规格前置（ATD）必要性判定定案归档 ADR。
 Feature Flag `MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS` 维持默认严格关闭 (`false`)，受控灰度具备服务端项目白名单硬门禁。
 下一阶段排期：推进 Greenfield vNext 带 ATD 的真实全流程跑通（含双人 Mattermost 真实环境流转终验）。
 
 Key status & deliverables:
+-0.6. **方向 C Phase 2：测试数据沙盒 REST API、秒级重置与 PreviewDrawer UI (Commit `6e110b81`)**:
+   - **核心引擎契约扩展与状态机完备 (`internal/fixturesandbox`)**：
+     - `provisioner.go`：新增 `TaskStatus`（查询契约、引擎、相对存储、当前场景、可选场景清单、Lease ID、重置次数与租期）、`ResetTask`（CAS 驱动重置任务私有 DB）与 `SwitchScenario`（切换并冻结不同场景的数据集基准）；
+     - `artifact.go`：修复 `Store.Reset` 返回值，确保原子递增后的最新 `Lease` 结构（包含递增后的 `ResetCount`）正确回传调用方；
+     - 纯函数单测：`go test -race -v ./internal/fixturesandbox/...` 全量 25/25 PASS。
+   - **REST API 端点实现与安全防护 (`internal/api/fixture_sandbox.go`, `server.go`)**：
+     - `GET /api/v1/projects/{name}/tasks/{taskId}/fixture-sandbox`：由主 mux 注册（`withTokenAuth`），`checkProjectAccess` 鉴权，无契约工程优雅降级返回 `{"hasContract":false}`，绝不阻塞任务预览；
+     - `POST /api/v1/projects/{name}/tasks/{taskId}/fixture-sandbox/reset`：严格执行 `checkProjectOperator` RBAC 门禁，调用 CAS 重置引擎恢复至不可变快照，写入结构化审计日志 `task.fixture_sandbox.reset`；
+     - `POST /api/v1/projects/{name}/tasks/{taskId}/fixture-sandbox/scenario`：严格执行 `checkProjectOperator`，对未在契约中声明的非法场景严格 fail-closed 拦截（HTTP 400），写入结构化审计日志 `task.fixture_sandbox.switch_scenario`；
+     - 端点集成测试：`internal/api/fixture_sandbox_test.go` 覆盖未认证 401、访客（Viewer）403、执行者（Operator）200、非法场景拦截 400、无契约降级 200 与任务不存在 404，全量 PASS。
+   - **控制台交互集成与双向重载联动 (`web/src/components/task/PreviewDrawer.tsx`)**：
+     - 在预览抽屉顶部工具栏优雅内嵌“🎭 数据沙盒”控制面板（仅在契约工程可见，无契约工程静默隐藏）；
+     - 提供当前场景标识、测试场景切换单选列表、相对存储路径只读展示（严防宿主绝对路径泄漏）；
+     - 提供“一键重置沙盒 (<100ms)”操作，点击后秒级抹除写污染并自动重载预览 iframe 呈现纯净数据；
+     - 包含重置次数徽章（`↺N`）与剩余租期动态显示；
+     - 完整接入中英文双语国际化词条（`web/src/locales/`）。
+   - **全量构建、回归测试与实机部署**：
+     - 前端编译：`npm run build` TypeScript 与 Vite 零告警通过；
+     - 全量回归：`make test` 52 个包 100% PASS (0 failure, 0 races)；
+     - 一键构建：`make build` 完整内嵌静态资源产出单文件二进制；
+     - 实机零漂移部署：交叉编译后同步至控制面（`linux/amd64`）与运行节点 `ubuntu-node-2`（`linux/arm64`），双方版本均为 `6e110b81`，心跳实时在线；实测未认证 401 拦截与无契约任务 `{"hasContract":false}` 正常降级。
+   - **诚实边界与未验证范围声明 (Honest Boundaries & Caveats)**：
+     - 已闭环验证：单元测试、API 鉴权门禁、前端构建、双端部署与版本对齐；
+     - 待后续在契约工程真实预览场景中由真人通过浏览器界面走查场景切换手感。
+
 -0.5. **真实环境部署与现场实测全闭环 (Live Deployment & Verification, Commit `a7741433`)**:
    - **双节点零漂移部署与心跳验证**：
      - 控制面（`amd64`）：服务正常运行，`/api/v1/version` 精确返回 `{"ok":true,"version":"a7741433"}`；
