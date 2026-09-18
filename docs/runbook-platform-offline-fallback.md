@@ -42,7 +42,7 @@
 | `ci_yaml_parses` | `.gitlab-ci.yml` 必须符合有效 YAML 格式规范。 | 语法错误将导致 GitLab CI 直接在 Lint 阶段报解析失败。 |
 | `required_jobs` | 必须包含以下 6 个核心 Job：<br/>1. `lint:backend`<br/>2. `test:backend`<br/>3. `build:frontend`<br/>4. `build:backend`<br/>5. `package`<br/>6. `deploy` | 缺失任一核心 Job 即破坏平台交付基线契约。 |
 | `runner_tags` | 所有声明的 Job 必须显式携带 `tags: [docker]`。 | 无此标签会导致任务无法被专用的 Docker Runner 认领。 |
-| `tag_only_release` | `package` 和 `deploy` 两个阶段必须严格配置 `` 规则门禁。 | 防止向主分支（main）日常推送提交时误触发打包与部署。 |
+| `tag_only_release` | `package` 和 `deploy` 两个阶段必须严格配置 `$CI_COMMIT_TAG` 规则门禁。 | 防止向主分支（main）日常推送提交时误触发打包与部署。 |
 | `npm_mirror` | 前端构建脚本中必须显式声明使用 `registry.npmmirror.com`。 | 避免海外官方源冷拉依赖耗时超 5–7 分钟导致构建超时。 |
 | `apk_cache` | 涉及 Alpine 镜像安装命令（`apk add`）时，**严禁**使用 `--no-cache`，必须配置 `--cache-dir /cache/apk`。 | 避免在每个 Job 中重复从外网下载 Docker CLI。 |
 | `interruptible` | 必须在全局或各个 Job 配置 `default.interruptible: true`。 | 允许后序提交自动取消前序冗余流水线，节约 Runner 资源。 |
@@ -51,48 +51,34 @@
 
 ### 1.2 本地单行校验脚本 (Zero-Server Execution)
 
-若机器上具备 Go 运行环境，可直接调用仓库内置的 `ciready` 纯函数模块，执行零服务静态校验：
+因 Go 语言规范中 `internal` 包严格禁止跨模块外部引用，且 `go run` 无内联程序执行机制，仓库在 `tools/ciready-check` 内置了纯 Go 零服务校验工具，直调 `internal/ciready` 内核：
 
 ```bash
-# 进入 multigent 仓库目录，执行对目标工程的就绪检查
-go run -C /Users/imac/Documents/code/github/multigent -e '
-package main
-import (
-	"fmt"
-	"os"
-	"github.com/multigent/multigent/internal/ciready"
-)
-func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: go run ... <target-repo-dir>")
-		os.Exit(2)
-	}
-	report := ciready.Verify(os.Args[1])
-	fmt.Printf("
-=== CI/CD Readiness Report: %s (Overall: %s) ===
-", report.Repo, report.Overall)
-	hasFail := false
-	for _, c := range report.Checks {
-		statusMark := "✓"
-		if c.Status == ciready.StatusFail {
-			statusMark = "✗"
-			hasFail = true
-		} else if c.Status == ciready.StatusSkip {
-			statusMark = "-"
-		}
-		detail := ""
-		if c.Detail != "" {
-			detail = " -> " + c.Detail
-		}
-		fmt.Printf("[%s] %-20s : %s%s
-", statusMark, c.Name, c.Status, detail)
-	}
-	if hasFail {
-		os.Exit(1)
-	}
-}
-' /path/to/target-project-repo
+# 1. 直接执行确定性静态检查（输出每项检查结果与 Exit Code）
+go run ./tools/ciready-check /path/to/target-project-repo
+
+# 2. 若缺少基线文件，可通过 --seed 参数自动补齐并验证（永不覆写已有文件）
+go run ./tools/ciready-check --seed /path/to/target-project-repo
 ```
+
+*命令输出示例：*
+```text
+=== CI/CD Readiness Report: /path/to/target-project-repo (Overall: ready) ===
+[✓] baseline_files         : pass
+[✓] lockfile               : pass
+[✓] build_tool_readiness   : pass
+[✓] makefile_targets       : pass
+[✓] ci_yaml_parses         : pass
+[✓] required_jobs          : pass
+[✓] runner_tags            : pass
+[✓] tag_only_release       : pass
+[✓] npm_mirror             : pass
+[✓] apk_cache              : pass
+[✓] interruptible          : pass
+[✓] frontend_scripts       : pass
+[✓] health_path            : pass
+```
+若存在不满足项，程序将输出 `[✗]` 错误明细并以退出码 `1` 退出（Fail-Closed）。
 
 ### 1.3 缺失基线文件补全 (Idempotent Seed)
 若新工程缺少 `.gitlab-ci.yml` 或 `deploy/` 目录：
@@ -209,15 +195,58 @@ docker volume create multigent-go-build-cache
 
 ### 3.3 启动独立预览容器
 
-执行以下标准命令，该命令与 `internal/preview/engine.go` 中的 `previewDockerBaseArgs` 保持完全一致的隔离与挂载参数：
+本步骤使用与平台 `previewDockerBaseArgs`（[`internal/preview/engine.go:950`](file:///Users/imac/Documents/code/github/multigent/internal/preview/engine.go#L950)）同构的缓存卷挂载点与环境变量体系。
+
+> [!IMPORTANT]
+> **缓存卷挂载规范与环境对齐（基于 `internal/sandbox/docker.go:1047` 的 p15 canary 教训）**：
+> 平台为避免 Docker 自动创建挂载目录时将 root 权限赋给普通用户 HOME 导致权限冲突，所有持久化缓存统一挂载在 `/tmp/multigent-cache` 下。必须同时注入 `npm_config_cache`、`GOPATH`、`GOMODCACHE`、`GOCACHE` 和 `NPM_CONFIG_PREFIX`，否则工具链会走默认路径导致缓存卷闲置落空。
+
+#### 启动命令规范
 
 ```bash
 PREVIEW_PORT=3000
-CONTAINER_NAME="standalone-preview-$(basename $(pwd))"
+PROJECT_NAME="$(basename $(pwd))"
+CONTAINER_NAME="standalone-preview-${PROJECT_NAME}"
 
-docker run -d   --name "$CONTAINER_NAME"   -p "127.0.0.1:${PREVIEW_PORT}:${PREVIEW_PORT}"   -v "$(pwd):/workspace"   -v "multigent-toolchains:/opt/multigent/toolchains"   -v "multigent-npm-cache:/root/.cache/npm"   -v "multigent-go-cache:/root/go/pkg/mod"   -v "multigent-go-build-cache:/root/.cache/go-build"   -e "npm_config_cache=/root/.cache/npm"   -e "GOPATH=/root/go"   -e "GOMODCACHE=/root/go/pkg/mod"   -e "GOCACHE=/root/.cache/go-build"   -e "PORT=${PREVIEW_PORT}"   -e "GOFLAGS=-buildvcs=false"   -w "/workspace"   ghcr.io/multigent/multigent/runtime-base:latest   sh -c "(cd web && npm install --no-audit --no-fund && npm run dev -- --port 3000 --host 0.0.0.0) & (cd server && go run .) & wait"
+# 若当前目录是 Git Linked Worktree，提取其母仓库绝对路径挂载（对应 sandbox.WorktreeParentMount）
+PARENT_GIT_MOUNT=""
+if [ -f .git ]; then
+    GITDIR=$(cat .git | sed 's/gitdir: //')
+    PARENT_REPO=$(cd "$GITDIR/../.." 2>/dev/null && pwd)
+    if [ -n "$PARENT_REPO" ]; then
+        PARENT_GIT_MOUNT="-v $PARENT_REPO:$PARENT_REPO"
+    fi
+fi
+
+docker run -d \
+  --name "$CONTAINER_NAME" \
+  -p "127.0.0.1:${PREVIEW_PORT}:${PREVIEW_PORT}" \
+  --label "com.multigent.preview=true" \
+  --label "com.multigent.preview.standalone=true" \
+  --label "com.multigent.preview.project=${PROJECT_NAME}" \
+  --label "com.multigent.preview.port=${PREVIEW_PORT}" \
+  -v "$(pwd):/workspace" \
+  $PARENT_GIT_MOUNT \
+  -v "multigent-toolchains:/opt/multigent/toolchains" \
+  -v "multigent-npm-cache:/tmp/multigent-cache/npm" \
+  -v "multigent-go-cache:/tmp/multigent-cache/go/pkg/mod" \
+  -v "multigent-go-build-cache:/tmp/multigent-cache/go-build" \
+  -e "npm_config_cache=/tmp/multigent-cache/npm" \
+  -e "GOPATH=/tmp/multigent-cache/go" \
+  -e "GOMODCACHE=/tmp/multigent-cache/go/pkg/mod" \
+  -e "GOCACHE=/tmp/multigent-cache/go-build" \
+  -e "NPM_CONFIG_PREFIX=/opt/multigent/toolchains/npm" \
+  -e "PORT=${PREVIEW_PORT}" \
+  -e "GOFLAGS=-buildvcs=false" \
+  -w "/workspace" \
+  ghcr.io/multigent/multigent/runtime-base:latest \
+  sh -c "(cd web && npm install --no-audit --no-fund && npm run dev -- --port ${PREVIEW_PORT} --host 0.0.0.0) & (cd server && go run .) & wait"
 ```
-*(注：对于 Spring Boot / JVM 项目，将镜像替换为 `ghcr.io/multigent/multigent/runtime-jvm21:2026.9.1` 并按 gradle bootRun 启动)*
+*(注：对于 Spring Boot / JVM 项目，将镜像替换为 `ghcr.io/multigent/multigent/runtime-jvm21:2026.9.1`，启动命令替换为 Gradle bootRun)*
+
+#### 启动命令与平台 Fallback 链的关系说明
+1. **契约优先**：当项目包含 `.multigent/runtime.json` 时，应优先根据其 `command` 字段启动各子服务；
+2. **平台 Fallback 链差异**：若缺少 `runtime.json`，平台内部使用一组自适应 fallback 链（`internal/preview/engine.go:417-434`），依次尝试 `npm start || npm run dev || node server/index.js`，后端尝试 `./bin/server || go run -buildvcs=false . || go run ./cmd/...`。上述手工命令针对标准前后端工程显式指定了启动链，在手工排查时语义更明确。
 
 ### 3.4 探活与验证
 

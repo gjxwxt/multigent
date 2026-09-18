@@ -8,9 +8,13 @@ Feature Flag `MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS` 维持默认严格关闭 (
 下一阶段排期已确立：插队进行 Reviewer 独立基线契约 (`de917d62`) 的半天真实验证切片，随后推进方向 A Phase 1 与方向 B 剩余批次。
 
 Key status & deliverables:
--0. **方向 A 独立工具箱 Phase 0 与决策基线进树 (commit `37f610cb`, `893b62e6`)**:
+-0. **方向 A 独立工具箱 Phase 0 收口与整改闭环 (commits `37f610cb`, `893b62e6`, 及待提交整改)**:
    - **选型与规划基线锁定**：`docs/roadmap-reprioritized-2026-09-12.md`、`docs/standalone-toolbox-decoupling-plan.md`、`docs/test-data-fixture-sandbox-plan.md` 已提交入 `dev` 分支，决策依据永久纳入代码历史。
-   - **零代码平台离线降级手册**：输出 `docs/runbook-platform-offline-fallback.md`，明确平台宕机/维护场景下的 10 项本地 CI Ready 纯函数检查、Git 附注 Tag 合规发布与 GitLab CI 监控、以及基于 `.multigent/runtime.json` 的独立容器本地预览 SOP；凭据永不导出，发布基于主干不可变 SHA。
+   - **零代码平台离线降级手册整改与参数真实化**：
+     - §1.1 修复表格中被转义吞掉的 `$CI_COMMIT_TAG` 规则门禁说明；
+     - §1.2 废弃不可执行的 `go run -e` 伪命令，落地实测可行的内置工具 `tools/ciready-check/main.go`（带单测 `main_test.go` 全 PASS），提供无服务直调 `ciready` 检查与 `--seed` 补全能力；
+     - §3.3 纠正缓存卷挂载点与环境变量体系为平台真实的 `/tmp/multigent-cache`（遵从 p15 canary 教训，防 root 权限踩坑），补齐 labels、linked worktree 父仓库挂载说明，并明确注明命令与平台 `engine.go:417-434` 运行时 fallback 链的自适应对应关系。
+   - **诚实验证说明**：规划文档与 Runbook 初始三笔提交为纯文档（通过 `internal/ciready` 单元测试与真实活库 0 运行记录核实）；本次整改新增 `tools/ciready-check` 经自动化测试验证通过（`go test -v ./tools/ciready-check` PASS）。
    - **后续插队行动**：实测确认 `de917d62`（Reviewer 独立基线契约）在 SQLite 数据库中真实运行记录为 0；在投入 Batch B/C 编码前，插队半天进行真实运行验证切片。
 0. **Preview Copilot Turn Receipts 切片 B（已正式放行）**:
    - **事务性回执与 Group-Slot 单事务原子化**：`internal/previewreceipt` 支持状态机 `CAPTURED → COMMITTING → COMMITTED / REVERTING → REVERTED / REVERT_FAILED`；`Prepare`、`Finalize`、`Abort`、`Recover` 均在单 DB 事务原子批处理中完成；租赁防御杜绝租期超时误抢占。
