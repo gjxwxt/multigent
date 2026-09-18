@@ -3,11 +3,21 @@
 ## Start here
 
 Branch: `dev`.
-Status: 方向 E Brownfield 存量仓库接入与受控就绪门禁（P0）纯函数探测引擎、6步受控就绪流水线（`brownfield-onboarding-v1`）及 RBAC 门禁全量闭环（-race 0 告警，5 条裁决修订全部到位）；方向 B Batch B / Batch C-1 及 Greenfield vNext 平台级自动化接缝验证（`TestRuntimeWorkflowSeam_GreenfieldVNextPromptAndStepDone`）已全量闭环（-race 0 告警）；Reviewer 独立基线契约 (`de917d62`) 真实验证切片全量闭环；方向 A Phase 1（`mgt deploy` & `mgt` CLI）已依据架构与价值审计正式挂起；Preview Copilot Turn Receipts 切片 B 与 Guarded Skill Profiles 已合入；Phase 0 降级 Runbook 与 `tools/ciready-check` 已合入（commits `37f610cb`, `893b62e6`, `fc5b8742`, `b3d998e5`）。
+Status: 交付流水线物理双轨制分工与验收测试规格前置（ATD）必要性判定已定案并沉淀 ADR（`docs/agent/decisions/2026-09-18-delivery-pipeline-duality-and-atd-necessity.md`）；方向 E Brownfield 存量仓库接入与受控就绪门禁（P0）纯函数探测引擎、6步受控就绪流水线（`brownfield-onboarding-v1`）及 RBAC 门禁全量闭环（-race 0 告警，5 条裁决修订全部到位）；方向 B Batch B / Batch C-1 及 Greenfield vNext 平台级自动化接缝验证（`TestRuntimeWorkflowSeam_GreenfieldVNextPromptAndStepDone`）已全量闭环（-race 0 告警）；Reviewer 独立基线契约 (`de917d62`) 真实验证切片全量闭环；方向 A Phase 1（`mgt deploy` & `mgt` CLI）已依据架构与价值审计正式挂起；Preview Copilot Turn Receipts 切片 B 与 Guarded Skill Profiles 已合入；Phase 0 降级 Runbook 与 `tools/ciready-check` 已合入（commits `37f610cb`, `893b62e6`, `fc5b8742`, `b3d998e5`）。
 Feature Flag `MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS` 维持默认严格关闭 (`false`)，受控灰度具备服务端项目白名单硬门禁。
-下一阶段排期：推进方向 B Batch C-2（真实 GitLab CI runner 联调，待部署窗口）与双人 Mattermost 真实环境流转终验。
+下一阶段排期：推进方向 B Batch C-2（真实 GitLab CI runner 联调与 Greenfield vNext 带 ATD 实测，待部署窗口）与双人 Mattermost 真实环境流转终验。
 
 Key status & deliverables:
+-0.4. **交付流水线物理双轨制分工与验收测试规格前置 (ATD) 必要性判定 (ADR 2026-09-18)**:
+   - **双轨制物理隔离架构确立**：
+     - **日常快速迭代流水线 (`unified-delivery-pipeline`)**：保持精简高效（澄清 $\to$ 澄清审 $\to$ 编码 $\to$ 初审 $\to$ CI 闸门 $\to$ 代码审 $\to$ 合并 $\to$ 后置 QA $\to$ 发布）；坚决不插入前置测试规格设计（ATD）节点与前置设计门，杜绝日常开发阻力与模型上下文膨胀。
+     - **全新工程交付流水线 (`greenfield-delivery-pipeline` vNext)**：针对从零起跑、高保真交付的新工程，完整保留 `design_review`（OpenDesign 高保真原型门）与 `acceptance_test_design`（ATD 验收测试规格前置设计门）。
+   - **ATD 契约锚点与稳定性归因**：
+     - 确认 ATD 节点产出的 `test_spec_manifest` 由纯函数强类型校验器（`internal/workflow/testspec.go`）硬门禁把关（占位词拦截、字段校验），向研发提供机器可读测试目标，杜绝大模型在无基线时写“假测试”（断言颠倒）；
+     - 正确归因 `t-20260910-pu8mhs` 成功经验：它验证了“设计确认 + 独立初审 + 合并前 QA 闸门”骨架的有效性，而 ATD 是给骨架增加事前契约保障。
+   - **下一步实证方案**：
+     - 将 Batch C-2（真实 GitLab CI runner 联调）与 Greenfield vNext 带 ATD 的从零交付结合，实地获取手感稳定性与往返打回率的客观数据。
+   - **ADR 归档**：[`docs/agent/decisions/2026-09-18-delivery-pipeline-duality-and-atd-necessity.md`](file:///Users/imac/Documents/code/github/multigent/docs/agent/decisions/2026-09-18-delivery-pipeline-duality-and-atd-necessity.md)。
 -0.3. **方向 E Brownfield 存量仓库受控接入与就绪门禁 (P0, 5 条裁决修订全闭环)**:
    - **纯函数探测与评估引擎 (`internal/brownfield`)**:
      - **多语言栈零副作用探测**：`Detect` 纯函数只读扫描 Node (npm/pnpm/yarn/bun)、JVM (Gradle/Maven/wrapper 权限)、Go (go.mod/go.sum)、Python (poetry/pipfile/requirements)、Rust (Cargo) 技术栈、构建脚本、CI/CD 与容器编排；
