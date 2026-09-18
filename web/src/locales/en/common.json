@@ -787,6 +787,8 @@
       "choice.existingDesc": "Pick from the existing project list; the design is already completed in OpenDesign.",
       "choice.generate": "Generate from requirements",
       "choice.generateDesc": "The platform calls OpenDesign to produce a first version from the upstream requirement; iterate via chat and version restore inside the dialog.",
+      "choice.waive": "Waive design verification",
+      "choice.waiveDesc": "For backend services, headless tasks, or clear logic without UI changes. Submit audited justification to proceed directly.",
       "choice.recommended": "Recommended",
       "confirm": "Confirm & proceed",
       "start": "Start design",
@@ -826,8 +828,11 @@
       "snapshotFailedDesc": "An error occurred while freezing the design prototype. To prevent shipping an empty shell or drifted prototype, the gate has been blocked. Provide an audited waiver reason to proceed:",
       "waiverReasonLabel": "Waiver justification (required, recorded in audit logs)",
       "waiverReasonPlaceholder": "e.g., OD service temporarily offline, verified mockups manually.",
+      "waiverDirectPlaceholder": "e.g., Pure backend API changes with no UI, or minor updates where visual prototyping is unnecessary.",
       "confirmWaiver": "Grant waiver & approve",
-      "autoComments.waived": "Design snapshot failure waived by human reviewer (reason: {{reason}}); proceeding to implementation."
+      "confirmWaiverBtn": "Confirm waiver & proceed",
+      "autoComments.waived": "Design snapshot failure waived by human reviewer (reason: {{reason}}); proceeding to implementation.",
+      "autoComments.directWaived": "Human reviewer waived design prototyping (reason: {{reason}}); proceeding to implementation."
     },
     "qa": {
       "itemId": "Item / AC ID",

@@ -3,11 +3,28 @@
 ## Start here
 
 Branch: `dev`.
-Status: 方向 C Phase 2（测试数据沙盒 REST API、秒级重置、场景切换与 PreviewDrawer 交互控制台）全量完成并实机部署验证（提交 `6e110b81`，控制台与分布式节点零版本漂移）；生产环境部署与现场实测已全量闭环（方向 E Brownfield 存量只读扫描、阻断识别与 RBAC 闭环；方向 B Batch C-2 真实 GitLab CI runner 证据与 SHA 锚定 14/14 项全绿通过）；交付流水线物理双轨制分工与验收测试规格前置（ATD）必要性判定定案归档 ADR。
+Status: 原型生命周期有界性（合入主干即归档）、真实代码与实时 Preview 为单源真理（SSOT）及设计门主动特批豁免（UI+后端审计）定案并全量落地（ADR `2026-09-18-design-prototype-lifecycle-and-preview-ssot.md`）；方向 C Phase 2（测试数据沙盒 REST API、秒级重置、场景切换与 PreviewDrawer 交互控制台）全量完成并实机部署验证（提交 `6e110b81`，控制台与分布式节点零版本漂移）；生产环境部署与现场实测已全量闭环（方向 E Brownfield 存量只读扫描、阻断识别与 RBAC 闭环；方向 B Batch C-2 真实 GitLab CI runner 证据与 SHA 锚定 14/14 项全绿通过）；交付流水线物理双轨制分工与验收测试规格前置（ATD）必要性判定定案归档 ADR。
 Feature Flag `MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS` 维持默认严格关闭 (`false`)，受控灰度具备服务端项目白名单硬门禁。
 下一阶段排期：推进 Greenfield vNext 带 ATD 的真实全流程跑通（含双人 Mattermost 真实环境流转终验）。
 
 Key status & deliverables:
+-0.7. **原型生命周期有界性、代码与 Preview 单源真理 (SSOT) 及设计门主动特批豁免 (ADR & UI 交付)**:
+   - **核心架构判定定案 (`docs/agent/decisions/2026-09-18-design-prototype-lifecycle-and-preview-ssot.md`)**：
+     - **原型生命周期有界性**：OpenDesign 原型生命周期严格截至对应任务分支合入主干（PR merge），合入即归档，不留陈旧基线；
+     - **单源真理 (SSOT)**：真实代码与沙箱 Preview 抽屉为唯一真理（结构性理由：代码包含原型无法表达的状态、路由、权限与异常降级行为），彻底免除反向同步原型的技术债负担；存量项目接入（Brownfield）直接以自身代码拉起 Preview，不碰 OpenDesign；
+     - **MVP 三场景 Loop**：0 $\to$ 1 走 `greenfield`（带 OD 一次定调）；存量接入走 `brownfield`（无 OD）；日常 1 $\to$ N 走 `unified` + Preview 抽屉验收。
+   - **控制台设计门主动透出特批豁免 (`web/src/components/design/`, `locales/`)**：
+     - `DesignChoiceCard.tsx`：扩展 `DesignSource = 'existing' | 'generate' | 'waive'`，引入 `ShieldAlert` 图标与高对比琥珀色告警选中态；
+     - `DesignSourceChoiceModal.tsx`：并排展示 3 选 1 卡片（生成、已有、特批豁免设计），选中豁免时动态展开必填理由输入框与审计说明；
+     - `DesignGateFlow.tsx`：实现 `confirmWaiverDirect(reason)`，携带 `design_waiver_reason` 与 `design_waived: 'true'` 提交审批；
+     - 国际化支持：中英文 locale 同步补齐 `choice.waive`、`waiverDirectPlaceholder` 与 `autoComments.directWaived`。
+   - **后端自动化单测回归与安全防护**：
+     - `internal/api/design_gate_snapshot_test.go`：新增 `TestDesignReviewApprovalSucceedsWithDirectWaiver`，严格校验无 OD 项目引用时携带合法理由直接放行、输入透传至下一阶段、并在任务审计日志留下完整操作痕迹；
+     - `make test` 全仓库 52 个包 100% PASS，`npm run build` 前端编译零告警通过。
+   - **诚实边界与未验证范围声明 (Honest Boundaries & Caveats)**：
+     - 已验证：前端 TypeScript 编译、多语言完整性、后端 API 鉴权/豁免放行/任务日志记入单测、全量回归无破坏；
+     - 待验证：在真实浏览器中点击该豁免卡片并提交，确认控制台界面的视觉体验与手感。
+
 -0.6. **方向 C Phase 2：测试数据沙盒 REST API、秒级重置与 PreviewDrawer UI (Commit `6e110b81`)**:
    - **核心引擎契约扩展与状态机完备 (`internal/fixturesandbox`)**：
      - `provisioner.go`：新增 `TaskStatus`（查询契约、引擎、相对存储、当前场景、可选场景清单、Lease ID、重置次数与租期）、`ResetTask`（CAS 驱动重置任务私有 DB）与 `SwitchScenario`（切换并冻结不同场景的数据集基准）；

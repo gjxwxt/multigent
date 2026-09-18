@@ -787,6 +787,8 @@
       "choice.existingDesc": "从已有项目列表中选择，设计已在 OpenDesign 完成。",
       "choice.generate": "从需求生成（推荐）",
       "choice.generateDesc": "由平台调用 OD 基于上游需求文档自动设计出首版，可在弹窗内对话修改与版本恢复。",
+      "choice.waive": "特批豁免设计",
+      "choice.waiveDesc": "后端服务、无 UI 界面或逻辑已明晰无需视觉原型，可签署审计理由后直接准入编码。",
       "choice.recommended": "推荐",
       "confirm": "确认并流转",
       "start": "开始设计",
@@ -826,8 +828,11 @@
       "snapshotFailedDesc": "系统在原子化冻结该设计原型时发生异常。为防止后续开发使用空壳或漂移原型，流程已拦截。如需特批放行，请填写审计豁免理由：",
       "waiverReasonLabel": "特批豁免理由（必填，将记入审计日志）",
       "waiverReasonPlaceholder": "例如：OD 服务暂时离线，已人工核验本地导出的设计稿一致。",
+      "waiverDirectPlaceholder": "例如：纯后端 API 改造无前端界面，或存量功能微调无需重做原型。",
       "confirmWaiver": "确认特批豁免并流转",
-      "autoComments.waived": "设计快照异常，经人工特批豁免（理由：{{reason}}），准入实现。"
+      "confirmWaiverBtn": "确认豁免并流转",
+      "autoComments.waived": "设计快照异常，经人工特批豁免（理由：{{reason}}），准入实现。",
+      "autoComments.directWaived": "人工特批豁免设计原型（理由：{{reason}}），准入实现。"
     },
     "qa": {
       "itemId": "验收项 / ID",

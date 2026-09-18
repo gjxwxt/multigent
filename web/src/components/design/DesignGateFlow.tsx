@@ -130,6 +130,27 @@ export function DesignGateFlow({
     }
   }
 
+  async function confirmWaiverDirect(reason: string) {
+    setBusyLocal(true)
+    setError(null)
+    try {
+      await submitReview(
+        {
+          design_waiver_reason: reason,
+          design_waived: 'true',
+          comments: t('designGate.autoComments.directWaived', {
+            defaultValue: `人工特批豁免设计原型（理由：${reason}），准入实现。`,
+            reason: reason,
+          }),
+        },
+        'approve',
+      )
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+      setBusyLocal(false)
+    }
+  }
+
   async function submitWaiver() {
     if (!waiverPrompt || !waiverReason.trim()) return
     setBusyLocal(true)
@@ -185,6 +206,7 @@ export function DesignGateFlow({
           onClose={onClose}
           onConfirmExisting={(id, name) => void confirmExisting(id, name)}
           onStartGenerate={() => void startGenerate()}
+          onConfirmWaiver={(reason) => void confirmWaiverDirect(reason)}
         />
       ) : (
         <DesignReviewModal

@@ -271,6 +271,72 @@ func TestDesignReviewApprovalFailsClosedWithoutReferenceOrWaiver(t *testing.T) {
 	}
 }
 
+// TestDesignReviewApprovalSucceedsWithDirectWaiver verifies that an upfront design waiver
+// with explicit justification allows approving without an OD project reference.
+func TestDesignReviewApprovalSucceedsWithDirectWaiver(t *testing.T) {
+	s, workspaceID, task := seedDesignTask(t, entity.TaskStatusAwaitingConfirmation)
+	seedODConnection(t, s)
+	seedDesignGateRun(t, s, workspaceID, task.ID)
+
+	body := `{
+		"decision": "approve",
+		"comments": "waived upfront for pure backend API",
+		"outputs": {
+			"design_waiver_reason": "pure backend API task, no UI changes required"
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/resproj/tasks/"+task.ID+"/workflow/review", strings.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), ctxUserKey, "admin"))
+	req.SetPathValue("name", "resproj")
+	req.SetPathValue("taskId", task.ID)
+	w := httptest.NewRecorder()
+	s.handlePostTaskWorkflowReview(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK with direct waiver, got %d: %s", w.Code, w.Body.String())
+	}
+
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	run, found, err := wfStore.RunForTask("resproj", task.ID)
+	if err != nil || !found || run.ActiveStepID != "acceptance_test_design" {
+		t.Fatalf("run should advance to acceptance_test_design: found=%v active=%s err=%v", found, run.ActiveStepID, err)
+	}
+	instances, err := wfStore.ListStepInstances(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var atd *entity.WorkflowStepInstance
+	for i := range instances {
+		if instances[i].StepID == "acceptance_test_design" {
+			atd = &instances[i]
+		}
+	}
+	if atd == nil {
+		t.Fatal("acceptance_test_design instance missing")
+	}
+	if got := atd.InputValues["design_waived"]; got != "true" {
+		t.Fatalf("expected design_waived=true in acceptance_test_design inputs, got %q", got)
+	}
+	if got := atd.InputValues["design_waiver_reason"]; !strings.Contains(got, "pure backend API task") {
+		t.Fatalf("expected design_waiver_reason in acceptance_test_design inputs, got %q", got)
+	}
+
+	comments, err := s.ts.ListComments("resproj", "agent", task.ID)
+	if err != nil {
+		t.Fatalf("failed to list task comments: %v", err)
+	}
+	foundComment := false
+	for _, c := range comments {
+		if strings.Contains(c.Body, "design verification waived by reviewer: pure backend API task") {
+			foundComment = true
+			break
+		}
+	}
+	if !foundComment {
+		t.Fatalf("expected waiver comment in task audit log, got comments: %+v", comments)
+	}
+}
+
 // TestDesignReviewApprovalFailsClosedWithForgedSnapshotPath proves that an attacker
 // cannot bypass design verification by supplying a forged approved_design_snapshot_path.
 // The server cleanses client-supplied snapshot paths and attempts to capture from OD;

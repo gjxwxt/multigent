@@ -28,6 +28,7 @@ export function DesignSourceChoiceModal({
   onClose,
   onConfirmExisting,
   onStartGenerate,
+  onConfirmWaiver,
 }: {
   project: string
   taskID: string
@@ -37,9 +38,11 @@ export function DesignSourceChoiceModal({
   onClose: () => void
   onConfirmExisting: (projectId: string, projectName: string) => void
   onStartGenerate: () => void
+  onConfirmWaiver?: (reason: string) => void
 }) {
   const { t } = useTranslation()
   const [selected, setSelected] = useState<DesignSource>('generate')
+  const [waiverReason, setWaiverReason] = useState('')
   const [pickingExisting, setPickingExisting] = useState(false)
   const [projects, setProjects] = useState<DesignProjectOption[] | null>(null)
   const [listErr, setListErr] = useState<string | null>(null)
@@ -66,20 +69,30 @@ export function DesignSourceChoiceModal({
   function handleSelect(value: DesignSource) {
     setSelected(value)
     // One-step entry: choosing "existing" is the intent to browse the list.
-    if (value === 'existing') setPickingExisting(true)
+    if (value === 'existing') {
+      setPickingExisting(true)
+    } else {
+      setPickingExisting(false)
+    }
   }
 
   const confirmLabel = pickingExisting
     ? t('designGate.confirm', { defaultValue: '确认并流转' })
     : selected === 'generate'
       ? t('designGate.start', { defaultValue: '开始设计' })
-      : t('designGate.chooseProject', { defaultValue: '下一步：选择项目' })
+      : selected === 'waive'
+        ? t('designGate.confirmWaiverBtn', { defaultValue: '确认豁免并流转' })
+        : t('designGate.chooseProject', { defaultValue: '下一步：选择项目' })
 
   function handleNext() {
     if (busy) return
     if (!pickingExisting) {
       if (selected === 'generate') {
         onStartGenerate()
+      } else if (selected === 'waive') {
+        if (waiverReason.trim() && onConfirmWaiver) {
+          onConfirmWaiver(waiverReason.trim())
+        }
       } else {
         setPickingExisting(true)
       }
@@ -118,14 +131,7 @@ export function DesignSourceChoiceModal({
 
         {!pickingExisting ? (
           <div className="space-y-4 px-5 py-4">
-            <div className="flex gap-3" role="radiogroup" aria-label={t('designGate.title', { defaultValue: '设计确认' })}>
-              <DesignChoiceCard
-                value="existing"
-                title={t('designGate.choice.existing', { defaultValue: '选择已有设计' })}
-                description={t('designGate.choice.existingDesc', { defaultValue: '从已有项目列表中选择，设计已在 OpenDesign 完成。' })}
-                selected={selected === 'existing'}
-                onSelect={handleSelect}
-              />
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3" role="radiogroup" aria-label={t('designGate.title', { defaultValue: '设计确认' })}>
               <DesignChoiceCard
                 value="generate"
                 title={t('designGate.choice.generate', { defaultValue: '从需求生成' })}
@@ -134,7 +140,37 @@ export function DesignSourceChoiceModal({
                 selected={selected === 'generate'}
                 onSelect={handleSelect}
               />
+              <DesignChoiceCard
+                value="existing"
+                title={t('designGate.choice.existing', { defaultValue: '选择已有设计' })}
+                description={t('designGate.choice.existingDesc', { defaultValue: '从已有项目列表中选择，设计已在 OpenDesign 完成。' })}
+                selected={selected === 'existing'}
+                onSelect={handleSelect}
+              />
+              <DesignChoiceCard
+                value="waive"
+                title={t('designGate.choice.waive', { defaultValue: '特批豁免设计' })}
+                description={t('designGate.choice.waiveDesc', { defaultValue: '后端服务、无 UI 界面或逻辑已明晰无需视觉原型，可签署审计理由后直接准入编码。' })}
+                selected={selected === 'waive'}
+                onSelect={handleSelect}
+              />
             </div>
+            {selected === 'waive' && (
+              <div className="space-y-1.5 rounded-lg border border-amber-200 bg-amber-50/50 p-3.5 dark:border-amber-900/40 dark:bg-amber-950/20">
+                <label className="block text-xs font-semibold text-amber-900 dark:text-amber-300">
+                  {t('designGate.waiverReasonLabel', { defaultValue: '特批豁免理由（必填，将记入审计日志）' })}
+                </label>
+                <textarea
+                  value={waiverReason}
+                  onChange={(e) => setWaiverReason(e.target.value)}
+                  rows={2}
+                  placeholder={t('designGate.waiverDirectPlaceholder', {
+                    defaultValue: '例如：纯后端 API 改造无前端界面，或存量功能微调无需重做原型。',
+                  })}
+                  className="w-full rounded-lg border border-amber-300 bg-white px-3 py-2 text-xs text-neutral-900 outline-none focus:border-amber-500 dark:border-amber-800 dark:bg-zinc-800 dark:text-zinc-100 resize-y"
+                />
+              </div>
+            )}
             {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
           </div>
         ) : (
@@ -199,10 +235,14 @@ export function DesignSourceChoiceModal({
           <button
             type="button"
             onClick={handleNext}
-            disabled={busy || (pickingExisting && !picked)}
+            disabled={busy || (pickingExisting && !picked) || (selected === 'waive' && !waiverReason.trim())}
             className={cn(
               'rounded-lg px-3 py-2 text-sm font-semibold text-white transition-colors disabled:opacity-50',
-              pickingExisting || selected === 'generate' ? 'bg-sky-600 hover:bg-sky-700' : 'bg-neutral-400 dark:bg-zinc-700',
+              selected === 'waive'
+                ? 'bg-amber-600 hover:bg-amber-700'
+                : pickingExisting || selected === 'generate'
+                  ? 'bg-sky-600 hover:bg-sky-700'
+                  : 'bg-neutral-400 dark:bg-zinc-700',
             )}
           >
             {busy ? t('forms.working', { defaultValue: '处理中…' }) : confirmLabel}
