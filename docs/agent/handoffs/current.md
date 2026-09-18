@@ -10,14 +10,16 @@ Feature Flag `MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS` 维持默认严格关闭 (
 Key status & deliverables:
 -0.4. **交付流水线物理双轨制分工与验收测试规格前置 (ATD) 必要性判定 (ADR 2026-09-18)**:
    - **双轨制物理隔离架构确立**：
-     - **日常快速迭代流水线 (`unified-delivery-pipeline`)**：保持精简高效（澄清 $\to$ 澄清审 $\to$ 编码 $\to$ 初审 $\to$ CI 闸门 $\to$ 代码审 $\to$ 合并 $\to$ 后置 QA $\to$ 发布）；坚决不插入前置测试规格设计（ATD）节点与前置设计门，杜绝日常开发阻力与模型上下文膨胀。
+     - **日常快速迭代流水线 (`unified-delivery-pipeline`)**：保持精简高效（澄清 $\to$ 澄清审 $\to$ 编码 $\to$ 初审 $\to$ CI 闸门 $\to$ 代码审 $\to$ 合并 $\to$ 后置 QA $\to$ 发布；此处为关键主干摘要，完整 13 步拓扑以 `internal/workflow/store.go` 为准）；坚决不插入前置测试规格设计（ATD）节点与前置设计门，杜绝日常开发阻力与模型上下文膨胀。
      - **全新工程交付流水线 (`greenfield-delivery-pipeline` vNext)**：针对从零起跑、高保真交付的新工程，完整保留 `design_review`（OpenDesign 高保真原型门）与 `acceptance_test_design`（ATD 验收测试规格前置设计门）。
    - **ATD 契约锚点与稳定性归因**：
      - 确认 ATD 节点产出的 `test_spec_manifest` 由纯函数强类型校验器（`internal/workflow/testspec.go`）硬门禁把关（占位词拦截、字段校验），向研发提供机器可读测试目标，杜绝大模型在无基线时写“假测试”（断言颠倒）；
      - 正确归因 `t-20260910-pu8mhs` 成功经验：它验证了“设计确认 + 独立初审 + 合并前 QA 闸门”骨架的有效性，而 ATD 是给骨架增加事前契约保障。
    - **下一步实证方案**：
      - 将 Batch C-2（真实 GitLab CI runner 联调）与 Greenfield vNext 带 ATD 的从零交付结合，实地获取手感稳定性与往返打回率的客观数据。
-   - **ADR 归档**：[`docs/agent/decisions/2026-09-18-delivery-pipeline-duality-and-atd-necessity.md`](file:///Users/imac/Documents/code/github/multigent/docs/agent/decisions/2026-09-18-delivery-pipeline-duality-and-atd-necessity.md)。
+   - **ADR 归档与诚实验证声明**：
+     - ADR 路径：[`docs/agent/decisions/2026-09-18-delivery-pipeline-duality-and-atd-necessity.md`](file:///Users/imac/Documents/code/github/multigent/docs/agent/decisions/2026-09-18-delivery-pipeline-duality-and-atd-necessity.md)；
+     - 验证说明：本提交为纯文档（docs-only），无代码面变动，未重复运行全量测试套件；最新代码提交 `e27b8eae` 经全量单测验证 100% PASS。
 -0.3. **方向 E Brownfield 存量仓库受控接入与就绪门禁 (P0, 5 条裁决修订全闭环)**:
    - **纯函数探测与评估引擎 (`internal/brownfield`)**:
      - **多语言栈零副作用探测**：`Detect` 纯函数只读扫描 Node (npm/pnpm/yarn/bun)、JVM (Gradle/Maven/wrapper 权限)、Go (go.mod/go.sum)、Python (poetry/pipfile/requirements)、Rust (Cargo) 技术栈、构建脚本、CI/CD 与容器编排；

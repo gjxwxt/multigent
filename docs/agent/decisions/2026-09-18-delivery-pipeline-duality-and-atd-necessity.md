@@ -3,7 +3,7 @@
 **Decision**
 
 1. **坚持流水线物理双轨制架构，不搞一刀切**：
-   - **日常快速迭代流水线 (`unified-delivery-pipeline`)**：保持精简高效（需求澄清 $\to$ 澄清快审 $\to$ 编码实现 $\to$ 独立初审 $\to$ CI 闸门 $\to$ 人工代码审 $\to$ 合并 $\to$ 后置 QA $\to$ 发布）。坚决不插入前置测试规格设计（ATD）节点与前置设计门，杜绝日常小需求、Bug 修复和轻量重构的流程阻力与模型上下文膨胀。
+   - **日常快速迭代流水线 (`unified-delivery-pipeline`)**：保持精简高效（需求澄清 $\to$ 澄清快审 $\to$ 编码实现 $\to$ 独立初审 $\to$ CI 闸门 $\to$ 人工代码审 $\to$ 合并 $\to$ 后置 QA $\to$ 发布；此处步骤列表为关键主干摘要，含变更日志与 PR 审核在内的完整 13 步拓扑定义以 `internal/workflow/store.go` 为准）。坚决不插入前置测试规格设计（ATD）节点与前置设计门，杜绝日常小需求、Bug 修复和轻量重构的流程阻力与模型上下文膨胀。
    - **全新工程交付流水线 (`greenfield-delivery-pipeline` vNext)**：针对从零起跑、高保真交付的新工程，完整保留 `design_review`（OpenDesign 高保真原型门）与 `acceptance_test_design`（ATD 验收测试规格前置设计门）。
 2. **保留 Greenfield 中的 ATD 节点，作为研发与 QA 之间的确定性契约锚点**：
    - 不回退或删除 `acceptance_test_design`。该节点产出的 `test_spec_manifest` 由纯函数强类型校验器（`internal/workflow/testspec.go`）硬门禁拦截（占位词拦截、字段校验），向研发提供不可变的机器可读测试目标，向初审与后置 QA 提供事实对账基线。
