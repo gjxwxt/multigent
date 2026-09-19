@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"regexp"
 	"sort"
@@ -1077,6 +1078,34 @@ func (s *Server) handleRuntimeWorkflowStepComplete(w http.ResponseWriter, r *htt
 	t.Summary = strings.TrimSpace(body.Summary)
 	t.LastError = strings.TrimSpace(body.Error)
 	t.UpdatedAt = now
+	// Platform-owned gates. An agent reporting that CI is ready is not evidence
+	// that CI is ready: recompute here and hold the step when it is not. A failed
+	// completion is never held — trapping an agent that is trying to report a
+	// problem is how you lose the report.
+	if stepStatus == "completed" {
+		decision, isGate, gateErr := s.ciReadyGateDecisionForTask(r.Context(), principal.WorkspaceID, principal.Project, t)
+		if isGate && gateErr != nil {
+			log.Printf("[ci-ready-gate] evaluation failed for task %s (project %s): %v", t.ID, principal.Project, gateErr)
+			s.jsonError(w, http.StatusInternalServerError, "could not evaluate the CI readiness gate; the step was not completed")
+			return
+		}
+		if isGate && decision.Blocked {
+			retryable := ciReadyGateIsRetryable(decision)
+			status, code := http.StatusBadRequest, ErrCodeValidationFailed
+			if retryable {
+				status, code = http.StatusConflict, ErrCodeConflict
+			}
+			s.writeAPIError(w, status, code, ciReadyGateMessage(decision), map[string]any{
+				"gate":       ciReadyGateKind,
+				"stepId":     decision.StepID,
+				"cause":      decision.Cause,
+				"retryable":  retryable,
+				"needsHuman": decision.NeedsHuman,
+				"detail":     decision.Detail,
+			})
+			return
+		}
+	}
 	transition, transitioned, err := s.completeRuntimeWorkflowStep(principal.WorkspaceID, principal.Project, t, body.Outputs, stepStatus)
 	if err != nil {
 		s.jsonError(w, http.StatusBadRequest, err.Error())

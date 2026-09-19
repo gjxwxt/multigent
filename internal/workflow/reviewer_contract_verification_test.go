@@ -206,6 +206,109 @@ func TestReviewerContractRoutingIssuesFixedRework(t *testing.T) {
 	}
 }
 
+// The cap is only real if the platform enforces it. A reviewer that ignores the
+// prompt contract and keeps asking for another round at the cap must be routed
+// to a human anyway: three implementation rounds is the budget, and the fourth
+// is a decision only a person can make.
+func TestReviewerContractRoutingForcesEscalationAtCap(t *testing.T) {
+	_, wfStore, projectName, taskID := setupUnifiedWorkflowRun(t, "zh-CN")
+	driveRunToSelfReview(t, wfStore, projectName, taskID)
+
+	res, err := wfStore.CompleteAndAdvance(projectName, taskID, "rework", "", map[string]string{
+		"self_review":         "仍有 AC-2 明文泄漏，要求第 4 轮返工。",
+		"self_review_verdict": "issues_fixed",
+		"review_rounds":       "3",
+	}, "completed")
+	if err != nil {
+		t.Fatalf("CompleteAndAdvance at cap: %v", err)
+	}
+	if res.Next == nil || res.Next.ID != "code_review" {
+		t.Fatalf("review_rounds at cap must escalate to a human even when the agent asks for rework, got %+v", res.Next)
+	}
+	run, _, _ := wfStore.RunForTask(projectName, taskID)
+	if run.ActiveStepID != "code_review" {
+		t.Fatalf("active step after capped rework = %s, want code_review", run.ActiveStepID)
+	}
+	// The agent's own verdict stays on the record: the platform overrode the
+	// route, it did not rewrite history.
+	insts, err := wfStore.ListStepInstances(run.ID)
+	if err != nil {
+		t.Fatalf("instances: %v", err)
+	}
+	var reviewerValues map[string]string
+	for _, inst := range insts {
+		if inst.StepID == "agent_self_review" && inst.OutputValues["self_review_verdict"] != "" {
+			reviewerValues = inst.OutputValues
+		}
+	}
+	if reviewerValues == nil || reviewerValues["self_review_verdict"] != "issues_fixed" {
+		t.Fatalf("persisted reviewer verdict must remain the agent's own, got %#v", reviewerValues)
+	}
+	var forcedNote string
+	for _, inst := range insts {
+		if inst.StepID == "agent_self_review" {
+			forcedNote = inst.Summary
+		}
+	}
+	if !strings.Contains(forcedNote, "平台裁决") || !strings.Contains(forcedNote, "issues_fixed") {
+		t.Fatalf("record must state that the platform, not the agent, chose escalation, got %q", forcedNote)
+	}
+}
+
+func TestReviewerContractRoutingIssuesFixedBeforeCapStillReworks(t *testing.T) {
+	_, wfStore, projectName, taskID := setupUnifiedWorkflowRun(t, "zh-CN")
+	driveRunToSelfReview(t, wfStore, projectName, taskID)
+
+	res, err := wfStore.CompleteAndAdvance(projectName, taskID, "rework", "", map[string]string{
+		"self_review":         "第 2 轮发现越权分支未覆盖，返工。",
+		"self_review_verdict": "issues_fixed",
+		"review_rounds":       "2",
+	}, "completed")
+	if err != nil {
+		t.Fatalf("CompleteAndAdvance below cap: %v", err)
+	}
+	if res.Next == nil || res.Next.ID != "implement" {
+		t.Fatalf("below the cap the agent's rework route must be honored, got %+v", res.Next)
+	}
+}
+
+// A person who rejects has just spent their own attention: the agent gets a
+// fresh three-round budget, not a residual one. Otherwise a single human
+// rejection leaves the pipeline one step from forced escalation with no one having
+// decided that.
+func TestReviewerContractHumanReworkResetsAgentRoundBudget(t *testing.T) {
+	_, wfStore, projectName, taskID := setupUnifiedWorkflowRun(t, "zh-CN")
+	driveRunToSelfReview(t, wfStore, projectName, taskID)
+	if _, err := wfStore.CompleteAndAdvance(projectName, taskID, "escalate", "", map[string]string{
+		"self_review":         "三轮未收敛，升级人工。",
+		"self_review_verdict": "escalate",
+		"escalation_case":     `[{"contract_violated":"AC-2","file_line":"user_service.go:218","impact":"明文口令入审计表","minimal_fix":"sanitizer.Mask(req)","missing_verification":"TestUserUpdateAuditMasking"}]`,
+		"review_rounds":       "3",
+	}, "completed"); err != nil {
+		t.Fatalf("escalate to human: %v", err)
+	}
+
+	res, err := wfStore.CompleteAndAdvance(projectName, taskID, "rework", "", map[string]string{
+		"decision": "request_changes",
+		"comments": "方向没问题，但缺了审计日志脱敏，重做。",
+	}, "completed")
+	if err != nil {
+		t.Fatalf("human request_changes: %v", err)
+	}
+	if res.Next == nil || res.Next.ID != "implement" {
+		t.Fatalf("human rejection must return to implement, got %+v", res.Next)
+	}
+	// The rework edge's deterministic accounting starts the fresh budget at the
+	// first attempt: a human rejection buys three more agent rounds, counted by
+	// the platform rather than reported by the model.
+	if got := res.NextInst.InputValues["review_rounds"]; got != "1" {
+		t.Fatalf("human rejection must restart the agent budget at attempt 1, got %q", got)
+	}
+	if next := incrementReviewRounds("1"); next != "2" {
+		t.Fatalf("fresh budget must keep counting in the platform's own steps, got %q", next)
+	}
+}
+
 func TestReviewerContractRoutingEscalateRoundCap(t *testing.T) {
 	_, wfStore, projectName, taskID := setupUnifiedWorkflowRun(t, "zh-CN")
 	driveRunToSelfReview(t, wfStore, projectName, taskID)

@@ -1048,7 +1048,11 @@ func unifiedDeliveryPipelineTemplate(locale string) entity.WorkflowTemplate {
 			edge("e-self-escalate", "agent_self_review", "code_review", "escalate", cond("self_review_verdict", "eq", "escalate"), map[string]string{"escalation_case": "$output.escalation_case", "review_comments": "$output.self_review", "review_rounds": "$output.review_rounds"}, false),
 			edge("e-ci-ready-review", "ci_ready_gate", "code_review", "", nil, map[string]string{"implementation": "$input.implementation", "ci_ready_report": "$output.ci_ready_report"}, true),
 			edge("e-code-approved", "code_review", "changelog", text["approved"], cond("decision", "eq", "approve"), map[string]string{"approved_change": "$output.approved_change"}, false),
-			edge("e-code-rework", "code_review", "implement", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "review_rounds": "$input.review_rounds"}, false),
+			// A human rejection is a fresh budget, not a fourth round: the person
+			// has just reviewed the work and chose to send it back, so the agent
+			// earns three more attempts. The platform, never the model, spends the
+			// budget — see applyReviewRoundCap.
+			edge("e-code-rework", "code_review", "implement", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "review_rounds": "0"}, false),
 			edge("e-changelog-pr", "changelog", "create_pr", "", nil, nil, true),
 			edge("e-pr-review", "create_pr", "pr_review", "", nil, nil, true),
 			edge("e-pr-approved", "pr_review", "merge_sync", text["approved"], cond("decision", "eq", "approve"), nil, false),
@@ -2704,6 +2708,15 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 		}
 	}
 	edge, hasNext := chooseNextEdge(def.Edges, currentStep.ID, values, output)
+	if _, capForced := applyReviewRoundCap(values); capForced {
+		// Whose decision it was belongs in the record the human reads: an
+		// escalation the agent chose and an escalation the platform had to take
+		// mean different things about the code.
+		summary = strings.TrimSpace(summary) + fmt.Sprintf(
+			"\n\n[平台裁决] Agent 初审轮次已达上限 %d，评审步骤请求的再次返工被强制升级为人工审核（agent 原判：%s）。",
+			maxReviewRounds, strings.TrimSpace(values[agentReviewVerdictField]),
+		)
+	}
 	if !hasNext && workflowHasOutgoingEdges(def.Edges, currentStep.ID) && !isTerminalReviewApproval(currentStep, def.Edges, values) {
 		// Release the transition claim: this abort happens BEFORE any
 		// persistence, so a corrected re-run must be able to claim again
@@ -3057,6 +3070,7 @@ func workflowBranchByID(branches []entity.WorkflowBranch, id string) (entity.Wor
 }
 
 func chooseNextEdge(edges []entity.WorkflowEdge, from string, outputValues map[string]string, output string) (entity.WorkflowEdge, bool) {
+	routingValues, _ := applyReviewRoundCap(outputValues)
 	var fallback *entity.WorkflowEdge
 	for i := range edges {
 		edge := edges[i]
@@ -3069,7 +3083,7 @@ func chooseNextEdge(edges []entity.WorkflowEdge, from string, outputValues map[s
 			}
 			continue
 		}
-		if workflowConditionMatches(edge.Condition, outputValues, output) {
+		if workflowConditionMatches(edge.Condition, routingValues, output) {
 			return edge, true
 		}
 	}
@@ -3077,6 +3091,60 @@ func chooseNextEdge(edges []entity.WorkflowEdge, from string, outputValues map[s
 		return *fallback, true
 	}
 	return entity.WorkflowEdge{}, false
+}
+
+// agentReviewVerdictField is the single-token routing verdict the independent
+// reviewer agent submits.
+const agentReviewVerdictField = "self_review_verdict"
+
+// reviewRoundCapOverriddenField marks, on the routing copy only, that the
+// platform — not the model — chose the escalate route.
+const reviewRoundCapOverriddenField = "review_rounds_cap_enforced"
+
+// reviewRoundCapReached reports whether the deterministic round counter (the one
+// the platform itself increments on rework edges) has consumed the whole budget.
+// A missing or non-numeric count leaves the agent's own route untouched: the cap
+// may only override a number the platform actually owns.
+func reviewRoundCapReached(outputValues map[string]string) bool {
+	raw := strings.TrimSpace(outputValues[reviewRoundsField])
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return false
+	}
+	return n >= maxReviewRounds
+}
+
+// applyReviewRoundCap returns the values used for route matching, forcing an
+// agent review verdict of "issues_fixed" to "escalate" once the round budget is
+// spent.
+//
+// The prompt has always told the reviewer to escalate at three rounds, and the
+// platform has always counted the rounds deterministically because the model's
+// self-reported count was unreliable. Stopping there left the decision — and
+// therefore the loop — in the model's hands: a reviewer asking for a fourth pass
+// got a fourth pass while the counter reported "3". Routing is now the platform's
+// job at the cap.
+//
+// Only the copy used for matching is changed. The reviewer's own verdict stays
+// on the record, so the human sees both what the agent asked for and what the
+// platform decided.
+func applyReviewRoundCap(outputValues map[string]string) (map[string]string, bool) {
+	if outputValues == nil {
+		return outputValues, false
+	}
+	if !strings.EqualFold(strings.TrimSpace(outputValues[agentReviewVerdictField]), "issues_fixed") {
+		return outputValues, false
+	}
+	if !reviewRoundCapReached(outputValues) {
+		return outputValues, false
+	}
+	routing := make(map[string]string, len(outputValues)+2)
+	for key, value := range outputValues {
+		routing[key] = value
+	}
+	routing[agentReviewVerdictField] = "escalate"
+	routing[reviewRoundCapOverriddenField] = "true"
+	return routing, true
 }
 
 func workflowConditionMatches(cond *entity.WorkflowEdgeCondition, outputValues map[string]string, output string) bool {
