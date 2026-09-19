@@ -168,7 +168,7 @@ mga task step done --id "$TASK" --agent <reviewer-agent> --status success \
 
 ## 9. 证据记录
 
-真机结果写进 `docs/agent/handoffs/current.md`（新增一条 `-1.8 闸门真机验收`），格式：
+真机结果写进 `docs/agent/handoffs/current.md`（新增一条「闸门真机验收」条目，编号接在当时最新条目之前），格式：
 
 - 每个用例一行：命令、期望、**实际**（含完整响应体）、判定 通过/不符/未执行。
 - 不符的项必须原样保留失败输出并给出下一步归因，禁止"重跑一次就绿了"式记录。
