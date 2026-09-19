@@ -1099,7 +1099,11 @@ func (s *Server) handleRuntimeNodeClaimRun(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		if !found {
-			_ = json.NewEncoder(w).Encode(map[string]any{"run": nil, "retryAfterMs": 3000})
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"run":          nil,
+				"retryAfterMs": 3000,
+				"notice":       s.ambientClaimNotice(principal.Node),
+			})
 			return
 		}
 		if s.finishClaimedRunIfTaskAlreadyTerminal(principal.Node.WorkspaceID, principal.Node.ID, &run) {
@@ -1108,7 +1112,51 @@ func (s *Server) handleRuntimeNodeClaimRun(w http.ResponseWriter, r *http.Reques
 		_ = json.NewEncoder(w).Encode(map[string]any{"run": runtimeRunResponse(run), "retryAfterMs": 0})
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"run": nil, "retryAfterMs": 3000})
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"run":          nil,
+		"retryAfterMs": 3000,
+		"notice":       s.ambientClaimNotice(principal.Node),
+	})
+}
+
+// ambientClaimNotice explains a claim that found no work while queued runs sit
+// unaddressed. Once a second live node can see the workspace, those runs are no
+// longer handed to whoever asks first (their spec carries the executing agent's
+// project env and model provider key), so a workspace that only bound some of
+// its workers would otherwise park the rest with no reason anyone can see.
+func (s *Server) ambientClaimNotice(node controldb.RuntimeNode) string {
+	if s == nil || s.controlDB == nil {
+		return ""
+	}
+	workspaceID := strings.TrimSpace(node.WorkspaceID)
+	if workspaceID == "" {
+		return ""
+	}
+	liveNodes := 0
+	if nodes, err := s.controlDB.ListRuntimeNodes(workspaceID); err == nil {
+		for _, other := range nodes {
+			if strings.TrimSpace(other.Status) != "disabled" {
+				liveNodes++
+			}
+		}
+	}
+	if liveNodes <= 1 {
+		return ""
+	}
+	runs, err := s.controlDB.ListRuntimeRuns(controldb.RuntimeRunFilter{WorkspaceID: workspaceID, Status: "queued", Limit: 500})
+	if err != nil {
+		return ""
+	}
+	parked := 0
+	for _, run := range runs {
+		if strings.TrimSpace(run.DesiredRuntimeNodeID) == "" {
+			parked++
+		}
+	}
+	if parked == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d queued run(s) are not addressed to a runtime node; with %d live nodes in this workspace they are held back instead of being claimed by whichever node asks first. Bind each agent worker to a runtime node to release them.", parked, liveNodes)
 }
 
 func (s *Server) finishClaimedRunIfTaskAlreadyTerminal(workspaceID, nodeID string, run *controldb.RuntimeRun) bool {

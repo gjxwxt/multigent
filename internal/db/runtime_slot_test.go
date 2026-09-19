@@ -44,6 +44,18 @@ func slotNode(t *testing.T, store *SQLiteStore, id string) {
 	}
 }
 
+// slotStandbyNode registers a second machine as disabled. Lease-takeover tests
+// need a rival node that may still call claim, but must not push the workspace
+// out of the single-node ambient-claim allowance — otherwise claim returns
+// nothing for placement reasons and the test would pass without ever reaching
+// the lease check it exists to assert.
+func slotStandbyNode(t *testing.T, store *SQLiteStore, id string) {
+	t.Helper()
+	if err := store.UpsertRuntimeNode(RuntimeNode{ID: id, WorkspaceID: "ws-slot", Name: id, Kind: "personal_computer", Status: "disabled", LastSeenAt: nowUTC(), CreatedByUserID: "admin"}); err != nil {
+		t.Fatalf("node %s: %v", id, err)
+	}
+}
+
 // runOccupiesWorkerSlot unit semantics (D1): running + unexpired lease +
 // slot_class != readonly. Queued never occupies; empty/unparseable lease never
 // occupies (reaper/claim handle those); unknown slot classes fail closed to
@@ -248,7 +260,7 @@ func TestClaimRuntimeRunDifferentWorkersParallel(t *testing.T) {
 func TestClaimRuntimeRunDoesNotTakeOverExpiredLease(t *testing.T) {
 	store := newSlotTestStore(t)
 	slotNode(t, store, "node-a")
-	slotNode(t, store, "node-b")
+	slotStandbyNode(t, store, "node-b")
 	if err := store.UpsertRuntimeRun(slotRun("run-exp", "aw-1", "queued")); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -293,7 +305,7 @@ func TestClaimRuntimeRunDoesNotTakeOverExpiredLease(t *testing.T) {
 func TestClaimRuntimeRunDoesNotTakeLiveLease(t *testing.T) {
 	store := newSlotTestStore(t)
 	slotNode(t, store, "node-a")
-	slotNode(t, store, "node-b")
+	slotStandbyNode(t, store, "node-b")
 	if err := store.UpsertRuntimeRun(slotRun("run-live", "aw-1", "queued")); err != nil {
 		t.Fatalf("seed: %v", err)
 	}

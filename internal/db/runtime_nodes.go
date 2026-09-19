@@ -442,6 +442,18 @@ func (db *SQLiteStore) ListRuntimeRuns(filter RuntimeRunFilter) ([]RuntimeRun, e
 	return out, rows.Err()
 }
 
+// ambientClaimAllowed reports whether runs that no one addressed to a specific
+// node may be claimed by whoever asks. Disabled machines do not count: taking a
+// node out of service must never widen the blast radius of a leaked token.
+func ambientClaimAllowed(tx *sql.Tx, workspaceID string) (bool, error) {
+	var liveNodes int
+	err := tx.QueryRow(`SELECT count(*) FROM runtime_nodes WHERE workspace_id = ? AND status != 'disabled'`, workspaceID).Scan(&liveNodes)
+	if err != nil {
+		return false, err
+	}
+	return liveNodes <= 1, nil
+}
+
 func (db *SQLiteStore) ClaimRuntimeRun(workspaceID, nodeID string, leaseSeconds int, busyAgents []string) (RuntimeRun, bool, error) {
 	if leaseSeconds <= 0 {
 		leaseSeconds = 60
@@ -466,9 +478,22 @@ func (db *SQLiteStore) ClaimRuntimeRun(workspaceID, nodeID string, leaseSeconds 
 	// expired. Only the reaper (lease + grace) terminates running runs;
 	// retries dispatch a NEW run with the same run_key. Claim candidates are
 	// therefore strictly queued rows.
-	query := runtimeRunSelectSQL() + ` WHERE workspace_id = ? AND (desired_runtime_node_id = '' OR desired_runtime_node_id = ?) AND status = 'queued'
-`
+	query := runtimeRunSelectSQL() + ` WHERE workspace_id = ? AND status = 'queued' AND (desired_runtime_node_id = ?`
 	args := []any{workspaceID, nodeID}
+	// An unaddressed run (desired_runtime_node_id = '') carries the executing
+	// agent's project env and model provider key in its spec, so handing it to
+	// an arbitrary node discloses another project's credentials. Ambient claim
+	// is only sound while one machine can see the workspace at all; as soon as
+	// a second live node registers, work must be addressed by binding the
+	// agent worker to a node (AgentWorker.DefaultRuntimeNodeID).
+	ambientClaim, err := ambientClaimAllowed(tx, workspaceID)
+	if err != nil {
+		return RuntimeRun{}, false, err
+	}
+	if ambientClaim {
+		query += ` OR desired_runtime_node_id = ''`
+	}
+	query += ")\n"
 	// GPT fix 6: the busyAgents exemption is scoped to slot_class='readonly'
 	// fork runs only — a normal fork run occupies its Worker slot exactly
 	// like a task run and must not be double-booked via a stale busy list.

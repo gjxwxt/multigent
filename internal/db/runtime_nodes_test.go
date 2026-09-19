@@ -17,9 +17,12 @@ func TestRuntimeRunClaimLeaseAndExpiredReclaim(t *testing.T) {
 	if err := db.UpsertWorkspace(Workspace{ID: workspaceID, Name: "Runtime", Slug: "runtime", Root: "/tmp/runtime", CreatedAt: nowUTC()}); err != nil {
 		t.Fatalf("workspace: %v", err)
 	}
+	// node-b stays disabled so the workspace keeps its single-node ambient-claim
+	// allowance: every claim below must be rejected (or accepted) by the lease
+	// rules under test, not by placement.
 	for _, node := range []RuntimeNode{
 		{ID: "node-a", WorkspaceID: workspaceID, Name: "A", Kind: "personal_computer", Status: "online", LastSeenAt: nowUTC(), CreatedByUserID: "admin"},
-		{ID: "node-b", WorkspaceID: workspaceID, Name: "B", Kind: "personal_computer", Status: "online", LastSeenAt: nowUTC(), CreatedByUserID: "admin"},
+		{ID: "node-b", WorkspaceID: workspaceID, Name: "B", Kind: "personal_computer", Status: "disabled", LastSeenAt: nowUTC(), CreatedByUserID: "admin"},
 	} {
 		if err := db.UpsertRuntimeNode(node); err != nil {
 			t.Fatalf("node %s: %v", node.ID, err)
