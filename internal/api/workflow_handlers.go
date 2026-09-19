@@ -1496,6 +1496,19 @@ func (s *Server) syncTaskCompletionRemote(project string, task *entity.Task) {
 		return
 	}
 	if strings.TrimSpace(task.BranchName) == "" {
+		// Initialization tasks work directly on the default branch: the agent
+		// pushed (or confirmed up-to-date) inside the sandbox during the sync
+		// step, so HEAD == origin/HEAD IS the delivery. The branch-push path
+		// below does not apply; record what actually happened instead of a
+		// misleading default.
+		synced, syncErr := s.worktreeMgr.MainMatchesRemote(s.resolveProjectGitRoot(project), p.DefaultBranch)
+		if syncErr == nil && synced {
+			task.RemoteSyncAttempts++
+			task.RemoteSyncStatus = "synced"
+			task.RemoteSyncCommit = task.CompletionCommit
+			task.RemoteSyncError = ""
+			return
+		}
 		task.RemoteSyncAttempts++
 		task.RemoteSyncStatus = "failed"
 		task.RemoteSyncError = "task branch is required for remote synchronization"

@@ -1001,11 +1001,54 @@ func (m *Manager) isAncestorLocked(projectRoot, ancestor, descendant string) (bo
 	return false, fmt.Errorf("check ancestor relationship: %w", err)
 }
 
+// MainMatchesRemote reports whether the repository's current default-branch
+// HEAD equals origin's HEAD for that branch, using a local fetch-free
+// comparison against the last-known remote tracking ref. Initialization tasks
+// deliver directly on the default branch inside the sandbox (the agent
+// pushes), so this — not a branch push — is their remote-sync evidence. A
+// fetch is deliberately NOT run here: the agent's sync step just pushed, the
+// tracking ref is fresh, and this check runs in the task-completion path
+// where a network failure must not overwrite an honest local judgment with
+// an error.
+func (m *Manager) MainMatchesRemote(projectRoot, defaultBranch string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	projectRoot = strings.TrimSpace(projectRoot)
+	defaultBranch = strings.TrimSpace(defaultBranch)
+	if projectRoot == "" {
+		return false, fmt.Errorf("project root is required")
+	}
+	if defaultBranch == "" {
+		defaultBranch = "main"
+	}
+	cmdRemote, remoteCancel := gitLocal(projectRoot, "remote")
+	remoteOut, remoteErr := cmdRemote.Output()
+	remoteCancel()
+	if remoteErr != nil || !hasRemote(string(remoteOut), "origin") {
+		return false, fmt.Errorf("repository has no origin remote")
+	}
+	cmdLocal, localCancel := gitLocal(projectRoot, "rev-parse", "refs/heads/"+defaultBranch)
+	localOut, err := cmdLocal.Output()
+	localCancel()
+	if err != nil {
+		return false, fmt.Errorf("resolve local %s: %w", defaultBranch, err)
+	}
+	cmdTracking, trackingCancel := gitLocal(projectRoot, "rev-parse", "refs/remotes/origin/"+defaultBranch)
+	trackingOut, err := cmdTracking.Output()
+	trackingCancel()
+	if err != nil {
+		return false, fmt.Errorf("resolve origin/%s: %w", defaultBranch, err)
+	}
+	local := strings.TrimSpace(string(localOut))
+	tracking := strings.TrimSpace(string(trackingOut))
+	return local != "" && local == tracking, nil
+}
+
 // IsAncestor reports whether ancestor is reachable from descendant. It is
 // used to detect squash/rebase integration where a task completion commit is
 // no longer in the default branch history.
-func (m *Manager) IsAncestor(projectRoot, ancestor, descendant string) (bool, error) {
-	m.mu.Lock()
+func (m *Manager) IsAncestor(projectRoot, ancestor, descendant string) (bool, error) {	m.mu.Lock()
 	defer m.mu.Unlock()
 	unlock, err := acquireProjectLock(projectRoot)
 	if err != nil {
