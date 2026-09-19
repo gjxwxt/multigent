@@ -5,9 +5,71 @@
 Branch: `dev`.
 Status: 原型生命周期有界性（合入主干即归档）、真实代码与实时 Preview 为单源真理（SSOT）及设计门主动特批豁免（UI+后端审计）定案并全量落地（ADR `2026-09-18-design-prototype-lifecycle-and-preview-ssot.md`）；方向 C Phase 2（测试数据沙盒 REST API、秒级重置、场景切换与 PreviewDrawer 交互控制台）全量完成并实机部署验证（提交 `6e110b81`，控制台与分布式节点零版本漂移）；生产环境部署与现场实测已全量闭环（方向 E Brownfield 存量只读扫描、阻断识别与 RBAC 闭环；方向 B Batch C-2 真实 GitLab CI runner 证据与 SHA 锚定 14/14 项全绿通过）；交付流水线物理双轨制分工与验收测试规格前置（ATD）必要性判定定案归档 ADR。
 Feature Flag `MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS` 维持默认严格关闭 (`false`)，受控灰度具备服务端项目白名单硬门禁。
-下一阶段排期：推进 Greenfield vNext 带 ATD 的真实全流程跑通（含双人 Mattermost 真实环境流转终验）。
+下一阶段排期：ADR `2026-09-19-review-round-cap-and-ci-ready-gate-hardening.md` 中"评审轮数强制升级"与"ci_ready 服务端复算并四分流"已落地（见 -1.6 / -1.7），剩余两项后置——人工打回归因 `rework`/`rescope` 二分 coupled 与永不重置的 `human_interventions` 计数、`ci_failed` 同项连续失败的 park 规则；三者都需一次带 CI 的真实项目全流程来取证，因此排在该全流程跑通之前不再扩张。随后推进 Greenfield vNext 带 ATD 的真实全流程（含双人 Mattermost 真实环境流转终验）。
 
 Key status & deliverables:
+-1.7. **ci_ready 闸门由服务端复算并参与路由（P2 第二步，同一 ADR）**：
+   - **缺陷**：`OverallNotReady` 全仓只出现在 `ciready.go` 与 `ci_ready_handlers.go` 两处，工作流引擎从不消费；该步骤类型是 `agent_task`，所以 agent 一句 `mga task step done` 就能带着 `not_ready` 推进——"CI 闸门"是提示词。
+   - **接线**：`POST /api/v1/runtime/tasks/{id}/workflow/step/complete`（每个 agent 步骤完成都走的路径）在推进前由服务端复算闸门（`internal/api/ci_ready_gate.go` + `runtime_workflow_handlers.go`）。评估逻辑从 HTTP handler 中行为保持地抽出为 `ciReadyEvaluation(ctx, ciReadyOptions{...})`，init 端点 `seed:true`（沿用补种契约）、闸门 `seed:false` 走 **`ciready.Verify`**——判定绝不写仓库（"平台进程不碰工作区"红线）。
+   - **四分流而非一刀切**：`repairable`（仓库形状不合规，400 返工给研发）/ `waiting_pipeline`（HEAD 流水线未终态或尚未出现，**409 且不打扰人**）/ `ci_failed`（流水线终态非 success，400）/ `environment`（远端未绑定或凭据缺失，携带 `needsHuman`）。原三分流在实现时发现必须加第四类，理由与判定见 ADR"实现期修正"。
+   - **闸门识别双通道**：`step.Config["platform_gate"] == "ci_ready"`（新模板声明式）∪ `ci_ready` / `ci_ready_gate` 步骤 ID 白名单（**存量已实例化模板同样受保护**，否则新闸门只覆盖新项目）。
+   - **失败步骤不被捕获**：agent 上报 `status != completed` 时跳过复算——拦住一个正在报告问题的人会丢掉那份报告。
+   - **人工打回重启预算**：`e-code-rework` 的 `review_rounds` 由原样透传改为重置；实测经引擎确定性自增后进入 `implement` 的值是 `1`（全新三轮从第 1 次尝试计起），断言按实测写而不是迁就预想。
+   - **自动化验证证据**：`internal/api/ci_ready_gate_test.go`
+     - 纯函数表驱动 7 例：ready 放行、仓库缺陷优先于等待、running/无流水线→waiting 且可重试、failed→ci_failed、未绑定→environment 且 needsHuman、not_ready 无失败项仍阻断；并断言"等待类判定绝不需要人"；
+     - 真实 run + 真实临时仓库 4 例：未就绪仓库必须拦住、**普通步骤不受闸门影响（热路径回归安全）**、Config 声明的非同名步骤被识别、**闸门不在仓库里留下任何新文件**；
+     - HTTP 接线 2 例：`mga task step done` 路径上未就绪返回 400 且 `run.ActiveStepID` 仍停在 `ci_ready_gate`；非闸门步骤返回 200 并推进到下一步；
+     - `internal/workflow/reviewer_contract_verification_test.go`：`TestReviewerContractHumanReworkResetsAgentRoundBudget`。
+   - **门禁**：`make test` 40 包 0 FAIL；`go build ./...` 通过。
+   - **诚实边界与未验证范围声明**：
+     - 未做真实 GitLab 联调：`waiting_pipeline` / `ci_failed` 两条分支目前只有构造出的响应对象在纯函数测试里覆盖，未对真实流水线跑过（真机验证需要一次带 CI 的完整任务）；
+     - 未实现：`ci_failed` 的"同一失败项连续 2 轮才 park 给人"重复计数；等待/告警状态到控制台与 Mattermost 卡片的透出（现在只在 API 响应体里）；
+     - 需运维动作：模板拓扑无变化，但 `e-code-rework` 重置属于已实例化数据之外——**要让线上项目生效必须重新实例化工作流**（`POST /api/v1/workflows`），否则数据库里的旧定义仍是原样透传；
+     - 风险面：闸门位于所有 agent 步骤完成的必经路径上，若某项目 `Verify` 误判将卡住该步骤；缓解是响应体带明确 `cause/detail`，且失败上报不被拦截，但仍需在有真实项目上跑一轮才敢说可上线。
+
+-1.6. **Agent 初审轮数上限由服务端强制执行（P2 第一步，ADR `2026-09-19-review-round-cap-and-ci-ready-gate-hardening.md`）**:
+   - **缺陷**：`maxReviewRounds = 3` 此前只做确定性自增（`internal/workflow/store.go` `incrementReviewRounds`），出边条件只看 `self_review_verdict`。实测：第 3 轮仍报 `issues_fixed` 时 run 回到 `implement` 继续第 4 轮，而计数字段被 clamp 显示为 `3`——提示词承诺的"三轮封顶"在行为上不存在。
+   - **为何不能靠模板条件修**：`compareWorkflowValue` 只支持 `eq / neq / exists / in`，无数值比较，模板无法声明 `review_rounds >= 3`。因此把裁决放进引擎而不是放进拓扑声明。
+   - **实现**：`applyReviewRoundCap`（`internal/workflow/store.go`）在**路由求值用的副本**上，把已达上限的 `issues_fixed` 改写为 `escalate`；`chooseNextEdge` 单点接入，两条转移路径同时受益。判定只认平台自己维护的计数——`review_rounds` 缺失或非数字时**不改写**（越权猜测会误伤正常路由）。实例与事件上持久化的仍是 agent 自己提交的词元，Summary 追加 `[平台裁决] …（agent 原判：issues_fixed）`，让人分清"模型主动升级"与"平台接管决定"。
+   - **自动化验证证据**：`internal/workflow/reviewer_contract_verification_test.go`
+     - `TestReviewerContractRoutingForcesEscalationAtCap`：红→绿（修复前实测落到 `implement`）——第 3 轮报 `issues_fixed` 必须落到 `code_review`、run 活跃步骤为 `code_review`、留存的 agent 原判仍为 `issues_fixed`、Summary 含"平台裁决"；
+     - `TestReviewerContractRoutingIssuesFixedBeforeCapStillReworks`：第 2 轮返工仍按 agent 意愿回 `implement`（证明不是无条件剥夺路由权）；
+     - 既有 `TestReviewerContractRouting*` 四条（pass / rework / 主动 escalate / 非法词元拒绝）全部未改未弱化。
+   - **门禁**：`make test` 40 包 0 FAIL（含 `internal/workflow`、`internal/api` 全量回归）。
+   - **诚实边界与未验证范围声明**：
+     - 未做真实模型联调：本轮只证明引擎在给定输入下的路由行为，未验证 reviewer-agent 在提示词与新行为之间的长期稳定性与打回率变化（这正是 ADR 要求用一次真实全流程跑通来取证的部分）；
+     - 未实现（ADR 内已裁定、尚未编码）：人工打回归因 `rework` / `rescope` 二分、永不重置的 `human_interventions` 计数、升级案卷服务端拼装、`ci_ready` 结果参与路由与 `repairable / waiting_pipeline / ci_failed` 三分流；
+     - 模板未改拓扑，因此**无需**重新实例化工作流即可生效（与 `rescope` 出边那部分不同，后者需要重新实例化）。
+
+-1.5. **人工审核闸门显示真实 diff（P1，评审发现项："审批人在签自述"）**:
+   - **缺陷**：审核面板只渲染 agent 自己声明的 `step.InputFields`，全平台没有 commit 区间的只读 diff 端点（唯一 diff 是 Copilot 预览轮次），`code_review`/`pr_review` 的人类看到的实际是"作者写的关于自己的文本"。
+   - **能力层（`internal/gitworktree/diff.go`，纯只读）**：`Manager.DiffCommits(dir, base, head)` 返回 `{base, head, files[{path,oldPath,status,additions,deletions,binary}], patch, truncated, note}`。两侧强制 `^[0-9a-f]{7,40}$`（`ValidateCommitSHA`），refs / `HEAD` / `sha^` / `sha..sha` / `--output=…` 一律拒绝；先 `cat-file -e <sha>^{commit}` 确认对象存在（`ErrUnknownCommit` 供上层映射 404）；整段读取持有项目 Git 锁，避免与 worktree 建立/快照/清理交错。
+   - **顺带修掉一个"被测试认证的假抽象"**：`SanitizedDiffArgs` 此前把 `--no-ext-diff/--no-textconv` 放在子命令**之前**，任何真实调用都会 `未知选项` 退出 129；它只有一个"字符串包含"断言的测试在为形状背书，生产代码从未调用过。现改为把 diff 专用开关插入子命令之后，并由 `DiffCommits` 的真实执行覆盖。
+   - **端点（`internal/api/task_diff_handlers.go`，注册在主 mux 非 publicMux）**：`GET /api/v1/projects/{name}/tasks/{taskId}/diff`，复用 `projectTaskResourceGuard`（鉴权 + 跨项目 404）；默认区间取任务不可变的 `BaseCommit..CompletionCommit`（符合"确定性基线"红线），可显式传参但必须是 hash；worktree 已回收时回落项目 checkout 的对象库。
+   - **控制台（`web/src/components/task/TaskDiffEvidence.tsx`）**：审核面板新增"代码变更"区块——文件数与 ± 行、逐文件状态（added/modified/deleted/renamed 含旧路径）、`base..head` 短哈希、可展开的行级着色补丁、截断时琥珀色告警；无提交记录/无本地 checkout 时显示可解释的空态而非报错弹窗。中英文 locale 与 `workflows.detail.changeDiff` 同步补齐。
+   - **自动化验证证据**：
+     - `internal/gitworktree/diff_test.go`：真实两提交仓库的 ± 行与补丁内容、add/delete/rename 三态、非法 revision 七类全拒、同 SHA 显式空、**仓库自带 `* diff=evil` + `diff.evil.external=/bin/touch` 探针文件未被创建**（宿主未被执行外部 diff 驱动）；
+     - `internal/api/task_diff_handlers_test.go` 6 项：真 diff 200、5 类注入参数 400 且不泄漏内容、缺基线 409、未知提交 404、跨项目 404、未认证经完整路由 401；
+     - `make test` 40 包 0 FAIL；`npx tsc -b` 退出 0 零输出；`make web` 与 `make build` 通过（dist/multigent 30M 内嵌控制台）。
+   - **诚实边界与未验证范围声明**：
+     - **未在真实浏览器点击验证**：本地库无带 `BaseCommit/CompletionCommit` 的真实任务，面板视觉效果与展开手感未经真人走查（编译与类型已通过，渲染未验证）；
+     - 未接入：IM 审核卡片（Mattermost 侧仍只有自述字段）；`qa`/`self_review` 等 agent 步骤未强制引用 diff；
+     - 未处理：单巨型提交的行级上限（当前 `MaxDiffLines=5000`、`MaxDiffBytes=400KB`、`MaxDiffFiles=200`，超限只给文件清单与说明）。
+
+-1. **运行节点 ambient claim 凭据越界收口（P0 安全，评审发现项）**:
+   - **缺陷**：`ClaimRuntimeRun` 的候选集含 `desired_runtime_node_id = ''`，仅按 `workspace_id` 隔离；而 run spec 的 env 合并了项目级环境变量与模型 Provider key（`runtimeProviderEnvForAgent`）。同 workspace 内任意持有效节点 token 的机器，轮询领取即可被动获得其它项目的凭据；join token 兑换出的节点凭据 `ExpiresAt` 被置空（长期有效）。
+   - **裁定（fail-closed 且可解释）**：未指派 run 的 ambient 领取只在 **workspace 内 ≤1 个非 disabled 节点** 时开放；一旦出现第二台在线节点，未指派 run 一律不派发给"先问的节点"，必须由 `AgentWorker.DefaultRuntimeNodeID` 显式定址。`ambientClaimAllowed`（`internal/db/runtime_nodes.go`）。
+   - **停摆不得静默**：领取返回空且确有 parked 未指派 run 时，响应携带 `notice`，说明滞留数量、在线节点数与解除方式（绑定 worker）——沿用"权限不足必须给文字反馈"的既有红线，避免第二台机器接入后被误判为节点假死。`ambientClaimNotice`（`internal/api/runtime_node_handlers.go`）。
+   - **自动化验证证据**：
+     - 红→绿：`internal/db/runtime_node_claim_scope_test.go`（`TestClaimRuntimeRunAmbientClaimRequiresSingleNode` 修复前实测 node-a 领到了 `proj-secret` 的未指派 run，修复后拒绝；`TestClaimRuntimeRunDisabledNodeDoesNotCount`）；
+     - 边界：`internal/api/runtime_node_claim_scope_test.go`（`TestRuntimeNodeClaimHoldsUnaddressedRunFromSecondNode`：两节点均不得领取、被拒的 spec 响应不含凭据字段、定址后仅该节点可领取）；
+     - 既有契约保护：`runtime_nodes_test.go` / `runtime_slot_test.go` 的租约与 generation 断言**未删除未弱化**，仅把第二个节点登记为 disabled，使其继续经由租约规则而非放置规则拒绝；
+     - `go test ./internal/... ./cmd/...` 37 包全绿、0 FAIL；`go build ./...` 通过。
+   - **诚实边界与未验证范围声明**：
+     - 未实机验证：真实双节点环境的领取/心跳行为，以及现有单节点部署在升级后确实零行为变化（按 `liveNodes <= 1` 分支推定）；
+     - 未处理（另立任务）：spec 携带长期凭据本身、节点 token `ExpiresAt` 置空、`ScopesJSON` 存而不校验、hostname 自报可合并节点身份；
+     - 未做：Nodes 管理页对 "parked runs" 的可视化（当前只在 claim 响应中给出原因）。
+
 -0.7. **原型生命周期有界性、代码与 Preview 单源真理 (SSOT) 及设计门主动特批豁免 (ADR & UI 交付)**:
    - **核心架构判定定案 (`docs/agent/decisions/2026-09-18-design-prototype-lifecycle-and-preview-ssot.md`)**：
      - **原型生命周期有界性**：OpenDesign 原型生命周期严格截至对应任务分支合入主干（PR merge），合入即归档，不留陈旧基线；
