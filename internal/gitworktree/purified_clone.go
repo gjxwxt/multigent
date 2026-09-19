@@ -286,14 +286,26 @@ const forcedConfigNosystemKey = "GIT_CONFIG_NOSYSTEM"
 // SanitizedDiffArgs returns the git arguments for extracting a diff from an
 // untrusted clone (round-10 P0): disable external diff drivers and textconv
 // (they execute project-controlled config) and neutralize fsmonitors/hooks.
+//
+// The diff-specific flags must follow the subcommand: git rejects
+// "--no-ext-diff" as a global option with "unknown option", so simply
+// prefixing all four produces a command that cannot run at all.
 func SanitizedDiffArgs(args ...string) []string {
-	base := []string{
+	out := append([]string{
 		"-c", "core.fsmonitor=",
 		"-c", "core.hooksPath=",
-		"--no-ext-diff",
-		"--no-textconv",
+	}, args...)
+	for i := 0; i < len(out); i++ {
+		if out[i] == "-c" {
+			i++ // skip the name=value pair so a value like "diff.x=y" is not mistaken for the subcommand
+			continue
+		}
+		if out[i] == "diff" || out[i] == "log" || out[i] == "show" {
+			rest := append([]string{"--no-ext-diff", "--no-textconv"}, out[i+1:]...)
+			return append(out[:i+1], rest...)
+		}
 	}
-	return append(base, args...)
+	return append(out, "--no-ext-diff", "--no-textconv")
 }
 
 // SanitizedExecutionArgs returns the git arguments for running git commands against

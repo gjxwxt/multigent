@@ -769,7 +769,8 @@
       "notifyChannelMattermost": "Mattermost",
       "assigneeNotification": "Assignee notification",
       "assigneeNotificationEnabled": "Enabled · {{channel}}",
-      "assigneeNotificationDisabled": "Disabled"
+      "assigneeNotificationDisabled": "Disabled",
+      "changeDiff": "Code changes"
     },
     "colors": {
       "neutral": "Neutral",
@@ -1431,7 +1432,16 @@
     "availableBranches": "Available branches (Git Branches)",
     "noBranchMatch": "No matching branch; will use \"{{value}}\"",
     "agentAlreadyRunning": "The agent is already executing this task in the background. Starting again joins the existing queue entry.",
-    "taskQueued": "Task queued. It will run as soon as the agent's current work finishes."
+    "taskQueued": "Task queued. It will run as soon as the agent's current work finishes.",
+    "diff": {
+      "loading": "Loading diff…",
+      "unavailable": "No diff available for this task yet.",
+      "empty": "These two commits have identical trees.",
+      "binary": "binary",
+      "filesChanged": "{{fileCount}} files changed",
+      "noPatch": "Patch not shown.",
+      "truncated": "This diff is truncated — review the full range before approving."
+    }
   },
   "projects": {
     "listEyebrow": "Delivery",

@@ -13,6 +13,7 @@ import { useFormatDateTime } from '../../lib/format-datetime'
 import { useApiJson } from '../../lib/use-api'
 import { useAuth } from '../../lib/auth'
 import { ChangeRunPanel } from './ChangeRunPanel'
+import { TaskDiffEvidence } from './TaskDiffEvidence'
 import { PreviewDrawer } from './PreviewDrawer'
 import { formatGoDuration, taskElapsedLabel } from '../../lib/task-duration'
 import { showToast } from '../ui/Toast'
@@ -1257,6 +1258,14 @@ export function WorkflowRuntimePanel({
           <WorkflowPanelBlock title={t('workflows.detail.input')}>
             <WorkflowFieldList fields={step.inputFields ?? []} values={inputValues} project={project} taskID={taskID} />
             {instance?.inputArtifact && !hasStructuredInput && <WorkflowArtifact value={instance.inputArtifact} />}
+          </WorkflowPanelBlock>
+        )}
+
+        {/* Rendered from git, not from the fields the authoring agent declared:
+            a reviewer approving without seeing the change is approving a story. */}
+        {project && taskID && (
+          <WorkflowPanelBlock title={t('workflows.detail.changeDiff', { defaultValue: 'Code changes' })}>
+            <TaskDiffEvidence project={project} taskID={taskID} />
           </WorkflowPanelBlock>
         )}
 
