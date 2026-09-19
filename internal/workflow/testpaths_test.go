@@ -17,6 +17,10 @@ func TestValidateQATouchedPathsAccepts(t *testing.T) {
 		"rust tests":                 "server/src/tests.rs",
 		"multiple lines with blanks": "server/store/store_test.go\n\nweb/e2e/checkout.spec.ts\n",
 		"go external test package":   "store_test/helpers_test.go",
+		// Third-party QA toolkits put generated scripts under tests/<layer>/,
+		// which this gate already accepts — see the rejects table for the part
+		// of their output that does NOT fit.
+		"external qa toolkit scripts": "tests/api/auth/login.spec.ts",
 	}
 	for name, raw := range cases {
 		if err := ValidateQATouchedPaths(raw); err != nil {
@@ -45,6 +49,15 @@ func TestValidateQATouchedPathsRejects(t *testing.T) {
 		"absolute path":        "/etc/passwd",
 		"backslash separator":  `server\store\store_test.go`,
 		"only blank lines":     "\n\n",
+		// A dotted artifact root is NOT the allowlisted "qa" component: the dir
+		// allowlist matches path components exactly, so ".qa-agent" misses.
+		// Pinned because QA toolkits hardcode this root and their case corpus /
+		// spec-tasks / reports are exactly what a QA step would try to declare.
+		"dotted qa root cases":      ".qa-agent/cases/auth.json",
+		"dotted qa root spec-tasks": ".qa-agent/spec-tasks/auth.json",
+		"dotted qa root config":     ".qa-agent/config/project.json",
+		"dotted qa root report":     ".qa-agent/reports/index.html",
+		"dotted qa root local env":  ".qa-agent/local/accounts.local.json",
 	}
 	for name, raw := range cases {
 		if err := ValidateQATouchedPaths(raw); err == nil {
