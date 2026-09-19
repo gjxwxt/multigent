@@ -82,22 +82,22 @@ type telemetryUsageCacheEntry struct {
 
 // Server serves JSON for one workspace root.
 type Server struct {
-	workspaceMu            sync.Mutex
-	controlDB              controldb.Store
-	root                   string
-	apiKey                 string
-	version                string
-	st                     store.Store
-	ts                     taskstore.Store
-	users                  *UserStore
-	sched                  *SchedulerManager
-	schedulerDesiredMu     sync.Mutex
-	triggers               *triggerManager
-	okrStore               *store.OKRStore
-	msStore                *store.MilestoneStore
-	updateCheck            UpdateChecker
-	daemonStatus           DaemonStatusFunc
-	localRuntimeAPIURL     string
+	workspaceMu        sync.Mutex
+	controlDB          controldb.Store
+	root               string
+	apiKey             string
+	version            string
+	st                 store.Store
+	ts                 taskstore.Store
+	users              *UserStore
+	sched              *SchedulerManager
+	schedulerDesiredMu sync.Mutex
+	triggers           *triggerManager
+	okrStore           *store.OKRStore
+	msStore            *store.MilestoneStore
+	updateCheck        UpdateChecker
+	daemonStatus       DaemonStatusFunc
+	localRuntimeAPIURL string
 	// previewOrigin is the explicit deployment-configured origin that serves
 	// preview surfaces (§2.0 origin isolation). Empty = previews disabled
 	// (fail-closed); preview never falls back to the console origin.
@@ -111,19 +111,22 @@ type Server struct {
 	// enablePreviewTurnReceipts flags whether turn receipts and isolated transactional
 	// modifications are active (controlled rollout flag MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS).
 	enablePreviewTurnReceipts bool
-	execMu                 sync.Mutex
-	execProcs              map[string]*execProcess // key = "project/agent"
-	interactions           *interaction.Manager
-	agentDirectory         *agentdir.Directory
-	connectionHealthCancel func()
-	connectionHealthDone   chan struct{}
-	agentIMMu              sync.Mutex
-	agentIMCancel          map[string]context.CancelFunc
-	attentionRecoveryOnce  sync.Once
-	runtimeReaperOnce      sync.Once
-	runtimeReaperDone      chan struct{}
-	runtimeReaperCancel    context.CancelFunc
-	runtimeTaskTokenMu     sync.Mutex
+	execMu                    sync.Mutex
+	execProcs                 map[string]*execProcess // key = "project/agent"
+	interactions              *interaction.Manager
+	agentDirectory            *agentdir.Directory
+	connectionHealthCancel    func()
+	connectionHealthDone      chan struct{}
+	agentIMMu                 sync.Mutex
+	agentIMCancel             map[string]context.CancelFunc
+	// imIdentityMissingSideEffect dedupes the unbound-sender audit event and
+	// binding-required DM across bridge catch-up replays of the same post.
+	imIdentityMissingSideEffect imIdentityMissingGuard
+	attentionRecoveryOnce       sync.Once
+	runtimeReaperOnce           sync.Once
+	runtimeReaperDone           chan struct{}
+	runtimeReaperCancel         context.CancelFunc
+	runtimeTaskTokenMu          sync.Mutex
 	// agentStartMu guards per-worker task/wakeup start serialization (P2 soak
 	// autoStart race): two autoStarts landing on the same agent in the same
 	// tick must not race the heartbeat-PID / interaction-lock ladders. The
@@ -132,12 +135,12 @@ type Server struct {
 	agentStartMu    sync.Mutex
 	agentStartGates map[string]*uint32
 	// agentStartTestHook is nil in production; tests swap the gate body.
-	agentStartTestHook     func(key string) func()
+	agentStartTestHook func(key string) func()
 	// driftWarnedMu guards driftWarnedNodes: heartbeat handlers run
 	// concurrently per node, and a bare map write under that concurrency is
 	// a fatal `concurrent map writes` crash (GPT review P0-2).
-	driftWarnedMu    sync.Mutex
-	driftWarnedNodes map[string]string
+	driftWarnedMu          sync.Mutex
+	driftWarnedNodes       map[string]string
 	connectorSetupMu       sync.Mutex
 	connectorSetupSessions map[string]connectorDeviceAuthSession
 	modelAuthMu            sync.Mutex
@@ -149,15 +152,15 @@ type Server struct {
 	// fixtureSandbox provisions task-private test databases (V1). Nil when
 	// the control DB or data dir is unavailable — previews then run without
 	// sandbox integration (contract-less projects are unaffected).
-	fixtureSandbox *fixturesandbox.Provisioner
-	previewMu              sync.Mutex
-	previewSessions        map[string]*previewChatSession
-	previewChatMu          sync.Mutex
-	previewChatSeen        map[string]*previewChatBucket
-	designClient           odClientAPI
-	designRateMu           sync.Mutex
-	designReadRateSeen     map[string]*previewChatBucket
-	designWriteRateSeen    map[string]*previewChatBucket
+	fixtureSandbox              *fixturesandbox.Provisioner
+	previewMu                   sync.Mutex
+	previewSessions             map[string]*previewChatSession
+	previewChatMu               sync.Mutex
+	previewChatSeen             map[string]*previewChatBucket
+	designClient                odClientAPI
+	designRateMu                sync.Mutex
+	designReadRateSeen          map[string]*previewChatBucket
+	designWriteRateSeen         map[string]*previewChatBucket
 	threadProjections           *imbridge.TaskThreadProjectionService
 	previewAgentRunnerFunc      func(workspaceID, project, agentName, runtimeURL string) previewreceipt.AgentRunner
 	previewTurnReceiptsProjects string
@@ -180,27 +183,27 @@ func NewServer(root, apiKey string) *Server {
 	ts := taskstore.NewDB(root, controlDB)
 	tm := newTriggerManager(root, sched.binPath, ts, controlDB)
 	s := &Server{
-		root:                       root,
-		apiKey:                     strings.TrimSpace(apiKey),
-		controlDB:                  controlDB,
-		st:                         store.NewDB(root, controlDB),
-		ts:                         ts,
-		users:                      newUserStore(controlDB),
-		sched:                      sched,
-		triggers:                   tm,
-		okrStore:                   store.NewOKRStore(root),
-		msStore:                    store.NewMilestoneStore(root),
-		execProcs:                  make(map[string]*execProcess),
-		interactions:               interaction.NewManager(),
-		agentDirectory:             agentdir.New(controlDB),
-		agentIMCancel:              make(map[string]context.CancelFunc),
-		connectorSetupSessions:     make(map[string]connectorDeviceAuthSession),
-		modelAuthSessions:          make(map[string]*modelAuthSession),
-		telemetryUsageCache:        make(map[string]telemetryUsageCacheEntry),
-		previewEngine:              preview.NewEngine(),
-		worktreeMgr:                gitworktree.NewManager(),
-		previewSessions:            make(map[string]*previewChatSession),
-		threadProjections:          imbridge.NewTaskThreadProjectionService(controlDB, nil),
+		root:                        root,
+		apiKey:                      strings.TrimSpace(apiKey),
+		controlDB:                   controlDB,
+		st:                          store.NewDB(root, controlDB),
+		ts:                          ts,
+		users:                       newUserStore(controlDB),
+		sched:                       sched,
+		triggers:                    tm,
+		okrStore:                    store.NewOKRStore(root),
+		msStore:                     store.NewMilestoneStore(root),
+		execProcs:                   make(map[string]*execProcess),
+		interactions:                interaction.NewManager(),
+		agentDirectory:              agentdir.New(controlDB),
+		agentIMCancel:               make(map[string]context.CancelFunc),
+		connectorSetupSessions:      make(map[string]connectorDeviceAuthSession),
+		modelAuthSessions:           make(map[string]*modelAuthSession),
+		telemetryUsageCache:         make(map[string]telemetryUsageCacheEntry),
+		previewEngine:               preview.NewEngine(),
+		worktreeMgr:                 gitworktree.NewManager(),
+		previewSessions:             make(map[string]*previewChatSession),
+		threadProjections:           imbridge.NewTaskThreadProjectionService(controlDB, nil),
 		enablePreviewCopilotDrawer:  IsTruthyEnv(os.Getenv(PreviewCopilotDrawerEnv)),
 		enablePreviewTurnReceipts:   IsTruthyEnv(os.Getenv(PreviewTurnReceiptsEnv)),
 		previewTurnReceiptsProjects: os.Getenv(PreviewTurnReceiptsProjectsEnv),
@@ -1443,12 +1446,12 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-	out = append(out, map[string]any{
-		"name":           p.Name,
-		"description":    p.Description,
-		"repo":           p.Repo,
-		"runtimeProfile": p.RuntimeProfile,
-	})
+		out = append(out, map[string]any{
+			"name":           p.Name,
+			"description":    p.Description,
+			"repo":           p.Repo,
+			"runtimeProfile": p.RuntimeProfile,
+		})
 	}
 	_ = json.NewEncoder(w).Encode(out)
 }
@@ -1518,12 +1521,12 @@ func (s *Server) handlePutProject(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Description      *string `json:"description"`
 		Repo             *string `json:"repo"`
-		RemoteProvider   string `json:"remoteProvider"`
-		RemoteConnection string `json:"remoteConnection"`
-		RemoteProjectID  string `json:"remoteProjectId"`
-		RemoteURL        string `json:"remoteUrl"`
-		CloneURL         string `json:"cloneUrl"`
-		DefaultBranch    string `json:"defaultBranch"`
+		RemoteProvider   string  `json:"remoteProvider"`
+		RemoteConnection string  `json:"remoteConnection"`
+		RemoteProjectID  string  `json:"remoteProjectId"`
+		RemoteURL        string  `json:"remoteUrl"`
+		CloneURL         string  `json:"cloneUrl"`
+		DefaultBranch    string  `json:"defaultBranch"`
 		// RuntimeProfile uses pointer semantics: omitted keeps the declared
 		// value (settings pages that only edit description/repo must not
 		// silently clear it). The string carries three states: "" explicitly

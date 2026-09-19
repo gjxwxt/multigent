@@ -39,6 +39,43 @@ type channelEventResolution struct {
 	AutoBound    bool
 }
 
+// imIdentityMissingOnce suppresses duplicate side effects when the bridge
+// redelivers the same post. Every bridge reconnect replays each known
+// channel's posts since its cursor, and the bridge-side seen-post cache is
+// in-memory only — so an unbound sender's message used to produce a fresh
+// audit event (and a fresh DM) on every reconnect, 8-9 copies per incident in
+// production. The guard is intentionally best-effort and in-memory: worst
+// case after a server restart is one more copy, not lost signals.
+type imIdentityMissingGuard struct {
+	mu    sync.Mutex
+	seen  map[string]struct{}
+	order []string
+}
+
+func (g *imIdentityMissingGuard) firstTime(provider, messageID string) bool {
+	if g == nil || strings.TrimSpace(messageID) == "" {
+		return true
+	}
+	key := provider + ":" + messageID
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.seen == nil {
+		g.seen = make(map[string]struct{})
+	}
+	if _, ok := g.seen[key]; ok {
+		return false
+	}
+	const maxTracked = 1024
+	if len(g.order) >= maxTracked {
+		oldest := g.order[0]
+		g.order = g.order[1:]
+		delete(g.seen, oldest)
+	}
+	g.order = append(g.order, key)
+	g.seen[key] = struct{}{}
+	return true
+}
+
 const imSystemAckReaction = "THINKING"
 
 func (s *Server) shouldWakeAgentForAttention(binding controldb.AgentChannelBinding, reason string) bool {
@@ -751,21 +788,25 @@ func (s *Server) acceptIMMessage(channelProvider imbridge.Provider, appID, verif
 			reason := "binding_not_found"
 			if resolution.HasCandidate {
 				reason = "unknown_identity"
-				s.recordAgentChannelCallback(resolution.Candidate, "rejected", reason, message, "")
-				s.replyChannelIdentityBindingRequired(channelProvider, resolution.Candidate, message)
-				s.auditLog(auditLogInput{
-					WorkspaceID:  resolution.Candidate.WorkspaceID,
-					Action:       "agent_channel.identity_missing",
-					ResourceType: "agent_channel",
-					ResourceID:   resolution.Candidate.ID,
-					Summary:      fmt.Sprintf("Ignored %s message for %s/%s because the sender is not linked to a Multigent user", provider, resolution.Candidate.ProjectID, resolution.Candidate.AgentID),
-					After: map[string]any{
-						"provider":       provider,
-						"externalUserId": shortSensitiveHash(message.SenderOpenID),
-						"messageId":      message.MessageID,
-						"chatId":         message.ChatID,
-					},
-				})
+				// Bridge catch-up replays the same post on every reconnect;
+				// audit + DM side effects apply to the first delivery only.
+				if s.imIdentityMissingSideEffect.firstTime(provider, message.MessageID) {
+					s.recordAgentChannelCallback(resolution.Candidate, "rejected", reason, message, "")
+					s.replyChannelIdentityBindingRequired(channelProvider, resolution.Candidate, message)
+					s.auditLog(auditLogInput{
+						WorkspaceID:  resolution.Candidate.WorkspaceID,
+						Action:       "agent_channel.identity_missing",
+						ResourceType: "agent_channel",
+						ResourceID:   resolution.Candidate.ID,
+						Summary:      fmt.Sprintf("Ignored %s message for %s/%s because the sender is not linked to a Multigent user", provider, resolution.Candidate.ProjectID, resolution.Candidate.AgentID),
+						After: map[string]any{
+							"provider":       provider,
+							"externalUserId": shortSensitiveHash(message.SenderOpenID),
+							"messageId":      message.MessageID,
+							"chatId":         message.ChatID,
+						},
+					})
+				}
 			} else {
 				log.Printf("[im:%s] binding not found app=%s chat=%s sender=%s message=%s", provider, appID, message.ChatID, message.SenderOpenID, message.MessageID)
 			}
