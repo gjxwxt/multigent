@@ -2094,7 +2094,7 @@ func (s *Server) recordIMAttentionSignal(resolved resolvedChannelEventBinding, p
 		}
 	}
 	dedupeKey := "im:" + strings.TrimSpace(providerID) + ":" + messageID
-	refsRaw, _ := json.Marshal(map[string]any{
+	refs := map[string]any{
 		"bindingId":   binding.ID,
 		"project":     binding.ProjectID,
 		"agent":       binding.AgentID,
@@ -2102,7 +2102,15 @@ func (s *Server) recordIMAttentionSignal(resolved resolvedChannelEventBinding, p
 		"messageId":   message.MessageID,
 		"chatType":    message.ChatType,
 		"messageType": message.MessageType,
-	})
+	}
+	threadTaskID, threadRoot := s.resolveTaskThreadForIMMessage(providerID, binding, message)
+	if threadTaskID != "" {
+		refs["taskId"] = threadTaskID
+		if threadRoot != "" {
+			refs["threadRoot"] = threadRoot
+		}
+	}
+	refsRaw, _ := json.Marshal(refs)
 	payload := authorizedIMAttentionPayload(map[string]any{
 		"text":           text,
 		"rawContent":     message.RawContent,
@@ -2308,6 +2316,39 @@ func imAttentionReason(message imbridge.IncomingMessage) string {
 		return "im_mention"
 	}
 	return "im_direct_message"
+}
+
+// resolveTaskThreadForIMMessage anchors an inbound IM message to its task when
+// it was posted inside a task thread. Mattermost keeps root_id pointing at the
+// thread root for every reply, and the live task card root post id is persisted
+// in task_thread_projections, so a lookup by (provider, chatId, rootId) is
+// enough. Fail-open: any miss or error degrades to no binding, never drops the
+// signal. The taskId comes from the server-side projection table only — client
+// claims are never trusted (same trust model as resolveTaskThreadTarget).
+func (s *Server) resolveTaskThreadForIMMessage(providerID string, binding controldb.AgentChannelBinding, message imbridge.IncomingMessage) (taskID, threadRoot string) {
+	if s == nil || s.controlDB == nil {
+		return "", ""
+	}
+	rootID := strings.TrimSpace(message.RootID)
+	if rootID == "" {
+		return "", ""
+	}
+	chatID := strings.TrimSpace(message.ChatID)
+	if chatID == "" {
+		return "", ""
+	}
+	proj, found, err := s.controlDB.TaskThreadProjectionByRoot(strings.TrimSpace(providerID), chatID, rootID)
+	if err != nil {
+		log.Printf("[im:%s] task thread lookup failed for %s/%s chat=%s root=%s: %v", providerID, binding.ProjectID, binding.AgentID, chatID, rootID, err)
+		return "", ""
+	}
+	if !found {
+		return "", ""
+	}
+	if !strings.EqualFold(strings.TrimSpace(proj.ProjectID), strings.TrimSpace(binding.ProjectID)) {
+		return "", ""
+	}
+	return strings.TrimSpace(proj.TaskID), strings.TrimSpace(proj.RootPostID)
 }
 
 func formatIMAgentPrompt(providerID string, binding controldb.AgentChannelBinding, identity controldb.ExternalIdentity, message imbridge.IncomingMessage, text string) string {

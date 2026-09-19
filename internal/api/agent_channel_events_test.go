@@ -2891,3 +2891,152 @@ func TestMatchChannelEventBindings_DisambiguatesDefectC3(t *testing.T) {
 }
 
 
+
+func TestRecordIMAttentionSignalAnchorsTaskThread(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := s.controlDB.UpsertAgentWorker(controldb.AgentWorker{
+		ID:          "aw-lina",
+		WorkspaceID: workspaceID,
+		Name:        "lina",
+		Status:      "active",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("worker: %v", err)
+	}
+	binding := controldb.AgentChannelBinding{
+		ID:            "chan-mm",
+		WorkspaceID:   workspaceID,
+		AgentWorkerID: "aw-lina",
+		ProjectID:     "sample",
+		AgentID:       "lina",
+		Provider:      "mattermost",
+		ConnectionID:  "conn-mm",
+		Status:        "connected",
+		MetadataJSON:  `{"appId":"mm-app"}`,
+	}
+
+	// Active task thread projection: root post lives in channel "chat-task"
+	if err := s.controlDB.UpsertTaskThreadProjection(controldb.TaskThreadProjection{
+		ID:          "ttp-1",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		TaskID:      "t-20260919-sgv20t",
+		Provider:    "mattermost",
+		ChannelID:   "chat-task",
+		RootPostID:  "post-root-1",
+		Status:      "active",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("upsert projection: %v", err)
+	}
+
+	resolved := resolvedChannelEventBinding{
+		Binding: binding,
+		Identity: controldb.ExternalIdentity{
+			WorkspaceID:    workspaceID,
+			Provider:       "mattermost",
+			ExternalUserID: "mm-owner",
+			UserID:         "owner",
+		},
+	}
+
+	// In-thread reply: RootID points at the live card root post.
+	signalID := s.recordIMAttentionSignal(resolved, "mattermost", imbridge.IncomingMessage{
+		MessageID:    "om-in-thread",
+		ChatID:       "chat-task",
+		ChatType:     "G",
+		RootID:       "post-root-1",
+		SenderOpenID: "mm-owner",
+		RawContent:   "A",
+	}, "A")
+	if signalID == "" {
+		t.Fatalf("signal id is empty")
+	}
+	sig, found, err := s.controlDB.AttentionSignalByID(workspaceID, signalID)
+	if err != nil || !found {
+		t.Fatalf("signal lookup ok=%v err=%v", found, err)
+	}
+	var refs map[string]any
+	if err := json.Unmarshal([]byte(sig.RefsJSON), &refs); err != nil {
+		t.Fatalf("refs json: %v", err)
+	}
+	if refs["taskId"] != "t-20260919-sgv20t" {
+		t.Fatalf("expected refs.taskId anchored, got %v (refs=%v)", refs["taskId"], refs)
+	}
+	if refs["threadRoot"] != "post-root-1" {
+		t.Fatalf("expected refs.threadRoot, got %v", refs["threadRoot"])
+	}
+
+	// Same channel but not inside the task thread: no anchoring, regressions guarded.
+	plainID := s.recordIMAttentionSignal(resolved, "mattermost", imbridge.IncomingMessage{
+		MessageID:    "om-top-level",
+		ChatID:       "chat-task",
+		ChatType:     "G",
+		SenderOpenID: "mm-owner",
+		RawContent:   "hello",
+	}, "hello")
+	plainSig, found, err := s.controlDB.AttentionSignalByID(workspaceID, plainID)
+	if err != nil || !found {
+		t.Fatalf("plain signal lookup ok=%v err=%v", found, err)
+	}
+	var plainRefs map[string]any
+	_ = json.Unmarshal([]byte(plainSig.RefsJSON), &plainRefs)
+	if _, has := plainRefs["taskId"]; has {
+		t.Fatalf("top-level message must not be anchored, refs=%v", plainRefs)
+	}
+
+	// Root that matches no projection: no anchoring, no error.
+	orphanID := s.recordIMAttentionSignal(resolved, "mattermost", imbridge.IncomingMessage{
+		MessageID:    "om-orphan-thread",
+		ChatID:       "chat-task",
+		ChatType:     "G",
+		RootID:       "post-unknown-root",
+		SenderOpenID: "mm-owner",
+		RawContent:   "hi",
+	}, "hi")
+	orphanSig, found, err := s.controlDB.AttentionSignalByID(workspaceID, orphanID)
+	if err != nil || !found {
+		t.Fatalf("orphan signal lookup ok=%v err=%v", found, err)
+	}
+	var orphanRefs map[string]any
+	_ = json.Unmarshal([]byte(orphanSig.RefsJSON), &orphanRefs)
+	if _, has := orphanRefs["taskId"]; has {
+		t.Fatalf("unmatched root must not be anchored, refs=%v", orphanRefs)
+	}
+
+	// Projection of a different project must not leak into this binding's signal.
+	if err := s.controlDB.UpsertTaskThreadProjection(controldb.TaskThreadProjection{
+		ID:          "ttp-2",
+		WorkspaceID: workspaceID,
+		ProjectID:   "other-project",
+		TaskID:      "t-other",
+		Provider:    "mattermost",
+		ChannelID:   "chat-cross",
+		RootPostID:  "post-cross-root",
+		Status:      "active",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("upsert cross projection: %v", err)
+	}
+	crossID := s.recordIMAttentionSignal(resolved, "mattermost", imbridge.IncomingMessage{
+		MessageID:    "om-cross",
+		ChatID:       "chat-cross",
+		ChatType:     "G",
+		RootID:       "post-cross-root",
+		SenderOpenID: "mm-owner",
+		RawContent:   "hi",
+	}, "hi")
+	crossSig, found, err := s.controlDB.AttentionSignalByID(workspaceID, crossID)
+	if err != nil || !found {
+		t.Fatalf("cross signal lookup ok=%v err=%v", found, err)
+	}
+	var crossRefs map[string]any
+	_ = json.Unmarshal([]byte(crossSig.RefsJSON), &crossRefs)
+	if _, has := crossRefs["taskId"]; has {
+		t.Fatalf("cross-project projection must not anchor, refs=%v", crossRefs)
+	}
+}

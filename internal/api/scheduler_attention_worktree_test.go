@@ -235,3 +235,62 @@ func TestAttentionWakeupWorktreeTarget_MultipleDistinctTasks_FailsClosed(t *test
 	}
 }
 
+
+func imThreadSignal(id, workspaceID, agent, taskID string) controldb.AttentionSignal {
+	refsJSON, _ := json.Marshal(map[string]string{"project": "sample", "agent": agent, "taskId": taskID, "threadRoot": "post-root"})
+	return controldb.AttentionSignal{
+		ID:            id,
+		WorkspaceID:   workspaceID,
+		AgentWorkerID: "aw-" + agent,
+		DedupeKey:     "test:" + id,
+		SourceKind:    "im_message",
+		SourceID:      "om-" + id,
+		Reason:        "im_mention",
+		RefsJSON:      string(refsJSON),
+		Summary:       "user verdict in task thread",
+		Status:        "pending",
+		CreatedAt:     time.Now().UTC().Format(time.RFC3339),
+	}
+}
+
+func TestAttentionWakeupTargetTaskIncludesTaskThreadIMSignal(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	seedTaskAttentionWorker(t, s, workspaceID, "sample", "lina", true)
+
+	task := &entity.Task{ID: "t-init-1", Title: "init", Status: entity.TaskStatusPending}
+	if err := s.ts.AddTask("sample", "lina", task); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
+
+	// IM signal anchored to the task thread alone must resolve the target task.
+	imSig := imThreadSignal("sig-im-thread", workspaceID, "lina", "t-init-1")
+	targetID, targetProj := s.attentionWakeupTargetTask(workspaceID, "sample", []controldb.AttentionSignal{imSig})
+	if targetID != "t-init-1" || targetProj != "sample" {
+		t.Fatalf("expected IM thread signal to anchor target task, got id=%q proj=%q", targetID, targetProj)
+	}
+
+	// Ghost taskId in refs (task deleted) must be dropped by existence check.
+	ghost := imThreadSignal("sig-im-ghost", workspaceID, "lina", "t-deleted")
+	targetID, _ = s.attentionWakeupTargetTask(workspaceID, "sample", []controldb.AttentionSignal{ghost})
+	if targetID != "" {
+		t.Fatalf("ghost taskId must not anchor, got %q", targetID)
+	}
+
+	// Task + its thread verdict signal agree: single distinct task wins.
+	taskSig := attentionWorktreeSignal("sig-task-1", workspaceID, "lina", "t-init-1", "workflow_step_assigned", "")
+	targetID, targetProj = s.attentionWakeupTargetTask(workspaceID, "sample", []controldb.AttentionSignal{taskSig, imSig})
+	if targetID != "t-init-1" || targetProj != "sample" {
+		t.Fatalf("agreed task signals must resolve, got id=%q proj=%q", targetID, targetProj)
+	}
+
+	// Two distinct tasks (one task-kind, one IM-kind) must fail closed.
+	other := &entity.Task{ID: "t-init-2", Title: "init 2", Status: entity.TaskStatusPending}
+	if err := s.ts.AddTask("sample", "lina", other); err != nil {
+		t.Fatalf("add other task: %v", err)
+	}
+	imSig2 := imThreadSignal("sig-im-thread-2", workspaceID, "lina", "t-init-2")
+	targetID, _ = s.attentionWakeupTargetTask(workspaceID, "sample", []controldb.AttentionSignal{taskSig, imSig2})
+	if targetID != "" {
+		t.Fatalf("distinct tasks must fail closed, got %q", targetID)
+	}
+}
