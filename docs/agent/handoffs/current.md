@@ -5,7 +5,7 @@
 Branch: `dev`.
 Status: 原型生命周期有界性（合入主干即归档）、真实代码与实时 Preview 为单源真理（SSOT）及设计门主动特批豁免（UI+后端审计）定案并全量落地（ADR `2026-09-18-design-prototype-lifecycle-and-preview-ssot.md`）；方向 C Phase 2（测试数据沙盒 REST API、秒级重置、场景切换与 PreviewDrawer 交互控制台）全量完成并实机部署验证（提交 `6e110b81`，控制台与分布式节点零版本漂移）；生产环境部署与现场实测已全量闭环（方向 E Brownfield 存量只读扫描、阻断识别与 RBAC 闭环；方向 B Batch C-2 真实 GitLab CI runner 证据与 SHA 锚定 14/14 项全绿通过）；交付流水线物理双轨制分工与验收测试规格前置（ATD）必要性判定定案归档 ADR。
 Feature Flag `MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS` 维持默认严格关闭 (`false`)，受控灰度具备服务端项目白名单硬门禁。
-下一阶段排期：ADR `2026-09-19-review-round-cap-and-ci-ready-gate-hardening.md` 中"评审轮数强制升级"与"ci_ready 服务端复算并四分流"已落地（见 -1.6 / -1.7），剩余两项后置——人工打回归因 `rework`/`rescope` 二分 coupled 与永不重置的 `human_interventions` 计数、`ci_failed` 同项连续失败的 park 规则；三者都需一次带 CI 的真实项目全流程来取证，因此排在该全流程跑通之前不再扩张。随后推进 Greenfield vNext 带 ATD 的真实全流程（含双人 Mattermost 真实环境流转终验）。
+下一阶段排期：ADR `2026-09-19-review-round-cap-and-ci-ready-gate-hardening.md` 中"评审轮数强制升级"与"ci_ready 服务端复算并四分流"已落地（见 -1.6 / -1.7），其真机取证脚本已就位：`docs/runbook-gate-acceptance-2026-09-19.md`（步骤 0 重新实例化 → ④ 新拓扑核对 → ① 闸门四分流含"失败流水线到底返 400 还是 409"的实测 → ② diff 面板浏览器实点 → ③ 三轮封顶案卷可读性），执行结果按该脚本 §9 回填本文件；剩余两项后置——人工打回归因 `rework`/`rescope` 二分 coupled 与永不重置的 `human_interventions` 计数、`ci_failed` 同项连续失败的 park 规则；三者都需一次带 CI 的真实项目全流程来取证，因此排在该全流程跑通之前不再扩张。随后推进 Greenfield vNext 带 ATD 的真实全流程（含双人 Mattermost 真实环境流转终验）。
 
 Key status & deliverables:
 -1.7. **ci_ready 闸门由服务端复算并参与路由（P2 第二步，同一 ADR）**：
@@ -22,7 +22,7 @@ Key status & deliverables:
      - `internal/workflow/reviewer_contract_verification_test.go`：`TestReviewerContractHumanReworkResetsAgentRoundBudget`。
    - **门禁**：`make test` 40 包 0 FAIL；`go build ./...` 通过。
    - **诚实边界与未验证范围声明**：
-     - 未做真实 GitLab 联调：`waiting_pipeline` / `ci_failed` 两条分支目前只有构造出的响应对象在纯函数测试里覆盖，未对真实流水线跑过（真机验证需要一次带 CI 的完整任务）；
+     - 未做真实 GitLab 联调：`waiting_pipeline` / `ci_failed` 两条分支目前只有构造出的响应对象在纯函数测试里覆盖，未对真实流水线跑过（真机验证需要一次带 CI 的完整任务，取证脚本 `docs/runbook-gate-acceptance-2026-09-19.md` §6 已把这四格连"到底 400 还是 409"写成可勾选断言）；
      - 未实现：`ci_failed` 的"同一失败项连续 2 轮才 park 给人"重复计数；等待/告警状态到控制台与 Mattermost 卡片的透出（现在只在 API 响应体里）；
      - 需运维动作：模板拓扑无变化，但 `e-code-rework` 重置属于已实例化数据之外——**要让线上项目生效必须重新实例化工作流**（`POST /api/v1/workflows`），否则数据库里的旧定义仍是原样透传；
      - 风险面：闸门位于所有 agent 步骤完成的必经路径上，若某项目 `Verify` 误判将卡住该步骤；缓解是响应体带明确 `cause/detail`，且失败上报不被拦截，但仍需在有真实项目上跑一轮才敢说可上线。
