@@ -699,6 +699,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/integrations/gitlab/namespaces", s.handleGitLabNamespaces)
 	mux.HandleFunc("POST /api/v1/integrations/gitlab/projects", s.handleGitLabCreateProject)
 	mux.HandleFunc("POST /api/v1/projects/{name}/remote/verify", s.handleProjectRemoteVerify)
+	mux.HandleFunc("POST /api/v1/projects/{name}/remote/verify-init", s.handleProjectInitRemoteVerify)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{id}/merge", s.handleMergeTaskMR)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview/live", s.handleGetTaskPreviewLive)
 	// ── Change Run (Task 3.1): proposals against a task worktree. Main mux

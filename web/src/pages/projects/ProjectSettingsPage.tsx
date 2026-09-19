@@ -1349,6 +1349,23 @@ function InitializeProjectModal({
         })
       }
 
+      // Bind-existing remote: the agent clones in the sandbox, so the platform
+      // record has no verified remote binding yet — without it, ci_ready
+      // pipeline evidence and remote adoption stay fail-closed forever. Verify
+      // the URL the operator typed through the pinned connection now (read-only
+      // forge lookup) so the binding exists before the task runs. Failure is
+      // not fatal: the task can proceed and an admin can re-run verification.
+      if (activeTab === 'bind_existing' && existingType === 'remote') {
+        try {
+          await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/remote/verify-init`, {
+            connectionId: gitlabStatus.connectionId,
+            cloneUrl: remoteUrl.trim(),
+          })
+        } catch {
+          showToast(t('projectSettings.remoteVerifyWarning', { defaultValue: '远程仓库绑定验证失败：初始化将继续，但 CI 流水线证据在该项目绑定验证成功前不可用。' }), 'info')
+        }
+      }
+
       // React + Go and React + Spring Boot are deterministic project templates. The
       // server writes their fixed files before the Agent task starts; the Agent
       // then installs dependencies, verifies the result and handles Git.

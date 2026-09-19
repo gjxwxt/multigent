@@ -81,7 +81,15 @@ func (s *Server) platformCreateRemoteBinding(workspaceID, projectName, connID st
 // given, else by the project's current pin — the operator must be workspace
 // admin, so an explicit connectionID is a deliberate choice, not a forgery
 // vector.
-func (s *Server) verifyProjectRemoteBinding(ctx context.Context, workspaceID, projectName, connectionID string) (*controldb.VerifiedRemoteBinding, error) {
+//
+// hintURL is the third way to name the remote, for bind-remote initialization
+// where the project record carries no platform-verified path yet (the agent
+// clones in the sandbox; only the operator knows the clone URL). The hint is
+// a HINT, not authorization: it only extracts a path-with-namespace, which
+// must then be confirmed by the live forge lookup through the pinned
+// connection, and it is rejected outright when its host does not match the
+// resolved connection's GitLab base host.
+func (s *Server) verifyProjectRemoteBinding(ctx context.Context, workspaceID, projectName, connectionID, hintURL string) (*controldb.VerifiedRemoteBinding, error) {
 	p, err := s.st.Project(projectName)
 	if err != nil {
 		return nil, err
@@ -93,6 +101,9 @@ func (s *Server) verifyProjectRemoteBinding(ctx context.Context, workspaceID, pr
 	path := strings.TrimSpace(p.RemoteAdoptPath)
 	if path == "" {
 		path = gitlabProjectPathFromURL(p.CloneURL, nil)
+	}
+	if path == "" {
+		path = gitlabProjectPathFromURL(hintURL, host)
 	}
 	if path == "" {
 		return nil, fmt.Errorf("project %s has no platform-recorded remote path to verify", projectName)
@@ -195,7 +206,7 @@ func (s *Server) handleProjectRemoteVerify(w http.ResponseWriter, r *http.Reques
 		ConnectionID string `json:"connectionId"`
 	}
 	_ = s.readJSON(w, r, &body) // body optional; empty connection = project pin
-	binding, err := s.verifyProjectRemoteBinding(r.Context(), mustWorkspaceID(r, s), projectName, body.ConnectionID)
+	binding, err := s.verifyProjectRemoteBinding(r.Context(), mustWorkspaceID(r, s), projectName, body.ConnectionID, "")
 	if err != nil {
 		if isNotFoundErr(err) {
 			s.jsonErrorCode(w, http.StatusNotFound, ErrCodeProjectNotFound, err.Error())
@@ -209,6 +220,64 @@ func (s *Server) handleProjectRemoteVerify(w http.ResponseWriter, r *http.Reques
 		ResourceType: "project",
 		ResourceID:   projectName,
 		Summary:      "Verified remote binding (read-only forge lookup)",
+		After: map[string]any{
+			"connectionId":    binding.ConnectionID,
+			"remoteProjectId": binding.RemoteProjectID,
+			"path":            binding.PathWithNamespace,
+			"source":          binding.Source,
+		},
+		Request: r,
+	})
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "binding": binding})
+}
+
+// handleProjectInitRemoteVerify lets the project initialization flow (bind an
+// existing remote repo) establish the verified remote binding without a
+// workspace admin in the loop. The caller must manage the project (the same
+// right that lets them start the initialization task), and the verification
+// itself stays read-only on the forge: the clone URL supplied by the init
+// form is only a path hint — authorization comes from the live lookup through
+// the pinned connection, which must actually contain a repository at that
+// path. Without this endpoint every bind-remote project would stay
+// fail-closed for ci_ready pipeline evidence and remote adoption until an
+// administrator ran the workspace-admin verify by hand.
+func (s *Server) handleProjectInitRemoteVerify(w http.ResponseWriter, r *http.Request) {
+	projectName := strings.TrimSpace(r.PathValue("name"))
+	if !s.checkProjectManager(w, r, projectName) {
+		return
+	}
+	p, err := s.st.Project(projectName)
+	if err != nil {
+		if isNotFoundErr(err) {
+			s.jsonErrorCode(w, http.StatusNotFound, ErrCodeProjectNotFound, "project not found")
+			return
+		}
+		s.serverError(w, err)
+		return
+	}
+	var body struct {
+		ConnectionID string `json:"connectionId"`
+		CloneURL     string `json:"cloneUrl"`
+	}
+	_ = s.readJSON(w, r, &body)
+	hint := strings.TrimSpace(body.CloneURL)
+	if hint == "" {
+		hint = strings.TrimSpace(p.CloneURL)
+	}
+	binding, err := s.verifyProjectRemoteBinding(r.Context(), mustWorkspaceID(r, s), projectName, body.ConnectionID, hint)
+	if err != nil {
+		if isNotFoundErr(err) {
+			s.jsonErrorCode(w, http.StatusNotFound, ErrCodeProjectNotFound, err.Error())
+			return
+		}
+		s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeValidationFailed, err.Error())
+		return
+	}
+	s.auditLog(auditLogInput{
+		Action:       "project.remote.verify",
+		ResourceType: "project",
+		ResourceID:   projectName,
+		Summary:      "Verified remote binding during project initialization (read-only forge lookup)",
 		After: map[string]any{
 			"connectionId":    binding.ConnectionID,
 			"remoteProjectId": binding.RemoteProjectID,
