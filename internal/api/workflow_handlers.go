@@ -1144,8 +1144,7 @@ type reviewCommitGit struct{ root string }
 
 // neutralizedBaseArgs are the git arguments every platform-side invocation
 // against an agent-writable tree must carry. Shared with the push path (which
-// adds them manually because it needs the host credential surface) and
-// mirroring gitworktree.SanitizedDiffArgs's fsmonitor/hooks entries.
+// adds them manually because it needs the host credential surface.
 func neutralizedBaseArgs(args ...string) []string {
 	return append([]string{
 		"-c", "core.fsmonitor=",

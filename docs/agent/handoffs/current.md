@@ -57,6 +57,7 @@ Key status & deliverables:
      - 模板未改拓扑，因此**无需**重新实例化工作流即可生效（与 `rescope` 出边那部分不同，后者需要重新实例化）。
 
 -1.5. **人工审核闸门显示真实 diff（P1，评审发现项："审批人在签自述"）**:
+   - **【已撤销 · 2026-09-20】**：产品定调不在平台内展示 diff，人工审证据改为 **preview 实跑 + 跳转远端看 commit**。`web/src/components/task/TaskDiffEvidence.tsx`、`GET /api/v1/projects/{name}/tasks/{taskId}/diff`、`internal/gitworktree/diff.go` 与 `SanitizedDiffArgs` 已全部删除——逐个核实过零调用方；`SanitizedDiffArgs` 的**唯一**生产调用方就是被删的 diff.go，preview 收据路径用的是配置中和更强的 `SanitizedExecutionArgsForDir`，所以"单独保留那个修复"会留下与 diff.go 同一种死代码，未采纳。原缺陷判断（**审批人在签自述**）本身仍然成立，只是修法换到外部证据通道；git diff flag 必须跟在子命令之后的教训以注释留在 `SanitizedExecutionArgs` 上。闸门 runbook 证据点 ② 同提交改验 preview/跳转可达性。依据：`docs/delivery-mode-preflight-plan.md` §1 前提 1、§10。
    - **缺陷**：审核面板只渲染 agent 自己声明的 `step.InputFields`，全平台没有 commit 区间的只读 diff 端点（唯一 diff 是 Copilot 预览轮次），`code_review`/`pr_review` 的人类看到的实际是"作者写的关于自己的文本"。
    - **能力层（`internal/gitworktree/diff.go`，纯只读）**：`Manager.DiffCommits(dir, base, head)` 返回 `{base, head, files[{path,oldPath,status,additions,deletions,binary}], patch, truncated, note}`。两侧强制 `^[0-9a-f]{7,40}$`（`ValidateCommitSHA`），refs / `HEAD` / `sha^` / `sha..sha` / `--output=…` 一律拒绝；先 `cat-file -e <sha>^{commit}` 确认对象存在（`ErrUnknownCommit` 供上层映射 404）；整段读取持有项目 Git 锁，避免与 worktree 建立/快照/清理交错。
    - **顺带修掉一个"被测试认证的假抽象"**：`SanitizedDiffArgs` 此前把 `--no-ext-diff/--no-textconv` 放在子命令**之前**，任何真实调用都会 `未知选项` 退出 129；它只有一个"字符串包含"断言的测试在为形状背书，生产代码从未调用过。现改为把 diff 专用开关插入子命令之后，并由 `DiffCommits` 的真实执行覆盖。

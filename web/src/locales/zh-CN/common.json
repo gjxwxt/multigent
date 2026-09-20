@@ -790,8 +790,7 @@
       "notifyChannelMattermost": "Mattermost",
       "assigneeNotification": "负责人通知",
       "assigneeNotificationEnabled": "已启用 · {{channel}}",
-      "assigneeNotificationDisabled": "未启用",
-      "changeDiff": "代码变更"
+      "assigneeNotificationDisabled": "未启用"
     },
     "colors": {
       "neutral": "中性",
@@ -1453,16 +1452,7 @@
     "availableBranches": "可用分支 (Git Branches)",
     "noBranchMatch": "未找到匹配分支，将使用 \"{{value}}\"",
     "agentAlreadyRunning": "智能体已在后台执行该任务中，重复启动会并入当前队列。",
-    "taskQueued": "任务已入队，将在智能体当前工作完成后执行。",
-    "diff": {
-      "loading": "正在读取变更…",
-      "unavailable": "该任务暂无可比对的代码变更。",
-      "empty": "这两个提交的树内容完全一致。",
-      "binary": "二进制",
-      "filesChanged": "变更 {{fileCount}} 个文件",
-      "noPatch": "未提供补丁内容。",
-      "truncated": "diff 已截断——批准前请查看完整区间。"
-    }
+    "taskQueued": "任务已入队，将在智能体当前工作完成后执行。"
   },
   "projects": {
     "listEyebrow": "交付",

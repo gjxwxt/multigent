@@ -674,7 +674,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/projects/{name}/branches/refresh", s.handlePostProjectBranchesRefresh)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview", s.handleGetTaskPreview)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/resources", s.handleGetTaskResources)
-	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/diff", s.handleGetTaskDiff)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/resources/worktree/cleanup", s.handlePostTaskWorktreeCleanup)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/design/projects", s.handleDesignListProjects)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/design/start", s.handleDesignStart)

@@ -1,6 +1,7 @@
 # 闸门真机验收 Runbook（2026-09-19）
 
-适用改动：`47d1844c`(P0 节点领取边界) · `ecd7a9c6`(P1 真实 diff) · `7684add7`(P2 ci_ready 闸门四分流 + 轮次封顶)。
+适用改动：`47d1844c`(P0 节点领取边界) · `7684add7`(P2 ci_ready 闸门四分流 + 轮次封顶)。
+`ecd7a9c6`(P1 平台内 diff 面板) 已被产品决策移除，证据点 ② 随之改为验 preview 与远端跳转，见 §7。
 
 这份文档**只在真机上执行**，用来补自动化测试证明不了的部分。所有命令与期望值均已对照当前源码核对（源码位置随条目标注），不含臆造命令；真机地址、凭据、runner 标签、部署主机一律用占位符，实际值只写在私有 runbook 里。
 
@@ -10,7 +11,7 @@
 |---|---|---|
 | ④ 模板重新实例化 | 模板结构断言（内存对象） | 库里那一行 definition 是不是新拓扑；新任务是否绑到它 |
 | ① 闸门四分流 | 构造 `ciReadyResponse` 的分类表 + 2 个 HTTP 接线用例 | 真实 GitLab 的 pipeline 状态字符串、错误分支、409/400 的实际响应体 |
-| ② 审核面板 diff | handler 6 例 + `DiffCommits` 5 例（含外部 diff 驱动器的恶意配置 canary） | 人在浏览器里**看得懂**这份 diff 吗 |
+| ② 人工审证据可达性 | 无（面板与端点已删除，零调用方） | preview 里看到的是不是本次分支实跑的东西、报错看不看得见、能不能跳到远端那个 commit |
 | ③ 三轮封顶 | 引擎路由 3 例（封顶强制升级 / 未封顶照常返工 / 人工打回重置预算） | `[平台裁决]` 记录与案卷在真实任务上是否可读 |
 
 诚实边界：本脚本执行完成前，上面右侧四栏全部是 `unknown`，不得对外声称已验证。
@@ -118,31 +119,19 @@ curl -sS "$MG/api/v1/projects/$PROJ/tasks/$TASK/workflow" -H "Authorization: Bea
 
 顺带确认 agent 侧提示语：受阻时 `detail`/`message` 是否真的告诉它"谁该动手、下一步做什么"，尤其 C 那句"不要为了等 pipeline 去改代码"。
 
-## 7. 证据点 ②：人工审核面板的真实 diff（浏览器实点）
+## 7. 证据点 ②：人工审核的证据可达性（浏览器实点）
 
-前提：任务跑到 `code_review`（人工审核节点），且 `baseCommit` 与 `completionCommit` 都已记录。
+**本格验收对象换过。** 原写的是"平台内 diff 面板"。产品定调不在平台内展示 diff，人工审的证据来自 **preview 实跑 + 跳转远端看 commit**，因此 `ecd7a9c6` 的前端面板、只读端点与 `internal/gitworktree/diff.go` 已删除（三者零调用方，连带 `SanitizedDiffArgs` —— 它唯一的生产调用方就是被删的 diff.go）。依据见 `docs/delivery-mode-preflight-plan.md` §1 前提 1。
 
-先用 API 定后端事实，再用眼睛定前端事实：
+换成验那两条证据通道**本身是否可达**：它们一断，人工审就退化成读一段 agent 自述。
 
-```sh
-curl -sS "$MG/api/v1/projects/$PROJ/tasks/$TASK/diff" -H "Authorization: Bearer $ADMIN_TOKEN"
-curl -sS "$MG/api/v1/projects/$PROJ/tasks/$TASK/diff?base=<7-40位SHA>&head=<7-40位SHA>" -H "Authorization: Bearer $ADMIN_TOKEN"
-```
+前提：任务跑到 `code_review`，且 `baseCommit` / `completionCommit` 已记录。
 
-后端断言：
-- [ ] 默认区间就是 `baseCommit..completionCommit`；返回 `files[].{path,oldPath,status,additions,deletions,binary}` 与 `patch`。
-- [ ] 非法 SHA → 400（`ValidateCommitSHA`，只接受 7–40 位十六进制）。
-- [ ] 不存在的 commit → 404。
-- [ ] 无基线可比 → 409（消息里给的是"还没有基线与完成快照"，不是 500）。
-- [ ] 不带 token → 401；换另一个项目的 taskID → 404（越界探测不得变成 403 泄漏存在性）。
-- [ ] 有外部 diff 驱动器/`textconv` 的仓库里仍然返回纯文本 diff（`--no-ext-diff --no-textconv` 位置见 `internal/gitworktree/purified_clone.go`；宿主上不执行外部程序是这条的存在理由）。
-
-前端断言（必须人眼回答，不允许用测试代替）：
-- [ ] 打开任务详情 → 人工审核面板，diff 证据块**看得见**（不是折叠到需要猜的角落）。
-- [ ] 文件列表能读出改了什么（增删行数、重命名的旧路径、`base..head` 短 SHA）。
-- [ ] 展开 patch 后**行级着色可读**，长 diff 截断时有明确告警而不是静默省略。
-- [ ] 空状态（无改动）不伪装成错误。
-- [ ] 中英两种 locale 文案都不溢出/不漏 key（`tasks.diff.*`、`workflows.detail.changeDiff`）。
+- [ ] **preview 可达**：从审核入口打开预览，看到的是本次任务分支实际跑起来的东西，不是主干旧版本。
+- [ ] **报错可见**：让预览处于一个真实错误状态，确认审核人能在预览里看到它，而不是只看到"测试通过"的自述。
+- [ ] **远端可跳转**：能从任务/审核界面到达 `completionCommit` 在远端的提交页，落点确实是任务分支上那个 commit。
+- [ ] **交付模式为 `local_branch` 时**（项目无已验证绑定）：新建任务处必须先给出"产不出 MR / 流水线证据 / 平台 MR 记录，但 push 与任务分支照常"的告知（`b79c035e`）。此时"跳转远端"只剩分支本身，需在记录里写明证据形式已变。
+- [ ] **观察项（不是断言）**：两个通道都不可用时，审核人还能否提交 approve。当前代码里**没有**阻止 approve 的守卫；把实际行为记下来，是否要加守卫由这次观察决定。
 
 截图存本地即可，**不要提交进仓库**（截图里通常带真实地址与主机名）。
 
@@ -179,7 +168,7 @@ mga task step done --id "$TASK" --agent <reviewer-agent> --status success \
 | 层级 | 动作 | 说明 |
 |---|---|---|
 | 闸门本身 | `git revert 7684add7` | 故意**没有**环境变量逃逸开关：一个可以被配置关掉的闸门等于没有闸门。要停就 revert 并重新部署 |
-| diff 面板 | `git revert ecd7a9c6` | 只读端点 + 前端组件，回退不影响路由 |
+| 人工审证据可达性 | 无代码开关 | 证据来源是 preview 与远端 commit 跳转，不在本仓库内；不可回退，只能按 §7 观察 |
 | 节点领取边界 | `git revert 47d1844c` | 回退前确认现场只有一个启用节点，否则等于把凭据下发面重新打开 |
 | 库内 definition | 控制台/`multigent workflow delete <id>` 删掉 §4 新建的那一行 | 只影响之后新建的任务；已跑起来的 run 绑在旧 definition 上，不动 |
 

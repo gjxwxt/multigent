@@ -140,16 +140,6 @@ func TestPurifiedGitEnvScrubsHostRedirects(t *testing.T) {
 	}
 }
 
-func TestSanitizedDiffArgsDisableExecutableConfig(t *testing.T) {
-	args := SanitizedDiffArgs("diff", "HEAD~1", "HEAD")
-	joined := strings.Join(args, " ")
-	for _, want := range []string{"core.fsmonitor=", "core.hooksPath=", "--no-ext-diff", "--no-textconv"} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("sanitized diff args must contain %s: %s", want, joined)
-		}
-	}
-}
-
 // Batch 3: the exported SanitizedGitEnv wraps purifiedGitEnv for host-side
 // callers touching agent-writable trees. Same contract: scrubbed keys cannot
 // re-enter through extras, GIT_CONFIG_NOSYSTEM=1 is forced last.
