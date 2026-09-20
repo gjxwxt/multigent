@@ -1,6 +1,6 @@
 # 交付模式前置告知方案（流水线外部依赖）
 
-状态：**待评审**。评审目标读者：另一个 agent / 人。请重点复核 §2 事实清单与 §9 未验证项。
+状态：**评审通过、可开工**（评审者独立核了 21 条断言：20 条属实、1 条措辞过强已收窄为 F14、0 条虚构）。评审带来的两处实质修正已并入本文：**push 不依赖已验证绑定**（§1 + F16，据此重写 §5.1 文案靶心为"MR / 流水线证据 / 平台记录"三断点）；**`requires_remote` 语义不得混入 registry 维度**（§5.2）。
 
 来源：本文替换 `.gemini/antigravity/brain/d360b492-1191-41fe-b520-c49148631e8c/implementation_plan.md`（下称"原方案"）。原方案的诊断成立、UI 位置选对，但数据源与推导方式有两处致命缺陷，另有四处描述与源码不符，评审结论见 §3。
 
@@ -14,6 +14,10 @@
 - 未绑定时 `create_pr` 步由 agent 通过内置 skill 完成，而该 skill **明确规定**无远端时把 `pr_url` 写成 `branch: <branch_name>`、`pr_number` 写成 task ID（`internal/builtins/files/skills/git-pr-delivery/SKILL.md` Scenario B）。
 - 平台侧 `updateTaskRemoteMR` 遇到 `none` / `branch:` 前缀时是 **`return false` 静默跳过、不记 MR**（`internal/api/workflow_handlers.go:1422-1425`），而 `pr_url` 作为 workflow 步骤输出**没有任何结构校验器**。
 - 合起来：这个非 URL 的占位值会沿 `e-create-pr-review` 传给 `pr_review` 人工节点（`internal/workflow/store.go:260`），返工时还会作为 `previous_pr` 回灌给实现步（`store.go:263`）。**这是约定式合法化，不是护栏。**
+
+**关键修正（评审实测 + 我复核机制）**：未绑定**不会**挡住 push。`PushNetworkEnv` 注释原文："Credentials still come from the environment only — never from repo config or remote URLs"（`internal/gitworktree/worktree.go:352-355`），且 `CommitWorktreeState` 把推送留给调用方（"credentials live at the push boundary"，`:744-748`）——**push 路径不查 `verifiedBinding()`**。评审提供的第一手现场也印证：项目 `remoteProvider` 为空时分支 `feat/pro-card-loading`、提交 `d1750ae` **成功推到了 GitLab**。
+
+所以"未绑定"真正断的是三件事，而且只有这三件：**① 创建 MR（需 GitLab API 与绑定里的 `remote_project_id`）；② 流水线证据（`verifiedGitLabHost` 直接硬错误，F1）；③ 平台侧 MR 记录与交付路径（`updateTaskRemoteMR` 静默跳过 + `prepareTaskDelivery` 在 `RemoteProvider=="gitlab"` 时硬失败）**。推送与分支交付始终可用。§5.1 的文案必须按这三件事写准，多写或少写都会制造新的失败模式。
 
 **两条已定的产品前提**（评审时请勿重开）：
 1. **不在平台内做 diff 展示**，人工代码审依赖 preview 实跑 + 跳转远端看 commit。据此，"人工审节点位置放错（排在 PR 之前）"这一改法**明确不做**。
@@ -38,8 +42,10 @@
 | F11 | `web/package.json` 的 scripts 只有 `dev/build/lint/preview`，**无 vitest**；`web/src` 下**零个** `.test.ts(x)` | `web/package.json`；find 结果 | **实测** |
 | F12 | 存在可切换的无远端依赖模板：`tdd-review-loop`、`agentic-bug-triage-loop`、`hotfix-deploy-pipeline` | `internal/workflow/store.go` `Templates()` 注册表 | 实读 |
 | F13 | IM 桥不配**不会**卡住 agent 派发：通知钩子在流转提交之后、panic-recovered goroutine 内、返回 void | `internal/api/task_thread_projection_hooks.go:43-48, 138-143`；`runtime_workflow_handlers.go:1504-1566` | 实读 |
-| F14 | 没有任何 stale `human_review` 扫描 / 超时 / 升级机制；唯一 TTL 是 2h 的 chatops action token（IM-only） | 子 Agent 审计 + `docs/concepts/workflow-collaboration-accounts.md:282`（"超时后升级"仅为设计想法） | **子 Agent 结论，我未逐行复验** |
+| F14 | **不存在**针对 `human_review` 的 stale 扫描 / 超时 / 升级机制。注：2h 的 chatops action token 是**IM 卡片的可点交互窗口**，不是评审时限（过期后由 `3b8a354a` 重发新卡），拿它当"唯一 TTL"会把语境错位 | 子 Agent 审计 + `docs/concepts/workflow-collaboration-accounts.md:282`（"超时后升级"仅为设计想法） | **子 Agent 结论，我未逐行复验**（评审亦指出原措辞过强，已收窄） |
 | F15 | 沙箱镜像有 python3/ripgrep/nodejs，**无 Playwright 浏览器** | `docker/runtime-base/Dockerfile:78-87` | 实读 |
+| F16 | **push 不依赖已验证绑定**：凭据只在推送瞬时从环境注入，绝不来自 repo config 或 remote URL | `internal/gitworktree/worktree.go:352-355`（`PushNetworkEnv` 注释原文）、`:744-748` | **实读 + 评审一手现场印证** |
+| F17 | 项目 `t-20260919-5pednj` 实际推进到 `code_review`（agent 自审 pass、`review_rounds=0`），分支与提交已推到 GitLab | 评审者在 VM 控制库与容器内亲查（`git status`） | **评审一手证据，本机构不到该库（拓扑所限，非证据缺口）** |
 
 > F14 与"react-components 那次交付实际停在哪个节点"是本方案仅存的两个未复验事实，见 §9。
 
@@ -91,11 +97,12 @@
 - `internal/runner/runner.go` `workflowPromptContext`（`:892` 起）：该函数**已经**打开控制库并解析 `workspaceID`（`:903-909`），只需追加一次 `controlDB.VerifiedRemoteBindingFor(workspaceID, project)`（`internal/db/remote_binding.go:81`），把结论渲染成一段事实块，与现有 workflow/step/fields 上下文并列注入。
 - 文案按三种情形分叉：
   - 有已验证绑定：给出 `path_with_namespace`（不含凭据），说明"远端可用，可创建 MR 并等待流水线"。
-  - 无绑定 + 非 remote-required：明说"本项目**未**绑定已验证远端。本次交付终点是**任务分支**：不要尝试创建 MR、不要等待流水线；按 `branch:<name>` 约定上报，并如实标注无法远端验证的部分。"
+  - 无绑定 + 非 remote-required：明说"本项目**未**绑定已验证远端。**推送与任务分支交付仍然正常，不要因此放弃推送**（F16）；真正不可用的是三件事——创建 MR、读取流水线证据、平台侧 MR 记录。因此：不要尝试创建 MR、不要等待流水线、按 `branch:<name>` 约定上报 `pr_url` 并**显式标注'非真实 MR'**；如实标出无法远端验证的部分。"
+    > 措辞风险（必须防）：把"未绑定"写成"交付终点是任务分支"而不带"推送可用"这句，agent 很可能推断成"推不动"从而**跳过推送**——那会是我们引入的新失败模式，比原来的假 `pr_url` 更糟。验收脚本里要有对应反向断言。
   - 无绑定 + remote-required：明说"该步将以 `cause=environment` 被平台拦住，请**直接升级给人**，不要重试。"
 - **同步修改内置 skill**（`internal/builtins/files/skills/git-pr-delivery/SKILL.md` Scenario B）：把"无条件填 `branch:`"改成"仅在提示词声明无远端时填 `branch:`，且必须在输出中显式标注'非真实 MR'"。否则 skill 与提示词两套指令并存。
 
-**测试**：`internal/runner/` 新增一例（现有 `reviewer_prompt_contract_test.go` / `runner_prompt_test.go` 已是同形态先例），断言三种情形各自的关键词在场/不在场。**必须包含一条反向断言**：无绑定时提示词里**不出现**"创建 Merge Request"这类指令性措辞。
+**测试**：`internal/runner/` 新增一例（现有 `reviewer_prompt_contract_test.go` / `runner_prompt_test.go` 已是同形态先例），断言三种情形各自的关键词在场/不在场。**必须包含两条反向断言**：(a) 无绑定时**不出现**"创建 Merge Request""等待流水线"这类指令性措辞；(b) 无绑定时**必须出现**"推送可用"语义，且**不出现**任何"无法推送/不要推送"表述（对应上面那条措辞风险）。
 
 **已知边界**：
 - 提示词是派发时渲染的，**run 中途新增绑定不会回溯影响已下发的 spec**；下一步派发时自愈。需在文档与本节明示，不得声称实时。
@@ -113,6 +120,10 @@
 **测试**：模板结构测试（断言这些步骤带标记、且**本地型模板不带**）+ 一个 handler 测试断言 `remoteBindingVerified` 来自已验证绑定而非显示字段（构造"显示字段有值、无已验证绑定"的项目，断言为 `false`——这条正是钉死原方案缺陷的回归）。
 
 **边界**：改模板需**重新实例化**（`POST /api/v1/workflows`）才对线上项目生效；已实例化的旧 definition 无此标记，将被判为"不要求远端"。这与 `ci_ready_gate` 当时遇到的问题是同一类，必须显式记录，并考虑沿用其**ID 白名单兜底**策略（`ci_readyGateStepIDs`，`ci_ready_gate.go:25`）以免存量模板静默失去保护。
+
+两条硬约束（评审提出，均属防"一个字段承载两种语义"）：
+- **`requires_remote` 语义必须单一**：只表达"该步依赖已验证 GitLab 远端绑定"。**不得**把 registry / KKRepo 可达性、构建工具链、预览环境等塞进同一声明——那些是另一个维度（源配置 + 镜像能力），已有既定决策（走 `[registries]` 全局配置，发布凭据走连接体系）。混进来就会重演 `ci_ready` 当初"一个 not_ready 承载四种责任人"的问题。
+- **ID 白名单是过渡债，必须登记偿还**（见 §10）：白名单本身就是下一个"过期事实"的温床——`AGENTS.md` 的"12 步"就是这么过期的（F9）。兜底生效期间，任何新增远端依赖步骤若只靠 ID 命中而未打标记，即为技术债累积。
 
 ### 5.3 第三层 · 控制台前置告知（纯 UX，按第二层产物渲染）
 
@@ -168,7 +179,7 @@
 ## 9. 未验证项（请评审者重点看这里）
 
 1. **F14**（无 stale review 扫描/升级）来自子 Agent 审计，我未逐行复验。
-2. **实际事故链未取证**：原方案引用任务 `t-20260919-5pednj` 与项目 `test-react-component`（称 `remoteProvider` 为 null），但**这台机器上查不到该库记录**——本地只有 `react-components`（`work/repos/react-components`，远端指向 `localhost:8083`），其唯一 AI 痕迹是 2026-07-30 的单个提交 `d53b6b9`、至今未合入主干。**"该任务实际停在哪个节点、报了什么错"仍是 unknown**，而它是本方案最强输入。执行前应从内网部署侧取该 run 的 step 实例与错误原文补进 §1。
+2. ~~实际事故链未取证~~ —— **已销掉（评审一手证据）**：本机查不到该库是**拓扑事实**（任务跑在 VM 上），不是证据缺口；真实进度见 F17。但这带出一个必须如实收窄的结论：该 run 停在 `code_review`，而统一交付流水线的顺序是 `ci_ready_gate → code_review → changelog → create_pr`——**它根本没走到 `create_pr`**。所以 §1 描述的"`branch:` 占位值回灌人工审与实现步"这条链，目前是**代码级已核实、现场未观测**：skill 文本、静默跳过、边映射三处都实读确认，但还没有一次真实 run 把它跑出来。本方案的必要性不依赖它被观测过（结构性缺陷已在代码里），但**引用证据时不得把这说成"已发生的事故"**。仍待取：该 run 后续推进到 `create_pr` 时实际产出的 `pr_url` 值。
 3. `wf-g837rxka` 这个**已实例化 definition** 的实际步骤数未核（本地无该库），13 步是代码模板数，不等于该定义实例。
 4. 5.1 的提示词长度影响：新增事实块会占用上下文预算，未实测对各模型档位步骤的影响（历史上 `glm-5.3-flash` 在长思考链下有过截断事故）。
 5. 分布式路径未单独验证：F6 表明提示词在控制台侧构建，但我未覆盖"运行节点离线/远端 DB 分离"部署形态下 `controldb.OpenDefault()` 解析到哪。若该形态存在，5.1 的事实块可能取错库——**必须在实现前确认**。
@@ -179,3 +190,13 @@
 - **runbook 证据点 ② 随之失效**：`docs/runbook-gate-acceptance-2026-09-19.md` 的 ② 写的是"diff 证据面板浏览器实点"。要么改成"preview 实跑 + 跳转远端看 commit"的等价人工验证，要么删掉该格——不能留在脚本里当验收项。
 - **`AGENTS.md:144` 的"12 步闭环"过期**（F9），需改为 13 步。与本方案无耦合，可单独修。
 - **内置 skill 与提示词不得并存两套指令**：见 §5.1，Scenario B 必须同步改，否则等于给了 agent 一个"合规撒谎"的出口。
+
+### 偿还清单（过渡债，登记于此以免变成第二个"12 步"）
+
+| 债项 | 来源 | 偿还条件 |
+|---|---|---|
+| `requires_remote` 的 **step ID 白名单兜底** | 沿用 `ci_readyGateStepIDs`（`ci_ready_gate.go:25`）保护存量已实例化 definition 的必要过渡 | 存量项目完成一次重新实例化后**删除白名单**，只留声明式路径。白名单是下一个"过期事实"的天然温床。 |
+| `AGENTS.md:144` 的"12 步闭环" | F9，文档过期 | 与功能改动**分开**单独 commit。 |
+| diff 面板及后端（`ecd7a9c6` 的三处零调用方产物） | §1 前提 1 | 单独 commit 删除，保留 `SanitizedDiffArgs` 修复；同时修正 runbook 证据点 ②。 |
+
+**提交纪律**：上述三项连带清理**一律不夹带**在 5.1/5.2/5.3 的功能提交里（评审要求）。功能改动与记录修正混提会让回退粒度失效。
