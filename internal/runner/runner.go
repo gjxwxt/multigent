@@ -37,6 +37,7 @@ import (
 	"github.com/multigent/multigent/internal/agentcli"
 	"github.com/multigent/multigent/internal/daemon"
 	controldb "github.com/multigent/multigent/internal/db"
+	"github.com/multigent/multigent/internal/deliverymode"
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/runenv"
 	"github.com/multigent/multigent/internal/runtimeauth"
@@ -941,6 +942,8 @@ func (r *Runner) workflowPromptContext(project, agentName, taskID string) string
 	}
 	fmt.Fprintf(&b, "- Running agent: `%s/%s`\n", project, agentName)
 	b.WriteString("\n")
+	mode, remoteRef := resolveDeliveryMode(controlDB, workspaceID, r.agentStore, project)
+	b.WriteString(deliveryModeSection(mode, remoteRef))
 	if len(step.InputFields) > 0 {
 		b.WriteString("Expected input fields:\n")
 		writeWorkflowFields(&b, step.InputFields)
@@ -990,6 +993,72 @@ func (r *Runner) workflowPromptContext(project, agentName, taskID string) string
 	b.WriteString("- For GitHub repository reads and writes, prefer `mga runtime action --connection github ...` so credentials, rate limits, and audit logs stay inside Multigent-managed connections.\n")
 	b.WriteString("- Do not fetch GitHub repository content from raw.githubusercontent.com in workflow runs; use GitHub API/connection actions or a checked-out repository instead.\n")
 	b.WriteString("- Every network shell command must have a bounded timeout, for example `timeout 30s ...`. If a dependency is slow or unavailable, fail the step with a clear error instead of hanging.\n")
+	return b.String()
+}
+
+// resolveDeliveryMode reads the same two facts the CI readiness gate reads: the
+// verified remote binding (never the project record's client-writable
+// RemoteProvider / RemoteConnection, which prove nothing) and the project's own
+// remote-required declaration.
+func resolveDeliveryMode(controlDB *controldb.SQLiteStore, workspaceID string, projects store.Store, project string) (deliverymode.Mode, string) {
+	if controlDB == nil || projects == nil {
+		return deliverymode.ModeUnknown, ""
+	}
+	record, err := projects.Project(project)
+	if err != nil {
+		return deliverymode.ModeUnknown, ""
+	}
+	binding, bound, err := controlDB.VerifiedRemoteBindingFor(workspaceID, project)
+	if err != nil {
+		return deliverymode.ModeUnknown, ""
+	}
+	if bound {
+		remoteRef := ""
+		if binding != nil {
+			remoteRef = strings.TrimSpace(binding.PathWithNamespace)
+		}
+		return deliverymode.ModeBound, remoteRef
+	}
+	return deliverymode.Resolve(record, false), ""
+}
+
+// deliveryModeSection tells the agent how far this delivery can actually get.
+// Without it the platform issues an unconditional "open a PR, wait for the
+// pipeline" instruction to a project with no remote, and the only way the agent
+// can satisfy it is the `branch:<name>` placeholder its skill prescribes — a
+// value that then flows into the human review step and back into rework.
+//
+// The LocalBranch wording is load-bearing in both directions: it must stop the
+// agent inventing an MR, and it must not imply that pushing is impossible. Git
+// push authenticates from the environment at the push boundary and does not
+// consult the binding at all, so an agent that skips pushing here has destroyed
+// the delivery rather than degraded it.
+func deliveryModeSection(mode deliverymode.Mode, remoteRef string) string {
+	var b strings.Builder
+	b.WriteString("## Delivery mode\n\n")
+	switch mode {
+	case deliverymode.ModeBound:
+		if remoteRef != "" {
+			fmt.Fprintf(&b, "- Mode: `%s` — verified GitLab remote binding: `%s`.\n", mode, remoteRef)
+		} else {
+			fmt.Fprintf(&b, "- Mode: `%s` — this project has a verified remote binding.\n", mode)
+		}
+		b.WriteString("- Creating a merge request, reading pipeline evidence for the HEAD commit, and recording the MR on the platform are all available.\n")
+		b.WriteString("- Report the real merge request URL and number. Never substitute a branch placeholder for either.\n")
+	case deliverymode.ModeLocalBranch:
+		fmt.Fprintf(&b, "- Mode: `%s` — this project has NO verified remote binding.\n", mode)
+		b.WriteString("- Git push and the task branch DO work: publish your commit to the task branch as usual. Do not skip pushing because of this mode.\n")
+		b.WriteString("- What is unavailable is exactly three things: creating a merge request, pipeline evidence for HEAD, and the platform-side MR record.\n")
+		b.WriteString("- Therefore: do not attempt to create a merge request, do not wait for a CI pipeline, and where a step asks for `pr_url`, report `branch:<branch_name>` and state plainly that it is not a real merge request.\n")
+	case deliverymode.ModeRequiredUnbound:
+		fmt.Fprintf(&b, "- Mode: `%s` — this project requires remote pipeline evidence but has no verified remote binding.\n", mode)
+		b.WriteString("- The platform will hold any remote-dependent step with cause=environment and escalate it to a human.\n")
+		b.WriteString("- Do not retry to work around it and do not substitute placeholder values: report the environment blocker and escalate.\n")
+	default:
+		b.WriteString("- Mode: `unknown` — the platform could not determine whether this project has a verified remote binding.\n")
+		b.WriteString("- Do not assume either way. Attempt the remote action once; if it fails for a binding or credential reason, report it as an environment blocker instead of retrying or inventing a placeholder value.\n")
+	}
+	b.WriteString("\n")
 	return b.String()
 }
 

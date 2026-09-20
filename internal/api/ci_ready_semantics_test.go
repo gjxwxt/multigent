@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/multigent/multigent/internal/ciready"
+	"github.com/multigent/multigent/internal/deliverymode"
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/runtimeauth"
 )
@@ -77,10 +78,10 @@ func TestCIRemotePipelineRequiredResolution(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(ciRemotePipelineRequiredEnv, tc.env)
+			t.Setenv(deliverymode.RemotePipelineRequiredEnv, tc.env)
 			p := &entity.Project{RemotePipelineRequired: tc.declared}
-			if got := ciRemotePipelineRequired(p); got != tc.want {
-				t.Fatalf("ciRemotePipelineRequired(declared=%q env=%q) = %v, want %v", tc.declared, tc.env, got, tc.want)
+			if got := deliverymode.RemotePipelineRequired(p); got != tc.want {
+				t.Fatalf("RemotePipelineRequired(declared=%q env=%q) = %v, want %v", tc.declared, tc.env, got, tc.want)
 			}
 		})
 	}

@@ -44,13 +44,16 @@ Use this skill when executing `changelog_cleanup`, `create_pr`, `push_to_remote`
      ```
   3. Capture the output `pr_url` (e.g. `https://gitlab.example.com/org/repo/-/merge_requests/123`) and `pr_number`.
 
-### Scenario B: Intranet / Local Sandbox Mode (No external remote / No GitLab login)
-- **STRICT RULE**: **DO NOT** hang on interactive `gh auth login`, **DO NOT** fail the step, and **DO NOT** attempt to fake external network connections.
-- The local Git branch and Worktree are the official delivery artifacts in Multigent:
+### Scenario B: Local-Branch Delivery (no verified remote binding)
+- **GATE THIS ON THE PROMPT, NOT ON CONVENIENCE.** The task prompt carries a `## Delivery mode` section with the platform's reading of the verified remote binding. Use this scenario **only** when it says ``Mode: `local_branch` ``. If it says `remote_bound`, you must produce a real merge request — the placeholder below is not an escape hatch. If it says `unknown`, do not assume: attempt the remote action once and report an environment blocker if it fails for a binding/credential reason.
+- **Pushing still works and is still required.** Git push authenticates from the environment at the push boundary; it does not depend on the verified binding. Publishing the task branch is the delivery here — skipping the push destroys the work instead of degrading it.
+- Artifacts for this mode:
   - `pr_url`: Set to `branch: <branch_name>` (e.g. `branch: feature/t-20260827-xxx`) or the internal repository branch link.
   - `pr_number`: Set to the current task ID or branch sequence (e.g. `t-20260827-xxx`).
+  - `pr_diff_summary`: **Start with an explicit notice** that this is a task-branch handoff and **not a real merge request**, so nobody downstream reads it as review evidence that exists. Then give the full structured markdown summary from `git log` and `git diff --stat`.
   - `preview_url`: If a web preview container is available, use `/preview/<taskId>/`; otherwise `none`.
-  - `pr_diff_summary`: Provide the full structured markdown summary extracted from `git log` and `git diff --stat`.
+- **STRICT RULE**: **DO NOT** hang on interactive `gh auth login`, **DO NOT** fail the step, and **DO NOT** attempt to fake external network connections.
+- What this mode genuinely cannot produce: a real merge request, pipeline evidence for HEAD, and the platform-side MR record. Say so in the output instead of substituting a value that looks like one.
 
 ---
 

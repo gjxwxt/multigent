@@ -15,6 +15,7 @@ import (
 
 	"github.com/multigent/multigent/internal/ciready"
 	"github.com/multigent/multigent/internal/codehost"
+	"github.com/multigent/multigent/internal/deliverymode"
 	"github.com/multigent/multigent/internal/entity"
 )
 
@@ -23,39 +24,6 @@ var (
 	errNoPipelineForSHA = errors.New("no pipeline observed for the current HEAD yet; retry with a longer wait")
 	errRemoteRequired   = errors.New("remote pipeline required but the project is not bound to a GitLab remote")
 )
-
-// ciRemotePipelineRequiredEnv is the server-level DEFAULT for projects that
-// do not declare RemotePipelineRequired themselves. Any of "1", "true",
-// "yes", "required" (case-insensitive) turns the gate strict workspace-wide.
-// It is a default, not a floor: a project may still declare "local" to opt
-// out, because there is no organization-enforcement deployment today — the
-// name deliberately keeps "REQUIRED" (not "DEFAULT") since the value it
-// selects is the strict gate, and if an org-enforced floor is ever needed it
-// should be a separate setting that ignores project-level "local".
-const ciRemotePipelineRequiredEnv = "MULTIGENT_CI_REMOTE_PIPELINE_REQUIRED"
-
-// ciRemotePipelineRequired resolves the effective gate semantics: explicit
-// project declaration first, then the server env default, then local-only
-// (the historical behavior). The declared- vs-bound-inference ambiguity
-// flagged in review 2026-09-14 is resolved by making both sides explicit.
-// Precedence (review round 3, C): project declaration > env default >
-// fallback local. The env is a default only — "local" at project level
-// always wins until an explicit org-floor setting exists.
-func ciRemotePipelineRequired(p *entity.Project) bool {
-	if p != nil {
-		switch strings.ToLower(strings.TrimSpace(p.RemotePipelineRequired)) {
-		case "required":
-			return true
-		case "local":
-			return false
-		}
-	}
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(ciRemotePipelineRequiredEnv))) {
-	case "1", "true", "yes", "required":
-		return true
-	}
-	return false
-}
 
 // ciReadyOptions selects what an evaluation does. seed and gatherEvidence are
 // separate on purpose: the init endpoint seeds and only looks for CI when asked
@@ -160,7 +128,7 @@ func (s *Server) ciReadyEvaluation(ctx context.Context, opts ciReadyOptions) (ci
 		return response, nil
 	}
 	waitSeconds := opts.waitSeconds
-	remoteRequired := ciRemotePipelineRequired(project)
+	remoteRequired := deliverymode.RemotePipelineRequired(project)
 	// P0.6: "bound" means a verified remote binding exists — display fields on
 	// the project record are client-writable and prove nothing.
 	_, _, remoteBound, bindErr := s.verifiedBinding(project.Name)
