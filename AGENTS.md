@@ -141,7 +141,7 @@ multigent/
 | 启动自愈扫描 | `internal/api/workflow_handlers.go` `recoverActiveWorkflowRuns` | 重启后 3s 自动恢复停在 agent 节点的 active run；永不自动恢复 human_review；150ms 节流 |
 | 六大生命周期解耦 | `internal/api/`, `internal/gitworktree/`, `internal/preview/`, `internal/workflow/` | 任务、代码基线、Worktree、预览会话、容器和远程同步各自独立，禁止混用单一状态 |
 | 工作流双层体系 | `internal/workflow/store.go` | 代码内置 `Templates()`（只读目录）→ 经 `POST /api/v1/workflows` 实例化落库才可供任务选用；改模板后必须重新实例化才能在 UI 生效 |
-| 统一交付流水线 | 模板 ID `unified-delivery-pipeline` | 12 步闭环，核心是编码后的 Agent 初审闸门（独立 reviewer-agent、实测验证、`review_rounds` 三轮封顶）；发布步 CI 触发为 best-effort（无权限如实填 none） |
+| 统一交付流水线 | 模板 ID `unified-delivery-pipeline` | 13 步闭环，核心是编码后的 Agent 初审闸门（独立 reviewer-agent、实测验证、`review_rounds` 三轮封顶）；发布步 CI 触发为 best-effort（无权限如实填 none） |
 | CI/CD 基线与 ci_ready 闸门 | `internal/ciready/` + 模板 `.gitlab-ci.yml`（模板 1.1.0） | 确定性优先：补种与十项校验全是纯函数，Agent 在 init v2 的 `ci_ready` 步骤只执行 `mga ci ready`（引擎无系统步骤类型才借道 agent_task）；端点 `POST /api/v1/runtime/ci-ready` 以 HEAD SHA 流水线为客观证据；`apk add --no-cache` 即 fail（每 job 重下 docker CLI）；release tag 必须从含优化 yml 的 main 切 |
 | 设计确认闸门与 OD 执行治理 | `internal/api/design_handlers.go`, `internal/api/od_client.go` | 继承澄清需求全文 + 框定 UI 原型角色；OD 项目唯一约束自动清理；OD 容器 `--read-only` 且单次硬封顶 16,384 tokens，严禁接入未调校的长思考链模型（`qwen3.8-27b` 必截断），默认使用实测兼容工具调用的 `glm-5.3-flash`（2.8k tokens 快速落盘） |
 
