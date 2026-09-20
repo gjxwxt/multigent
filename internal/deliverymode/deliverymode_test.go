@@ -8,11 +8,11 @@ import (
 
 func TestResolve(t *testing.T) {
 	cases := []struct {
-		name     string
-		project  *entity.Project
-		bound    bool
-		env      string
-		want     Mode
+		name    string
+		project *entity.Project
+		bound   bool
+		env     string
+		want    Mode
 	}{
 		{"a verified binding always wins", &entity.Project{RemotePipelineRequired: "required"}, true, "true", ModeBound},
 		{"unbound without a requirement is local branch", &entity.Project{}, false, "", ModeLocalBranch},
