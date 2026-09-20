@@ -195,8 +195,28 @@
 
 | 债项 | 来源 | 偿还条件 |
 |---|---|---|
-| `requires_remote` 的 **step ID 白名单兜底** | 沿用 `ci_readyGateStepIDs`（`ci_ready_gate.go:25`）保护存量已实例化 definition 的必要过渡 | 存量项目完成一次重新实例化后**删除白名单**，只留声明式路径。白名单是下一个"过期事实"的天然温床。 |
+| ~~`requires_remote` 的 **step ID 白名单兜底**~~ | 曾计划沿用 `ci_readyGateStepIDs` 保护存量 definition | **未欠下**：实现时确认白名单与"禁止猜测"的立论直接冲突（改名即静默失去保护 = 假绿），改为未标记一律渲染"未声明"，补保护靠重新实例化。见 `internal/workflow/remote_dependency.go` 注释。 |
 | `AGENTS.md:144` 的"12 步闭环" | F9，文档过期 | 与功能改动**分开**单独 commit。 |
 | diff 面板及后端（`ecd7a9c6` 的三处零调用方产物） | §1 前提 1 | 单独 commit 删除，保留 `SanitizedDiffArgs` 修复；同时修正 runbook 证据点 ②。 |
+| 存量已实例化 definition 无 `requires_remote` | 声明式方案的必然结果 | 各项目重新实例化后消失；在此之前控制台对它们显示"未声明"，属预期行为而非缺陷。 |
 
 **提交纪律**：上述三项连带清理**一律不夹带**在 5.1/5.2/5.3 的功能提交里（评审要求）。功能改动与记录修正混提会让回退粒度失效。
+
+## 11. 实施记录（2026-09-20）
+
+已落地并提交：`4f87f691`（5.1 提示词注入）→ `406bc214`（5.2 后端声明 + 派生字段）→ `b79c035e`（5.3 前端渲染）。门禁：`make test` 41 包 0 FAIL、`tsc -b` 通过、`npm --prefix web run build` 通过、`make build` 通过（web 控制台已内嵌）。
+
+**实现期对方案的三处偏离**（都是往严格方向）：
+
+1. **不做 ID 白名单兜底**（原 §5.2/§10 曾计划沿用 `ci_readyGateStepIDs`）。理由：白名单与本文"禁止按 ID 猜测"的立论自相矛盾——改名即静默失去保护，正是假绿。改为未标记一律渲染"未声明"，补保护只能靠重新实例化。§10 债项已相应注销。
+2. **补了方案漏掉的一个模板**：`hotfix-deploy-pipeline` 的 `verify_and_tag` 同样打标+推送，方案 §5.2 只列了 unified 与 greenfield。现已声明，并由 `TestRemoteDependentStepsDeclaredPerTemplate` 把四个模板的集合钉死（含 `tdd-review-loop` 显式声明为空）。
+3. **`remoteBindingVerified` 用可空布尔**：读表失败输出 JSON `null` 而非 `false`。"查不出来"与"确实没绑定"导向不同动作，混成一个值就等于让告警系统在最该说话的时候沉默。
+
+**新增的自动化证据**：`internal/deliverymode/deliverymode_test.go`（Resolve 三向 + 永不泄漏 unknown）、`internal/runner/delivery_mode_prompt_test.go`（四情形文案 + 每种模式的 push 否定措辞反向断言 + "显示字段撒谎仍报 local_branch"）、`internal/workflow/remote_dependency_test.go`（模板声明集合、human_review 一律不声明、改名步骤不得被猜出、标记挺过实例化）、`internal/api/project_remote_binding_view_test.go`。
+
+**仍未取证（不得声称已完成）**：
+
+- §8 的行为级验收**一条都没跑**：没有从真实运行里取过下发 prompt 的原文，没有浏览器实点四类状态，也没有实测"自建改名流程显示未声明"。以上全部只是单元/接线级证据。
+- 内置 skill 的 Scenario B 改动**未对真实 agent 验证**：提示词与 skill 是否协同、agent 是否真的停止编造 `pr_url`，需要一次真实 run。
+- 沙箱内 `controldb.OpenDefault()` 的 fail-open 路径（§5.1 已知边界）未构造用例。
+- 提示词长度增加对各档位模型的上下文影响未实测。
