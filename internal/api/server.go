@@ -1478,6 +1478,24 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, err)
 		return
 	}
+	// The display fields below are client-writable and prove nothing (see the
+	// P0.6 note in ci_ready_handlers.go). Nothing on this endpoint used to
+	// report whether a real remote exists, which pushed consumers toward
+	// remoteProvider. remoteBindingVerified is the derived answer; it is a
+	// JSON null when the binding table could not be read, because "unknown"
+	// and "not bound" lead to different actions.
+	var bindingVerified *bool
+	bindingNamespace := ""
+	if _, binding, ok, bindErr := s.verifiedBinding(name); bindErr != nil {
+		log.Printf("[project] verified remote binding lookup failed for %s: %v", name, bindErr)
+	} else if ok && binding != nil {
+		verified := true
+		bindingVerified = &verified
+		bindingNamespace = strings.TrimSpace(binding.PathWithNamespace)
+	} else {
+		verified := false
+		bindingVerified = &verified
+	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"name":             p.Name,
 		"description":      p.Description,
@@ -1495,6 +1513,8 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		"deployPort":       p.DeployPort,
 		"runtimeProfile":   p.RuntimeProfile,
 
+		"remoteBindingVerified":  bindingVerified,
+		"remoteBindingNamespace": bindingNamespace,
 		"remotePipelineRequired": p.RemotePipelineRequired,
 		// Platform-controlled trust record: read-only here (the PUT body has
 		// no corresponding fields by design). Exposed so the UI can show
