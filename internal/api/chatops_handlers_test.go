@@ -1029,6 +1029,123 @@ func TestMattermostActionCallback_DirectApprove_AntiReplayAndTracePersistence(t 
 	}
 }
 
+func signExpiredActionToken(t *testing.T, hmacSecret, workspaceID, taskID, stepID string, version int64, snapshotHash string) (string, string) {
+	t.Helper()
+	nonce := imbridge.GenerateNonce()
+	tok, err := imbridge.SignActionToken(hmacSecret, imbridge.ActionTokenPayload{
+		WorkspaceID:          workspaceID,
+		ProjectID:            "sample",
+		TaskID:               taskID,
+		StepID:               stepID,
+		Action:               "approve",
+		ChannelID:            "chan-chatops-1",
+		ConnectionID:         "conn-mm-chatops-test",
+		ExpectedStateVersion: version,
+		ReviewSnapshotHash:   snapshotHash,
+		Nonce:                nonce,
+		ExpiresAt:            time.Now().UTC().Add(-time.Minute).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("SignActionToken: %v", err)
+	}
+	return tok, nonce
+}
+
+// A validly-signed but expired card click must reissue a fresh review card
+// instead of dead-ending: overnight human review gates routinely outlive the
+// 2h card TTL. The reissue must NOT advance the workflow.
+func TestMattermostActionCallback_ExpiredActionToken_ReissuesCurrentCard(t *testing.T) {
+	s, workspaceID, _, postCount, _, hmacSecret := setupTestChatopsEnv(t)
+	task, preview := setupTestWorkflowTask(t, s, workspaceID)
+
+	tok, nonce := signExpiredActionToken(t, hmacSecret, workspaceID, task.ID, preview.StepID, preview.ExpectedStateVersion, preview.ReviewSnapshotHash)
+
+	bodyBytes, _ := json.Marshal(mattermostActionPayload{
+		UserID:    "mm-user-admin",
+		UserName:  "admin",
+		ChannelID: "chan-chatops-1",
+		PostID:    "mock-post-card-1",
+		Context:   mattermostActionContext{ActionToken: tok, Action: "approve"},
+	})
+	rec := httptest.NewRecorder()
+	s.handleMattermostActionCallback(rec, httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/actions", bytes.NewReader(bodyBytes)))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "补发当前版本的审批卡片") {
+		t.Fatalf("expected expired-card reissue guidance, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if postCount.Load() != 1 {
+		t.Fatalf("expected exactly one fresh review card post, got %d", postCount.Load())
+	}
+
+	// The stale_refresh session claims the dead card's nonce exactly once.
+	session, found, err := s.controlDB.ChatopsActionSessionByNonce(workspaceID, nonce)
+	if err != nil || !found || session == nil {
+		t.Fatalf("expected stale_refresh session for nonce, found=%v err=%v", found, err)
+	}
+	if session.ActionType != "stale_refresh" {
+		t.Fatalf("expected action_type stale_refresh, got %q", session.ActionType)
+	}
+
+	// The workflow must still be waiting on the same review step.
+	wfStore := workflow.NewStore(s.controlDB, workspaceID)
+	run, ok, err := wfStore.RunForTask("sample", task.ID)
+	if err != nil || !ok {
+		t.Fatalf("RunForTask: %v", err)
+	}
+	if run.ActiveStepID != preview.StepID {
+		t.Fatalf("expired reissue must not advance workflow: still on %s (want %s)", run.ActiveStepID, preview.StepID)
+	}
+}
+
+// Repeated clicks on the same expired card must not stream replacement cards:
+// the nonce-claimed stale_refresh session dedupes them.
+func TestMattermostActionCallback_ExpiredActionToken_DuplicateClicksDeduped(t *testing.T) {
+	s, workspaceID, _, postCount, _, hmacSecret := setupTestChatopsEnv(t)
+	task, preview := setupTestWorkflowTask(t, s, workspaceID)
+
+	tok, _ := signExpiredActionToken(t, hmacSecret, workspaceID, task.ID, preview.StepID, preview.ExpectedStateVersion, preview.ReviewSnapshotHash)
+
+	bodyBytes, _ := json.Marshal(mattermostActionPayload{
+		UserID:    "mm-user-admin",
+		UserName:  "admin",
+		ChannelID: "chan-chatops-1",
+		PostID:    "mock-post-card-1",
+		Context:   mattermostActionContext{ActionToken: tok, Action: "approve"},
+	})
+	for i := 0; i < 3; i++ {
+		s.handleMattermostActionCallback(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/actions", bytes.NewReader(bodyBytes)))
+	}
+	if got := postCount.Load(); got != 1 {
+		t.Fatalf("expected exactly one reissued card across 3 clicks, got %d", got)
+	}
+}
+
+// A token whose signature does not verify must never reissue anything — the
+// expired-reissue path is gated on HMAC validity, not on attacker-decodable
+// payload fields.
+func TestMattermostActionCallback_TamperedExpiredToken_NoReissue(t *testing.T) {
+	s, workspaceID, _, postCount, _, hmacSecret := setupTestChatopsEnv(t)
+	task, preview := setupTestWorkflowTask(t, s, workspaceID)
+
+	tok, _ := signExpiredActionToken(t, hmacSecret, workspaceID, task.ID, preview.StepID, preview.ExpectedStateVersion, preview.ReviewSnapshotHash)
+	tampered := tok + "x"
+
+	bodyBytes, _ := json.Marshal(mattermostActionPayload{
+		UserID:    "mm-user-admin",
+		UserName:  "admin",
+		ChannelID: "chan-chatops-1",
+		PostID:    "mock-post-card-1",
+		Context:   mattermostActionContext{ActionToken: tampered, Action: "approve"},
+	})
+	rec := httptest.NewRecorder()
+	s.handleMattermostActionCallback(rec, httptest.NewRequest(http.MethodPost, "/api/v1/im/mattermost/actions", bytes.NewReader(bodyBytes)))
+	if !strings.Contains(rec.Body.String(), "签名失效") {
+		t.Fatalf("expected signature-failure guidance, got %s", rec.Body.String())
+	}
+	if postCount.Load() != 0 {
+		t.Fatalf("tampered token must not trigger any card post, got %d", postCount.Load())
+	}
+}
+
 // Mattermost sends post-action callbacks as application/json with its routing
 // fields at the top level and card-defined values nested under context. Keep
 // this independent from the local struct helper so a drift in that wire shape

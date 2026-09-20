@@ -1,6 +1,7 @@
 package imbridge
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -42,12 +43,17 @@ func TestChatopsTokens_SignAndVerify(t *testing.T) {
 		t.Fatal("expected error on tampered token")
 	}
 
-	// 3. Expired token fails
+	// 3. Expired token fails, but surfaces the verified payload + sentinel so
+	// callers can identify the task and reissue fresh material.
 	expiredPayload := actionPayload
 	expiredPayload.ExpiresAt = time.Now().UTC().Add(-10 * time.Second).Unix()
 	expTok, _ := SignActionToken(secret, expiredPayload)
-	if _, err := VerifyActionToken(secret, expTok); err == nil {
-		t.Fatal("expected error on expired token")
+	expVerified, err := VerifyActionToken(secret, expTok)
+	if !errors.Is(err, ErrActionTokenExpired) {
+		t.Fatalf("expected ErrActionTokenExpired, got %v", err)
+	}
+	if expVerified == nil || expVerified.TaskID != "task-100" || expVerified.Nonce != "nonce-1" {
+		t.Fatalf("expected verified payload alongside expiry error, got %+v", expVerified)
 	}
 
 	// 4. Dialog Token

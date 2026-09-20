@@ -267,11 +267,27 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// 2. Verify action_token HMAC signature & expiration
+	// 2. Verify action_token HMAC signature & expiration.
+	// An expired-but-validly-signed token is reissued rather than rejected:
+	// human review routinely outlives the 2h card TTL (overnight gates), and a
+	// stale click should surface a fresh card, not a dead end. The reissue path
+	// re-runs identity/RBAC/projection checks below so the payload only ever
+	// steers WHICH task's current card is posted, never what it approves.
 	tokenData, err := imbridge.VerifyActionToken(hmacSecret, actionToken)
+	if errors.Is(err, imbridge.ErrActionTokenExpired) {
+		if tokenData == nil || tokenData.Nonce == "" {
+			stage = "action_token_expired_unidentifiable"
+			writeMattermostActionError(w, "审批卡片已过期且缺少任务标识，无法自动补发。请前往 Web 控制台完成审批。")
+			return
+		}
+		s.reissueExpiredActionTokenCard(r, *tokenData, payload, stage)
+		stage = "action_token_expired_reissued"
+		writeMattermostActionError(w, "♻️ 审批卡片已超过 2 小时有效时限，系统已补发当前版本的审批卡片。请使用 Thread 中最新的卡片操作，或前往 Web 控制台完成审批。")
+		return
+	}
 	if err != nil {
 		stage = "action_token_verification_failed"
-		writeMattermostActionError(w, "审批卡片已超过有效时限（2小时）或签名失效。请刷新任务 Thread 获取最新卡片，或前往 Web 控制台完成审批。")
+		writeMattermostActionError(w, "审批卡片已超过有效时限（2小时）或签名失效。请前往 Web 控制台完成审批。")
 		return
 	}
 	if tokenData.ConnectionID != connectionID {
@@ -662,6 +678,76 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte("{}"))
 	stage = "dialog_opened"
+}
+
+// reissueExpiredActionTokenCard repairs the UX after a click on a long-stale
+// review card. Unlike reissueCurrentMattermostReviewCard (which runs inside the
+// fully-verified callback flow), the expired-token branch never reaches those
+// checks, so this function re-derives every security decision it needs before
+// posting: identity binding, workflow-decision RBAC against the run's CURRENT
+// active step, and an active thread projection. Any failure aborts silently —
+// the caller has already sent the guidance text. The stale_refresh session row
+// (nonce + token hash both UNIQUE) deduplicates repeated clicks on the same
+// dead card so a burst of clicks cannot stream replacement cards.
+func (s *Server) reissueExpiredActionTokenCard(r *http.Request, tokenData imbridge.ActionTokenPayload, payload mattermostActionPayload, _ string) {
+	if s == nil || s.controlDB == nil || s.threadProjections == nil {
+		return
+	}
+	mmUserID := strings.TrimSpace(payload.UserID)
+	if mmUserID == "" || tokenData.WorkspaceID == "" || tokenData.ProjectID == "" || tokenData.TaskID == "" {
+		return
+	}
+	platformUserID, err := s.resolvePlatformUserForAction(r, tokenData.WorkspaceID, tokenData.ConnectionID, mmUserID)
+	if err != nil || platformUserID == "" {
+		return
+	}
+	if err := s.validateWorkflowDecisionReviewer(tokenData.WorkspaceID, tokenData.ProjectID, tokenData.TaskID, platformUserID); err != nil {
+		return
+	}
+	task, _, err := s.findTaskInProject(tokenData.ProjectID, tokenData.TaskID)
+	if err != nil || task == nil {
+		return
+	}
+	wfStore := workflow.NewStore(s.controlDB, tokenData.WorkspaceID)
+	preview, err := wfStore.GetReviewResolutionPreview(tokenData.ProjectID, task, tokenData.StepID)
+	if err != nil {
+		return
+	}
+	session := &controldb.ChatopsActionSession{
+		ID:                   "cas-refresh-" + newChatopsID(),
+		WorkspaceID:          tokenData.WorkspaceID,
+		Project:              tokenData.ProjectID,
+		TaskID:               tokenData.TaskID,
+		StepID:               tokenData.StepID,
+		ExpectedStateVersion: preview.ExpectedStateVersion,
+		ReviewSnapshotHash:   preview.ReviewSnapshotHash,
+		ActionType:           "stale_refresh",
+		ActorMMUserID:        mmUserID,
+		ActorPlatformUserID:  platformUserID,
+		State:                "stale",
+		ActionNonce:          tokenData.Nonce,
+		TokenHash:            "expired:" + imbridge.ComputeTokenHash(tokenData.Nonce),
+		ExpiresAt:            time.Now().UTC().Add(10 * time.Minute),
+	}
+	if err := s.controlDB.CreateChatopsActionSession(session); err != nil {
+		// nonce UNIQUE: a prior refresh (or action) already claimed this card.
+		// Retry only repairs the narrow case where the previous refresh failed
+		// mid-post — otherwise repeated clicks stay silent, as intended.
+		if existing, found, lookupErr := s.controlDB.ChatopsActionSessionByNonce(tokenData.WorkspaceID, tokenData.Nonce); lookupErr == nil && found && existing != nil && existing.State == "failed" {
+			_ = s.controlDB.UpdateChatopsActionSessionState(tokenData.WorkspaceID, existing.ID, "stale")
+			if err := s.postCurrentMattermostReviewCard(r, tokenData, task, preview); err != nil {
+				_ = s.controlDB.UpdateChatopsActionSessionState(tokenData.WorkspaceID, existing.ID, "failed")
+				log.Printf("[chatops] expired-card retry reissue failed for %s/%s: %v", tokenData.ProjectID, tokenData.TaskID, err)
+			}
+			return
+		}
+		log.Printf("[chatops] expired-card refresh already claimed or could not be recorded project=%s task=%s step=%s: %v", tokenData.ProjectID, tokenData.TaskID, tokenData.StepID, err)
+		return
+	}
+	if err := s.postCurrentMattermostReviewCard(r, tokenData, task, preview); err != nil {
+		_ = s.controlDB.UpdateChatopsActionSessionState(tokenData.WorkspaceID, session.ID, "failed")
+		log.Printf("[chatops] expired-card reissue current review card failed for %s/%s: %v", tokenData.ProjectID, tokenData.TaskID, err)
+	}
 }
 
 // reissueCurrentMattermostReviewCard repairs the UX after a stale card click.

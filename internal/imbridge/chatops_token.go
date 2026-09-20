@@ -13,6 +13,13 @@ import (
 	"time"
 )
 
+// ErrActionTokenExpired is returned by VerifyActionToken/VerifyDialogToken when
+// the HMAC signature is valid but the embedded expiry has passed. The verified
+// payload travels with the error so callers can safely identify the task and
+// reissue fresh material (e.g. re-posting a review card) without trusting an
+// unverified token.
+var ErrActionTokenExpired = errors.New("action token has expired")
+
 // GenerateNonce returns a cryptographically random 16-byte hex string.
 func GenerateNonce() string {
 	b := make([]byte, 16)
@@ -97,7 +104,7 @@ func VerifyActionToken(secret, token string) (*ActionTokenPayload, error) {
 	}
 
 	if time.Now().UTC().Unix() > payload.ExpiresAt {
-		return nil, errors.New("action token has expired")
+		return &payload, ErrActionTokenExpired
 	}
 
 	return &payload, nil
@@ -148,7 +155,7 @@ func VerifyDialogToken(secret, token string) (*DialogTokenPayload, error) {
 	}
 
 	if time.Now().UTC().Unix() > payload.ExpiresAt {
-		return nil, errors.New("dialog token has expired")
+		return &payload, ErrActionTokenExpired
 	}
 
 	return &payload, nil
