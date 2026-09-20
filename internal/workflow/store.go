@@ -940,6 +940,7 @@ func unifiedDeliveryPipelineTemplate(locale string) entity.WorkflowTemplate {
 		"mergedSHAField":         "Merge commit SHA on the default branch.",
 		"mergeStatusField":       "Merge and sync status report.",
 		"testReportField":        "Automated and manual test result summary.",
+		"riskMatrixField":        "Optional risk-coverage matrix as a JSON array covering acceptance criteria with risk level, status and evidence (see qa_signoff gate); omit when the run predates the matrix contract and report via test_report alone.",
 		"candidateField":         "The ONLY shipping contract the release node sees. Must be an immutable reference — merged SHA or pushed tag (e.g. f01efb9b (main HEAD, merged for t-xxx)); NEVER a branch name (main may drift after sign-off).",
 		"gitTagField":            "Release tag pushed to the remote.",
 		"pipelineURLField":       "CI/CD pipeline link, or none with the permission reason.",
@@ -996,6 +997,7 @@ func unifiedDeliveryPipelineTemplate(locale string) entity.WorkflowTemplate {
 		"mergedSHAField":           "默认分支上的合并提交 SHA。",
 		"mergeStatusField":         "合并与同步状态报告。",
 		"testReportField":          "自动化与人工测试结果摘要。",
+		"riskMatrixField":          "可选的风险-覆盖矩阵 JSON 数组：[{\"item_id\":\"A1\",\"acceptance_criteria\":\"...\",\"risk_level\":\"high\",\"status\":\"passed\",\"evidence\":\"...\"}]，覆盖验收项、风险级别、状态与执行证据；QA 准出通过前由平台闸门校验，历史运行可省略并仅在 test_report 中报告。",
 		"candidateField":           "发布节点唯一可见的发运契约。默认自动引用合并 SHA/已推送 Tag，确认无误即可；必须是具体不可变引用，严禁写分支名（准出后 main 可能漂移）。",
 		"candidateInputField":      "QA 准出批准的发布候选：具体不可变引用（合并 SHA 或已推送 Tag）。严禁按分支名发运（准出后 main 可能漂移）。",
 		"gitTagField":              "已推送到远端的发布 Tag。",
@@ -1025,8 +1027,8 @@ func unifiedDeliveryPipelineTemplate(locale string) entity.WorkflowTemplate {
 			withStepConfig(tmplStep("create_pr", "agent_task", text["prTitle"], text["prDesc"], "developer-agent", "violet", 1760, []entity.WorkflowField{field("approved_change", "approvedChangeInputField"), field("changelog", "changelogField"), field("branch_summary", "branchSummaryField")}, []entity.WorkflowField{field("pr_url", "prURLField"), field("pr_diff_summary", "prDiffSummaryField"), field("preview_url", "previewURLField")}), map[string]string{StepConfigRequiresRemote: "true"}),
 			tmplStep("pr_review", "human_review", text["prReviewTitle"], text["prReviewDesc"], "owner-engineer", "amber", 2040, []entity.WorkflowField{field("pr_url", "prURLField"), field("pr_diff_summary", "prDiffSummaryField"), field("preview_url", "previewURLField"), field("branch_summary", "branchSummaryField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField")}),
 			withStepConfig(tmplStep("merge_sync", "agent_task", text["mergeTitle"], text["mergeDesc"], "developer-agent", "emerald", 2320, []entity.WorkflowField{field("pr_url", "prURLField"), field("branch_summary", "branchSummaryField")}, []entity.WorkflowField{field("merged_sha", "mergedSHAField"), field("merge_status", "mergeStatusField")}), map[string]string{StepConfigRequiresRemote: "true"}),
-			tmplStep("qa", "agent_task", text["qaTitle"], text["qaDesc"], "qa-agent", "rose", 2600, []entity.WorkflowField{field("merged_sha", "mergedSHAField")}, []entity.WorkflowField{field("test_report", "testReportField")}),
-			tmplStep("qa_signoff", "human_review", text["qaReviewTitle"], text["qaReviewDesc"], "qa-owner", "amber", 2880, []entity.WorkflowField{field("test_report", "testReportField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("release_candidate", "candidateField")}),
+			tmplStep("qa", "agent_task", text["qaTitle"], text["qaDesc"], "qa-agent", "rose", 2600, []entity.WorkflowField{field("merged_sha", "mergedSHAField")}, []entity.WorkflowField{optionalField("risk_coverage_matrix", "riskMatrixField"), field("test_report", "testReportField")}),
+			tmplStep("qa_signoff", "human_review", text["qaReviewTitle"], text["qaReviewDesc"], "qa-owner", "amber", 2880, []entity.WorkflowField{optionalField("risk_coverage_matrix", "riskMatrixField"), field("test_report", "testReportField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("release_candidate", "candidateField")}),
 			withStepConfig(tmplStep("release", "agent_task", text["releaseTitle"], text["releaseDesc"], "release-agent", "emerald", 3160, []entity.WorkflowField{field("release_candidate", "candidateInputField")}, []entity.WorkflowField{field("git_tag", "gitTagField"), field("pipeline_url", "pipelineURLField"), field("release_report", "releaseReportField")}), map[string]string{StepConfigRequiresRemote: "true"}),
 		},
 		[]entity.WorkflowEdge{
@@ -1058,7 +1060,14 @@ func unifiedDeliveryPipelineTemplate(locale string) entity.WorkflowTemplate {
 			edge("e-pr-approved", "pr_review", "merge_sync", text["approved"], cond("decision", "eq", "approve"), nil, false),
 			edge("e-pr-rework", "pr_review", "implement", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "previous_pr": "$input.pr_url"}, false),
 			edge("e-merge-qa", "merge_sync", "qa", "", nil, nil, true),
-			edge("e-qa-signoff", "qa", "qa_signoff", "", nil, nil, true),
+			// The QA sign-off risk-coverage gate validates this matrix before an
+			// approval can route forward, so QA must be able to produce it and
+			// the sign-off step must be able to receive it. Both declared
+			// optional: legacy definitions predate the gate and report via
+			// test_report alone; the sign-off whitelist carries a matching
+			// compatibility exemption (see the qa_signoff branch in
+			// normalizeStepOutputs).
+			edge("e-qa-signoff", "qa", "qa_signoff", "", nil, map[string]string{"risk_coverage_matrix": "$output.risk_coverage_matrix", "test_report": "$output.test_report"}, true),
 			edge("e-qa-approved", "qa_signoff", "release", text["approved"], cond("decision", "eq", "approve"), map[string]string{"release_candidate": "$output.release_candidate"}, false),
 			edge("e-qa-rework", "qa_signoff", "implement", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments"}, false),
 		})
@@ -2905,6 +2914,17 @@ func normalizeWorkflowOutputValues(step entity.WorkflowStep, values map[string]s
 	if stepID := strings.ToLower(strings.TrimSpace(step.ID)); stepID == "qa_signoff" || strings.Contains(stepID, "qa_signoff") {
 		if _, ok := allowed["qa_rework_items"]; !ok {
 			allowed["qa_rework_items"] = entity.WorkflowField{Name: "qa_rework_items", Optional: true}
+		}
+		// The qa_signoff risk-coverage gate requires this matrix on approval,
+		// but unified-delivery-pipeline definitions instantiated before the
+		// matrix contract do not declare it — without the exemption such runs
+		// deadlock: the gate demands a field the whitelist forbids. Optional
+		// so the human may leave it empty on rejection or when QA reported via
+		// test_report alone; the gate itself still rejects an empty matrix on
+		// approve. New definitions declare the field (qa output → edge →
+		// sign-off input) and never rely on this branch.
+		if _, ok := allowed["risk_coverage_matrix"]; !ok {
+			allowed["risk_coverage_matrix"] = entity.WorkflowField{Name: "risk_coverage_matrix", Optional: true}
 		}
 	}
 	if len(out) == 0 && !failed {
