@@ -6,6 +6,8 @@ import { cn } from '../../lib/cn'
 import { useApiJson } from '../../lib/use-api'
 import type { TaskOption } from '../task/TaskModals'
 import { overlayDismissProps } from '../ui/overlay'
+import { DeliveryModeNotice } from './DeliveryModeNotice'
+import type { ProjectRemoteState } from '../../lib/delivery-mode'
 
 const TASK_TYPES = ['chore', 'feature', 'bug', 'review', 'triage', 'test', 'research'] as const
 const TEMPLATE_VAR_RE = /\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}/g
@@ -14,7 +16,7 @@ type AgentOpt = { name: string; model?: string }
 
 type ProjectAgentsOpt = { projectId: string; agents: AgentOpt[] }
 type WorkflowBranchOpt = { id: string; title: string; actorRole?: string; workflow?: WorkflowOpt }
-type WorkflowStepOpt = { id: string; type: string; title: string; actorRole?: string; branches?: WorkflowBranchOpt[] }
+type WorkflowStepOpt = { id: string; type: string; title: string; actorRole?: string; branches?: WorkflowBranchOpt[]; config?: Record<string, string> }
 type WorkflowOpt = { id: string; name: string; steps?: WorkflowStepOpt[]; edges?: unknown[] }
 type WorkflowListResponse = { workflows: WorkflowOpt[] }
 type TaskTemplateVariable = { name: string; description?: string; required?: boolean; default?: string }
@@ -89,6 +91,12 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
     branchRefreshKey,
   )
   const usersState = useApiJson<UserListResponse>(open ? '/api/v1/users' : null, 0)
+  // Only the derived fields are read here. remoteProvider / remoteConnection on
+  // the same payload are client-writable and must never drive this decision.
+  const projectRemoteState = useApiJson<ProjectRemoteState>(
+    open && selectedProject ? `/api/v1/projects/${encodeURIComponent(selectedProject)}` : null,
+    0,
+  )
   const workflows = workflowsState.status === 'ok' ? workflowsState.data.workflows : []
   const taskTemplates = templatesState.status === 'ok' ? templatesState.data.templates : []
   const availableBranches = useMemo(() => {
@@ -711,6 +719,15 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
                   </select>
                   <p className="mt-0.5 text-xs text-neutral-400 dark:text-zinc-500">{t('workflows.taskWorkflowHint')}</p>
                 </label>
+              ) : null}
+
+              {selectedWorkflow ? (
+                <DeliveryModeNotice
+                  steps={selectedWorkflow.steps}
+                  project={projectRemoteState.status === 'ok' ? projectRemoteState.data : undefined}
+                  workflows={workflows}
+                  onSelectWorkflow={onWorkflowChange}
+                />
               ) : null}
 
               {workflowDefinitionId && workflowActorSlots.length > 0 ? (

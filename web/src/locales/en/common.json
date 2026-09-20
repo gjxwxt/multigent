@@ -611,6 +611,27 @@
     "taskWorkflow": "Task workflow",
     "noWorkflow": "No workflow",
     "taskWorkflowHint": "When selected, creating the task starts a workflow run.",
+    "deliveryMode": {
+      "undeclared": "This workflow declares no external delivery dependency. A custom or older workflow may simply not declare one yet, so confirm before treating it as local-only.",
+      "ready": {
+        "title": "Remote delivery available",
+        "body": "This project has a verified remote binding, so the steps that need one can run: {{steps}}."
+      },
+      "localBranch": {
+        "title": "No verified remote binding — this run can only deliver to a task branch",
+        "body": "These steps cannot produce their remote artifacts: {{steps}}. They will report a branch reference instead of a merge request, and no pipeline evidence will exist.",
+        "pushStillWorks": "Git push and the task branch still work: publish the commit as usual. Only the merge request, pipeline evidence and the platform-side MR record are unavailable."
+      },
+      "requiredUnbound": {
+        "title": "Blocked: this project requires remote pipeline evidence but has no verified binding",
+        "body": "The platform will hold these steps and escalate them to a human: {{steps}}. Verify the remote binding in project settings, or choose a workflow that does not require one."
+      },
+      "bindingUnknown": {
+        "title": "Remote binding state unavailable",
+        "body": "The platform could not read this project's verified binding, so it cannot tell whether these steps will work: {{steps}}.",
+        "bindingUnknownHint": "Reported as unknown rather than ready: the absence of a warning is not a green light."
+      }
+    },
     "actorBindings": "Actor assignment",
     "actorBindingsProgress": "{{done}} / {{total}} assigned",
     "actorBindingsRequired": "Assign an actor for every workflow role.",

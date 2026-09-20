@@ -611,6 +611,27 @@
     "taskWorkflow": "任务流程",
     "noWorkflow": "不使用流程",
     "taskWorkflowHint": "选择后，任务创建时会启动对应的流程运行。",
+    "deliveryMode": {
+      "undeclared": "该流程未声明外部交付依赖。自建或较早版本的流程可能只是还没声明，请自行确认后再当作纯本地流程。",
+      "ready": {
+        "title": "远端交付可用",
+        "body": "该项目已具备已验证远端绑定，需要远端的步骤可以执行：{{steps}}。"
+      },
+      "localBranch": {
+        "title": "无已验证远端绑定 —— 本次只能交付到任务分支",
+        "body": "以下步骤产不出远端制品：{{steps}}。它们只能上报分支引用而非合并请求，也不会有流水线证据。",
+        "pushStillWorks": "Git 推送与任务分支仍然可用，照常提交即可。不可用的只是合并请求、流水线证据与平台侧 MR 记录这三样。"
+      },
+      "requiredUnbound": {
+        "title": "会被拦住：该项目要求远端流水线证据，但没有已验证绑定",
+        "body": "平台将拦住以下步骤并升级给人处理：{{steps}}。请在项目设置中完成远端验证，或改用不要求远端的流程。"
+      },
+      "bindingUnknown": {
+        "title": "远端绑定状态读取不到",
+        "body": "平台读不到该项目的已验证绑定，因此无法判断这些步骤能否执行：{{steps}}。",
+        "bindingUnknownHint": "这里报的是「未知」而不是「就绪」：没有告警不等于绿灯。"
+      }
+    },
     "actorBindings": "执行者编排",
     "actorBindingsProgress": "已指定 {{done}} / {{total}}",
     "actorBindingsRequired": "请为流程中的每个执行角色指定执行者。",
