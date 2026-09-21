@@ -1521,6 +1521,39 @@ func (s *Server) fireTaskTriggerOrQueueRuntime(workspaceID, project, agent strin
 		}
 		return nil
 	}
+	// Task 0.4 gap 1: engine-internal readiness callback. Workflow continuity
+	// dispatches here without an HTTP entry point, so a Docker outage or a
+	// runtime node going offline between steps would otherwise be discovered
+	// blindly by the next agent run. Fail fast instead: leave the task
+	// pending and post a structured environment diagnosis.
+	//
+	// This deliberately returns nil on a withheld dispatch: the previous step
+	// HAS completed and the run state advanced before this function runs, so
+	// surfacing an error would turn a successful completion callback into a
+	// 500 (agent retries, completion appears failed). The withheld next step
+	// stays pending and is re-driven by the scheduler tick, whose readiness
+	// gate withholds again until the environment recovers.
+	if readiness := s.runtimeReadinessForExecution(workspaceID, meta); readiness.Blocking {
+		detail := runtimeReadinessErrorMessage(readiness)
+		s.addTaskSystemComment(project, agent, task,
+			"[platform] 环境就绪检查未通过，下一步骤暂缓派发（fail-fast，不烧 token）：",
+			detail+"\n上一步已完成，运行状态已保存。环境恢复后调度器会自动继续；也可手动启动。")
+		s.auditLog(auditLogInput{
+			WorkspaceID:  workspaceID,
+			Action:       "workflow.dispatch.withheld",
+			ResourceType: "task",
+			ResourceID:   project + "/" + agent + "/" + task.ID,
+			Summary:      "Workflow next step dispatch withheld: runtime not ready",
+			After: map[string]any{
+				"project": project,
+				"agent":   agent,
+				"taskId":  task.ID,
+				"detail":  detail,
+			},
+			Request: r,
+		})
+		return nil
+	}
 	if s.hasActiveRuntimeRun(workspaceID, project, agent, task.ID) {
 		return nil
 	}

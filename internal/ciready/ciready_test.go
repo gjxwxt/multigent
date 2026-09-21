@@ -266,3 +266,59 @@ func TestCheckFlagsUnexecutableGradlewOrMissingWrapper(t *testing.T) {
 		t.Fatalf("unexpected detail: %s", check.Detail)
 	}
 }
+
+func TestProbeBuildDependencies(t *testing.T) {
+	t.Run("pass when lockfile present", func(t *testing.T) {
+		repo := writeFixtureRepo(t)
+		checks := ProbeBuildDependencies(repo)
+		var lockfile *Check
+		for i := range checks {
+			if checks[i].Name == "lockfile" {
+				lockfile = &checks[i]
+			}
+		}
+		if lockfile == nil || lockfile.Status != StatusPass {
+			t.Fatalf("expected lockfile pass, got %#v", checks)
+		}
+	})
+
+	t.Run("fail when web manifest has no lockfile", func(t *testing.T) {
+		repo := writeFixtureRepo(t)
+		if err := os.Remove(filepath.Join(repo, "web", "package-lock.json")); err != nil {
+			t.Fatal(err)
+		}
+		checks := ProbeBuildDependencies(repo)
+		found := false
+		for _, c := range checks {
+			if c.Name == "lockfile" && c.Status == StatusFail {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("expected lockfile fail, got %#v", checks)
+		}
+	})
+
+	t.Run("skip on repo without manifests", func(t *testing.T) {
+		repo := t.TempDir()
+		checks := ProbeBuildDependencies(repo)
+		for _, c := range checks {
+			// build_tool_readiness passes vacuously when there is no gradle
+			// server dir; lockfile/makefile checks skip without manifests.
+			if c.Status != StatusSkip && !(c.Name == "build_tool_readiness" && c.Status == StatusPass) {
+				t.Fatalf("expected skip (or vacuous pass) on empty repo, got %#v", checks)
+			}
+		}
+	})
+
+	t.Run("never seeds or mutates the repo", func(t *testing.T) {
+		repo := writeFixtureRepo(t)
+		if err := os.Remove(filepath.Join(repo, "web", "package-lock.json")); err != nil {
+			t.Fatal(err)
+		}
+		_ = ProbeBuildDependencies(repo)
+		if _, err := os.Stat(filepath.Join(repo, "web", "package-lock.json")); !os.IsNotExist(err) {
+			t.Fatalf("probe must not seed lockfiles")
+		}
+	})
+}

@@ -447,6 +447,18 @@ func checkPrerequisites(repoDir string, add func(string, string, string)) {
 	}
 }
 
+// ProbeBuildDependencies runs only the deterministic build-dependency checks
+// (lockfile ↔ manifest, gradle wrapper, Makefile targets) against repoDir.
+// It is the read-only subset of Verify used by runtime readiness probes:
+// no seeding, no filesystem mutation, safe to call on any project directory.
+func ProbeBuildDependencies(repoDir string) []Check {
+	var checks []Check
+	checkPrerequisites(repoDir, func(name, status, detail string) {
+		checks = append(checks, Check{Name: name, Status: status, Detail: detail})
+	})
+	return checks
+}
+
 func scriptLines(spec map[string]any) []string {
 	var lines []string
 	switch value := spec["script"].(type) {

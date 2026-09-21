@@ -15,6 +15,7 @@ import (
 	"time"
 
 	controldb "github.com/multigent/multigent/internal/db"
+	"github.com/multigent/multigent/internal/ciready"
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/runner"
 	"github.com/multigent/multigent/internal/runtimeexec"
@@ -153,6 +154,19 @@ func (s *Server) runtimeReadinessForExecution(workspaceID string, meta *entity.A
 	})
 }
 
+// runtimeReadinessForExecutionCached is runtimeReadinessForExecution with a
+// caller-owned Docker/image cache (Task 0.4: engine-internal probes run per
+// agent per scheduler tick; without the shared cache a tick with many agents
+// would issue one Docker round-trip each — a probe storm).
+func (s *Server) runtimeReadinessForExecutionCached(workspaceID string, meta *entity.AgentMeta, dockerCache *runtimeReadinessDockerCache) runtimeReadinessResponse {
+	return s.runtimeReadinessForRuntimeNode(workspaceID, meta, runtimeReadinessOptions{
+		ProbeRuntime:   true,
+		CheckContainer: true,
+		AgentDir:       s.st.AgentDir(meta.Project, meta.Name),
+		DockerCache:    dockerCache,
+	})
+}
+
 func (s *Server) runtimeReadinessForProjectList(workspaceID string, meta *entity.AgentMeta) runtimeReadinessResponse {
 	return s.runtimeReadinessForRuntimeNode(workspaceID, meta, runtimeReadinessOptions{
 		ProbeRuntime:   false,
@@ -210,6 +224,37 @@ func (s *Server) runtimeReadinessForRuntimeNode(workspaceID string, meta *entity
 			Checks:   checks,
 		}
 	}
+	// Task 0.4 gap 2: build-dependency probe. When the caller wants a full
+	// execution-time probe, also verify the project's build dependencies
+	// (lockfile ↔ manifest, gradle wrapper, Makefile targets) against the
+	// materialized repo. A missing lockfile or wrapper is a REPO CONTENT
+	// defect, not a local-environment issue: it fails identically on a
+	// runtime node's worktree, so unlike the sandbox/docker checks below it
+	// is intentionally NOT downgraded to a warning when a runtime node is
+	// online. Only "fail" blocks — "skip" (no manifest of that kind) is
+	// normal for projects without that stack.
+	if opts.ProbeRuntime && meta != nil && strings.TrimSpace(meta.Project) != "" {
+		for _, probe := range ciready.ProbeBuildDependencies(s.resolveProjectGitRoot(meta.Project)) {
+			if probe.Status == ciready.StatusSkip {
+				continue
+			}
+			check := setupCheck{
+				Key:    "build_dependencies",
+				Label:  "Build dependencies: " + probe.Name,
+				Status: probe.Status,
+				Detail: probe.Detail,
+			}
+			if probe.Status == ciready.StatusFail {
+				check.Blocking = true
+				check.Action = "Commit the missing lockfile/wrapper (or fix the Makefile targets), then retry."
+			}
+			readiness.Checks = append(readiness.Checks, check)
+		}
+		readiness = recomputeRuntimeReadiness(readiness)
+		if readiness.Blocking {
+			return readiness
+		}
+	}
 	if !readiness.Blocking {
 		return readiness
 	}
@@ -245,6 +290,33 @@ func (s *Server) runtimeReadinessForRuntimeNode(workspaceID string, meta *entity
 		filtered.Summary = "Runtime is ready."
 	}
 	return filtered
+}
+
+// recomputeRuntimeReadiness re-derives Blocking/Ready/Summary from the check
+// list. Shared by the readiness paths that append checks after the initial
+// build (reviewer finding: summary logic must not be duplicated per call site).
+func recomputeRuntimeReadiness(rs runtimeReadinessResponse) runtimeReadinessResponse {
+	blocking := false
+	warnings := 0
+	for _, c := range rs.Checks {
+		if c.Blocking || c.Status == "error" {
+			blocking = true
+		}
+		if c.Status == "warning" {
+			warnings++
+		}
+	}
+	rs.Blocking = blocking
+	rs.Ready = !blocking
+	switch {
+	case blocking:
+		rs.Summary = "Runtime is not ready. Resolve blocking checks before running this agent."
+	case warnings > 0:
+		rs.Summary = "Runtime can run, but preparation is incomplete. First run may be slower."
+	default:
+		rs.Summary = "Runtime is ready."
+	}
+	return rs
 }
 
 func runtimeNodeBlockingReadiness(summary, detail string) runtimeReadinessResponse {

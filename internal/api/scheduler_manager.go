@@ -1127,6 +1127,24 @@ func (s *Server) nextRuntimeWakeupTask(workspaceID, project, agent string, hb *e
 	return task, attentionIDs, nil
 }
 
+// pendingWakeupTaskForDiagnosis returns, read-only, the task a withheld
+// heartbeat wakeup would have dispatched (Task 0.4 gap-1 diagnostics). It
+// mirrors nextRuntimeWakeupTask's selection order but never creates wakeup
+// tasks; when only a synthetic wakeup prompt would run, it returns nil and
+// the caller just logs.
+func (s *Server) pendingWakeupTaskForDiagnosis(project, agent string) *entity.Task {
+	if due, err := s.nextRuntimeDueScheduledTask(project, agent); err == nil && due != nil {
+		return due
+	}
+	if urgent, err := s.nextRuntimeUrgentPendingTask(project, agent); err == nil && urgent != nil {
+		return urgent
+	}
+	if selected, err := s.nextRuntimePendingTask(project, agent); err == nil {
+		return selected
+	}
+	return nil
+}
+
 func (s *Server) nextRuntimeDueScheduledTask(project, agent string) (*entity.Task, error) {
 	tasks, err := s.ts.ListTasks(project, agent, entity.TaskStatusPending)
 	if err != nil {
@@ -1366,6 +1384,10 @@ func (s *Server) runtimeSchedulerTick(ctx context.Context, workspaceID, project,
 	}
 	targets := s.runtimeSchedulerTargets(workspaceID, project, agent)
 	now := time.Now()
+	// Task 0.4: one shared Docker/image cache per tick — the readiness probes
+	// below run per agent, but Docker availability and image presence are
+	// host-global facts; probing them once per tick avoids a probe storm.
+	dockerCache := &runtimeReadinessDockerCache{}
 	for _, target := range targets {
 		if ctx.Err() != nil {
 			return
@@ -1386,6 +1408,20 @@ func (s *Server) runtimeSchedulerTick(ctx context.Context, workspaceID, project,
 			continue
 		}
 		if s.hasActiveRuntimeRunForTarget(workspaceID, target, "") {
+			continue
+		}
+		// Task 0.4 gap 1: engine-internal readiness callback for heartbeat
+		// wakeup dispatch. This path has no HTTP entry point, so probe before
+		// enqueueing; on a blocking environment failure, record a structured
+		// diagnosis on the pending wakeup task instead of burning tokens.
+		if readiness := s.runtimeReadinessForExecutionCached(workspaceID, meta, dockerCache); readiness.Blocking {
+			detail := runtimeReadinessErrorMessage(readiness)
+			if task := s.pendingWakeupTaskForDiagnosis(execTarget.project, execTarget.agent); task != nil {
+				s.addTaskSystemComment(execTarget.project, execTarget.agent, task,
+					"[platform] 环境就绪检查未通过，wakeup 未派发（fail-fast，不烧 token）：",
+					detail+"\n修复后等待下一次心跳即可自动继续。")
+			}
+			log.Printf("runtime scheduler wakeup %s/%s withheld: runtime not ready: %s", execTarget.project, execTarget.agent, detail)
 			continue
 		}
 		run, task, err := s.enqueueRuntimeWakeupRunFromRequest(workspaceID, execTarget.project, execTarget.agent, hb, serverURL, actor)
