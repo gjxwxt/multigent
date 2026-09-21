@@ -233,12 +233,12 @@
 
 **验收缺口（不得声称行为级验收全部通过）**：
 
-1. ~~**缺口-高**：agent 真实行为未验证~~ → **已补齐（2026-09-21 下午，见 §13）**，仅剩 local_branch 象限。
-2. **缺口-中**：浏览器人工实点未做（§8 5.3 原始要求）；四态卡片视觉与交互路径未经人工实点。
+1. ~~**缺口-高**：agent 真实行为未验证~~ → **已补齐（2026-09-21，见 §13.1/§13.2：remote_bound 与 local_branch 两象限真实 run 均 8/8 断言通过）**。
+2. **缺口-中**：浏览器人工实点未做（§8 5.3 原始要求）；四态卡片视觉与交互路径未经人工实点。（唯一剩余缺口）
 3. ~~**缺口-中**：bound 态为测试桩构造~~ → **已补齐（2026-09-21 下午，见 §13）**：改走 `POST /remote/verify` 正路（GitLab 实查，source=explicit-verify）。
 4. **缺口-低**：bindingUnknown（API null）/ unknown（prompt）两态集成触发未构造，由单测覆盖（2026-09-21 实跑 PASS：`TestProjectDetailReportsVerifiedBindingIndependentlyOfDisplayFields`、`TestDeliveryModeSectionWording`、`TestRemoteDependentStepsDeclaredPerTemplate`、`TestRenamedStepsAreNotGuessedAsRemoteDependent`）。
 
-**结论**：§8 验收状态 = **提示词层/API 层/前端逻辑层通过；行为层 remote_bound 象限已补齐（§13），local_branch 象限与视觉实点待补**。复审（reviewer-claude 两轮）已确认证据链无夸大表述。
+**结论**：§8 验收状态 = **提示词层/API 层/前端逻辑层通过；行为层 remote_bound 象限已补齐（§13.1），local_branch 象限已补齐（§13.2）；仅剩浏览器四态卡片视觉实点**。复审（reviewer-claude 两轮）已确认证据链无夸大表述。
 
 ## 13. 行为层补验收：remote_bound 真实 agent run（2026-09-21）
 
@@ -247,4 +247,12 @@ VM 主服务升级到 `cb6bd098` 后在真实部署环境执行：
 - **绑定走正路**：`POST /api/v1/projects/1test/remote/verify` 经 GitLab API 实查通过，绑定表 source=explicit-verify——替代了第一轮验收的 sqlite 测试桩，缺口-3 就此销掉。
 - **真实 run**：任务 `t-20260921-ivcwv0`（agent Mira / glm-5.3-flash / Docker 沙箱，workflow = 13 步 v2 定义）。8 项行为断言全部通过，关键三项：**push 真实发生**（GitLab `new branch` 输出，local_branch 担心的"误解为不能 push"未出现）、**0 次 MR API 调用**（指令明确不建 MR，agent 遵守）、**未编造 pr_url**（clarify 输出仅含真实 commit SHA `4237c011` 与可验证的交付证据）。
 - 完整证据：`work/evidence/deliverymode-acceptance/real-agent-run/`（git-excluded，含 959KB run log 与 REAL-AGENT-ACCEPTANCE.md）。
-- 剩余：local_branch 象限（无绑定项目同样方法跑一个真实任务，观察 `branch:<name>` 占位行为）归入 C-2 窗口。
+
+### 13.2 local_branch 象限（2026-09-21 晚，真实 run 补齐）
+
+- **任务**：`t-20260921-f8rc3y`（Mira / glm-5.3-flash / Docker 沙箱，同一条 13 步 v2 流水线；由 Antigravity 编排发起）。**行为层 8/8 断言通过**：local_branch 事实注入被正确理解、`/tmp/ws/1test` 克隆工作（家目录红线遵守）、`feature/t-20260921-f8rc3y` 基于不可变 `origin/main@5be3f864`、提交 `d006d4ab` 真实推送（GitLab API 文件+sha256 实证）、**0 MR 创建 + pr_url 按 `branch:<name>` 占位约定上报（零编造）**、ci_ready 判 fail 后按升级规则停止且未带 fail 声明完成。
+- **终态 `done_failed` 归因**：ci_ready `lockfile=FAIL`，根因是**平台侧 workspace（project.Repo）为 8-31 陈旧物料、与 GitLab main 脱节**——lockfile 在仓库所有分支均存在（blob `b354ef60`），agent 六步反证诊断正确并按规则升级人工（完整诊断链见任务 ci_ready_report）。属平台 workspace 生命周期空白（发现项，见下），非 agent 行为缺陷、非检查逻辑缺陷。
+- **处置**：workspace 已重新物料化（干净 clone main@5be3f86、去 remote/凭据残留、属主修正）；全链路 ci_ready 绿灯留待下次真实 run 复验。
+- **平台待办（新）**：workspace 无刷新机制——init 物化后永不再与远端同步，`resolveProjectGitRoot` fallback 链在脱节项目上全部落空。候选方向：归入 Rev 2 计划 Task 0.4（探针/诊断面）或单独立项 workspace 生命周期。
+- **证据**：`work/evidence/deliverymode-acceptance/real-agent-run/LOCAL-BRANCH-ACCEPTANCE.md`（含 8 断言清单、根因分析、修复记录）+ `f8rc3y-workflow-snapshot.json`（181KB 结构化快照）。
+- **剩余**：浏览器四态卡片视觉实点（人工走查）；沙箱运行中 daemon 掉线等跨步骤探针（Task 0.4 范畴）。
