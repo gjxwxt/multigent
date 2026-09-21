@@ -71,6 +71,7 @@ func init() {
 
 	rootCmd.AddCommand(
 		newVersionCmd(),
+		newDoctorCmd(),
 		newCreateCmd(),
 		newTeamCmd(),
 		newRoleCmd(),

@@ -1,8 +1,10 @@
-# 环境变量与配置面参考 + 内网迁移卡点（2026-09-14）
+# 环境变量与配置面参考 + 内网迁移卡点（2026-09-14；2026-09-21 增补 doctor 与扫描数修订）
 
 > 目标读者：迁移执行者、平台配置审计者。事实来源为 `grep 'MULTIGENT_' internal/ cmd/` 全量扫描（51 个变量，2026-09-14）与 systemd 实测。
 > 定位：与 `docs/intranet-runtime-plan.md`（P0 实施契约，未动）互补——那边定架构决策，这边给**现状清单 + 迁移日核对表 + 公共配置面设计建议**。
 > 安全面：本文档全部使用占位符，不含真实内网地址、凭据或部署细节。
+
+> **2026-09-21 增补**：① 自检入口新增 `multigent doctor`（见 §6）；② 全量扫描修订：直接 `os.Getenv("MULTIGENT_*")` 57 个、含常量间接引用的去重全集 121 个（差异 = 子进程契约变量，§2.6 类，非配置面）；§2 清单仍以迁移相关的 server 配置为准。
 
 ---
 
@@ -99,7 +101,7 @@
 ## 4. 公共配置面设计建议（演进方向，非本轮实施）
 
 1. **单一事实源**：现状"conf + systemd Environment + 进程内 Getenv"三层并存，迁移审计要扫三处。建议 P0/P1 落地时以 conf 为唯一声明源，systemd 只保留 secrets（加密 key/token），其余全部收进 conf 的强类型 section——appconfig 严格解析（intranet-plan §2.2）正好是承载面。
-2. **`multigent config check`**：启动前自检命令，输出"生效配置快照"（secret 打码）。比 `systemctl show` + grep 源码拼凑可靠得多，迁移日收益直接。
+2. ~~**`multigent config check`**：启动前自检命令~~ → **已落地为 `multigent doctor`**（2026-09-21，见 §6；覆盖本条全部诉求且扩展到连通性探活）。
 3. **配置项分代标注**：每个配置在文档里标"嵌入式内部 / 部署面 / 开发面"（§2.6 的分类就是起点），避免内部契约变量被误当部署配置带进生产。
 4. **NO_PROXY 声明化**：与其手写逗号串，不如 conf 里声明"内网服务清单"，由平台生成 NO_PROXY 与 JVM nonProxyHosts 两个视图——消除两处手写漂移（现网 GitLab 主机/控制面主机的手写重复已现端倪）。
 
@@ -108,3 +110,22 @@
 - `docs/intranet-runtime-plan.md`：P0 契约（registries/严格解析/锁/探针），本文不重复、不改其范围。
 - `docs/executor-blindspots-2026-09-14.md`：执行盲点与 Feature 优先级。
 - `HANDOFF.md` §10.18：P2 soak 启动清单（本地文档）。
+
+## 6. `multigent doctor`（server 侧自检，2026-09-21 落地）
+
+一次性输出迁移日需要的全部事实，只读、永不打印密文材料：
+
+| 分区 | 内容 | 判定规则 |
+|---|---|---|
+| configuration tree | 六大域全部键的生效值 + 来源（env / unset） | 与 server 同链（`loadAppConfig` 先行，conf 派生后仍为空的键标 unset） |
+| data-dir | 数据目录可写性（瞬时探针文件，即写即删） | 不可写 = **blocking** |
+| secrets-baseline | 复用 `AuditSecrets`（明文计数、加密计数、key 是否配置） | 明文>0 且 REQUIRE=1 = **blocking**（启动必 fail-closed）；明文>0 无 REQUIRE = warn（引导 `secrets migrate`） |
+| gitlab:conn-* | 每个连接解密凭据后 GET /user 实探（5s 超时） | 401 = fail（token 被拒）；无凭据可解 = warn；**不作为 blocking** |
+| llm:prov-* | GET {base}/models 探活（openai/anthropic 各自鉴权头） | 任何失败 = warn（provider 可达性属环境问题，不阻断） |
+| docker | daemon 可达性 | 不可达 = warn（沙箱将失败但服务本身可跑） |
+
+用法与退出码：`multigent doctor [--json] [--offline]`；退出码 1 = 存在 blocking（数据目录不可用 / control DB 打不开 / 明文密钥+REQUIRE）；warn 不影响退出码。
+
+**conf 凭据注入注意**：连接/provider 密文解密依赖 `MULTIGENT_CONNECTION_ENCRYPTION_KEY`——用 systemd 同源 key 运行（`sudo systemctl show multigent -p Environment` 取值后 `sudo env MULTIGENT_CONNECTION_ENCRYPTION_KEY=... multigent doctor`），否则 gitlab/llm 探活退化为 `no credential available for live probe`（这是 doctor 如实报告缺 key，不是缺陷）。
+
+已知边界：provider 探活路径对非 openai 网关可能 404（endpoint 不存在 /models），属探测局限不影响判定语义（reachable-but-404 已在 detail 注明）。
