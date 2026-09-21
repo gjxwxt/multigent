@@ -511,6 +511,9 @@ func (s *Server) submitWorkflowReviewFromTrigger(workspaceID string, record work
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
 	deliveryPrepared := false
 	var currentStep entity.WorkflowStep
+	// Task 0.5: delivery routing is definition-version aware; default 1
+	// (legacy) when the run has no resolvable definition.
+	defVersion := 1
 	run, found, err := wfStore.RunForTask(record.Project, record.TaskID)
 	if err != nil {
 		return result, err
@@ -521,13 +524,16 @@ func (s *Server) submitWorkflowReviewFromTrigger(workspaceID string, record work
 			return result, err
 		}
 		if defFound {
+			defVersion = def.Version
+			// Task 0.5: version-aware delivery routing (legacy fallback only
+			// below workflowstore.DefinitionVersionV2).
 			for _, step := range def.Steps {
 				if step.ID == run.ActiveStepID {
 					currentStep = step
 					break
 				}
 			}
-			if isPullRequestReviewStep(currentStep) {
+			if workflowstore.PullRequestReviewStepMatches(currentStep, def.Version) {
 				willComplete, err := wfStore.WillComplete(record.Project, record.TaskID, outputs, summary, "", "completed")
 				if err != nil {
 					return result, err
@@ -550,7 +556,7 @@ func (s *Server) submitWorkflowReviewFromTrigger(workspaceID string, record work
 	}
 	_ = s.ts.RemoveFromInbox(record.TaskID)
 	if result.Done {
-		if isPullRequestReviewStep(currentStep) && !deliveryPrepared {
+		if workflowstore.PullRequestReviewStepMatches(currentStep, defVersion) && !deliveryPrepared {
 			return result, errors.New("terminal pull request review completed without delivery preparation")
 		}
 		now := time.Now().UTC()

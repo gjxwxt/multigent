@@ -163,6 +163,9 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		designStep.Config = map[string]string{}
 	}
 	designStep.Config["designGate"] = "true"
+	// Task 0.1: the unified marker is declarative and survives step renames;
+	// the legacy designGate flag above stays until the Task 0.5 deprecation.
+	designStep.Config[GateConfigKey] = GateKindDesignGate
 
 	acceptanceTestDesignStep := tmplStep("acceptance_test_design", "agent_task", text["atdTitle"], text["atdDesc"], "qa-agent", "rose", 780,
 		[]entity.WorkflowField{

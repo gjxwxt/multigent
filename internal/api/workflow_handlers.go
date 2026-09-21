@@ -633,11 +633,15 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 	if err != nil {
 		return taskWorkflowResponse{}, http.StatusInternalServerError, err
 	}
+	// Task 0.5: delivery routing is definition-version aware. defVersion
+	// defaults to 1 (legacy) when the run has no resolvable definition.
+	defVersion := 1
 	var currentStep entity.WorkflowStep
 	if runFound {
 		if def, found, err := workflowStore.RunDefinition(run); err != nil {
 			return taskWorkflowResponse{}, http.StatusInternalServerError, err
 		} else if found {
+			defVersion = def.Version
 			for _, step := range def.Steps {
 				if step.ID == run.ActiveStepID {
 					currentStep = step
@@ -658,7 +662,7 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 	// before committing the workflow terminal state, otherwise a failed merge
 	// would be reported as a successful task.
 	deliveryPrepared := false
-	if runFound && isPullRequestReviewStep(currentStep) {
+	if runFound && workflowstore.PullRequestReviewStepMatches(currentStep, defVersion) {
 		willComplete, err := workflowStore.WillComplete(project, taskID, outputs, summary, "", "completed")
 		if err != nil {
 			return taskWorkflowResponse{}, http.StatusBadRequest, err
@@ -743,7 +747,7 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 		t.Summary = summary
 		t.UpdatedAt = now
 		t.FinishedAt = &now
-		if !deliveryPrepared && isPullRequestReviewStep(currentStep) {
+		if !deliveryPrepared && workflowstore.PullRequestReviewStepMatches(currentStep, defVersion) {
 			return taskWorkflowResponse{}, http.StatusConflict, errors.New("terminal pull request review completed without delivery preparation")
 		}
 		snapshotErr := s.captureTaskCompletionSnapshot(t)
@@ -795,27 +799,31 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 	return taskWorkflowResponse{Definition: def, Run: transition.Run, Steps: steps, Branches: branches, History: history}, http.StatusOK, nil
 }
 
+// Platform gate step matching lives in internal/workflow/gate.go (Task 0.1):
+// one registry, explicit platform_gate marker first, legacy ID/title fallbacks
+// centralized there. These thin wrappers keep the call sites below readable
+// and preserve the historical names used across this package.
+//
+// isPullRequestReviewStep has NO remaining production callers (Task 0.5 moved
+// delivery routing to the definition-version-aware
+// workflowstore.PullRequestReviewStepMatches). The exported
+// workflowstore.IsPullRequestReviewStep remains part of the registry's public
+// API and is what the characterization tests and the builtin-template guard
+// test (TestBuiltinTemplatesDeclareDeliveryMarkers) exercise; this package
+// wrapper is kept so those tests can lock the legacy semantics under the
+// historical name.
 func isPullRequestReviewStep(step entity.WorkflowStep) bool {
-	id := strings.ToLower(strings.TrimSpace(step.ID))
-	title := strings.ToLower(strings.TrimSpace(step.Title))
-	return strings.Contains(id, "pr_review") || strings.Contains(id, "mr_review") || strings.Contains(id, "merge_and_sync") || strings.Contains(id, "push_to_gitlab") || strings.Contains(title, "pull request") || strings.Contains(title, "merge request") || strings.Contains(title, "merge and sync")
+	return workflowstore.IsPullRequestReviewStep(step)
 }
 
-// isDesignGateStep reports whether the step carries the design gate flag
-// (greenfield design_review). Used to freeze the approved design snapshot at
-// confirm time.
+// isDesignGateStep reports whether the step is the platform's design gate.
 func isDesignGateStep(step entity.WorkflowStep) bool {
-	if step.Config != nil && strings.EqualFold(strings.TrimSpace(step.Config["designGate"]), "true") {
-		return true
-	}
-	id := strings.ToLower(strings.TrimSpace(step.ID))
-	return id == "design_review" || strings.Contains(id, "design_review")
+	return workflowstore.IsDesignGateStep(step)
 }
 
-// isQASignoffStep reports whether the step represents a QA sign-off gate.
+// isQASignoffStep reports whether the step is the platform's QA sign-off gate.
 func isQASignoffStep(step entity.WorkflowStep) bool {
-	id := strings.ToLower(strings.TrimSpace(step.ID))
-	return id == "qa_signoff" || strings.Contains(id, "qa_signoff")
+	return workflowstore.IsQASignoffStep(step)
 }
 
 type qaRiskItem struct {

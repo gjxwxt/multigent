@@ -10,19 +10,14 @@ import (
 	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
 
-// platformGateConfigKey marks a workflow step whose route the platform decides,
-// not the agent. Declaring it on the step (rather than hard-coding step IDs) is
-// what keeps a gate from becoming prompt-shaped: the agent's own report is never
-// an input to this decision.
-const platformGateConfigKey = "platform_gate"
+// Gate step resolution lives in internal/workflow/gate.go (Task 0.1 single
+// source of truth: explicit platform_gate marker first, legacy ID fallback
+// until the Task 0.5 deprecation). The ciReadyGateKind constant is kept for
+// the cause-classification code below that references the gate kind string.
+const platformGateConfigKey = workflowstore.GateConfigKey
 
-// ciReadyGateKind is the only gate implemented today.
-const ciReadyGateKind = "ci_ready"
-
-// ciReadyGateStepIDs are templates that predate the config marker. They stay
-// enforced, otherwise existing instantiated workflows keep advancing on a
-// self-report while only new projects get a real gate.
-var ciReadyGateStepIDs = map[string]bool{"ci_ready": true, "ci_ready_gate": true}
+// ciReadyGateKind is the ci_ready gate kind.
+const ciReadyGateKind = workflowstore.GateKindCIReady
 
 // Gate causes. Each one has a different owner, which is the whole point of
 // splitting what used to be a single "not_ready".
@@ -157,7 +152,7 @@ func ciReadyGateStep(wfStore *workflowstore.Store, run entity.WorkflowRun) (enti
 		if step.ID != run.ActiveStepID {
 			continue
 		}
-		if strings.TrimSpace(step.Config[platformGateConfigKey]) == ciReadyGateKind || ciReadyGateStepIDs[step.ID] {
+		if workflowstore.IsCIReadyGateStep(step) {
 			return step, true
 		}
 		return entity.WorkflowStep{}, false

@@ -194,7 +194,7 @@ func (s *Store) SeedDefaults() error {
 				InputFields:  []entity.WorkflowField{{Name: "approved_change", Description: "Code artifact approved for testing."}, {Name: "approved_technical_spec", Description: "Approved implementation plan."}, {Name: "changelog", Description: "Updated changelog entry or release note."}, {Name: "branch_summary", Description: "Branch name, commit summary, and delivery evidence."}},
 				OutputFields: []entity.WorkflowField{{Name: "pr_url", Description: "Pull request URL."}, {Name: "pr_number", Description: "Pull request number or provider identifier."}, {Name: "pr_diff_summary", Description: "Diff, tests, risks, and changed-files summary."}, {Name: "preview_url", Description: "Preview URL or explicit none when no preview exists."}},
 				Position:     entity.WorkflowPosition{X: 2600, Y: 180},
-				Config:       map[string]string{"color": "violet"},
+				Config:       map[string]string{"color": "violet", StepConfigPlatformDelivery: DeliveryKindPullRequestReview},
 			},
 			{
 				ID: "pr_review", Type: "human_review", Title: "Pull Request Review",
@@ -203,7 +203,7 @@ func (s *Store) SeedDefaults() error {
 				InputFields:  []entity.WorkflowField{{Name: "approved_change", Description: "Code artifact approved for testing."}, {Name: "pr_url", Description: "Pull request URL."}, {Name: "pr_number", Description: "Pull request number or provider identifier."}, {Name: "pr_diff_summary", Description: "Diff, tests, risks, and changed-files summary."}, {Name: "preview_url", Description: "Preview URL or explicit none when no preview exists."}, {Name: "approved_technical_spec", Description: "Approved implementation plan."}, {Name: "branch_summary", Description: "Branch name, commit summary, and delivery evidence."}},
 				OutputFields: []entity.WorkflowField{{Name: "decision", Description: "approve, approve_push, or request_changes."}, {Name: "comments", Description: "Review comments and clarification notes."}},
 				Position:     entity.WorkflowPosition{X: 2880, Y: 180},
-				Config:       map[string]string{"color": "amber"},
+				Config:       map[string]string{"color": "amber", StepConfigPlatformDelivery: DeliveryKindPullRequestReview},
 			},
 			{
 				ID: "merge_and_sync", Type: "agent_task", Title: "Merge and Sync",
@@ -212,7 +212,7 @@ func (s *Store) SeedDefaults() error {
 				InputFields:  []entity.WorkflowField{{Name: "branch_summary", Description: "Branch name, commit summary, and delivery evidence."}, {Name: "approved_change", Description: "Code artifact approved for testing."}, {Name: "pr_url", Description: "Pull request URL."}},
 				OutputFields: []entity.WorkflowField{{Name: "merged_sha", Description: "Merged commit SHA on main."}, {Name: "merge_status", Description: "Merge status and sync confirmation."}},
 				Position:     entity.WorkflowPosition{X: 3160, Y: 180},
-				Config:       map[string]string{"color": "emerald"},
+				Config:       map[string]string{"color": "emerald", StepConfigPlatformDelivery: DeliveryKindPullRequestReview},
 			},
 			{
 				ID: "qa", Type: "agent_task", Title: "QA Test",
@@ -319,7 +319,7 @@ func (s *Store) EnsureProjectInitializationDefinition() error {
 		Steps: []entity.WorkflowStep{
 			step("ready", "确定性就绪", "工作区已由平台物化于沙箱 /workspace。在 /workspace 内部按序执行有界就绪命令：(1) 标准全栈模板执行 `timeout 180s make install`（安装前后端依赖）；(2) 执行 `timeout 300s make verify`，确认前端构建、后端单测与契约全部通过；(3) 校验 .multigent/runtime.json 契约完整性。全部通过后立即执行 `mga task step done` 汇报就绪结果，严禁跳过或在失败时上报完成。", 80),
 			step("sync", "提交并同步", "在 /workspace 内部提交并同步远端仓库：(1) 若尚未初始化 Git 则执行 `git init -b main`；(2) 预提交审计，确保未将凭据或密钥加入暂存区；(3) 执行 `git add . && git commit -m \"chore: initialize project\"`；(4) 若配置了 GitLab 远端，直接推送到配置的默认分支（如 `git remote add origin <remote> && git push -u origin main`，凭据由平台 helper 自动注入，严禁把凭据写进 URL）；(5) 推送完成后立即执行 `mga task step done`。", 440),
-			step("ci_ready", "CI/CD 就绪", "在 /workspace 运行 `mga ci ready --wait 300` 执行确定性 CI/CD 闸门：平台会自动补齐缺失的基线文件（.gitlab-ci.yml、deploy/）并运行 10 项基线校验；绑定了 GitLab 远端时会等待流水线构建完成。校验与流水线通过后立即执行 `mga task step done`。", 800),
+			withStepConfig(step("ci_ready", "CI/CD 就绪", "在 /workspace 运行 `mga ci ready --wait 300` 执行确定性 CI/CD 闸门：平台会自动补齐缺失的基线文件（.gitlab-ci.yml、deploy/）并运行 10 项基线校验；绑定了 GitLab 远端时会等待流水线构建完成。校验与流水线通过后立即执行 `mga task step done`。", 800), map[string]string{GateConfigKey: GateKindCIReady}),
 		},
 		Edges: []entity.WorkflowEdge{
 			edge("e-ready-sync", "ready", "sync", "", nil, nil, true),
@@ -394,9 +394,9 @@ func softwareDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			step("implementation", "agent_task", "implementationTitle", "implementationDesc", "developer-agent", "emerald", 1760, []entity.WorkflowField{field("approved_technical_spec", "approvedTechnicalSpecInputField"), field("review_comments", "reviewCommentsInputField"), field("previous_pr", "previousPRInputField")}, []entity.WorkflowField{field("pr", "prField"), field("tests_run", "testsRunField"), field("risks", "risksField")}),
 			step("code_review", "human_review", "codeReviewTitle", "codeReviewDesc", "owner-engineer", "amber", 2040, []entity.WorkflowField{field("pr", "prReviewField"), field("approved_technical_spec", "approvedTechnicalSpecInputField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("approved_change", "approvedChangeField")}),
 			step("changelog_cleanup", "agent_task", "changelogCleanupTitle", "changelogCleanupDesc", "developer-agent", "sky", 2320, []entity.WorkflowField{field("approved_change", "approvedChangeInputField"), field("approved_technical_spec", "approvedTechnicalSpecInputField")}, []entity.WorkflowField{field("changelog", "changelogField"), field("branch_summary", "branchSummaryField")}),
-			step("create_pr", "agent_task", "createPRTitle", "createPRDesc", "developer-agent", "violet", 2600, []entity.WorkflowField{field("approved_change", "approvedChangeInputField"), field("approved_technical_spec", "approvedTechnicalSpecInputField"), field("changelog", "changelogField"), field("branch_summary", "branchSummaryField")}, []entity.WorkflowField{field("pr_url", "prURLField"), field("pr_number", "prNumberField"), field("pr_diff_summary", "prDiffSummaryField"), field("preview_url", "previewURLField")}),
-			step("pr_review", "human_review", "prReviewTitle", "prReviewDesc", "owner-engineer", "amber", 2880, []entity.WorkflowField{field("approved_change", "approvedChangeInputField"), field("pr_url", "prURLField"), field("pr_number", "prNumberField"), field("pr_diff_summary", "prDiffSummaryField"), field("preview_url", "previewURLField"), field("approved_technical_spec", "approvedTechnicalSpecInputField"), field("branch_summary", "branchSummaryField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField")}),
-			step("merge_and_sync", "agent_task", "mergeAndSyncTitle", "mergeAndSyncDesc", "developer-agent", "emerald", 3160, []entity.WorkflowField{field("branch_summary", "branchSummaryField"), field("approved_change", "approvedChangeInputField"), field("pr_url", "prURLField")}, []entity.WorkflowField{field("merged_sha", "mergedSHAField"), field("merge_status", "mergeStatusField")}),
+			withStepConfig(step("create_pr", "agent_task", "createPRTitle", "createPRDesc", "developer-agent", "violet", 2600, []entity.WorkflowField{field("approved_change", "approvedChangeInputField"), field("approved_technical_spec", "approvedTechnicalSpecInputField"), field("changelog", "changelogField"), field("branch_summary", "branchSummaryField")}, []entity.WorkflowField{field("pr_url", "prURLField"), field("pr_number", "prNumberField"), field("pr_diff_summary", "prDiffSummaryField"), field("preview_url", "previewURLField")}), map[string]string{StepConfigPlatformDelivery: DeliveryKindPullRequestReview}),
+			withStepConfig(step("pr_review", "human_review", "prReviewTitle", "prReviewDesc", "owner-engineer", "amber", 2880, []entity.WorkflowField{field("approved_change", "approvedChangeInputField"), field("pr_url", "prURLField"), field("pr_number", "prNumberField"), field("pr_diff_summary", "prDiffSummaryField"), field("preview_url", "previewURLField"), field("approved_technical_spec", "approvedTechnicalSpecInputField"), field("branch_summary", "branchSummaryField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField")}), map[string]string{StepConfigPlatformDelivery: DeliveryKindPullRequestReview}),
+			withStepConfig(step("merge_and_sync", "agent_task", "mergeAndSyncTitle", "mergeAndSyncDesc", "developer-agent", "emerald", 3160, []entity.WorkflowField{field("branch_summary", "branchSummaryField"), field("approved_change", "approvedChangeInputField"), field("pr_url", "prURLField")}, []entity.WorkflowField{field("merged_sha", "mergedSHAField"), field("merge_status", "mergeStatusField")}), map[string]string{StepConfigPlatformDelivery: DeliveryKindPullRequestReview}),
 			step("qa", "agent_task", "qaTitle", "qaDesc", "qa-agent", "rose", 3440, []entity.WorkflowField{field("approved_change", "approvedChangeInputField")}, []entity.WorkflowField{field("test_cases", "testCasesField"), field("test_report", "testReportField")}),
 			step("qa_review", "human_review", "qaReviewTitle", "qaReviewDesc", "qa-owner", "amber", 3720, []entity.WorkflowField{field("test_report", "testReportReviewField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("release_candidate", "releaseCandidateField")}),
 			step("release", "agent_task", "releaseTitle", "releaseDesc", "release-agent", "emerald", 4000, []entity.WorkflowField{field("release_candidate", "releaseCandidateInputField")}, []entity.WorkflowField{field("release_report", "releaseReportField")}),
@@ -1021,14 +1021,14 @@ func unifiedDeliveryPipelineTemplate(locale string) entity.WorkflowTemplate {
 			tmplStep("clarify_review", "human_review", text["clarifyReviewTitle"], text["clarifyReviewDesc"], "product-owner", "amber", 360, []entity.WorkflowField{field("clarified", "clarifiedField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("approved_scope", "approvedScopeField")}),
 			tmplStep("implement", "agent_task", text["implementTitle"], text["implementDesc"], "developer-agent", "emerald", 640, []entity.WorkflowField{field("approved_scope", "approvedScopeField"), field("review_comments", "commentsField"), field("review_rounds", "roundsField")}, []entity.WorkflowField{field("implementation", "implementationField"), field("review_rounds", "roundsField")}),
 			tmplStep("agent_self_review", "agent_task", text["selfReviewTitle"], text["selfReviewDesc"], "reviewer-agent", "rose", 920, []entity.WorkflowField{field("implementation", "implementationField"), field("approved_scope", "approvedScopeField"), field("review_rounds", "roundsField")}, []entity.WorkflowField{field("self_review", "selfReviewField"), field("self_review_verdict", "selfReviewVerdictField"), optionalField("escalation_case", "escalationField"), field("review_rounds", "roundsField")}),
-			tmplStep("ci_ready_gate", "agent_task", text["ciReadyTitle"], text["ciReadyDesc"], "developer-agent", "emerald", 1060, []entity.WorkflowField{field("implementation", "implementationField")}, []entity.WorkflowField{field("ci_ready_report", "ciReadyField")}),
+			withStepConfig(tmplStep("ci_ready_gate", "agent_task", text["ciReadyTitle"], text["ciReadyDesc"], "developer-agent", "emerald", 1060, []entity.WorkflowField{field("implementation", "implementationField")}, []entity.WorkflowField{field("ci_ready_report", "ciReadyField")}), map[string]string{GateConfigKey: GateKindCIReady}),
 			tmplStep("code_review", "human_review", text["codeReviewTitle"], text["codeReviewDesc"], "owner-engineer", "amber", 1200, []entity.WorkflowField{field("self_review", "selfReviewField"), field("escalation_case", "escalationField"), field("implementation", "implementationField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("approved_change", "approvedChangeField")}),
 			tmplStep("changelog", "agent_task", text["changelogTitle"], text["changelogDesc"], "developer-agent", "sky", 1480, []entity.WorkflowField{field("approved_change", "approvedChangeInputField"), field("approved_scope", "approvedScopeField")}, []entity.WorkflowField{field("changelog", "changelogField"), field("branch_summary", "branchSummaryField")}),
-			withStepConfig(tmplStep("create_pr", "agent_task", text["prTitle"], text["prDesc"], "developer-agent", "violet", 1760, []entity.WorkflowField{field("approved_change", "approvedChangeInputField"), field("changelog", "changelogField"), field("branch_summary", "branchSummaryField")}, []entity.WorkflowField{field("pr_url", "prURLField"), field("pr_diff_summary", "prDiffSummaryField"), field("preview_url", "previewURLField")}), map[string]string{StepConfigRequiresRemote: "true"}),
-			tmplStep("pr_review", "human_review", text["prReviewTitle"], text["prReviewDesc"], "owner-engineer", "amber", 2040, []entity.WorkflowField{field("pr_url", "prURLField"), field("pr_diff_summary", "prDiffSummaryField"), field("preview_url", "previewURLField"), field("branch_summary", "branchSummaryField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField")}),
-			withStepConfig(tmplStep("merge_sync", "agent_task", text["mergeTitle"], text["mergeDesc"], "developer-agent", "emerald", 2320, []entity.WorkflowField{field("pr_url", "prURLField"), field("branch_summary", "branchSummaryField")}, []entity.WorkflowField{field("merged_sha", "mergedSHAField"), field("merge_status", "mergeStatusField")}), map[string]string{StepConfigRequiresRemote: "true"}),
+			withStepConfig(tmplStep("create_pr", "agent_task", text["prTitle"], text["prDesc"], "developer-agent", "violet", 1760, []entity.WorkflowField{field("approved_change", "approvedChangeInputField"), field("changelog", "changelogField"), field("branch_summary", "branchSummaryField")}, []entity.WorkflowField{field("pr_url", "prURLField"), field("pr_diff_summary", "prDiffSummaryField"), field("preview_url", "previewURLField")}), map[string]string{StepConfigRequiresRemote: "true", StepConfigPlatformDelivery: DeliveryKindPullRequestReview}),
+			withStepConfig(tmplStep("pr_review", "human_review", text["prReviewTitle"], text["prReviewDesc"], "owner-engineer", "amber", 2040, []entity.WorkflowField{field("pr_url", "prURLField"), field("pr_diff_summary", "prDiffSummaryField"), field("preview_url", "previewURLField"), field("branch_summary", "branchSummaryField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField")}), map[string]string{StepConfigPlatformDelivery: DeliveryKindPullRequestReview}),
+			withStepConfig(tmplStep("merge_sync", "agent_task", text["mergeTitle"], text["mergeDesc"], "developer-agent", "emerald", 2320, []entity.WorkflowField{field("pr_url", "prURLField"), field("branch_summary", "branchSummaryField")}, []entity.WorkflowField{field("merged_sha", "mergedSHAField"), field("merge_status", "mergeStatusField")}), map[string]string{StepConfigRequiresRemote: "true", StepConfigPlatformDelivery: DeliveryKindPullRequestReview}),
 			tmplStep("qa", "agent_task", text["qaTitle"], text["qaDesc"], "qa-agent", "rose", 2600, []entity.WorkflowField{field("merged_sha", "mergedSHAField")}, []entity.WorkflowField{optionalField("risk_coverage_matrix", "riskMatrixField"), field("test_report", "testReportField")}),
-			tmplStep("qa_signoff", "human_review", text["qaReviewTitle"], text["qaReviewDesc"], "qa-owner", "amber", 2880, []entity.WorkflowField{optionalField("risk_coverage_matrix", "riskMatrixField"), field("test_report", "testReportField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("release_candidate", "candidateField")}),
+			withStepConfig(tmplStep("qa_signoff", "human_review", text["qaReviewTitle"], text["qaReviewDesc"], "qa-owner", "amber", 2880, []entity.WorkflowField{optionalField("risk_coverage_matrix", "riskMatrixField"), field("test_report", "testReportField")}, []entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("release_candidate", "candidateField")}), map[string]string{GateConfigKey: GateKindQASignoff}),
 			withStepConfig(tmplStep("release", "agent_task", text["releaseTitle"], text["releaseDesc"], "release-agent", "emerald", 3160, []entity.WorkflowField{field("release_candidate", "candidateInputField")}, []entity.WorkflowField{field("git_tag", "gitTagField"), field("pipeline_url", "pipelineURLField"), field("release_report", "releaseReportField")}), map[string]string{StepConfigRequiresRemote: "true"}),
 		},
 		[]entity.WorkflowEdge{
@@ -2900,6 +2900,12 @@ func normalizeWorkflowOutputValues(step entity.WorkflowStep, values map[string]s
 	// weakening the general structured-output contract: only a design-gated
 	// step may carry these two server-derived fields when its old definition
 	// does not list them yet.
+	// Strict original semantics on purpose: this shim predates the gate
+	// registry and exists only for definitions persisted before the audit
+	// outputs were declared. Widening it (registry EqualFold/ID fallbacks)
+	// would let client-supplied design_waived through on steps that never
+	// declared the design gate — keep the exemption exactly as narrow as it
+	// was when the shim shipped.
 	if step.Config != nil && step.Config["designGate"] == "true" {
 		for _, name := range []string{"design_waiver_reason", "design_waived"} {
 			if _, ok := allowed[name]; !ok {
@@ -2911,7 +2917,10 @@ func normalizeWorkflowOutputValues(step entity.WorkflowStep, values map[string]s
 	// aggregates the failed matrix items before persisting), so a qa_signoff
 	// step whose definition predates the field must still accept it — same
 	// compatibility reasoning as the design-gate audit outputs above.
-	if stepID := strings.ToLower(strings.TrimSpace(step.ID)); stepID == "qa_signoff" || strings.Contains(stepID, "qa_signoff") {
+	// Strict original semantics on purpose (same reasoning as the design-gate
+	// shim above): the original inline check was case-sensitive on the raw ID,
+	// and this shim must not widen just because the registry lowercases.
+	if stepID := strings.TrimSpace(step.ID); stepID == "qa_signoff" || strings.Contains(stepID, "qa_signoff") {
 		if _, ok := allowed["qa_rework_items"]; !ok {
 			allowed["qa_rework_items"] = entity.WorkflowField{Name: "qa_rework_items", Optional: true}
 		}
