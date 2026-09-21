@@ -216,7 +216,35 @@
 
 **仍未取证（不得声称已完成）**：
 
-- §8 的行为级验收**一条都没跑**：没有从真实运行里取过下发 prompt 的原文，没有浏览器实点四类状态，也没有实测"自建改名流程显示未声明"。以上全部只是单元/接线级证据。
-- 内置 skill 的 Scenario B 改动**未对真实 agent 验证**：提示词与 skill 是否协同、agent 是否真的停止编造 `pr_url`，需要一次真实 run。
+- ~~§8 的行为级验收**一条都没跑**~~ → **已部分补齐（2026-09-21）**，见 §12。
+- 内置 skill 的 Scenario B 改动**未对真实 agent 验证**：提示词与 skill 是否协同、agent 是否真的停止编造 `pr_url`，需要一次真实 run（同 §12 缺口-高）。
 - 沙箱内 `controldb.OpenDefault()` 的 fail-open 路径（§5.1 已知边界）未构造用例。
-- 提示词长度增加对各档位模型的上下文影响未实测。
+- ~~提示词长度增加对各档位模型的上下文影响未实测~~ → **已实测（2026-09-21）**：完整 run prompt 7259 字节，Delivery mode 段约 3.4KB，占 glm-5.3-flash（240K ctx）<1.5%，无截断风险；实测 max_tokens=2000 请求 finish_reason=stop。证据见 §12。
+
+## 12. 行为级验收记录（2026-09-21，部分通过）
+
+验收环境：`dist/multigent`（dev HEAD `cb6bd098`）独立实例（127.0.0.1:27995 + 独立数据目录），与运行中的旧二进制主服务（49bccd78，不含本功能）隔离。完整证据链与三个 run prompt 原文：`work/evidence/deliverymode-acceptance/ACCEPTANCE-EVIDENCE.md`（git 除外，不进库）。
+
+**已取证**：
+
+- **5.1 提示词层**：三种 mode 的真实 runner prompt 原文取证。local_branch（事实在 + push 不禁用 + `branch:<name>` 非真实 MR 标注指引 + 全文无无条件 MR 指令）、required_unbound（三要素全在 + 无 local_branch 的 push 指引混入）、remote_bound（namespace 正确回显）。均走完整 `workflowPromptContext` 路径（含 Workflow/Run ID/step 上下文）。
+- **5.2 API 层**：`remoteBindingVerified` false/true 实测（null 态由单测覆盖）；四个内置模板 `requires_remote` 声明集合逐一核对；项目级 `remotePipelineRequired` 声明（local/required/继承 env）PUT 读写生效。
+- **5.3 逻辑层**：以源码 `web/src/lib/delivery-mode.ts` 的 `evaluateDeliveryNotice()`（35-55 行，五态判定）为真源核查，运行实例内嵌 bundle 交叉一致；**自建改名流程（create_pr→publish_change 且无标记）实测平台不猜，声明列表不含它——改名即"未声明"**（本方案与原版方案的关键差异点，通过）。
+
+**验收缺口（不得声称行为级验收全部通过）**：
+
+1. ~~**缺口-高**：agent 真实行为未验证~~ → **已补齐（2026-09-21 下午，见 §13）**，仅剩 local_branch 象限。
+2. **缺口-中**：浏览器人工实点未做（§8 5.3 原始要求）；四态卡片视觉与交互路径未经人工实点。
+3. ~~**缺口-中**：bound 态为测试桩构造~~ → **已补齐（2026-09-21 下午，见 §13）**：改走 `POST /remote/verify` 正路（GitLab 实查，source=explicit-verify）。
+4. **缺口-低**：bindingUnknown（API null）/ unknown（prompt）两态集成触发未构造，由单测覆盖（2026-09-21 实跑 PASS：`TestProjectDetailReportsVerifiedBindingIndependentlyOfDisplayFields`、`TestDeliveryModeSectionWording`、`TestRemoteDependentStepsDeclaredPerTemplate`、`TestRenamedStepsAreNotGuessedAsRemoteDependent`）。
+
+**结论**：§8 验收状态 = **提示词层/API 层/前端逻辑层通过；行为层 remote_bound 象限已补齐（§13），local_branch 象限与视觉实点待补**。复审（reviewer-claude 两轮）已确认证据链无夸大表述。
+
+## 13. 行为层补验收：remote_bound 真实 agent run（2026-09-21）
+
+VM 主服务升级到 `cb6bd098` 后在真实部署环境执行：
+
+- **绑定走正路**：`POST /api/v1/projects/1test/remote/verify` 经 GitLab API 实查通过，绑定表 source=explicit-verify——替代了第一轮验收的 sqlite 测试桩，缺口-3 就此销掉。
+- **真实 run**：任务 `t-20260921-ivcwv0`（agent Mira / glm-5.3-flash / Docker 沙箱，workflow = 13 步 v2 定义）。8 项行为断言全部通过，关键三项：**push 真实发生**（GitLab `new branch` 输出，local_branch 担心的"误解为不能 push"未出现）、**0 次 MR API 调用**（指令明确不建 MR，agent 遵守）、**未编造 pr_url**（clarify 输出仅含真实 commit SHA `4237c011` 与可验证的交付证据）。
+- 完整证据：`work/evidence/deliverymode-acceptance/real-agent-run/`（git-excluded，含 959KB run log 与 REAL-AGENT-ACCEPTANCE.md）。
+- 剩余：local_branch 象限（无绑定项目同样方法跑一个真实任务，观察 `branch:<name>` 占位行为）归入 C-2 窗口。

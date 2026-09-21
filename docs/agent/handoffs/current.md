@@ -8,11 +8,15 @@ Feature Flag `MULTIGENT_ENABLE_PREVIEW_TURN_RECEIPTS` 维持默认严格关闭 (
 下一阶段排期：ADR `2026-09-19-review-round-cap-and-ci-ready-gate-hardening.md` 中"评审轮数强制升级"与"ci_ready 服务端复算并四分流"已落地（见 -1.6 / -1.7），其真机取证脚本已就位：`docs/runbook-gate-acceptance-2026-09-19.md`（步骤 0 重新实例化 → ④ 新拓扑核对 → ① 闸门四分流含"失败流水线到底返 400 还是 409"的实测 → ② diff 面板浏览器实点 → ③ 三轮封顶案卷可读性），执行结果按该脚本 §9 回填本文件；剩余两项后置——人工打回归因 `rework`/`rescope` 二分 coupled 与永不重置的 `human_interventions` 计数、`ci_failed` 同项连续失败的 park 规则；三者都需一次带 CI 的真实项目全流程来取证，因此排在该全流程跑通之前不再扩张。随后推进 Greenfield vNext 带 ATD 的真实全流程（含双人 Mattermost 真实环境流转终验）。外部 QA 工具包（`qa-skill`/ming-qa）评估已定案：`docs/qa-skill-integration-plan.md`——**暂不整体挂载**，阶段 1（给 ATD 规格补人工确认门禁）可立即执行且零外部依赖，阶段 2 必须等闸门真机验收四格不再是 `unknown`，阶段 3 需先关掉路径冲突/浏览器/cap 单一所有者/DB 凭据面四个决策（详见该文档 §6）。流水线外部依赖前置告知方案：`docs/delivery-mode-preflight-plan.md`（**状态：评审通过、可开工**；评审独立核 21 条断言，20 属实 / 1 措辞过强已收窄 / 0 虚构）。**注意一处连带冲突**：产品已定"不做平台内 diff 展示、人工审靠 preview 实跑 + 跳转远端看 commit"，因此 `docs/runbook-gate-acceptance-2026-09-19.md` 的证据点 ②（diff 面板浏览器实点）随之失效，该 runbook 与 `ecd7a9c6` 的前端组件取舍需在评审后一并修正，不得留成互相矛盾的记录。
 
 Key status & deliverables:
--1.9. **交付模式前置告知方案定案（`docs/delivery-mode-preflight-plan.md`）**：批准按 5.1→5.2→5.3 顺序开工（5.1 提示词注入交付事实 → 5.2 `requires_remote` 声明 + 后端派生只读 `remoteBindingVerified` → 5.3 前端纯渲染）。否决外部原方案的两处根基：前端读客户端可写显示字段（`ci_ready_handlers.go:164-165` 自证"prove nothing"）、用 step ID 白名单猜依赖（自建流程改个名即静默漏判）。
-   - **本轮新核出的 durable 事实（会推翻直觉，且直接关系任务 #2）**：**push 路径不查 `verifiedBinding()`**——凭据只在推送瞬时从环境注入，"never from repo config or remote URLs"（`internal/gitworktree/worktree.go:352-355`）。因此"项目未绑定已验证远端"真正断的只有三件事：创建 MR、流水线证据（`verifiedGitLabHost` 硬错误）、平台侧 MR 记录；**推送与分支交付始终可用**。VM 现场印证：`remoteProvider` 为空时提交仍成功推到 GitLab。
-   - **一处如实收窄**：外部方案与评审都把"`branch:` 占位值回灌人工审/实现步"当已发生事故引用，但那次 run 停在 `code_review`，而顺序是 `code_review → changelog → create_pr`——**它没走到 `create_pr`**。该链条是代码级已核实（skill 文本 + 静默跳过 + 边映射三处实读）、现场未观测。引用时不得说成已发生。
-   - **风险提示（写进 §5.1 验收）**：警示文案若只说"未绑定/交付终点是任务分支"而不明写"推送可用"，agent 极可能推断成推不动而**跳过推送**——那是我们引入的新失败模式，比假 `pr_url` 更糟。故测试含两条反向断言。
-   - **连带债已登记 §10 偿还清单**：`requires_remote` 的 ID 白名单兜底需在存量重新实例化后删除；`AGENTS.md:144` 的"12 步"改 13；`ecd7a9c6` 的 diff 三件套（零调用方，逐个核实）单独 commit 删除、仅留 `SanitizedDiffArgs` 修复，并同步修正闸门 runbook 的证据点 ②。三项**均不夹带**在功能提交里。
+-1.9. **交付模式前置告知方案落地与验收（`docs/delivery-mode-preflight-plan.md`）**：
+   - **代码落地**：5.1 提示词注入（`4f87f691`）、5.2 步骤声明与后端派生判定（`406bc214`）、5.3 控制台前置告知（`b79c035e`）、连带死代码清理（`a51325f8`）及统一流水线 QA 矩阵死锁修复（`cb6bd098`）全量合入，单测 41 包全绿。
+   - **行为级验收进展（2026-09-21，见方案 §12/§13）**：
+     - 提示词层：local_branch、required_unbound、remote_bound 三态真实 prompt 原文已取证，反向断言通过；
+     - API 层：`remoteBindingVerified` 经 `POST /remote/verify` 真实验证通过，模板声明集合核对一致；
+     - 逻辑层：五态判定逻辑与 bundle 一致，改名步骤如实报“未声明”（不猜白名单）；
+     - 模型开销：实测 prompt 增量在 `glm-5.3-flash` 下占上下文 <1.5%，无截断风险；
+     - 真实 Agent Run：`1test` 项目（`t-20260921-ivcwv0`）在 `remote_bound` 模式下真实 push 成功，且 0 次 MR 误调，未编造 pr_url；
+     - 遗留缺口：`local_branch` 象限下的 Agent 占位符行为验证（归入 C-2 部署窗口）与浏览器视觉实点走查。
 
 -1.8. **外部 QA 工具包（`qa-skill` / ming-qa）采纳评估定案**（方案 `docs/qa-skill-integration-plan.md`）：
    - **判断**：契约层我们领先、执行层我们空白。它主张的"前置意图冻结 + 后置验收防线"本仓库已有且更严（ATD manifest 纯函数硬校验；QA `touched_paths` 与真实 worktree delta 双向 fail-closed 比对）；真正缺的是把测试跑起来的机器与跨任务回归语料。
