@@ -173,3 +173,48 @@ func TestBrownfieldEvaluate_RuntimeEndpoint(t *testing.T) {
 		t.Fatalf("expected 403 for missing capability, got %d", recNoCap.Code)
 	}
 }
+
+// Regression (2026-09-22 VM dogfood): a project created with a forge path in
+// the repo field (e.g. "owner/repo", the brownfield bind-remote flow) made the
+// scan default to a non-existent relative directory and report a misleading
+// empty "not_ready". The workspace materialization must win whenever it
+// exists; a forge-style repo value must never be treated as a scan directory.
+func TestBrownfieldScan_WorkspacePreferredOverForgeRepoPath(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	seedSampleAgentsForTest(t, s, workspaceID)
+	grantProjectRoleForTest(t, s, workspaceID, "user-operator", ProjectRoleOperator)
+
+	tempDir := filepath.Join(s.st.ProjectDir("sample"), "workspace")
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if _, err := projecttemplate.Materialize(tempDir, projecttemplate.ReactGoFullstackID); err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+
+	p, _ := s.st.Project("sample")
+	p.Repo = "root/api-key-hub" // forge path recorded at creation, not a directory
+	_ = s.st.SaveProject("sample", p)
+
+	req := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/brownfield/scan", "user-operator", nil)
+	req.SetPathValue("name", "sample")
+	rec := httptest.NewRecorder()
+	s.handleBrownfieldScan(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp brownfieldScanResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal scan response: %v", err)
+	}
+	// The scan must have run against the workspace materialization (tempDir),
+	// not the forge path.
+	if resp.Report.Repo != filepath.Clean(tempDir) {
+		t.Fatalf("expected scan rooted at workspace %s, got %s", filepath.Clean(tempDir), resp.Report.Repo)
+	}
+	if resp.Evaluation.Status != "ready" {
+		t.Fatalf("expected evaluation ready from workspace materialization, got %s, issues: %+v", resp.Evaluation.Status, resp.Evaluation.Issues)
+	}
+}

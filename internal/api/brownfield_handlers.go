@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -45,10 +46,21 @@ func (s *Server) handleBrownfieldScan(w http.ResponseWriter, r *http.Request) {
 
 	repoDir := strings.TrimSpace(req.Repo)
 	if repoDir == "" {
-		repoDir = strings.TrimSpace(project.Repo)
-	}
-	if repoDir == "" {
-		repoDir = filepath.Join(s.st.ProjectDir(name), "workspace")
+		// Scan targets the local workspace materialization by default.
+		// project.Repo may hold a forge path (e.g. "owner/repo") recorded at
+		// creation, which is not a scannable directory — only use it when it
+		// resolves to an existing local directory. Explicit request paths are
+		// honored as-is (operator choice).
+		ws := filepath.Join(s.st.ProjectDir(name), "workspace")
+		if st, err := os.Stat(ws); err == nil && st.IsDir() {
+			repoDir = ws
+		} else if p := strings.TrimSpace(project.Repo); p != "" && !strings.Contains(p, "://") {
+			if st, err := os.Stat(p); err == nil && st.IsDir() {
+				repoDir = filepath.Clean(p)
+			}
+		} else {
+			repoDir = ws
+		}
 	}
 	if !strings.Contains(repoDir, "://") {
 		repoDir = filepath.Clean(repoDir)
