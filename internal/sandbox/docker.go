@@ -1063,6 +1063,7 @@ var NamedCacheVolumes = []string{
 	"multigent-npm-cache",
 	"multigent-go-cache",
 	"multigent-go-build-cache",
+	"multigent-gradle-cache",
 }
 
 // runAsHostUser reports whether the container should run under the server's

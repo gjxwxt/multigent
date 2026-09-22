@@ -187,3 +187,36 @@ func containsEnvArg(args []string, key string) bool {
 	}
 	return false
 }
+
+// The shared gradle cache volume must ride along on every non-isolated agent
+// container (host-user side) with GRADLE_USER_HOME pointed at it, and must be
+// absent from isolated preview sandboxes (root-owned previews would fight the
+// host user over the volume). Regression lock for the Batch 4.3 cache mount.
+func TestDockerProviderMountsGradleCacheForAgentsOnly(t *testing.T) {
+	workspace := t.TempDir()
+	agentDir := filepath.Join(workspace, "projects", "demo", "agents", "builder")
+	runtime := &entity.SandboxConfig{
+		Provider: entity.SandboxDocker,
+		Image:    sandbox.BaseImage,
+		Docker:   &entity.DockerSandboxConfig{Image: sandbox.BaseImage},
+	}
+
+	_, args, err := DockerProvider{}.Command(ProcessSpec{
+		WorkspaceRoot: workspace,
+		AgentDir:      agentDir,
+		Model:         entity.ModelCodex,
+		Runtime:       runtime,
+		Command:       []string{"codex", "exec", "-"},
+	})
+	if err != nil {
+		t.Fatalf("Command: %v", err)
+	}
+	joined := strings.Join(args, "\n")
+	wantMount := "multigent-gradle-cache:" + sandbox.HostUserCacheHome + "/gradle"
+	if !strings.Contains(joined, wantMount) {
+		t.Fatalf("agent container missing gradle cache mount %q:\n%s", wantMount, joined)
+	}
+	if !strings.Contains(joined, "GRADLE_USER_HOME="+sandbox.HostUserCacheHome+"/gradle") {
+		t.Fatalf("agent container missing GRADLE_USER_HOME env:\n%s", joined)
+	}
+}

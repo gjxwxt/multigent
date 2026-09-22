@@ -94,6 +94,11 @@ func (DockerProvider) Command(spec ProcessSpec) (string, []string, error) {
 			"multigent-npm-cache:"+sandbox.HostUserCacheHome+"/npm",
 			"multigent-go-cache:"+sandbox.HostUserCacheHome+"/go/pkg/mod",
 			"multigent-go-build-cache:"+sandbox.HostUserCacheHome+"/go-build",
+			// Gradle cache is agent-side only: agent containers run as the host
+			// user and share one warmed volume (wrapper dists + dependencies);
+			// preview containers run as root, so mounting the same volume there
+			// would fight over ownership (see preview engine's mount list).
+			"multigent-gradle-cache:"+sandbox.HostUserCacheHome+"/gradle",
 		)
 	}
 	pathParts := []string{}
@@ -110,6 +115,11 @@ func (DockerProvider) Command(spec ProcessSpec) (string, []string, error) {
 	}
 	pathParts = append(pathParts, runtimecli.ManagedBinDir, runtimecli.BinDir, agentcli.ToolchainBin, sandbox.UserBin, sandbox.ContainerDefaultPATH)
 	cfg.ExtraEnv = append(cfg.ExtraEnv, "PATH="+strings.Join(pathParts, ":"))
+	if !isIsolated {
+		// Point Gradle at the shared agent-side cache volume; without this the
+		// wrapper re-downloads distributions and dependencies per container.
+		cfg.ExtraEnv = append(cfg.ExtraEnv, "GRADLE_USER_HOME="+sandbox.HostUserCacheHome+"/gradle")
+	}
 	if !isIsolated {
 		for _, mount := range spec.Mounts {
 			volume := DockerVolume(mount)
