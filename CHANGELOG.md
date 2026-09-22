@@ -1,5 +1,18 @@
 # Changelog
 
+## [v2.0.13] - 2026-09-22
+
+### Added
+
+- Added configurable instance URLs for self-managed GitLab connections.
+- GitLab HTTP actions now target the configured instance and preserve custom base paths when calling the `/api/v4` API.
+- Agent runtimes now receive matching `glab` host configuration for self-managed GitLab instances.
+
+### Tested
+
+- Added regression coverage for GitLab URL normalization, connection profiles, HTTP action routing, and runtime configuration.
+- Verified `go test ./...` and the production web build.
+
 ## [v2.0.12] - 2026-09-04
 
 ### Fixed
