@@ -236,6 +236,56 @@ S1→S2 先行的理由：机制层不动 UI/API，改完立即可验；S3 动 A
 
 ## 7. 执行日志（倒序追加）
 
+- 2026-09-22（S2-1 修复轮）：S2 dogfood 于 parallel_workstreams 汇聚处暴露引擎缺陷，
+  经评审批准实施两项修复（本文件 §4.5 闸门语义随之修订，后续实现以本条为准）：
+
+  **缺陷链（证据：Mira 会话日志 + DB + 源码比对）**：
+
+  1. **完成路由缺口**（Fix A）：branch 子任务走 `mga task step done` →
+     `handleRuntimeWorkflowStepComplete` 缺少 branch 分流 → 以子 run 身份
+     `CompleteAndAdvance` 先落账（子 run completed、任务 done_success），然后
+     branch join 的 QA 闸门 fail-closed 拒绝（`.cursor/`、`.mcp.json` 等平台
+     脚手架被要求声明）→ 400 返回时终态已落账、agent 已退出 → branch instance
+     永远停在 running，joinPolicy=all 永不满足。**失败后的状态一致性缺失**。
+  2. **闸门度量面错误**（Fix B）：touched_paths 真实变更闸门度量绝对 git status，
+     平台物化脚手架与基线期遗留未跟踪文件被误计为任务交付，诚实完成被拒绝。
+
+  **修复（commit 见 git log S2-1）**：
+
+  - Fix A：branch join QA 闸门提取为共享校验（`Store.PreviewBranchQAGate` +
+    `NormalizeWorkflowOutputValuesForPreview`），step/complete 端点在 branch
+    子任务**终态步**（child 定义无出边的当前步）持久化前预检同一闸门——拒绝时
+    零写入、任务保持 in_progress、branch 保持 running，agent 可修正重报；中间步
+    与线性路径完全不受影响。回归测试：
+    `internal/api/runtime_branch_precheck_test.go`（预检五态）、
+    `internal/api/runtime_branch_join_http_test.go`（HTTP 端到端：拒绝后零终态、
+    修正重报成功、重复上报不重复推进、线性任务零影响）。
+  - Fix B：worktree 物化时（`gitworktree.ensureWorktree`，agent 启动前的受保护
+    时点）记录内容指纹基线（`.multigent/qa_baseline.json`，SHA-256 per path）；
+    闸门改度**任务交付增量**（相对基线的新增/内容变化/删除），同路径再修改与
+    已提交变更均可检出（GPT 边界意见采纳：纯路径集合会漏检这两类）；损坏基线
+    fail-closed 不降级；无基线的老 worktree 保持原绝对 status 语义（依旧严格）。
+    回归测试：`internal/workflow/qa_baseline_regression_test.go`（脚手架误报
+    消除、已提交变更、同路径再修改、删除、损坏基线、无基线回退六项）。
+
+  **评审明确排除的方案**（记录防止回潮）：不扩大目录豁免清单（清单会爬行且违背
+  确定性匹配）；不以完成时状态补造基线（会漂白闸门本要捕获的变更）；历史脏文件
+  不自动认定为合法交付内容。
+
+  **S2 验收状态：未通过**（评审决定）。wfr-07249bes 两个 workstream 产物已确认
+  完整（WS-A: `feat/ws-a-client-lifecycle-63b32fc` @ 67c379d；WS-B:
+  `feat/ias-auth-center-ws-b` @ ca7981c96dd；契约基线 63b32fc6b610），且两个
+  agent 工作区 git 状态与完成申报一致（worktree 仍可观测），但汇聚未发生，且
+  "两个分支进入同一集成候选 SHA"（§6 提高的验收目标）尚未发生。历史 run 恢复
+  方案见 `docs/s2-wfr-07249bes-recovery.md`；恢复操作不计入验收证据。
+
+  **架构方向修订（评审意见，指导后续 S 阶段）**：大需求编排从 "scale_gate 选择
+  线性/并行" 提升为 "批准的交付计划驱动分批执行"（规划与审批 → 冻结计划 →
+  物化任务 → 按依赖分批执行 → 集成验收）；scale_gate 保留为入口判断。首批验证
+  目标调整为：冻结交付计划 → 自动物化第一批任务 → ≥2 个工作包正确执行并集成为
+  同一候选 → 本批验收通过后启动下批 → 失败/变更可从明确位置恢复。本文 §4 后续
+  将按此修订（当前先完成可靠性修复，不在本次补丁中重写编排架构）。
+
 - 2026-09-22：v1.0 设计定稿。三轮会话收敛：①引擎能力盘点（parallel_stage/cond 路由/
   OD 输入链全部现役，零引擎改动）；②否决两条备选路线并记录理由（§1.3）；③补齐需求
   包资产层与 OD 输入标准两个缺口定义（DM1/DM2/DM9）；④确认双遍验证路径（S2/S4）。
