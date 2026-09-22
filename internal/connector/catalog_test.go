@@ -103,6 +103,32 @@ func TestFigmaProviderIncludesOptionalMCPServerURLField(t *testing.T) {
 	}
 }
 
+func TestGitLabProviderSupportsSelfManagedInstanceURL(t *testing.T) {
+	var gitlab Provider
+	for _, provider := range Defaults() {
+		if provider.Provider == "gitlab" {
+			gitlab = provider
+			break
+		}
+	}
+	if gitlab.Provider == "" {
+		t.Fatal("gitlab provider missing")
+	}
+	for _, field := range gitlab.Fields {
+		if field.Key != "instanceUrl" {
+			continue
+		}
+		if field.Required || field.Secret || field.InputType != "url" {
+			t.Fatalf("unexpected instance URL field: %#v", field)
+		}
+		if field.Placeholder != DefaultGitLabInstanceURL {
+			t.Fatalf("placeholder=%q", field.Placeholder)
+		}
+		return
+	}
+	t.Fatalf("gitlab instanceUrl field missing: %#v", gitlab.Fields)
+}
+
 func TestRegistryProvidersUseDefaultRegistryURL(t *testing.T) {
 	providers := map[string]Provider{}
 	for _, provider := range Defaults() {

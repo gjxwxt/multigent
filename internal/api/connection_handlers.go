@@ -228,6 +228,10 @@ func (s *Server) handleCreateConnection(w http.ResponseWriter, r *http.Request) 
 		s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeUnsupportedAuthType, "unsupported auth type")
 		return
 	}
+	if err := normalizeConnectionValues(provider, body.Values); err != nil {
+		s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeValidationFailed, err.Error())
+		return
+	}
 	if err := validateConnectionValues(provider, authType, body.Values); err != nil {
 		s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeValidationFailed, err.Error())
 		return
@@ -256,6 +260,7 @@ func (s *Server) handleCreateConnection(w http.ResponseWriter, r *http.Request) 
 	if profile == nil {
 		profile = map[string]any{}
 	}
+	copyPublicConnectionValues(profile, provider, body.Values)
 	profile["provider"] = body.Provider
 	profile["connectionName"] = connectionName
 	profileJSON, _ := json.Marshal(profile)
@@ -1473,6 +1478,10 @@ func (s *Server) handleUpdateConnection(w http.ResponseWriter, r *http.Request) 
 				secretValues[key] = value
 			}
 		}
+		if err := normalizeConnectionValues(provider, secretValues); err != nil {
+			s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeValidationFailed, err.Error())
+			return
+		}
 		if err := validateConnectionValues(provider, authType, secretValues); err != nil {
 			s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeValidationFailed, err.Error())
 			return
@@ -1487,6 +1496,9 @@ func (s *Server) handleUpdateConnection(w http.ResponseWriter, r *http.Request) 
 	profile := connectionProfileMap(connection)
 	for k, v := range body.Profile {
 		profile[k] = v
+	}
+	if shouldUpdateSecret {
+		copyPublicConnectionValues(profile, provider, secretValues)
 	}
 	profile["provider"] = updated.Provider
 	profile["connectionName"] = updated.ConnectionName
@@ -1924,6 +1936,36 @@ func validateConnectionValues(provider connector.Provider, authType string, valu
 		}
 	}
 	return nil
+}
+
+func normalizeConnectionValues(provider connector.Provider, values map[string]string) error {
+	if provider.Provider != "gitlab" || values == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(values["instanceUrl"])
+	if raw == "" {
+		return nil
+	}
+	normalized, err := connector.NormalizeGitLabInstanceURL(raw)
+	if err != nil {
+		return err
+	}
+	values["instanceUrl"] = normalized
+	return nil
+}
+
+func copyPublicConnectionValues(profile map[string]any, provider connector.Provider, values map[string]string) {
+	if profile == nil || len(values) == 0 {
+		return
+	}
+	for _, field := range provider.Fields {
+		if field.Secret {
+			continue
+		}
+		if value := strings.TrimSpace(values[field.Key]); value != "" {
+			profile[field.Key] = value
+		}
+	}
 }
 
 func isRuntimeSecretEnvName(name string) bool {

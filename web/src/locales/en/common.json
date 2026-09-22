@@ -390,6 +390,7 @@
       "appId": "App ID",
       "appSecret": "App Secret",
       "baseUrl": "OpenAPI Base URL",
+      "instanceUrl": "GitLab instance URL",
       "privateKey": "Private key",
       "gitUserName": "Git user name",
       "gitUserEmail": "Git user email",
@@ -502,7 +503,7 @@
     },
     "providerDescriptions": {
       "github": "Connect repositories, issues, pull requests, releases, and engineering collaboration context.",
-      "gitlab": "Connect GitLab repositories, merge requests, issues, and CI/CD context.",
+      "gitlab": "Connect GitLab.com or a self-managed GitLab instance for repositories, merge requests, issues, and CI/CD context.",
       "gitee": "Connect Gitee repositories, issues, pull requests, and domestic code hosting workflows.",
       "ssh_key": "Configure a reusable SSH private key for private hosts and SSH-based tools.",
       "git_ssh": "Configure Git over SSH so agents can clone, fetch, and push private repositories.",

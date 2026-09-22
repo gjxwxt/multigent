@@ -704,6 +704,70 @@ func TestWriteRuntimeToolsFileMaterializesGitHubCLIConfig(t *testing.T) {
 	}
 }
 
+func TestWriteRuntimeToolsFileMaterializesSelfManagedGitLabCLIConfig(t *testing.T) {
+	body := []byte(`{
+		"tools":[{
+			"provider":"gitlab",
+			"displayName":"GitLab",
+			"connectionId":"conn_gitlab",
+			"connectionAlias":"gitlab",
+			"connectionName":"default",
+			"recommendedAdapter":"cli",
+			"skills":["gitlab"],
+			"adapters":[{
+				"type":"cli",
+				"priority":90,
+				"skills":["gitlab"],
+				"cli":{
+					"binary":"glab",
+					"configFiles":[{"path":"~/.config/glab-cli/config.yml","format":"yaml"}]
+				},
+				"credentialMaterialize":"runtime_file"
+			}]
+		}]
+	}`)
+	agentDir := t.TempDir()
+	toolDir, toolsPath, env, err := writeRuntimeToolsFile("", agentDir, "run-gitlab", "/tmp/connections.json", body, func(connectionID string) (map[string]string, bool, error) {
+		if connectionID != "conn_gitlab" {
+			t.Fatalf("connectionID=%q", connectionID)
+		}
+		return map[string]string{
+			"apiKey":      "glpat-test-token",
+			"instanceUrl": "https://gitlab.example.test",
+		}, true, nil
+	})
+	if err != nil {
+		t.Fatalf("write tools file: %v", err)
+	}
+	if toolDir == "" || toolsPath == "" {
+		t.Fatalf("toolDir=%q toolsPath=%q", toolDir, toolsPath)
+	}
+	configDir := env["GLAB_CONFIG_DIR"]
+	if configDir == "" || !strings.Contains(configDir, toolDir) {
+		t.Fatalf("GLAB_CONFIG_DIR=%q toolDir=%q", configDir, toolDir)
+	}
+	if env["GITLAB_HOST"] != "gitlab.example.test" || env["GLAB_API_PROTOCOL"] != "https" {
+		t.Fatalf("unexpected GitLab env: %#v", env)
+	}
+	configBody, err := os.ReadFile(filepath.Join(configDir, "config.yml"))
+	if err != nil {
+		t.Fatalf("read config.yml: %v", err)
+	}
+	configText := string(configBody)
+	for _, want := range []string{"gitlab.example.test", "glpat-test-token", "api_protocol: \"https\"", "git_protocol: https"} {
+		if !strings.Contains(configText, want) {
+			t.Fatalf("config missing %q: %s", want, configText)
+		}
+	}
+	toolsBody, err := os.ReadFile(toolsPath)
+	if err != nil {
+		t.Fatalf("read tools file: %v", err)
+	}
+	if strings.Contains(string(toolsBody), "glpat-test-token") {
+		t.Fatalf("tools file leaked token: %s", string(toolsBody))
+	}
+}
+
 func TestRuntimeMGAInstallerScriptFallsBackToReadonlyRuntimeBinary(t *testing.T) {
 	script := strings.Join(runtimeMGAInstallerScript(), "\n")
 	managed := agentcli.ToolchainHome + "/mga/bin/mga"

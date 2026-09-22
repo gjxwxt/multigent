@@ -10,7 +10,7 @@ import { confirmDialog } from '../components/ui/ConfirmDialog'
 import { primaryOutlineButton } from '../lib/button-styles'
 import { formatDateTimeForLanguage, useFormatDateTime } from '../lib/format-datetime'
 
-type ProviderField = { key: string; label: string; inputType: string; required: boolean; secret: boolean }
+type ProviderField = { key: string; label: string; inputType: string; placeholder?: string; required: boolean; secret: boolean }
 type ProviderGuide = { title: string; body: string; links?: Array<{ label: string; url: string }> }
 type ProviderAction = { name: string; displayName: string; description?: string }
 type Provider = {
@@ -1354,6 +1354,7 @@ function ConnectionDialog({
                 className={cn(inputCls, 'min-h-28 resize-y font-mono text-xs leading-5')}
                 value={values[field.key] ?? ''}
                 onChange={e => setValues(v => ({ ...v, [field.key]: e.target.value }))}
+                placeholder={field.placeholder}
               />
             ) : (
               <input
@@ -1361,6 +1362,7 @@ function ConnectionDialog({
                 className={inputCls}
                 value={values[field.key] ?? ''}
                 onChange={e => setValues(v => ({ ...v, [field.key]: e.target.value }))}
+                placeholder={field.placeholder}
               />
             )}
           </label>

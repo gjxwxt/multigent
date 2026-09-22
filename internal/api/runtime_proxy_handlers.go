@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/multigent/multigent/internal/connector"
 	controldb "github.com/multigent/multigent/internal/db"
 )
 
@@ -542,8 +543,19 @@ func (s *Server) runtimeHTTPActionConfig(connection controldb.Connection) (runti
 			cfg.RedactValues = append(cfg.RedactValues, apiKey, cfg.AuthValue)
 		}
 	case "gitlab":
-		if cfg.BaseURL == "" {
-			cfg.BaseURL = "https://gitlab.com/api/v4"
+		instanceURL := strings.TrimSpace(values["instanceUrl"])
+		if instanceURL == "" {
+			if v, ok := profile["instanceUrl"].(string); ok {
+				instanceURL = strings.TrimSpace(v)
+			}
+		}
+		if instanceURL == "" {
+			instanceURL = cfg.BaseURL
+		}
+		var err error
+		cfg.BaseURL, err = connector.GitLabAPIBaseURL(instanceURL)
+		if err != nil {
+			return runtimeHTTPActionConfig{}, err
 		}
 		cfg.AuthHeader = "PRIVATE-TOKEN"
 		if apiKey != "" {
@@ -1092,11 +1104,11 @@ func validateRuntimeActionBaseURL(raw string) error {
 }
 
 func buildRuntimeActionURL(baseURL, endpoint string, query map[string]string) (string, error) {
-	base, err := url.Parse(strings.TrimRight(strings.TrimSpace(baseURL), "/"))
+	base, err := url.Parse(strings.TrimRight(strings.TrimSpace(baseURL), "/") + "/")
 	if err != nil {
 		return "", err
 	}
-	rel, err := url.Parse(strings.TrimSpace(endpoint))
+	rel, err := url.Parse(strings.TrimPrefix(strings.TrimSpace(endpoint), "/"))
 	if err != nil {
 		return "", err
 	}

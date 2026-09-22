@@ -390,6 +390,7 @@
       "appId": "App ID",
       "appSecret": "App Secret",
       "baseUrl": "OpenAPI Base URL",
+      "instanceUrl": "GitLab インスタンス URL",
       "privateKey": "秘密鍵",
       "gitUserName": "Git ユーザー名",
       "gitUserEmail": "Git メールアドレス",
@@ -502,7 +503,7 @@
     },
     "providerDescriptions": {
       "github": "リポジトリ、Issue、PR、リリース、開発協業のコンテキストに接続します。",
-      "gitlab": "GitLab のリポジトリ、マージリクエスト、Issue、CI/CD コンテキストに接続します。",
+      "gitlab": "GitLab.com またはセルフマネージド GitLab に接続し、リポジトリ、マージリクエスト、Issue、CI/CD コンテキストを利用します。",
       "gitee": "Gitee のリポジトリ、Issue、Pull Request、コードホスティング業務に接続します。",
       "ssh_key": "プライベートホストや SSH ベースのツール向けに汎用 SSH 秘密鍵を設定します。",
       "git_ssh": "Git over SSH を設定し、Agent が private repository を clone、fetch、push できるようにします。",

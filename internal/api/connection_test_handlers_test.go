@@ -122,6 +122,65 @@ func TestConnectionTestCustomHTTPUsesServerSideCredential(t *testing.T) {
 	}
 }
 
+func TestConnectionTestSelfManagedGitLabUsesInstanceAPI(t *testing.T) {
+	s, workspaceID := newConnectionTestServer(t)
+	var gotPath string
+	var gotToken string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotToken = r.Header.Get("PRIVATE-TOKEN")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"username": "agent"})
+	}))
+	defer upstream.Close()
+
+	connection := controldb.Connection{
+		ID:             "conn-gitlab-self-managed",
+		WorkspaceID:    workspaceID,
+		Provider:       "gitlab",
+		ConnectionName: "default",
+		OwnerType:      ConnectionOwnerUser,
+		OwnerID:        "owner",
+		AuthType:       ConnectionAuthAPIKey,
+		Status:         "active",
+		ProfileJSON:    `{}`,
+		CreatedBy:      "owner",
+		CreatedAt:      "2026-07-15T00:00:00Z",
+		UpdatedAt:      "2026-07-15T00:00:00Z",
+	}
+	if err := s.controlDB.UpsertConnection(connection); err != nil {
+		t.Fatalf("connection: %v", err)
+	}
+	secret, err := sealConnectionSecret(map[string]string{
+		"instanceUrl": upstream.URL,
+		"apiKey":      "gitlab-token",
+	})
+	if err != nil {
+		t.Fatalf("seal secret: %v", err)
+	}
+	secret.ConnectionID = connection.ID
+	if err := s.controlDB.UpsertConnectionSecret(secret); err != nil {
+		t.Fatalf("connection secret: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/connections/conn-gitlab-self-managed/test", strings.NewReader(`{}`))
+	req.SetPathValue("id", connection.ID)
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(context.WithValue(req.Context(), ctxUserKey, "owner"))
+	rec := httptest.NewRecorder()
+	s.handleTestConnection(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if gotPath != "/api/v4/user" {
+		t.Fatalf("path=%q, want /api/v4/user", gotPath)
+	}
+	if gotToken != "gitlab-token" {
+		t.Fatalf("PRIVATE-TOKEN=%q", gotToken)
+	}
+}
+
 func TestConnectionTestRequiresManagementAccess(t *testing.T) {
 	s, workspaceID := newConnectionTestServer(t)
 	if err := s.controlDB.UpsertConnection(controldb.Connection{

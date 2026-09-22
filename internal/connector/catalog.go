@@ -23,11 +23,12 @@ type Provider struct {
 }
 
 type ProviderField struct {
-	Key       string `json:"key"`
-	Label     string `json:"label"`
-	InputType string `json:"inputType"`
-	Required  bool   `json:"required"`
-	Secret    bool   `json:"secret"`
+	Key         string `json:"key"`
+	Label       string `json:"label"`
+	InputType   string `json:"inputType"`
+	Placeholder string `json:"placeholder,omitempty"`
+	Required    bool   `json:"required"`
+	Secret      bool   `json:"secret"`
 }
 
 type OAuth2Config struct {
@@ -175,7 +176,7 @@ func Defaults() []Provider {
 			},
 			Enabled: true,
 		},
-		staticPATProvider("gitlab", "GitLab", "Developer Tools", "Use GitLab repositories, merge requests, issues, and CI/CD context.", "Personal access token", "Create a personal access token from GitLab preferences. Prefer project-scoped tokens for production workspaces.", "GitLab access tokens", "https://docs.gitlab.com/user/profile/personal_access_tokens/", gitLabActions()),
+		gitLabProvider(),
 		{
 			Provider:    "gitee",
 			DisplayName: "Gitee",
@@ -650,6 +651,25 @@ func staticPATProvider(provider, displayName, category, description, fieldLabel,
 			credentialGuide(fieldLabel, guideBody, linkLabel, linkURL),
 		},
 		Actions: actions,
+		Enabled: true,
+	}
+}
+
+func gitLabProvider() Provider {
+	return Provider{
+		Provider:    "gitlab",
+		DisplayName: "GitLab",
+		Description: "Use GitLab.com or a self-managed GitLab instance for repositories, merge requests, issues, and CI/CD context.",
+		Category:    "Developer Tools",
+		AuthTypes:   []string{AuthAPIKey},
+		Fields: []ProviderField{
+			{Key: "instanceUrl", Label: "GitLab instance URL", InputType: "url", Placeholder: DefaultGitLabInstanceURL},
+			{Key: "apiKey", Label: "Personal access token", InputType: "password", Required: true, Secret: true},
+		},
+		Guides: []ProviderGuide{
+			credentialGuide("Personal access token", "Enter the root URL of your GitLab instance, then create a personal access token from that instance. Leave the URL empty for GitLab.com and prefer project-scoped tokens for production workspaces.", "GitLab access tokens", "https://docs.gitlab.com/user/profile/personal_access_tokens/"),
+		},
+		Actions: gitLabActions(),
 		Enabled: true,
 	}
 }

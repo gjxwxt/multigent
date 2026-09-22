@@ -675,6 +675,58 @@ func TestRuntimeActionConfigForTokenFirstExternalTools(t *testing.T) {
 	}
 }
 
+func TestRuntimeActionConfigUsesSelfManagedGitLabAPI(t *testing.T) {
+	users := newTestUserStore(t)
+	s := &Server{controlDB: users.db, users: users}
+	if err := users.db.UpsertWorkspace(controldb.Workspace{ID: "ws-one", Name: "One", Slug: "one"}); err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	connection := controldb.Connection{
+		ID:             "conn-gitlab-self-managed",
+		WorkspaceID:    "ws-one",
+		Provider:       "gitlab",
+		ConnectionName: "default",
+		OwnerType:      ConnectionOwnerWorkspace,
+		OwnerID:        "ws-one",
+		AuthType:       ConnectionAuthAPIKey,
+		Status:         "active",
+		ProfileJSON:    `{"instanceUrl":"https://gitlab.example.test"}`,
+		CreatedBy:      "admin",
+	}
+	if err := users.db.UpsertConnection(connection); err != nil {
+		t.Fatalf("connection: %v", err)
+	}
+	secret, err := sealConnectionSecret(map[string]string{"apiKey": "gitlab-token"})
+	if err != nil {
+		t.Fatalf("seal secret: %v", err)
+	}
+	secret.ConnectionID = connection.ID
+	if err := users.db.UpsertConnectionSecret(secret); err != nil {
+		t.Fatalf("connection secret: %v", err)
+	}
+	cfg, err := s.runtimeHTTPActionConfig(connection)
+	if err != nil {
+		t.Fatalf("runtime config: %v", err)
+	}
+	if cfg.BaseURL != "https://gitlab.example.test/api/v4" {
+		t.Fatalf("baseURL=%q", cfg.BaseURL)
+	}
+	if cfg.AuthHeader != "PRIVATE-TOKEN" || cfg.AuthValue != "gitlab-token" {
+		t.Fatalf("auth header=%q value=%q", cfg.AuthHeader, cfg.AuthValue)
+	}
+}
+
+func TestBuildRuntimeActionURLPreservesBasePath(t *testing.T) {
+	got, err := buildRuntimeActionURL("https://gitlab.example.test/root/api/v4", "/projects/42/issues", map[string]string{"state": "opened"})
+	if err != nil {
+		t.Fatalf("build URL: %v", err)
+	}
+	want := "https://gitlab.example.test/root/api/v4/projects/42/issues?state=opened"
+	if got != want {
+		t.Fatalf("URL=%q, want %q", got, want)
+	}
+}
+
 func TestRuntimeActionProxyForwardsCustomHTTPWithServerSideCredential(t *testing.T) {
 	users := newTestUserStore(t)
 	s := &Server{controlDB: users.db, users: users}

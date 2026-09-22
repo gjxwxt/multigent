@@ -34,6 +34,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/multigent/multigent/internal/agentcli"
+	"github.com/multigent/multigent/internal/connector"
 	"github.com/multigent/multigent/internal/daemon"
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
@@ -2545,6 +2546,8 @@ func materializeCLIConfig(tool runtimeToolRef, adapter runtimeAdapterRef, cfg ru
 	switch strings.TrimSpace(tool.Provider) {
 	case "github":
 		return materializeGitHubCLIConfig(adapter, cfg, secretValues)
+	case "gitlab":
+		return materializeGitLabCLIConfig(adapter, cfg, secretValues)
 	case "feishu", "lark":
 		return materializeLarkCLIConfig(tool, adapter, cfg, secretValues)
 	case "ssh_key":
@@ -2695,6 +2698,43 @@ func materializeGitHubCLIConfig(adapter runtimeAdapterRef, cfg runtimeConfigFile
 		return nil, err
 	}
 	return map[string]string{"GH_CONFIG_DIR": filepath.Dir(cfg.MaterializedPath)}, nil
+}
+
+func materializeGitLabCLIConfig(adapter runtimeAdapterRef, cfg runtimeConfigFileRef, secretValues map[string]string) (map[string]string, error) {
+	if adapter.CLI == nil || adapter.CLI.Binary != "glab" {
+		return nil, nil
+	}
+	if !strings.HasSuffix(strings.TrimSpace(cfg.Path), "config.yml") {
+		return nil, nil
+	}
+	token := firstNonEmpty(secretValues["apiKey"], secretValues["accessToken"], secretValues["token"])
+	if token == "" || cfg.MaterializedPath == "" {
+		return nil, nil
+	}
+	instanceURL, err := connector.NormalizeGitLabInstanceURL(secretValues["instanceUrl"])
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := url.Parse(instanceURL)
+	if err != nil {
+		return nil, err
+	}
+	host := parsed.Host
+	body := "host: " + yamlQuote(host) + "\nhosts:\n  " + yamlQuote(host) + ":\n"
+	body += "    api_host: " + yamlQuote(host) + "\n"
+	body += "    api_protocol: " + yamlQuote(parsed.Scheme) + "\n"
+	body += "    token: " + yamlQuote(token) + "\n"
+	body += "    git_protocol: https\n"
+	if err := os.WriteFile(cfg.MaterializedPath, []byte(body), 0o600); err != nil {
+		return nil, err
+	}
+	return map[string]string{
+		"GLAB_CONFIG_DIR":   filepath.Dir(cfg.MaterializedPath),
+		"GITLAB_HOST":       host,
+		"GITLAB_API_HOST":   host,
+		"GLAB_API_PROTOCOL": parsed.Scheme,
+		"GLAB_GIT_PROTOCOL": "https",
+	}, nil
 }
 
 func materializeSSHKeyConfig(cfg runtimeConfigFileRef, secretValues map[string]string, keyBaseName, envKey string) (map[string]string, error) {

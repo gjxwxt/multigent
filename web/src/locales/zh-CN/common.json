@@ -390,6 +390,7 @@
       "appId": "App ID",
       "appSecret": "App Secret",
       "baseUrl": "OpenAPI Base URL",
+      "instanceUrl": "GitLab 实例 URL",
       "privateKey": "私钥",
       "gitUserName": "Git 用户名",
       "gitUserEmail": "Git 邮箱",
@@ -502,7 +503,7 @@
     },
     "providerDescriptions": {
       "github": "连接代码仓库、Issue、PR、发布和研发协作上下文。",
-      "gitlab": "连接 GitLab 仓库、合并请求、Issue 和 CI/CD 上下文。",
+      "gitlab": "连接 GitLab.com 或自建 GitLab 实例，使用仓库、合并请求、Issue 和 CI/CD 上下文。",
       "gitee": "连接 Gitee 仓库、Issue、Pull Request 和国内代码托管流程。",
       "ssh_key": "配置通用 SSH 私钥，供 Agent 访问私有主机或 SSH 工具。",
       "git_ssh": "配置 Git over SSH，让 Agent 能 clone、fetch、push 私有仓库。",

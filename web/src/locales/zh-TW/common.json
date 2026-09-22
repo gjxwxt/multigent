@@ -390,6 +390,7 @@
       "appId": "App ID",
       "appSecret": "App Secret",
       "baseUrl": "OpenAPI Base URL",
+      "instanceUrl": "GitLab 執行個體 URL",
       "privateKey": "私鑰",
       "gitUserName": "Git 使用者名稱",
       "gitUserEmail": "Git 電子郵件",
@@ -502,7 +503,7 @@
     },
     "providerDescriptions": {
       "github": "連接程式碼倉庫、Issue、PR、發布和研發協作上下文。",
-      "gitlab": "連接 GitLab 倉庫、合併請求、Issue 和 CI/CD 上下文。",
+      "gitlab": "連接 GitLab.com 或自建 GitLab 執行個體，使用倉庫、合併請求、Issue 和 CI/CD 上下文。",
       "gitee": "連接 Gitee 倉庫、Issue、Pull Request 和國內程式碼託管流程。",
       "ssh_key": "設定通用 SSH 私鑰，供 Agent 存取私有主機或 SSH 工具。",
       "git_ssh": "設定 Git over SSH，讓 Agent 能 clone、fetch、push 私有倉庫。",

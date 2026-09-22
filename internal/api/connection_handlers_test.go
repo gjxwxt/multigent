@@ -220,6 +220,34 @@ func TestConnectionValuesValidateMCPServerURL(t *testing.T) {
 	}
 }
 
+func TestGitLabConnectionValuesNormalizeAndExposeInstanceURL(t *testing.T) {
+	provider, ok := defaultConnectorProvider("gitlab")
+	if !ok {
+		t.Fatal("gitlab provider missing")
+	}
+	values := map[string]string{
+		"apiKey":      "private-token",
+		"instanceUrl": "https://gitlab.example.test/api/v4/",
+	}
+	if err := normalizeConnectionValues(provider, values); err != nil {
+		t.Fatalf("normalize values: %v", err)
+	}
+	if values["instanceUrl"] != "https://gitlab.example.test" {
+		t.Fatalf("instanceUrl=%q", values["instanceUrl"])
+	}
+	if err := validateConnectionValues(provider, ConnectionAuthAPIKey, values); err != nil {
+		t.Fatalf("validate values: %v", err)
+	}
+	profile := map[string]any{}
+	copyPublicConnectionValues(profile, provider, values)
+	if profile["instanceUrl"] != "https://gitlab.example.test" {
+		t.Fatalf("profile=%#v", profile)
+	}
+	if _, exists := profile["apiKey"]; exists {
+		t.Fatalf("secret copied to profile: %#v", profile)
+	}
+}
+
 func TestConnectionByIDRequiresCurrentWorkspace(t *testing.T) {
 	db, err := controldb.Open(filepath.Join(t.TempDir(), "multigent.db"))
 	if err != nil {
