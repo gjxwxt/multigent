@@ -91,8 +91,22 @@ func TestReviewFreezesDesignSnapshot(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("run: %v", err)
 	}
-	// vNext pipeline: design_review approve routes to acceptance_test_design,
-	// which forwards the frozen design artifacts into implementation.
+	// vNext pipeline: design_review approve parks at scale_gate (module S1);
+	// walk the linear verdict so the frozen artifacts reach acceptance_test_design.
+	if run.ActiveStepID == "scale_gate" {
+		if _, err := wfStore.CompleteAndAdvance("resproj", task.ID, "linear", "", map[string]string{
+			"scale_verdict": "linear",
+		}, "completed"); err != nil {
+			t.Fatalf("scale gate linear: %v", err)
+		}
+		run, found, err = wfStore.RunForTask("resproj", task.ID)
+		if err != nil || !found {
+			t.Fatalf("re-fetch run: %v", err)
+		}
+	}
+	// vNext pipeline: the scale gate's linear verdict routes to
+	// acceptance_test_design, which forwards the frozen design artifacts into
+	// implementation.
 	if run.ActiveStepID != "acceptance_test_design" {
 		t.Fatalf("expected run to advance to acceptance_test_design, at %s", run.ActiveStepID)
 	}
@@ -170,11 +184,8 @@ func TestReviewDesignSnapshotAtomicFailureRequiresWaiver(t *testing.T) {
 		t.Fatalf("review with waiver must succeed: %d %s", w2.Code, w2.Body.String())
 	}
 
+	run := advancePastScaleGate(t, s, workspaceID, "resproj", task.ID, "acceptance_test_design")
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
-	run, found, err := wfStore.RunForTask("resproj", task.ID)
-	if err != nil || !found || run.ActiveStepID != "acceptance_test_design" {
-		t.Fatalf("run should advance to acceptance_test_design: found=%v active=%s err=%v", found, run.ActiveStepID, err)
-	}
 	instances, err := wfStore.ListStepInstances(run.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -296,11 +307,8 @@ func TestDesignReviewApprovalSucceedsWithDirectWaiver(t *testing.T) {
 		t.Fatalf("expected 200 OK with direct waiver, got %d: %s", w.Code, w.Body.String())
 	}
 
+	run := advancePastScaleGate(t, s, workspaceID, "resproj", task.ID, "acceptance_test_design")
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
-	run, found, err := wfStore.RunForTask("resproj", task.ID)
-	if err != nil || !found || run.ActiveStepID != "acceptance_test_design" {
-		t.Fatalf("run should advance to acceptance_test_design: found=%v active=%s err=%v", found, run.ActiveStepID, err)
-	}
 	instances, err := wfStore.ListStepInstances(run.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -559,4 +567,32 @@ func TestGetDesignSnapshotRejectsSymlinkEscape(t *testing.T) {
 	if strings.Contains(getW.Body.String(), "TOP_SECRET_PASSWORD") {
 		t.Fatal("secret leaked through symlink!")
 	}
+}
+
+// advancePastScaleGate handles the large-requirement module S1 insertion: the
+// design gate now parks the run at scale_gate (agent verdict step). The helper
+// completes the gate with a linear verdict when needed and asserts the run
+// reached the expected next step. It returns the run for downstream asserts.
+func advancePastScaleGate(t *testing.T, s *Server, workspaceID, project, taskID, wantStep string) entity.WorkflowRun {
+	t.Helper()
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	run, found, err := wfStore.RunForTask(project, taskID)
+	if err != nil || !found {
+		t.Fatalf("run for task: found=%v err=%v", found, err)
+	}
+	if run.ActiveStepID == "scale_gate" {
+		if _, err := wfStore.CompleteAndAdvance(project, taskID, "linear requirement", "", map[string]string{
+			"scale_verdict": "linear",
+		}, "completed"); err != nil {
+			t.Fatalf("scale gate linear verdict: %v", err)
+		}
+		run, found, err = wfStore.RunForTask(project, taskID)
+		if err != nil || !found {
+			t.Fatalf("re-fetch run: found=%v err=%v", found, err)
+		}
+	}
+	if run.ActiveStepID != wantStep {
+		t.Fatalf("run should advance to %s, active=%s", wantStep, run.ActiveStepID)
+	}
+	return run
 }

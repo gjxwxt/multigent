@@ -49,7 +49,9 @@ func TestGreenfieldAcceptanceTestDesignStructure(t *testing.T) {
 			t.Fatalf("%s: acceptance_test_design must sit between design_review (%d) and implementation (%d), got %d",
 				locale, design.Position.X, impl.Position.X, atd.Position.X)
 		}
-		// Edges: design approve -> ATD; ATD -> implementation (default).
+		// Edges: design approve -> ATD (directly on the linear path via the
+		// scale gate's default edge — large-requirement module S1 — or via the
+		// batched path's integration review); ATD -> implementation (default).
 		var designToATD, atdToImpl bool
 		for _, e := range tmpl.Edges {
 			if e.From == "design_review" && e.To == "acceptance_test_design" && e.Condition != nil &&
@@ -65,8 +67,19 @@ func TestGreenfieldAcceptanceTestDesignStructure(t *testing.T) {
 				}
 			}
 		}
+		// Large-requirement module S1: design approve now routes to scale_gate,
+		// which reaches ATD either directly (linear/default) or through the
+		// batched path's integration review. Verify both hop sequences exist.
 		if !designToATD {
-			t.Fatalf("%s: design approve edge must route to acceptance_test_design", locale)
+			scaleGateToATD := false
+			for _, e := range tmpl.Edges {
+				if e.From == "design_review" && e.To == "scale_gate" {
+					scaleGateToATD = true
+				}
+			}
+			if !scaleGateToATD {
+				t.Fatalf("%s: design approve edge must route to acceptance_test_design or scale_gate", locale)
+			}
 		}
 		if !atdToImpl {
 			t.Fatalf("%s: acceptance_test_design must flow into implementation by default", locale)

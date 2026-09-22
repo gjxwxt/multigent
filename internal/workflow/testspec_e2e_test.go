@@ -37,6 +37,9 @@ func newGreenfieldRunStore(t *testing.T) (*Store, string) {
 		"owner-engineer":  {Type: "user", ID: "eng"},
 		"qa-owner":        {Type: "user", ID: "qaowner"},
 		"release-agent":   {Type: "agent", ID: "rel"},
+		// Large-requirement module S1: scale gate + batched-path bindings.
+		"workstream-agent-1": {Type: "agent", ID: "ws1"},
+		"workstream-agent-2": {Type: "agent", ID: "ws2"},
 	}
 	if _, _, err := store.StartRun("project", "task-gf-e2e", def.ID, bindings); err != nil {
 		t.Fatalf("start run: %v", err)
@@ -97,6 +100,13 @@ func TestGreenfieldE2EWithAcceptanceTestDesign(t *testing.T) {
 		"comments": "ship it",
 	}, "completed"); err != nil {
 		t.Fatalf("design review: %v", err)
+	}
+	// 3b. scale_gate verdict: linear (large-requirement module S1) — routes
+	// straight to acceptance_test_design on the historical single-track path.
+	if _, err := store.CompleteAndAdvance(project, taskID, "small requirement, linear", "", map[string]string{
+		"scale_verdict": "linear",
+	}, "completed"); err != nil {
+		t.Fatalf("scale gate linear: %v", err)
 	}
 	// 4. acceptance_test_design with an INVALID manifest must abort (no
 	// routing) and keep the step pending.

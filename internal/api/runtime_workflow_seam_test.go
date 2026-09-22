@@ -250,6 +250,11 @@ func TestRuntimeWorkflowSeam_GreenfieldVNextPromptAndStepDone(t *testing.T) {
 		"design_waiver_reason": "headless API service, no frontend UI",
 		"design_waived":        "true",
 	})
+	// Large-requirement module S1: the scale gate sits between the design
+	// gate and acceptance_test_design; take the linear path for this seam test.
+	advanceDirect("scale_gate", "linear", map[string]string{
+		"scale_verdict": "linear",
+	})
 
 	// ── 1. acceptance_test_design Seam Check ────────────────────────────────
 	taskQA := refreshTask("qa-agent")

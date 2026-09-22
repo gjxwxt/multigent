@@ -116,6 +116,17 @@ func TestPilotGreenfieldDeliveryPipelineFullLifecycle(t *testing.T) {
 	}
 
 	run, found, err = wfStore.RunForTask("resproj", task.ID)
+	// Large-requirement module S1: design approval parks at scale_gate; take
+	// the linear verdict so the lifecycle continues to acceptance_test_design.
+	if err != nil || !found || run.ActiveStepID != "scale_gate" {
+		t.Fatalf("expected active step scale_gate, got found=%v step=%s err=%v", found, run.ActiveStepID, err)
+	}
+	if _, err := wfStore.CompleteAndAdvance("resproj", task.ID, "linear", "", map[string]string{
+		"scale_verdict": "linear",
+	}, "completed"); err != nil {
+		t.Fatalf("scale gate linear: %v", err)
+	}
+	run, found, err = wfStore.RunForTask("resproj", task.ID)
 	if err != nil || !found || run.ActiveStepID != "acceptance_test_design" {
 		t.Fatalf("expected active step acceptance_test_design, got found=%v step=%s err=%v", found, run.ActiveStepID, err)
 	}

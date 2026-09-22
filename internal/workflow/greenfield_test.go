@@ -32,8 +32,8 @@ func TestGreenfieldTemplateShape(t *testing.T) {
 	if !ok {
 		t.Fatal("greenfield template not registered")
 	}
-	if len(tmpl.Steps) != 12 {
-		t.Fatalf("expected 12 steps (incl. acceptance_test_design), got %d", len(tmpl.Steps))
+	if len(tmpl.Steps) != 17 {
+		t.Fatalf("expected 17 steps (12 original + scale_gate/contract_batch/contract_review/parallel_workstreams/integration_review), got %d", len(tmpl.Steps))
 	}
 	if tmpl.StartStepID != "requirement_draft" {
 		t.Fatalf("start step = %q", tmpl.StartStepID)

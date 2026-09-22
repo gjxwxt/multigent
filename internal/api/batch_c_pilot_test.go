@@ -96,6 +96,11 @@ func TestBatchCPilotGreenfieldVNextOverRealRepo(t *testing.T) {
 		"design_waiver_reason": "no UI surface",
 		"design_waived":        "true",
 	})
+	// Large-requirement module S1: the scale gate sits between the design
+	// gate and acceptance_test_design; take the linear path here.
+	advance("scale_gate", map[string]string{
+		"scale_verdict": "linear",
+	})
 	// checklist item 2: a high-risk exception/authorization case in the spec.
 	specManifest := `[
 	 {"case_id":"AC-1","ac_id":"AC-1","risk_level":"medium","automation_level":"api_integration","execution_type":"auto","expected_result":"GET /version returns v2"},
