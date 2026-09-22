@@ -155,6 +155,9 @@ type Server struct {
 	telemetryUsageCache    map[string]telemetryUsageCacheEntry
 	previewEngine          previewEngineAPI
 	worktreeMgr            *gitworktree.Manager
+	// worktreeResolveOverride, when non-nil, replaces resolveTaskWorktreeDir
+	// entirely. Test-only seam (nil in production builds).
+	worktreeResolveOverride func(project, taskID string) string
 	// fixtureSandbox provisions task-private test databases (V1). Nil when
 	// the control DB or data dir is unavailable — previews then run without
 	// sandbox integration (contract-less projects are unaffected).

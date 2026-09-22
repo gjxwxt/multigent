@@ -1191,6 +1191,12 @@ func rewriteHTML(html, taskID, projectName string, consoleOrigins ...string) str
 }
 
 func (s *Server) resolveTaskWorktreeDir(project, taskID string) string {
+	// Test seam: lets workflow-gate tests substitute a scratch worktree
+	// without standing up the full workspace→project→agent→task chain.
+	// Always nil in production (NewServer leaves it unset).
+	if s.worktreeResolveOverride != nil {
+		return s.worktreeResolveOverride(project, taskID)
+	}
 	task, agent, err := s.findTaskInProject(project, taskID)
 	if err == nil && task != nil && strings.TrimSpace(task.WorktreeDir) != "" {
 		if _, err := os.Stat(task.WorktreeDir); err == nil {

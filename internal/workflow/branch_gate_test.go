@@ -132,7 +132,7 @@ func TestBranchQAGateBlocksUndeclaredBusinessChange(t *testing.T) {
 	_, err := store.CompleteBranchAndMaybeAdvance("project", "task-1", runID, stepID, "qa_branch", "qa done",
 		map[string]string{"risk_coverage_matrix": "[{\"item_id\":\"AC-1\",\"risk_level\":\"low\",\"status\":\"passed\"}]",
 			"touched_paths": "server_test.go", "test_report": "ok"}, "completed")
-	if err == nil || !strings.Contains(err.Error(), "does not match the worktree") || !strings.Contains(err.Error(), "server.go") {
+	if err == nil || !strings.Contains(err.Error(), "not declared") || !strings.Contains(err.Error(), "server.go") {
 		t.Fatalf("branch qa completion must hit the real-change gate, got: %v", err)
 	}
 	// The branch must still be pending for a corrected completion.

@@ -1883,6 +1883,43 @@ type BranchTransitionResult struct {
 	Transition TransitionResult
 }
 
+// PreviewBranchQAGate exposes the branch QA real-change checkpoint for
+// zero-write prechecks (S2-1 fix). It applies exactly the same rules as the
+// gate inside CompleteBranchAndMaybeAdvance — declaration format,
+// observable worktree, and declared-vs-real path cross-check — so a
+// precheck pass guarantees the authoritative gate will not reject the same
+// output (barring TOCTOU worktree mutation between the two reads).
+func (s *Store) PreviewBranchQAGate(project, taskID string, branchStep entity.WorkflowStep, values map[string]string) error {
+	return s.checkBranchQAGate(project, taskID, branchStep, values, "completed")
+}
+
+// checkBranchQAGate is the QA real-change checkpoint shared by every branch
+// completion path (round-19 P0, fix round S2-1): both the store-level branch
+// join and the HTTP step-complete precheck must run the SAME gate so a
+// rejection can never land after one path already persisted terminal state.
+// Callers translate the returned error into their own message with the
+// branch title; the error text already carries the deterministic reason
+// (declaration format, observable worktree, or path cross-check).
+func (s *Store) checkBranchQAGate(project, taskID string, branchStep entity.WorkflowStep, values map[string]string, status string) error {
+	if strings.TrimSpace(status) == "failed" {
+		return nil
+	}
+	if !workflowFieldDeclared(branchStep.OutputFields, "touched_paths") {
+		return nil
+	}
+	if err := ValidateQATouchedPaths(values["touched_paths"]); err != nil {
+		return err
+	}
+	if s.WorktreeResolver == nil {
+		return nil
+	}
+	worktreeDir := strings.TrimSpace(s.WorktreeResolver(project, taskID))
+	if worktreeDir == "" || !worktreeObservable(worktreeDir) {
+		return fmt.Errorf("touched_paths checkpoint requires an observable worktree for task %s (none found)", taskID)
+	}
+	return verifyQATouchedPathsAgainstWorktree(values["touched_paths"], worktreeDir)
+}
+
 func (s *Store) CompleteBranchAndMaybeAdvance(project, taskID, runID, stepID, branchID, summary string, outputValues map[string]string, status string) (BranchTransitionResult, error) {
 	var result BranchTransitionResult
 	run, ok, err := s.RunForTask(project, taskID)
@@ -1934,19 +1971,8 @@ func (s *Store) CompleteBranchAndMaybeAdvance(project, taskID, runID, stepID, br
 	// deterministic path matching, never model judgment. Abort happens
 	// before any branch instance write, so the branch stays pending for a
 	// corrected completion.
-	if strings.TrimSpace(status) != "failed" && workflowFieldDeclared(branchStep.OutputFields, "touched_paths") {
-		if err := ValidateQATouchedPaths(values["touched_paths"]); err != nil {
-			return result, fmt.Errorf("workflow branch %q output rejected: %w", branchStep.Title, err)
-		}
-		if s.WorktreeResolver != nil {
-			worktreeDir := strings.TrimSpace(s.WorktreeResolver(project, taskID))
-			if worktreeDir == "" || !worktreeObservable(worktreeDir) {
-				return result, fmt.Errorf("workflow branch %q output rejected: touched_paths checkpoint requires an observable worktree for task %s (none found)", branchStep.Title, taskID)
-			}
-			if err := verifyQATouchedPathsAgainstWorktree(values["touched_paths"], worktreeDir); err != nil {
-				return result, fmt.Errorf("workflow branch %q output rejected: touched_paths does not match the worktree: %w", branchStep.Title, err)
-			}
-		}
+	if err := s.checkBranchQAGate(project, taskID, branchStep, values, status); err != nil {
+		return result, fmt.Errorf("workflow branch %q output rejected: %w", branchStep.Title, err)
 	}
 	found := false
 	for i := range branches {
@@ -2977,6 +3003,16 @@ func normalizeWorkflowOutputValues(step entity.WorkflowStep, values map[string]s
 		}
 	}
 	return out, nil
+}
+
+// NormalizeWorkflowOutputValuesForPreview runs the same output normalization
+// and validation as a real completion (required-field checks, unknown-field
+// rejection) without touching any state, so HTTP handlers can reject a
+// completion that would fail downstream BEFORE persisting the step
+// transition (S2-1 fix: never let a rejected branch completion leave a
+// finished child run behind).
+func NormalizeWorkflowOutputValuesForPreview(step entity.WorkflowStep, values map[string]string, summary, output string) (map[string]string, error) {
+	return normalizeWorkflowOutputValues(step, values, summary, output, false)
 }
 
 func workflowFieldRequiresDocID(field entity.WorkflowField) bool {

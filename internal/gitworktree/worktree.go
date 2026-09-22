@@ -482,6 +482,16 @@ func (m *Manager) ensureWorktree(projectRoot, taskID, baseBranch, baseCommit, fe
 	if err := preserveRuntimeContract(projectRoot, targetDir); err != nil {
 		log.Printf("[worktree] preserve runtime contract warning for %s: %v", targetDir, err)
 	}
+	// QA baseline (fix round S2-1, Fix B): record the freshly materialized
+	// worktree's file fingerprints BEFORE any agent runs. The touched_paths
+	// gate then measures the task's delivery delta against this baseline
+	// instead of the absolute git status, so pre-existing scaffold/dirty
+	// state can no longer fail an honest completion. Best-effort: a capture
+	// failure is logged and leaves no baseline — the gate falls back to the
+	// fail-closed absolute measurement rather than a fabricated baseline.
+	if err := CaptureQABaseline(targetDir); err != nil {
+		log.Printf("[worktree] qa baseline capture warning for %s: %v", targetDir, err)
+	}
 	return targetDir, branch, nil
 }
 

@@ -8,6 +8,7 @@
 package workflow
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -67,6 +68,26 @@ func worktreeChangedPaths(worktreeDir string) ([]string, error) {
 	return paths, nil
 }
 
+// worktreeDeliveryDelta resolves the surface the real-change gate measures:
+// the task's delivery delta relative to the platform-recorded baseline when
+// one exists (fix round S2-1, Fix B — the absolute git status conflated
+// platform scaffolding and pre-existing dirty state with the task's own
+// changes), and the previous absolute status surface when no usable
+// baseline exists (older worktrees) — still fail-closed, still strict.
+func worktreeDeliveryDelta(worktreeDir string) ([]string, error) {
+	delta, err := gitworktree.QABaselineWorktreeDelta(worktreeDir)
+	if err == nil {
+		return delta, nil
+	}
+	if !errors.Is(err, gitworktree.ErrNoQABaseline) {
+		// A CORRUPT baseline must not silently downgrade to absolute
+		// measurement (that downgrade would be exploitable); only the
+		// clean "no baseline" case falls back.
+		return nil, fmt.Errorf("qa baseline delta: %w", err)
+	}
+	return worktreeChangedPaths(worktreeDir)
+}
+
 // unquoteGitPath decodes a C-quoted git path (octal escapes, backslashes).
 func unquoteGitPath(p string) string {
 	p = p[1 : len(p)-1]
@@ -120,7 +141,7 @@ func worktreeObservable(worktreeDir string) bool {
 // delta's paths via the same ValidateQATouchedPaths used for declarations,
 // so the accepted surface is identical no matter which side produced it.
 func verifyQATouchedPathsAgainstWorktree(declared, worktreeDir string) error {
-	real, err := worktreeChangedPaths(worktreeDir)
+	real, err := worktreeDeliveryDelta(worktreeDir)
 	if err != nil {
 		return fmt.Errorf("read worktree changes: %w", err)
 	}

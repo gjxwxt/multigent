@@ -1106,6 +1106,25 @@ func (s *Server) handleRuntimeWorkflowStepComplete(w http.ResponseWriter, r *htt
 			return
 		}
 	}
+	// Branch-completion precheck (S2-1 fix): a branch child task whose
+	// workflow reaches its terminal step with THIS completion triggers the
+	// parent-side branch join, which runs the QA touched_paths gate. That
+	// gate used to fire only AFTER completeRuntimeWorkflowStep had already
+	// persisted the child run's terminal transition and the task's
+	// done_success — a rejected branch output left the task finished, the
+	// agent gone, and the branch instance stuck "running" forever (join
+	// barrier never satisfied; S2 dogfood wfr-07249bes). Run the identical
+	// gate here BEFORE any persistence: on rejection nothing is written, the
+	// task stays in_progress, and the agent can correct and re-report. The
+	// gate is fail-open for intermediate branch steps (their completion does
+	// not reach the join) and for failed completions, mirroring the
+	// store-level check.
+	if stepStatus == "completed" && strings.TrimSpace(t.Vars[workflowBranchIDVar]) != "" {
+		if err := s.precheckBranchJoinGate(principal.WorkspaceID, principal.Project, t, body.Outputs); err != nil {
+			s.jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	transition, transitioned, err := s.completeRuntimeWorkflowStep(principal.WorkspaceID, principal.Project, t, body.Outputs, stepStatus)
 	if err != nil {
 		s.jsonError(w, http.StatusBadRequest, err.Error())
@@ -1172,6 +1191,105 @@ func (s *Server) handleRuntimeWorkflowStepComplete(w http.ResponseWriter, r *htt
 		Request:      r,
 	})
 	_ = json.NewEncoder(w).Encode(taskToRow(t, principal.Project, agent, archived))
+}
+
+// workflowStepByID is a local alias over the workflow package's step lookup.
+func workflowStepByID(steps []entity.WorkflowStep, id string) (entity.WorkflowStep, bool) {
+	for i := range steps {
+		if strings.TrimSpace(steps[i].ID) == strings.TrimSpace(id) {
+			return steps[i], true
+		}
+	}
+	return entity.WorkflowStep{}, false
+}
+
+// workflowStepIsTerminal reports whether completing `step` ends the
+// workflow run: a step with no outgoing edges is terminal, and for steps
+// WITH outgoing edges the engine decides the next step from conditions —
+// conservatively treat those as non-terminal here so the precheck stays
+// fail-open and never blocks a completion the real transition would have
+// allowed through.
+func workflowStepIsTerminal(def entity.WorkflowDefinition, step entity.WorkflowStep) bool {
+	for _, e := range def.Edges {
+		if strings.TrimSpace(e.From) == strings.TrimSpace(step.ID) {
+			return false
+		}
+	}
+	return true
+}
+
+// branchOutputFields resolves the output contract the parent-side branch
+// join validates against: the branch's own declared OutputFields. For
+// generated single-step branch definitions this equals the start step's
+// OutputFields; for embedded multi-step branch workflows the branch-level
+// declaration is the contract that survives the whole branch.
+func branchOutputFields(def entity.WorkflowDefinition, start entity.WorkflowStep) []entity.WorkflowField {
+	// A branch definition that came from workflowDefinitionForBranch carries
+	// the branch contract on its start step (single-step case). Definitions
+	// supplied via branch.Workflow keep their own step contracts; the
+	// branch-level join validates whatever the start step declares, which is
+	// the contract the engine's aggregate actually maps through.
+	if len(start.OutputFields) > 0 {
+		return append([]entity.WorkflowField{}, start.OutputFields...)
+	}
+	for _, st := range def.Steps {
+		if strings.TrimSpace(st.ID) == strings.TrimSpace(def.StartStepID) {
+			return append([]entity.WorkflowField{}, st.OutputFields...)
+		}
+	}
+	return nil
+}
+
+// precheckBranchJoinGate mirrors the branch-join QA gate BEFORE the child
+// run's own transition is persisted. It must predict, not re-enforce: the
+// authoritative gate still runs inside CompleteBranchAndMaybeAdvance after
+// the child run completes. Prediction logic: the child workflow completes
+// with this call when its active step is the LAST step of the child
+// definition (any outgoing conditional edges are resolved by the same
+// engine logic the transition will use; a terminal step has no outgoing
+// edges to another step). For multi-step branches the intermediate
+// completions return nil (fail-open) — the precheck fires only when the
+// completion would actually reach the parent join.
+func (s *Server) precheckBranchJoinGate(workspaceID, project string, t *entity.Task, outputs map[string]string) error {
+	if s == nil || s.controlDB == nil || t == nil {
+		return nil
+	}
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	wfStore.WorktreeResolver = func(project, taskID string) string {
+		return s.resolveTaskWorktreeDir(project, taskID)
+	}
+	run, ok, err := wfStore.RunForTask(project, t.ID)
+	if err != nil || !ok {
+		// No child run: the store-level gate will judge later; nothing to
+		// predict here.
+		return nil
+	}
+	def, ok, err := wfStore.RunDefinition(run)
+	if err != nil || !ok {
+		return nil
+	}
+	current, ok := workflowStepByID(def.Steps, run.ActiveStepID)
+	if !ok {
+		return nil
+	}
+	if !workflowStepIsTerminal(def, current) {
+		// Intermediate branch step: this completion advances within the
+		// branch workflow and never reaches the parent join.
+		return nil
+	}
+	// The join consumes the BRANCH's declared output contract, not the
+	// step's (they are identical for generated single-step branches; for
+	// embedded multi-step branches the branch-level contract is what
+	// aggregateBranchOutputs maps through).
+	branchStep := entity.WorkflowStep{ID: current.ID, Title: current.Title, OutputFields: branchOutputFields(def, current)}
+	values, err := workflowstore.NormalizeWorkflowOutputValuesForPreview(branchStep, outputs, "", "")
+	if err != nil {
+		// Output normalization failures (missing required fields) also
+		// deserve a zero-write rejection: the post-transition join would
+		// fail the same way.
+		return err
+	}
+	return wfStore.PreviewBranchQAGate(project, t.ID, branchStep, values)
 }
 
 func (s *Server) completeRuntimeWorkflowStep(workspaceID, project string, t *entity.Task, outputs map[string]string, stepStatus string) (workflowstore.TransitionResult, bool, error) {

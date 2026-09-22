@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/multigent/multigent/internal/gitworktree"
 )
 
 func newGitWorktree(t *testing.T) string {
@@ -30,6 +32,13 @@ func newGitWorktree(t *testing.T) string {
 	}
 	run("add", ".")
 	run("commit", "-m", "base")
+	// S2-1 Fix B: production worktrees get a baseline captured at the
+	// protected materialization point (before any agent runs); tests must
+	// mirror that so the gate measures the delivery delta, not absolute
+	// status. Capture BEFORE the test dirties the tree.
+	if err := gitworktree.CaptureQABaseline(dir); err != nil {
+		t.Fatalf("capture qa baseline: %v", err)
+	}
 	return dir
 }
 
