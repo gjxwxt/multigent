@@ -1197,6 +1197,12 @@ func (s *Server) resolveTaskWorktreeDir(project, taskID string) string {
 	if s.worktreeResolveOverride != nil {
 		return s.worktreeResolveOverride(project, taskID)
 	}
+	return s.resolveTaskWorktreeDirFromDB(project, taskID)
+}
+
+// resolveTaskWorktreeDirFromDB is the production resolver path, split out so
+// the test seam stays a pure override.
+func (s *Server) resolveTaskWorktreeDirFromDB(project, taskID string) string {
 	task, agent, err := s.findTaskInProject(project, taskID)
 	if err == nil && task != nil && strings.TrimSpace(task.WorktreeDir) != "" {
 		if _, err := os.Stat(task.WorktreeDir); err == nil {

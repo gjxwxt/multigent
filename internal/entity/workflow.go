@@ -159,7 +159,17 @@ type WorkflowBranchInstance struct {
 	OutputArtifact string            `json:"outputArtifact,omitempty" yaml:"output_artifact,omitempty"`
 	InputValues    map[string]string `json:"inputValues,omitempty" yaml:"input_values,omitempty"`
 	OutputValues   map[string]string `json:"outputValues,omitempty" yaml:"output_values,omitempty"`
+	// OutputFields carries the branch definition's declared output contract
+	// on the instance (S2-2, reviewer P1-1): the join precheck reads the
+	// PARENT run's contract from the instance snapshot, so a parent
+	// definition edited after the run started can never change the contract
+	// a completed branch is judged against.
+	OutputFields []entity_WorkflowFieldAlias `json:"outputFields,omitempty" yaml:"output_fields,omitempty"`
 }
+
+// entity_WorkflowFieldAlias keeps the field slice JSON-compatible with
+// entity.WorkflowField without importing another package cycle.
+type entity_WorkflowFieldAlias = WorkflowField
 
 type WorkflowStepEvent struct {
 	ID             string            `json:"id" yaml:"id"`

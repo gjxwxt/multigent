@@ -1,0 +1,98 @@
+package api
+
+import (
+	"net/http"
+	"os"
+	"path/filepath"
+	"testing"
+
+	workflowstore "github.com/multigent/multigent/internal/workflow"
+)
+
+// TestBranchCrashWindowReJoinResumesParent (S2-2.1): the parent run stays
+// active@parallel while BOTH branch instances are already terminal — the
+// process died between SaveBranchInstance and CompleteAndAdvance (or the join
+// transition lost its claim). A re-report through the step/complete endpoint
+// must re-drive the join from the recorded aggregate (CAS-claimed, so it can
+// never double-advance), bringing the parent past the join — not return a
+// zero-write replay that wedges the run at the barrier forever.
+func TestBranchCrashWindowReJoinResumesParent(t *testing.T) {
+	s, workspaceID := newBranchJoinHTTPServer(t)
+	wt := newBranchJoinWorktree(t)
+	s.worktreeResolveOverride = func(project, taskID string) string { return wt }
+	s.qaBaselineLookupOverride = mustUploadQABaseline(t, s, workspaceID, "sample", "task-join-child", wt)
+	if err := workflowstore.NewStore(s.controlDB, workspaceID).CaptureQABaselineRecord("sample", "task-join-root", wt); err != nil {
+		t.Fatalf("upload parent qa baseline: %v", err)
+	}
+	task, _ := seedBranchChildRun(t, s, workspaceID)
+	if err := os.WriteFile(filepath.Join(wt, "server_test.go"), []byte("package main\n\nfunc TestX() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	parentRunID := task.Vars[workflowRunIDVar]
+
+	// Simulate the crash window directly: the first branch (ws_b) reached its
+	// terminal write, but the join never advanced (parent run still
+	// active@parallel). Store the branch terminal WITHOUT calling
+	// CompleteAndAdvance — exactly the state after a crash between the two
+	// writes.
+	if err := os.WriteFile(filepath.Join(wt, "server_test.go"), []byte("package main\n\nfunc TestX() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	outputs := map[string]string{"branch_summary": "did things", "touched_paths": "server_test.go"}
+	instances, err := wfStore.BranchInstancesForStep(parentRunID, "parallel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instances) != 1 || instances[0].BranchID != "ws_b" {
+		t.Fatalf("fixture must seed exactly the ws_b instance, got %+v", instances)
+	}
+	instances[0].Status = "completed"
+	instances[0].Summary = "did things"
+	instances[0].OutputValues = outputs
+	instances[0].OutputArtifact = `{"branch_summary":"did things","touched_paths":"server_test.go"}`
+	if err := wfStore.SaveBranchInstance(&instances[0]); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second branch exists in the parent plan but never reported (its task
+	// was lost); the re-driving re-report comes from ws_b only, so the join
+	// must NOT advance until both branches are terminal.
+	reportBranchID := task.Vars[workflowBranchIDVar]
+	if reportBranchID != "ws_b" {
+		t.Fatalf("fixture branch id: %q", reportBranchID)
+	}
+
+	// Single-branch plan: ws_b terminal + re-report → the report completes the
+	// child run (the task was never archived in this fixture) and the join
+	// re-drives from the recorded aggregate; the parent run must move past the
+	// parallel step. Recovery is asserted on PERSISTED state (the re-drive can
+	// ride either the step-complete transition or the branch handler), never
+	// on a response shape.
+	rec := postBranchStepComplete(t, s, workspaceID, task.ID, outputs)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("crash-window re-report must succeed, got %d: %s", rec.Code, rec.Body.String())
+	}
+	parentRun, _, err := wfStore.RunByID("sample", parentRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parentRun.Status != "completed" {
+		t.Fatalf("parent run must be completed after the resumed join, got %q@%q", parentRun.Status, parentRun.ActiveStepID)
+	}
+
+	// A SECOND re-report after the join ran must stay idempotent (200, no
+	// error): the run is terminal now, so the zero-write replay path applies.
+	rec = postBranchStepComplete(t, s, workspaceID, task.ID, outputs)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("post-join re-report must stay idempotent, got %d: %s", rec.Code, rec.Body.String())
+	}
+	parentRun, _, err = wfStore.RunByID("sample", parentRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parentRun.Status != "completed" {
+		t.Fatalf("parent run must stay completed, got %q", parentRun.Status)
+	}
+}

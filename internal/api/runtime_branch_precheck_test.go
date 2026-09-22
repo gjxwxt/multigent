@@ -98,7 +98,8 @@ func branchTaskWithVars(t *testing.T, branchID string) *entity.Task {
 func TestPrecheckBranchJoinGateRejectsUndeclaredBusinessChange(t *testing.T) {
 	s, wfStore := newPrecheckServer(t)
 	wt := newBranchTestWorktree(t)
-	if err := gitworktree.CaptureQABaseline(wt); err != nil {
+	s.qaBaselineLookupOverride = mustUploadQABaseline(t, s, "ws", "proj", "task-precheck-workstream_2", wt)
+	if _, err := gitworktree.CaptureQABaseline(wt); err != nil {
 		t.Fatal(err)
 	}
 	// The task's real delta includes an undeclared business edit.
@@ -156,7 +157,8 @@ func TestPrecheckBranchJoinGatePassesHonestDeclaration(t *testing.T) {
 	if err := writeTestFile(t, wt, ".mcp.json", "{}\n"); err != nil {
 		t.Fatal(err)
 	}
-	if err := gitworktree.CaptureQABaseline(wt); err != nil {
+	s.qaBaselineLookupOverride = mustUploadQABaseline(t, s, "ws", "proj", "task-precheck-workstream_2", wt)
+	if _, err := gitworktree.CaptureQABaseline(wt); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeTestFile(t, wt, "server_test.go", "package main\n\nfunc TestX() {}\n"); err != nil {

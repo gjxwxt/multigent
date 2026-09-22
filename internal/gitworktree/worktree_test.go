@@ -33,7 +33,7 @@ func TestGitWorktreeLifecycle(t *testing.T) {
 	taskID := "task-test-123"
 
 	// 1. Ensure worktree
-	wtDir, branch, err := mgr.EnsureWorktree(tempDir, taskID, "main", "feature/task-test-123")
+	wtDir, branch, err, _ := mgr.EnsureWorktree(tempDir, taskID, "main", "feature/task-test-123")
 	if err != nil {
 		t.Fatalf("EnsureWorktree failed: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestGitWorktreeLifecycle(t *testing.T) {
 	runGit(t, wtDir, "commit", "-m", "add feature")
 
 	// 3. Ensure worktree idempotent
-	wtDir2, branch2, err := mgr.EnsureWorktree(tempDir, taskID, "main", "feature/task-test-123")
+	wtDir2, branch2, err, _ := mgr.EnsureWorktree(tempDir, taskID, "main", "feature/task-test-123")
 	if err != nil {
 		t.Fatalf("EnsureWorktree second time failed: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestEnsureWorktreeReturnsGeneratedBranch(t *testing.T) {
 	runGit(t, tempDir, "add", "README.md")
 	runGit(t, tempDir, "commit", "-m", "initial commit")
 
-	wtDir, branch, err := NewManager().EnsureWorktree(tempDir, "task-generated", "main", "")
+	wtDir, branch, err, _ := NewManager().EnsureWorktree(tempDir, "task-generated", "main", "")
 	if err != nil {
 		t.Fatalf("EnsureWorktree failed: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestResolveBaseCommitUsesFetchedRemoteRevision(t *testing.T) {
 		t.Fatalf("resolved base = %s, want remote %s", resolved, remoteBase)
 	}
 
-	wtDir, _, err := mgr.EnsureWorktreeAt(rootDir, "task-remote-base", resolved, "feature/task-remote-base")
+	wtDir, _, err, _ := mgr.EnsureWorktreeAt(rootDir, "task-remote-base", resolved, "feature/task-remote-base")
 	if err != nil {
 		t.Fatalf("EnsureWorktreeAt failed: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestPushBranchVerifiesRemoteSHA(t *testing.T) {
 	runGit(t, rootDir, "remote", "add", "origin", remoteDir)
 	runGit(t, rootDir, "push", "-u", "origin", "main")
 
-	_, branch, err := NewManager().EnsureWorktree(rootDir, "task-push", "main", "feature/task-push")
+	_, branch, err, _ := NewManager().EnsureWorktree(rootDir, "task-push", "main", "feature/task-push")
 	if err != nil {
 		t.Fatalf("EnsureWorktree failed: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestMergeBranchLocally(t *testing.T) {
 	mgr := NewManager()
 
 	// 1. Create feature branch and commit
-	wtDir, branch, err := mgr.EnsureWorktree(tempDir, "task-merge-1", "main", "feature/merge-1")
+	wtDir, branch, err, _ := mgr.EnsureWorktree(tempDir, "task-merge-1", "main", "feature/merge-1")
 	if err != nil {
 		t.Fatalf("EnsureWorktree failed: %v", err)
 	}
@@ -368,7 +368,7 @@ func TestMergeBranchLocallyDirty(t *testing.T) {
 	runGit(t, tempDir, "commit", "-m", "initial commit")
 
 	mgr := NewManager()
-	_, branch, err := mgr.EnsureWorktree(tempDir, "task-dirty-1", "main", "feature/dirty-1")
+	_, branch, err, _ := mgr.EnsureWorktree(tempDir, "task-dirty-1", "main", "feature/dirty-1")
 	if err != nil {
 		t.Fatalf("EnsureWorktree failed: %v", err)
 	}
@@ -403,7 +403,7 @@ func TestMergeBranchLocallyAbortsConflictInRepository(t *testing.T) {
 	runGit(t, tempDir, "commit", "-m", "initial commit")
 
 	mgr := NewManager()
-	wtDir, branch, err := mgr.EnsureWorktree(tempDir, "task-conflict", "main", "feature/conflict")
+	wtDir, branch, err, _ := mgr.EnsureWorktree(tempDir, "task-conflict", "main", "feature/conflict")
 	if err != nil {
 		t.Fatalf("EnsureWorktree failed: %v", err)
 	}
@@ -684,7 +684,7 @@ func TestPushTagEnforcesAncestryAndVerifiesRemote(t *testing.T) {
 
 	// 1. A commit that never landed on main is a dangling release: the gate
 	// must refuse before anything reaches the remote.
-	wtDir, _, err := mgr.EnsureWorktree(rootDir, "task-tag", "main", "feature/task-tag")
+	wtDir, _, err, _ := mgr.EnsureWorktree(rootDir, "task-tag", "main", "feature/task-tag")
 	if err != nil {
 		t.Fatalf("EnsureWorktree failed: %v", err)
 	}
@@ -751,7 +751,7 @@ func TestPreserveRuntimeContract(t *testing.T) {
 	mgr := NewManager()
 
 	// 1. EnsureWorktree copies contract when missing
-	wtDir, _, err := mgr.EnsureWorktree(tempDir, "task-contract-1", "main", "feature/task-contract-1")
+	wtDir, _, err, _ := mgr.EnsureWorktree(tempDir, "task-contract-1", "main", "feature/task-contract-1")
 	if err != nil {
 		t.Fatalf("EnsureWorktree failed: %v", err)
 	}
@@ -769,7 +769,7 @@ func TestPreserveRuntimeContract(t *testing.T) {
 	if err := os.WriteFile(wtContractPath, []byte(bogusContract), 0644); err != nil {
 		t.Fatalf("write bogus contract: %v", err)
 	}
-	wtDirReopen, _, err := mgr.EnsureWorktree(tempDir, "task-contract-1", "main", "feature/task-contract-1")
+	wtDirReopen, _, err, _ := mgr.EnsureWorktree(tempDir, "task-contract-1", "main", "feature/task-contract-1")
 	if err != nil {
 		t.Fatalf("EnsureWorktree reopen failed: %v", err)
 	}

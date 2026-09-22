@@ -18,6 +18,7 @@ import (
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/errs"
+	"github.com/multigent/multigent/internal/gitworktree"
 )
 
 var workflowDocIDPattern = regexp.MustCompile(`^doc-\d{8}-[a-z0-9]+$`)
@@ -29,6 +30,12 @@ type Store struct {
 	// cross-check declared paths against the worktree's real git delta
 	// (round-18 P0-4). Nil = declaration-only validation (library callers).
 	WorktreeResolver WorktreeResolver
+
+	// QABaselineLookup resolves a task's authoritative QA baseline from the
+	// control plane (S2-2, reviewer P0-1). When nil the gate keeps the
+	// legacy absolute-status surface (declaration-only tests, legacy
+	// callers); production stores always wire it.
+	QABaselineLookup gitworktree.QABaselineLookup
 }
 
 func NewStore(db controldb.Store, workspaceID string) *Store {
@@ -1562,6 +1569,27 @@ func (s *Store) RunForTask(project, taskID string) (entity.WorkflowRun, bool, er
 	return run, true, nil
 }
 
+// RunByID looks a run up by its ID (S2-2, reviewer P1-1): branch children
+// hold the PARENT run ID in their vars, so the precheck needs to fetch the
+// parent run's snapshot without knowing the parent task ID. Runs are keyed
+// [project, taskID, runID], so the scan filters by project + runID.
+func (s *Store) RunByID(project, runID string) (entity.WorkflowRun, bool, error) {
+	recs, err := s.db.ListRecords("workflow_runs", s.workspaceID, []string{project})
+	if err != nil {
+		return entity.WorkflowRun{}, false, err
+	}
+	for _, rec := range recs {
+		run, err := decodeWorkflowRunPayload(rec.Payload, project, "")
+		if err != nil {
+			continue
+		}
+		if run.ID == runID {
+			return run, true, nil
+		}
+	}
+	return entity.WorkflowRun{}, false, nil
+}
+
 // RunForTaskWithSnapshot is RunForTask plus the raw claim witness: the
 // stored payload (marker or plain run JSON) and the monotonic revision, read
 // in the SAME SELECT as the payload. CompleteAndAdvance passes the snapshot
@@ -1917,7 +1945,16 @@ func (s *Store) checkBranchQAGate(project, taskID string, branchStep entity.Work
 	if worktreeDir == "" || !worktreeObservable(worktreeDir) {
 		return fmt.Errorf("touched_paths checkpoint requires an observable worktree for task %s (none found)", taskID)
 	}
-	return verifyQATouchedPathsAgainstWorktree(values["touched_paths"], worktreeDir)
+	// S2-2 ⑤: a branch join is a DELIVERY checkpoint — the branch agent's
+	// whole delta vs its baseline is the deliverable, so the test-artifact
+	// whitelist must not apply (it exists for linear QA steps that only
+	// write test files). The trusted baseline (control plane) scopes the
+	// measurement; loss/tamper fail closed (P0-1).
+	surf, err := resolveQABaselineSurface(worktreeDir, s.QABaselineLookup, project, taskID)
+	if err != nil {
+		return fmt.Errorf("touched_paths checkpoint baseline unavailable for task %s: %w", taskID, err)
+	}
+	return verifyWorktreeDeltaAgainstDeclaration(values["touched_paths"], worktreeDir, surf)
 }
 
 func (s *Store) CompleteBranchAndMaybeAdvance(project, taskID, runID, stepID, branchID, summary string, outputValues map[string]string, status string) (BranchTransitionResult, error) {
@@ -1929,7 +1966,21 @@ func (s *Store) CompleteBranchAndMaybeAdvance(project, taskID, runID, stepID, br
 	if run.ID != strings.TrimSpace(runID) {
 		return result, fmt.Errorf("workflow branch task is attached to run %q, active run is %q", strings.TrimSpace(runID), run.ID)
 	}
-	if run.ActiveStepID != strings.TrimSpace(stepID) {
+	if run.ActiveStepID != strings.TrimSpace(stepID) || workflowRunStatusTerminal(run.Status) {
+		// S2-2 (reviewer P1-2): the run has already advanced past the join
+		// step (or is terminal). Before rejecting, check whether THIS
+		// branch was already recorded — a re-report after a partial join
+		// must return the recorded result idempotently (zero writes) so the
+		// runtime can resume instead of wedging on a stale rejection.
+		if branches, berr := s.BranchInstancesForStep(run.ID, strings.TrimSpace(stepID)); berr == nil {
+			for _, b := range branches {
+				if b.BranchID == branchID && b.Status != "" && b.Status != "running" && b.Status != "pending" {
+					result.Branch = b
+					result.AllDone = workflowBranchAllTerminal(branches)
+					return result, nil
+				}
+			}
+		}
 		return result, fmt.Errorf("workflow branch step %q is no longer active", strings.TrimSpace(stepID))
 	}
 	result.Transition.Run = run
@@ -1951,6 +2002,42 @@ func (s *Store) CompleteBranchAndMaybeAdvance(project, taskID, runID, stepID, br
 	branches, err := s.BranchInstancesForStep(run.ID, step.ID)
 	if err != nil {
 		return result, err
+	}
+	// S2-2 (reviewer P1-2): an ALREADY-TERMINAL branch instance receiving a
+	// second completion is a retry after a partial join, not fresh work.
+	// Return the recorded result idempotently (no writes) so the runtime
+	// caller can resume the parent-side join it missed; a re-report for a
+	// still-running branch falls through to the normal gate + persistence
+	// path below.
+	for _, b := range branches {
+		if b.BranchID == branchID && b.Status != "" && b.Status != "running" && b.Status != "pending" {
+			result.Branch = b
+			result.AllDone = workflowBranchAllTerminal(branches)
+			// S2-2.1 (crash-window resume): the run is still active at this
+			// step while every branch is already terminal — the process died
+			// between SaveBranchInstance and CompleteAndAdvance (or the join
+			// transition lost its claim). The zero-write replay alone would
+			// leave the parent wedged at the join forever: re-drive the join
+			// from the recorded aggregate now. CAS-claimed, so concurrent
+			// re-reports cannot double-advance; a failed branch re-report
+			// still returns the recorded failure without advancing. Only the
+			// ACTIVE-run crash window re-drives the join: a terminal
+			// run means the join already happened, and CompleteAndAdvance
+			// would refuse re-entry (turning the idempotent 200 into a 400).
+			if result.AllDone && b.Status != "failed" && !workflowRunStatusTerminal(run.Status) {
+				aggregate := aggregateBranchOutputs(branches)
+				stageSummary := workflowBranchSummary(branches)
+				if stageSummary == "" {
+					stageSummary = strings.TrimSpace(summary)
+				}
+				transition, jerr := s.CompleteAndAdvance(project, taskID, stageSummary, workflowValuesJSON(aggregate), aggregate, "completed")
+				if jerr != nil {
+					return result, jerr
+				}
+				result.Transition = transition
+			}
+			return result, nil
+		}
 	}
 	now := time.Now().UTC()
 	branchStep := entity.WorkflowStep{ID: branchDef.ID, Title: branchDef.Title, OutputFields: branchDef.OutputFields}
@@ -2047,6 +2134,31 @@ func (s *Store) CompleteBranchAndMaybeAdvance(project, taskID, runID, stepID, br
 	}
 	result.Transition = transition
 	return result, nil
+}
+
+// workflowRunStatusTerminal reports whether a workflow run reached a
+// terminal status (store-local copy; the API layer has its own wider alias).
+func workflowRunStatusTerminal(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "completed", "failed", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+// workflowBranchAllTerminal reports whether every branch instance of the
+// stage reached a terminal status (completed/failed/skipped) — used by the
+// idempotent re-join path to reproduce AllDone without re-running the join.
+func workflowBranchAllTerminal(branches []entity.WorkflowBranchInstance) bool {
+	for _, b := range branches {
+		switch strings.TrimSpace(b.Status) {
+		case "completed", "failed", "skipped":
+		default:
+			return false
+		}
+	}
+	return len(branches) > 0
 }
 
 func workflowJoinPolicy(step entity.WorkflowStep) string {
@@ -2736,6 +2848,11 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 				s.releaseWorkflowTransitionClaim(&run, claimID)
 				return result, fmt.Errorf("workflow step %q output rejected: touched_paths checkpoint requires an observable worktree for task %s (none found) — complete the step from a code task with a worktree, or drop the touched_paths output", currentStep.Title, run.TaskID)
 			}
+			// S2-2 ⑤: a linear QA step remains a WHITELIST checkpoint — the
+			// QA agent may only write test artifacts, so the strict legacy
+			// surface (absolute status + test-artifact whitelist) applies.
+			// The baseline delta is deliberately NOT used here: QA edits a
+			// business file to "write a regression test" must keep failing.
 			if err := verifyQATouchedPathsAgainstWorktree(values["touched_paths"], worktreeDir); err != nil {
 				s.releaseWorkflowTransitionClaim(&run, claimID)
 				return result, fmt.Errorf("workflow step %q output rejected: touched_paths does not match the worktree: %w", currentStep.Title, err)
@@ -3123,6 +3240,13 @@ func stepByID(steps []entity.WorkflowStep, id string) (entity.WorkflowStep, bool
 		}
 	}
 	return entity.WorkflowStep{}, false
+}
+
+// WorkflowBranchByID finds a branch by ID in a parallel_stage step's branch
+// list (exported for the API-layer join precheck, which maps the PARENT
+// branch contract before predicting the join gate).
+func WorkflowBranchByID(branches []entity.WorkflowBranch, id string) (entity.WorkflowBranch, bool) {
+	return workflowBranchByID(branches, id)
 }
 
 func workflowBranchByID(branches []entity.WorkflowBranch, id string) (entity.WorkflowBranch, bool) {

@@ -31,6 +31,7 @@ import (
 	"github.com/multigent/multigent/internal/store"
 	"github.com/multigent/multigent/internal/taskstore"
 	"github.com/multigent/multigent/internal/telemetry"
+	"github.com/multigent/multigent/internal/workflow"
 )
 
 type contextKey string
@@ -158,6 +159,10 @@ type Server struct {
 	// worktreeResolveOverride, when non-nil, replaces resolveTaskWorktreeDir
 	// entirely. Test-only seam (nil in production builds).
 	worktreeResolveOverride func(project, taskID string) string
+	// qaBaselineLookupOverride, when non-nil, replaces the control-plane QA
+	// baseline lookup wired into workflow stores. Test-only seam (nil in
+	// production builds) so gate tests can simulate loss/tamper.
+	qaBaselineLookupOverride gitworktree.QABaselineLookup
 	// fixtureSandbox provisions task-private test databases (V1). Nil when
 	// the control DB or data dir is unavailable — previews then run without
 	// sandbox integration (contract-less projects are unaffected).
@@ -296,6 +301,19 @@ func mergeJSONObjects(raw string, patch map[string]any) string {
 		return raw
 	}
 	return string(next)
+}
+
+// QABaselineLookupAdapter exposes the server's control-plane QA baseline
+// lookup as the plain function the workflow gate helper expects. Test seam
+// first, then the production kv_records-backed lookup. The store-level
+// workspaceID is irrelevant for LoadQABaselinePayload (keys carry project
+// + taskID), but NewStore validates nothing — constructing with an empty
+// workspace is safe for lookups only.
+func (s *Server) QABaselineLookupAdapter() gitworktree.QABaselineLookup {
+	if s != nil && s.qaBaselineLookupOverride != nil {
+		return s.qaBaselineLookupOverride
+	}
+	return workflow.NewStore(s.controlDB, "").LoadQABaselinePayload
 }
 
 func (s *Server) failStaleInteractionSessionsOnStartup() {

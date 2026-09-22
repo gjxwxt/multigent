@@ -223,13 +223,23 @@ func (s *Server) createProjectTaskFromBody(w http.ResponseWriter, r *http.Reques
 				return
 			}
 			t.BaseCommit = baseCommit
-			wtDir, branchName, err := s.worktreeMgr.EnsureWorktreeAt(gitRoot, t.ID, baseCommit, t.BranchName)
+			wtDir, branchName, err, qaCapture := s.worktreeMgr.EnsureWorktreeAt(gitRoot, t.ID, baseCommit, t.BranchName)
 			if err != nil {
 				s.jsonError(w, http.StatusConflict, fmt.Sprintf("prepare git worktree: %v", err))
 				return
 			}
 			t.WorktreeDir = wtDir
 			t.BranchName = branchName
+			// S2-2: persist the capture-time baseline to the control plane
+			// BEFORE the task (and its agent) becomes visible — the gate
+			// trusts only this copy. A failed upload leaves no manifest and
+			// no baseline, so the gate stays on the legacy strict surface.
+			if qaCapture.Baseline.Entries != nil {
+				wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+				if err := wfStore.CaptureQABaselineRecord(name, t.ID, wtDir); err != nil {
+					log.Printf("[qa-baseline] control-plane persist failed for %s/%s: %v", name, t.ID, err)
+				}
+			}
 		} else if strings.TrimSpace(t.BranchName) != "" {
 			s.jsonError(w, http.StatusBadRequest, "a feature branch requires a git repository")
 			return

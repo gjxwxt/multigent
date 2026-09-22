@@ -1370,6 +1370,17 @@ func syncWorkflowHandledDuringRun(root string, ts taskstore.Store, project, agen
 		return false, nil
 	}
 	wfStore := workflowstore.NewStore(db, workspaceID)
+	// S2-2 (reviewer P1): the scheduler drives workflow task re-dispatch for
+	// tasks whose runtime run ended without a completion report; it must see
+	// the same worktree surface as the API-side QA gate, otherwise a task
+	// with a worktree could be silently re-dispatched past an observable
+	// gate.
+	wfStore.WorktreeResolver = func(project, taskID string) string {
+		if strings.TrimSpace(fresh.WorktreeDir) != "" && taskID == fresh.ID {
+			return fresh.WorktreeDir
+		}
+		return ""
+	}
 	run, ok, err := wfStore.RunForTask(project, fresh.ID)
 	if err != nil || !ok {
 		return false, nil

@@ -36,7 +36,7 @@ func newGitWorktree(t *testing.T) string {
 	// protected materialization point (before any agent runs); tests must
 	// mirror that so the gate measures the delivery delta, not absolute
 	// status. Capture BEFORE the test dirties the tree.
-	if err := gitworktree.CaptureQABaseline(dir); err != nil {
+	if _, err := gitworktree.CaptureQABaseline(dir); err != nil {
 		t.Fatalf("capture qa baseline: %v", err)
 	}
 	return dir

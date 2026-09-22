@@ -1,19 +1,22 @@
 package workflow
 
-// Regression suite for fix round S2-1 (Fix A + Fix B), encoding the review
-// gate's acceptance list: gate rejections must leave zero terminal state
-// behind, corrected re-reports succeed and duplicates cannot double-advance,
-// multi-step branches keep intermediate completions intra-branch, the
-// baseline delta catches committed changes and same-path re-modification,
-// and the scaffold-noise false positive from the S2 dogfood is gone.
+// Regression suite for fix rounds S2-1 (Fix A + Fix B) and S2-2 (baseline
+// trust model): gate rejections must leave zero terminal state behind,
+// corrected re-reports succeed, the baseline delta catches committed
+// changes / same-path re-modification / deletion, and the baseline itself
+// is TRUSTED ONLY from the control plane — the agent-writable worktree
+// copy can never win, and a lost baseline fails closed instead of
+// degrading to the weaker absolute surface.
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/gitworktree"
 )
 
@@ -29,11 +32,47 @@ func gitCommand(t *testing.T, dir string, args ...string) *exec.Cmd {
 	return cmd
 }
 
-// TestQABaselineDeltaIgnoresPlatformScaffolding is the direct S2 dogfood
-// repro: scaffold noise (.cursor/, .mcp.json, stray docs) that predates the
-// task must NOT make the gate demand its declaration, while the task's own
-// real change must still be required.
+// newBaselineStore builds a workflow Store over a real control DB, matching
+// the production wiring where baselines live in kv_records.
+func newBaselineStore(t *testing.T) *Store {
+	t.Helper()
+	controlDB, err := db.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { controlDB.Close() })
+	if err := controlDB.UpsertWorkspace(db.Workspace{ID: "ws-baseline", Name: "WS", Slug: "ws-baseline", Root: t.TempDir()}); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	return NewStore(controlDB, "ws-baseline")
+}
+
+// captureBaselineForTask mirrors the production capture flow: fingerprint +
+// persist to the control plane + write the recovery copy and manifest.
+func captureBaselineForTask(t *testing.T, store *Store, project, taskID, wt string) {
+	t.Helper()
+	if err := store.CaptureQABaselineRecord(project, taskID, wt); err != nil {
+		t.Fatalf("capture qa baseline record: %v", err)
+	}
+}
+
+// verifyWithBaseline runs the delivery-scope gate exactly as the branch join
+// does: resolve the trust surface from the control plane, then cross-check.
+func verifyWithBaseline(
+	t *testing.T,
+	store *Store,
+	project, taskID, declared, wt string,
+) error {
+	t.Helper()
+	surf, err := resolveQABaselineSurface(wt, store.QABaselineLookupAdapter(), project, taskID)
+	if err != nil {
+		return err
+	}
+	return verifyWorktreeDeltaAgainstDeclaration(declared, wt, surf)
+}
+
 func TestQABaselineDeltaIgnoresPlatformScaffolding(t *testing.T) {
+	store := newBaselineStore(t)
 	wt := newGitWorktree(t)
 	// Platform materialization noise, present BEFORE baseline capture.
 	for _, p := range []string{".cursor/settings.json", ".mcp.json"} {
@@ -44,32 +83,29 @@ func TestQABaselineDeltaIgnoresPlatformScaffolding(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := gitworktree.CaptureQABaseline(wt); err != nil {
-		t.Fatalf("capture baseline: %v", err)
-	}
+	captureBaselineForTask(t, store, "proj", "task-scaffold", wt)
 	// The task's only change: a test file.
 	if err := os.WriteFile(filepath.Join(wt, "server_test.go"), []byte("package main\n\nfunc TestX() {}\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyQATouchedPathsAgainstWorktree("server_test.go", wt); err != nil {
+	if err := verifyWithBaseline(t, store, "proj", "task-scaffold", "server_test.go", wt); err != nil {
 		t.Fatalf("scaffold noise must not fail an honest completion: %v", err)
 	}
 	// The task's change is still mandatory to declare.
-	err := verifyQATouchedPathsAgainstWorktree("none", wt)
+	err := verifyWithBaseline(t, store, "proj", "task-scaffold", "none", wt)
 	if err == nil || !strings.Contains(err.Error(), "server_test.go") {
 		t.Fatalf("undeclared real change must still fail, got: %v", err)
 	}
 }
 
-// TestQABaselineDeltaCatchesCommittedChange covers GPT's B rejection:
-// committed changes empty the git status, so a path-set-only comparison
-// would miss them. The fingerprinted baseline still reports the file as
-// changed (baseline fingerprint != committed content fingerprint).
+// TestQABaselineDeltaCatchesCommittedChange: committed changes empty the
+// git status, so a path-set-only comparison would miss them. The
+// fingerprinted baseline still reports the file as changed (baseline
+// fingerprint != committed content fingerprint).
 func TestQABaselineDeltaCatchesCommittedChange(t *testing.T) {
+	store := newBaselineStore(t)
 	wt := newGitWorktree(t)
-	if err := gitworktree.CaptureQABaseline(wt); err != nil {
-		t.Fatal(err)
-	}
+	captureBaselineForTask(t, store, "proj", "task-committed", wt)
 	run := func(args ...string) {
 		cmd := gitCommand(t, wt, args...)
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -86,38 +122,37 @@ func TestQABaselineDeltaCatchesCommittedChange(t *testing.T) {
 		t.Fatalf("test setup: worktree should be clean after commit, got %q (%v)", out, err)
 	}
 	// Declaring "none" must STILL fail: the committed delta is a delivery.
-	err := verifyQATouchedPathsAgainstWorktree("none", wt)
+	err := verifyWithBaseline(t, store, "proj", "task-committed", "none", wt)
 	if err == nil || !strings.Contains(err.Error(), "server_test.go") {
 		t.Fatalf("committed change must not escape the gate, got: %v", err)
 	}
 	// Declaring it honestly passes the cross-check (whitelist then rules).
-	if err := verifyQATouchedPathsAgainstWorktree("server_test.go", wt); err != nil {
+	if err := verifyWithBaseline(t, store, "proj", "task-committed", "server_test.go", wt); err != nil {
 		t.Fatalf("honest committed-change declaration must pass: %v", err)
 	}
 }
 
-// TestQABaselineDeltaCatchesSamePathReModification covers the second half of
-// GPT's B rejection: a file modified before the task (baseline captured the
-// modified content) and modified AGAIN by the task must be reported as
-// changed even though its path was already in the baseline.
+// TestQABaselineDeltaCatchesSamePathReModification: a file modified before
+// the task (baseline captured the modified content) and modified AGAIN by
+// the task must be reported as changed even though its path was already in
+// the baseline.
 func TestQABaselineDeltaCatchesSamePathReModification(t *testing.T) {
+	store := newBaselineStore(t)
 	wt := newGitWorktree(t)
 	// Dirty BEFORE baseline: server_test.go already modified vs HEAD.
 	if err := os.WriteFile(filepath.Join(wt, "server_test.go"), []byte("package main\n\nfunc PreExisting() {}\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := gitworktree.CaptureQABaseline(wt); err != nil {
-		t.Fatal(err)
-	}
+	captureBaselineForTask(t, store, "proj", "task-remodify", wt)
 	// The task modifies the SAME file again.
 	if err := os.WriteFile(filepath.Join(wt, "server_test.go"), []byte("package main\n\nfunc TaskEdit() {}\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	err := verifyQATouchedPathsAgainstWorktree("none", wt)
+	err := verifyWithBaseline(t, store, "proj", "task-remodify", "none", wt)
 	if err == nil || !strings.Contains(err.Error(), "server_test.go") {
 		t.Fatalf("same-path re-modification must be reported, got: %v", err)
 	}
-	if err := verifyQATouchedPathsAgainstWorktree("server_test.go", wt); err != nil {
+	if err := verifyWithBaseline(t, store, "proj", "task-remodify", "server_test.go", wt); err != nil {
 		t.Fatalf("declaring the re-modification must pass: %v", err)
 	}
 }
@@ -125,42 +160,99 @@ func TestQABaselineDeltaCatchesSamePathReModification(t *testing.T) {
 // TestQABaselineDeltaCatchesDeletion: a baseline file deleted by the task
 // surfaces as a delta path under its original name.
 func TestQABaselineDeltaCatchesDeletion(t *testing.T) {
+	store := newBaselineStore(t)
 	wt := newGitWorktree(t)
-	if err := gitworktree.CaptureQABaseline(wt); err != nil {
-		t.Fatal(err)
-	}
+	captureBaselineForTask(t, store, "proj", "task-delete", wt)
 	if err := os.Remove(filepath.Join(wt, "server_test.go")); err != nil {
 		t.Fatal(err)
 	}
-	err := verifyQATouchedPathsAgainstWorktree("none", wt)
+	err := verifyWithBaseline(t, store, "proj", "task-delete", "none", wt)
 	if err == nil || !strings.Contains(err.Error(), "server_test.go") {
 		t.Fatalf("deletion must be reported, got: %v", err)
 	}
 }
 
-// TestQAGateCorruptBaselineFailsClosed: a corrupt baseline document must
-// NOT silently downgrade to absolute measurement (that downgrade would be
-// exploitable); the gate fails closed instead.
-func TestQAGateCorruptBaselineFailsClosed(t *testing.T) {
+// TestQAGateLostBaselineFailsClosed (S2-2, reviewer P0-1): the worktree's
+// capture manifest proves a baseline EXISTED; if the control plane cannot
+// produce it (agent destroyed the record path? control-plane loss?), the
+// gate must fail closed — silently degrading to the weaker absolute status
+// surface would let an agent neutralize the gate by staging noise.
+func TestQAGateLostBaselineFailsClosed(t *testing.T) {
+	store := newBaselineStore(t)
 	wt := newGitWorktree(t)
-	if err := os.WriteFile(filepath.Join(wt, ".multigent", "qa_baseline.json"), []byte("{not json"), 0644); err != nil {
+	captureBaselineForTask(t, store, "proj", "task-lost", wt)
+	if err := os.WriteFile(filepath.Join(wt, "server_test.go"), []byte("package main\n\nfunc TestX() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// The control-plane record disappears.
+	if err := store.DeleteQABaselineRecord("proj", "task-lost"); err != nil {
+		t.Fatal(err)
+	}
+	err := verifyWithBaseline(t, store, "proj", "task-lost", "server_test.go", wt)
+	if err == nil || !strings.Contains(err.Error(), "baseline") {
+		t.Fatalf("lost baseline must fail closed, got: %v", err)
+	}
+}
+
+// TestQAGateTamperedWorktreeCopyFailsClosed (S2-2, reviewer P0-1): the
+// agent-writable worktree copy must never win a disagreement with the
+// control plane — a forged local baseline cannot launder real changes.
+func TestQAGateTamperedWorktreeCopyFailsClosed(t *testing.T) {
+	store := newBaselineStore(t)
+	wt := newGitWorktree(t)
+	captureBaselineForTask(t, store, "proj", "task-tamper", wt)
+	if err := os.WriteFile(filepath.Join(wt, "server.go"), []byte("package main\n\nfunc Bad() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// The agent rewrites the local copy to claim the worktree was born
+	// dirty (laundering its own edit into "pre-existing state").
+	forged := map[string]gitworktree.QABaselineEntry{}
+	for _, p := range []string{"server.go", "server_test.go"} {
+		forged[p] = gitworktree.QABaselineEntry{Fingerprint: "forged"}
+	}
+	payload, _ := json.Marshal(gitworktree.QABaseline{
+		SchemaVersion: gitworktree.QABaselineSchemaVersion,
+		HeadCommit:    "deadbeef",
+		Entries:       forged,
+	})
+	if err := os.WriteFile(gitworktree.QABaselinePath(wt), payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := verifyWithBaseline(t, store, "proj", "task-tamper", "server_test.go", wt)
+	if err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+		t.Fatalf("forged worktree baseline must fail closed, got: %v", err)
+	}
+}
+
+// TestQAGateCorruptControlPlaneBaselineFailsClosed: a corrupt control-plane
+// document must not silently downgrade to absolute measurement.
+func TestQAGateCorruptControlPlaneBaselineFailsClosed(t *testing.T) {
+	store := newBaselineStore(t)
+	wt := newGitWorktree(t)
+	captureBaselineForTask(t, store, "proj", "task-corrupt", wt)
+	// Corrupt the authoritative record.
+	if err := store.db.UpsertRecord(qaBaselineTable, store.workspaceID, []string{"proj", "task-corrupt"}, "{not json"); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(wt, "server_test.go"), []byte("package main\n\nfunc TestX() {}\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	err := verifyQATouchedPathsAgainstWorktree("server_test.go", wt)
-	if err == nil || !strings.Contains(err.Error(), "qa baseline") {
-		t.Fatalf("corrupt baseline must fail closed, got: %v", err)
+	err := verifyWithBaseline(t, store, "proj", "task-corrupt", "server_test.go", wt)
+	if err == nil || !strings.Contains(err.Error(), "corrupt") {
+		t.Fatalf("corrupt control-plane baseline must fail closed, got: %v", err)
 	}
 }
 
 // TestQAGateNoBaselineFallsBackAbsolute: worktrees created before the fix
-// have no baseline; the gate falls back to the previous absolute status
-// measurement (still fail-closed, still strict).
+// have NO baseline AND no capture manifest; the gate falls back to the
+// previous absolute status measurement (still fail-closed, still strict).
 func TestQAGateNoBaselineFallsBackAbsolute(t *testing.T) {
+	store := newBaselineStore(t)
 	wt := newGitWorktree(t)
-	if err := os.Remove(filepath.Join(wt, ".multigent", "qa_baseline.json")); err != nil {
+	// Legacy worktree: remove the recovery copy (the fixture captures the
+	// baseline document but never uploads it, so no manifest was ever
+	// written and no control-plane record exists).
+	if err := os.Remove(gitworktree.QABaselinePath(wt)); err != nil {
 		t.Fatal(err)
 	}
 	// Scaffold noise now FAILS again (absolute surface) — documented
@@ -171,8 +263,30 @@ func TestQAGateNoBaselineFallsBackAbsolute(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wt, "server_test.go"), []byte("package main\n\nfunc TestX() {}\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	err := verifyQATouchedPathsAgainstWorktree("server_test.go", wt)
+	err := verifyWithBaseline(t, store, "proj", "task-legacy", "server_test.go", wt)
 	if err == nil || !strings.Contains(err.Error(), ".mcp.json") {
 		t.Fatalf("legacy worktree without baseline must use absolute status, got: %v", err)
+	}
+}
+
+// TestQABaselineCaptureUploadFailureLeavesNoCanary (S2-2 ordering): when the
+// control-plane upload fails, neither the recovery copy nor the manifest may
+// remain — that combination would trigger the fail-closed tamper path for
+// the whole life of the worktree.
+func TestQABaselineCaptureUploadFailureLeavesNoCanary(t *testing.T) {
+	wt := newGitWorktree(t)
+	// The fixture already wrote a worktree-side copy via CaptureQABaseline;
+	// simulate a failed upload by removing the DB-backed store's ability to
+	// persist (nil db) and re-running the record capture.
+	broken := &Store{workspaceID: "ws-baseline"}
+	err := broken.CaptureQABaselineRecord("proj", "task-upload-fail", wt)
+	if err == nil {
+		t.Fatal("upload failure must surface as an error")
+	}
+	if _, err := os.Stat(gitworktree.QABaselinePath(wt)); !os.IsNotExist(err) {
+		t.Fatalf("recovery copy must be rolled back after failed upload: %v", err)
+	}
+	if _, err := os.Stat(gitworktree.QABaselineManifestPath(wt)); !os.IsNotExist(err) {
+		t.Fatalf("manifest must not be written when upload failed: %v", err)
 	}
 }

@@ -68,83 +68,77 @@ func worktreeChangedPaths(worktreeDir string) ([]string, error) {
 	return paths, nil
 }
 
-// worktreeDeliveryDelta resolves the surface the real-change gate measures:
-// the task's delivery delta relative to the platform-recorded baseline when
-// one exists (fix round S2-1, Fix B — the absolute git status conflated
-// platform scaffolding and pre-existing dirty state with the task's own
-// changes), and the previous absolute status surface when no usable
-// baseline exists (older worktrees) — still fail-closed, still strict.
-func worktreeDeliveryDelta(worktreeDir string) ([]string, error) {
-	delta, err := gitworktree.QABaselineWorktreeDelta(worktreeDir)
-	if err == nil {
-		return delta, nil
+// qaBaselineSurface bundles the trust decision for one gate invocation:
+// WHICH measurement surface to use and the baseline document to diff
+// against (nil for the legacy absolute surface).
+//
+// Surface decision (S2-2, reviewer P0 — trust model):
+//   - control-plane baseline found → baseline-delta surface (trusted;
+//     the document lives in kv_records, agents cannot touch it);
+//   - baseline absent but the worktree's capture manifest proves one
+//     EXISTED (new-task tamper/loss case) → ErrQABaselineLost, the gate
+//     FAILS CLOSED instead of degrading to a weaker surface;
+//   - baseline absent, no manifest (legacy worktree that never had a
+//     baseline) → the old absolute git-status surface, still strict.
+type qaBaselineSurface struct {
+	baseline *gitworktree.QABaseline
+}
+
+// resolveQABaselineSurface decides the measurement surface for a gate run.
+// lookup may be nil (store built without control-plane access — tests);
+// a nil lookup is treated as "no baseline anywhere" and falls through to
+// the manifest check so tamper detection still applies.
+func resolveQABaselineSurface(worktreeDir string, lookup gitworktree.QABaselineLookup, project, taskID string) (qaBaselineSurface, error) {
+	if lookup == nil {
+		b, err := gitworktree.LoadQABaselineForGate(worktreeDir, nil, project, taskID)
+		switch {
+		case err == nil:
+			bb := b
+			return qaBaselineSurface{baseline: &bb}, nil
+		case errors.Is(err, gitworktree.ErrNoQABaseline):
+			return qaBaselineSurface{}, nil
+		default:
+			return qaBaselineSurface{}, err
+		}
 	}
-	if !errors.Is(err, gitworktree.ErrNoQABaseline) {
-		// A CORRUPT baseline must not silently downgrade to absolute
-		// measurement (that downgrade would be exploitable); only the
-		// clean "no baseline" case falls back.
-		return nil, fmt.Errorf("qa baseline delta: %w", err)
+	b, err := gitworktree.LoadQABaselineForGate(worktreeDir, lookup, project, taskID)
+	switch {
+	case err == nil:
+		bb := b
+		return qaBaselineSurface{baseline: &bb}, nil
+	case errors.Is(err, gitworktree.ErrNoQABaseline):
+		return qaBaselineSurface{}, nil
+	default:
+		return qaBaselineSurface{}, err
+	}
+}
+
+// realDelta returns the gate's measurement surface for one gate invocation:
+// baseline delta when a trusted baseline exists, absolute status otherwise.
+func (surf qaBaselineSurface) realDelta(worktreeDir string) ([]string, error) {
+	if surf.baseline != nil {
+		return gitworktree.QABaselineWorktreeDelta(worktreeDir, *surf.baseline)
 	}
 	return worktreeChangedPaths(worktreeDir)
 }
 
-// unquoteGitPath decodes a C-quoted git path (octal escapes, backslashes).
-func unquoteGitPath(p string) string {
-	p = p[1 : len(p)-1]
-	var b strings.Builder
-	for i := 0; i < len(p); i++ {
-		if p[i] == '\\' && i+3 < len(p) && p[i+1] >= '0' && p[i+1] <= '7' {
-			var v int
-			_, _ = fmt.Sscanf(p[i+1:i+4], "%o", &v)
-			b.WriteByte(byte(v))
-			i += 3
-			continue
-		}
-		if p[i] == '\\' && i+1 < len(p) {
-			i++
-			b.WriteByte(p[i])
-			continue
-		}
-		b.WriteByte(p[i])
-	}
-	return b.String()
-}
-
-// worktreeObservable reports whether dir exists AND is a readable git
-// worktree. The QA real-change gate is fail-closed (round-19 P0): a
-// declared touched_paths step whose worktree is missing or unreadable must
-// NOT silently downgrade to declaration-only — the caller rejects the
-// completion instead. (An unreadable-but-existing dir also fails here; the
-// distinction is surfaced by the gate's error message.)
-func worktreeObservable(worktreeDir string) bool {
-	info, err := os.Stat(worktreeDir)
-	if err != nil || !info.IsDir() {
-		return false
-	}
-	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
-	cmd.Dir = worktreeDir
-	cmd.Env = gitworktree.SanitizedGitEnv()
-	out, err := cmd.Output()
-	return err == nil && strings.TrimSpace(string(out)) == "true"
-}
-
-// verifyQATouchedPathsAgainstWorktree cross-checks the declared paths
-// against the worktree's real delta. Both directions must hold:
-//
-//   - every REAL change is declared (a business file modified without
-//     declaration = the drift the gate exists to catch; "none" with a dirty
-//     tree fails here);
-//   - every DECLARED path is really changed (claiming test-file edits that
-//     did not happen is treated the same way — declarations must be true).
-//
-// The whitelist (test-artifact classification) then applies to the REAL
-// delta's paths via the same ValidateQATouchedPaths used for declarations,
-// so the accepted surface is identical no matter which side produced it.
-func verifyQATouchedPathsAgainstWorktree(declared, worktreeDir string) error {
-	real, err := worktreeDeliveryDelta(worktreeDir)
+// verifyWorktreeDeltaAgainstDeclaration cross-checks ONE gate's declared
+// paths against ONE measurement surface (see
+// verifyQATouchedPathsAgainstWorktree for the full contract text); the
+// surface parameter is what makes the two checkpoint kinds distinct
+// (S2-2, ⑤): callers pass the surface matching their own scope.
+func verifyWorktreeDeltaAgainstDeclaration(declared string, worktreeDir string, surf qaBaselineSurface) error {
+	real, err := surf.realDelta(worktreeDir)
 	if err != nil {
 		return fmt.Errorf("read worktree changes: %w", err)
 	}
+	return verifyDeclaredAgainstReal(declared, real)
+}
+
+// verifyDeclaredAgainstReal applies the declaration contract (directions
+// 1–3, same wording as the historical implementation) to a concrete
+// real-change set — shared by both checkpoint kinds.
+func verifyDeclaredAgainstReal(declared string, real []string) error {
 	declaredSet := map[string]bool{}
 	if strings.TrimSpace(declared) != "" {
 		for _, line := range strings.Split(declared, "\n") {
@@ -197,4 +191,66 @@ func verifyQATouchedPathsAgainstWorktree(declared, worktreeDir string) error {
 		}
 	}
 	return nil
+}
+
+// unquoteGitPath decodes a C-quoted git path (octal escapes, backslashes).
+func unquoteGitPath(p string) string {
+	if len(p) < 2 || p[0] != '"' || p[len(p)-1] != '"' {
+		return p
+	}
+	p = p[1 : len(p)-1]
+	var b strings.Builder
+	for i := 0; i < len(p); i++ {
+		if p[i] == '\\' && i+1 < len(p) && p[i+1] >= '0' && p[i+1] <= '7' {
+			// Exactly three octal digits (git's C-quote format); a short or
+			// non-octal tail is kept literal instead of silently decoding.
+			if i+3 >= len(p) || p[i+2] < '0' || p[i+2] > '7' || p[i+3] < '0' || p[i+3] > '7' {
+				b.WriteByte(p[i])
+				continue
+			}
+			v := int(p[i+1]-'0')*64 + int(p[i+2]-'0')*8 + int(p[i+3]-'0')
+			if v > 255 {
+				b.WriteByte(p[i])
+				continue
+			}
+			b.WriteByte(byte(v))
+			i += 3
+			continue
+		}
+		if p[i] == '\\' && i+1 < len(p) {
+			i++
+			b.WriteByte(p[i])
+			continue
+		}
+		b.WriteByte(p[i])
+	}
+	return b.String()
+}
+
+// worktreeObservable reports whether dir exists AND is a readable git
+// worktree. The QA real-change gate is fail-closed (round-19 P0): a
+// declared touched_paths step whose worktree is missing or unreadable must
+// NOT silently downgrade to declaration-only — the caller rejects the
+// completion instead. (An unreadable-but-existing dir also fails here; the
+// distinction is surfaced by the gate's error message.)
+func worktreeObservable(worktreeDir string) bool {
+	info, err := os.Stat(worktreeDir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	cmd.Dir = worktreeDir
+	cmd.Env = gitworktree.SanitizedGitEnv()
+	out, err := cmd.Output()
+	return err == nil && strings.TrimSpace(string(out)) == "true"
+}
+
+// verifyQATouchedPathsAgainstWorktree cross-checks the declared paths
+// against the LEGACY absolute status surface. S2-2 ⑤: this helper no longer
+// decides the surface — the two checkpoint kinds carry different scopes and
+// call verifyWorktreeDeltaAgainstDeclaration with their own
+// qaBaselineSurface. The legacy surface keeps the strict historical
+// semantics (absolute status, both directions, test-artifact whitelist).
+func verifyQATouchedPathsAgainstWorktree(declared, worktreeDir string) error {
+	return verifyWorktreeDeltaAgainstDeclaration(declared, worktreeDir, qaBaselineSurface{})
 }

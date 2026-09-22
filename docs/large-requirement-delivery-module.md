@@ -236,6 +236,33 @@ S1→S2 先行的理由：机制层不动 UI/API，改完立即可验；S3 动 A
 
 ## 7. 执行日志（倒序追加）
 
+- 2026-09-22（S2-2 修复轮）：S2-1 补丁经 GPT 复核与独立跨模型复审（真
+  claude-sonnet-4-6）双通道 request_changes，6 项发现收敛后全部修复：
+
+  - **P0-1 基线信任模型重定**：权威基线只存在于控制平面（kv_records
+    `qa_baselines`）；worktree 副本（manifest 0644 可写，金丝雀而非保护层）仅
+    用于恢复与篓改检出。worktree 副本 digest 不匹配 → `ErrQABaselineTampered`
+    fail-closed；manifest 在而控制平面记录丢失 → `ErrQABaselineLost`
+    fail-closed；无 manifest 的老 worktree → 绝对 status 回退（依旧严格）。
+    二次采集前滚动旧副本，采集上传失败不残留副本。
+  - **P0-2 预检 worktree 解析修正**：branch join 预检与落账闸门统一用
+    `workflowRootTaskIDVar`（父任务）解析 worktree，不再误用子任务自身 ID。
+  - **P1-1 预检契约源修正**：branch 契约从**冻结的 branch instance
+    OutputFields**（fan-out 时快照）读取，回退父 run 定义快照；embedded
+    multi-step branch 无契约即拒（fail-closed）——消除“预检过、join 拒”的
+    错契约窗口。
+  - **P1-2 幂等 re-join**：已终态 branch instance 的重报零写返回记录结果；
+    已归档子任务的重报路由到 `resumeArchivedBranchJoin` 续跑 join——重试
+    不再被陈旧拒绝卡死，也不得借重报重新推进父 run。
+  - **P2 加固**：fingerprint 覆盖权限位/symlink/special 文件；
+    `unquoteGitPath` 严格三位八进制校验；交付增量（branch join）与线性 qa
+    步白名单两套度量面彻底分离（QA 编辑业务文件依旧必拒）。
+  - 回归：`internal/workflow/qa_baseline_regression_test.go` 重写至信任模型
+    （9 项）；新增 `internal/api/runtime_branch_precheck_contract_test.go`
+    （5 项）；join HTTP 套件修正 fixture 语义（子任务 Vars 携带父 run ID——
+    与生产 fan-out 对齐）并按 P1-2 契约更新重复上报断言。全仓 `go test ./...`
+    / `go vet` / web `tsc` 全绿。
+
 - 2026-09-22（S2-1 修复轮）：S2 dogfood 于 parallel_workstreams 汇聚处暴露引擎缺陷，
   经评审批准实施两项修复（本文件 §4.5 闸门语义随之修订，后续实现以本条为准）：
 

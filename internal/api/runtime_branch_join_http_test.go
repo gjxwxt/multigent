@@ -88,10 +88,24 @@ func newBranchJoinWorktree(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(dir, ".mcp.json"), []byte("{}"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := gitworktree.CaptureQABaseline(dir); err != nil {
+	if _, err := gitworktree.CaptureQABaseline(dir); err != nil {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+
+// mustUploadQABaseline mirrors the production capture flow for fixtures:
+// fingerprint the worktree and persist the authoritative baseline into the
+// test control plane, then hand the server a lookup override over the same
+// DB (equivalent to s.QABaselineLookupAdapter with the fixture workspace).
+func mustUploadQABaseline(t *testing.T, s *Server, workspaceID, project, taskID, wt string) gitworktree.QABaselineLookup {
+	t.Helper()
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	if err := wfStore.CaptureQABaselineRecord(project, taskID, wt); err != nil {
+		t.Fatalf("upload qa baseline: %v", err)
+	}
+	return wfStore.QABaselineLookupAdapter()
 }
 
 func seedBranchChildRun(t *testing.T, s *Server, workspaceID string) (*entity.Task, string) {
@@ -101,7 +115,7 @@ func seedBranchChildRun(t *testing.T, s *Server, workspaceID string) (*entity.Ta
 		ID: "task-join-child", Title: "WS-2 branch", Status: entity.TaskStatusInProgress,
 		Priority: 2, Assignee: "pm", CreatedAt: now, UpdatedAt: now,
 		Vars: map[string]string{
-			workflowRunIDVar:      "wfr-join", // set properly below
+			workflowRunIDVar:      "", // parent run ID, stamped below before persist
 			workflowStepIDVar:     "parallel",
 			workflowBranchIDVar:   "ws_b",
 			workflowRootTaskIDVar: "task-join-root",
@@ -126,8 +140,44 @@ func seedBranchChildRun(t *testing.T, s *Server, workspaceID string) (*entity.Ta
 	if err != nil {
 		t.Fatal(err)
 	}
-	branchTask.Vars[workflowRunIDVar] = run.ID
+	// S2-2 P0-2/P1-1: the precheck + join now resolve the PARENT run
+	// (task-join-root) for the worktree key and the branch contract. Seed
+	// the parent run + branch instance the production fan-out creates.
+	parentDef := &entity.WorkflowDefinition{
+		ID: "wf-join-parent", Name: "Join parent", Version: 1, Scope: "workspace", StartStepID: "parallel",
+		Steps: []entity.WorkflowStep{{
+			ID: "parallel", Type: "parallel_stage", Title: "Parallel",
+			Branches: []entity.WorkflowBranch{{
+				ID: "ws_b", Title: "WS-2",
+				OutputFields: []entity.WorkflowField{
+					{Name: "branch_summary"}, {Name: "touched_paths"},
+				},
+			}},
+		}},
+		Edges:     []entity.WorkflowEdge{},
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := wfStore.SaveDefinition(parentDef); err != nil {
+		t.Fatal(err)
+	}
+	parentRun, _, err := wfStore.StartRun("sample", "task-join-root", parentDef.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// S2-2 fixture semantics: production fan-out stamps the PARENT run ID
+	// on branch tasks (activateParallelWorkflowStep Vars), so the join's
+	// RunForTask(project, rootTaskID).ID == runID guard holds. The child
+	// run ID is only recorded on the branch instance (ChildRunID).
+	branchTask.Vars[workflowRunIDVar] = parentRun.ID
 	if err := s.ts.AddTask("sample", "pm", branchTask); err != nil {
+		t.Fatal(err)
+	}
+	if err := wfStore.SaveBranchInstance(&entity.WorkflowBranchInstance{
+		RunID: parentRun.ID, StepID: "parallel", BranchID: "ws_b", Status: "running",
+		StartedAt: now, UpdatedAt: now,
+		ChildTaskID: branchTask.ID, ChildRunID: run.ID,
+		OutputFields: []entity.WorkflowField{{Name: "branch_summary"}, {Name: "touched_paths"}},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	return branchTask, run.ID
@@ -166,6 +216,11 @@ func TestBranchJoinRejectionLeavesAllStateRetryable(t *testing.T) {
 	s, workspaceID := newBranchJoinHTTPServer(t)
 	wt := newBranchJoinWorktree(t)
 	s.worktreeResolveOverride = func(project, taskID string) string { return wt }
+	s.qaBaselineLookupOverride = mustUploadQABaseline(t, s, workspaceID, "sample", "task-join-child", wt)
+	// S2-2 P0-2: precheck + join both run under the PARENT task key now.
+	if err := workflowstore.NewStore(s.controlDB, workspaceID).CaptureQABaselineRecord("sample", "task-join-root", wt); err != nil {
+		t.Fatalf("upload parent qa baseline: %v", err)
+	}
 	task, _ := seedBranchChildRun(t, s, workspaceID)
 
 	// The task's real deliverable (a test-file edit) plus an UNDECLARED
@@ -232,11 +287,18 @@ func TestBranchJoinRejectionLeavesAllStateRetryable(t *testing.T) {
 
 // TestBranchJoinDuplicateReportCannotDoubleAdvance: after the child run is
 // terminal, a duplicate step/complete must not re-run the join or advance
-// anything — it fails with a stale/conflict error and the run stays put.
+// anything — S2-2 (P1-2) it returns the RECORDED result idempotently (200,
+// zero writes: identical branch timestamps, no parent re-advance) instead of
+// a stale rejection that would wedge a retrying agent.
 func TestBranchJoinDuplicateReportCannotDoubleAdvance(t *testing.T) {
 	s, workspaceID := newBranchJoinHTTPServer(t)
 	wt := newBranchJoinWorktree(t)
 	s.worktreeResolveOverride = func(project, taskID string) string { return wt }
+	s.qaBaselineLookupOverride = mustUploadQABaseline(t, s, workspaceID, "sample", "task-join-child", wt)
+	// S2-2 P0-2: precheck + join both run under the PARENT task key now.
+	if err := workflowstore.NewStore(s.controlDB, workspaceID).CaptureQABaselineRecord("sample", "task-join-root", wt); err != nil {
+		t.Fatalf("upload parent qa baseline: %v", err)
+	}
 	task, _ := seedBranchChildRun(t, s, workspaceID)
 
 	// Real delta: one test-file edit, honestly declared.
@@ -247,17 +309,60 @@ func TestBranchJoinDuplicateReportCannotDoubleAdvance(t *testing.T) {
 	if rec := postBranchStepComplete(t, s, workspaceID, task.ID, outputs); rec.Code != http.StatusOK {
 		t.Fatalf("first completion must succeed, got %d: %s", rec.Code, rec.Body.String())
 	}
-	// Duplicate.
-	rec := postBranchStepComplete(t, s, workspaceID, task.ID, outputs)
-	if rec.Code == http.StatusOK {
-		t.Fatalf("duplicate completion must not succeed: %s", rec.Body.String())
-	}
-	run, _, err := workflowstore.NewStore(s.controlDB, workspaceID).RunForTask("sample", task.ID)
+	// Snapshot the recorded branch + runs after the first (consumed)
+	// completion, so the duplicate can be proven write-free.
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	branchAfterFirst, err := wfStore.BranchInstancesForStep(task.Vars[workflowRunIDVar], "parallel")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.Status != "completed" || run.ActiveStepID != "" {
-		t.Fatalf("duplicate must not change run state, got %q@%q", run.Status, run.ActiveStepID)
+	parentRunAfterFirst, _, err := wfStore.RunByID("sample", task.Vars[workflowRunIDVar])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Duplicate: idempotent re-report returns the recorded result, never a
+	// second join or a stale rejection.
+	rec := postBranchStepComplete(t, s, workspaceID, task.ID, outputs)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("duplicate completion must return the recorded result idempotently, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Branch  entity.WorkflowBranchInstance `json:"branch"`
+		AllDone bool                          `json:"allDone"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode duplicate payload: %v", err)
+	}
+	if payload.Branch.BranchID != "ws_b" || payload.Branch.Status != "completed" {
+		t.Fatalf("duplicate must return the recorded branch result, got %+v", payload.Branch)
+	}
+	if len(branchAfterFirst) != 1 || !payload.Branch.FinishedAt.Equal(branchAfterFirst[0].FinishedAt) {
+		t.Fatalf("duplicate must return the recorded (not rewritten) branch result: recorded finishedAt=%v, returned=%v", branchAfterFirst[0].FinishedAt, payload.Branch.FinishedAt)
+	}
+
+	stored, err := wfStore.BranchInstancesForStep(task.Vars[workflowRunIDVar], "parallel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 || stored[0].Status != "completed" || !stored[0].FinishedAt.Equal(branchAfterFirst[0].FinishedAt) {
+		t.Fatalf("duplicate must leave the stored branch instance untouched: first finishedAt=%v, after duplicate=%v", branchAfterFirst[0].FinishedAt, stored[0].FinishedAt)
+	}
+	childRunAfterDuplicate, _, err := wfStore.RunForTask("sample", task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if childRunAfterDuplicate.Status != "completed" || childRunAfterDuplicate.ActiveStepID != "" {
+		t.Fatalf("duplicate must not change child run state, got %q@%q", childRunAfterDuplicate.Status, childRunAfterDuplicate.ActiveStepID)
+	}
+	parentRunAfterDuplicate, _, err := wfStore.RunByID("sample", task.Vars[workflowRunIDVar])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parentRunAfterDuplicate.Status != parentRunAfterFirst.Status || parentRunAfterDuplicate.ActiveStepID != parentRunAfterFirst.ActiveStepID || parentRunAfterDuplicate.UpdatedAt != parentRunAfterFirst.UpdatedAt {
+		t.Fatalf("duplicate must not re-advance the parent run: first %q@%q(%s) vs duplicate %q@%q(%s)",
+			parentRunAfterFirst.Status, parentRunAfterFirst.ActiveStepID, parentRunAfterFirst.UpdatedAt,
+			parentRunAfterDuplicate.Status, parentRunAfterDuplicate.ActiveStepID, parentRunAfterDuplicate.UpdatedAt)
 	}
 }
 

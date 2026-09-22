@@ -169,12 +169,15 @@ func sanitizeTaskID(taskID string) string {
 // EnsureWorktree prepares a dedicated git worktree for a task.
 // If the worktree already exists, it returns its path and checked-out branch.
 // Otherwise, it fetches the base branch, creates the feature branch, and adds the worktree.
-func (m *Manager) EnsureWorktree(projectRoot, taskID, baseBranch, featureBranch string) (string, string, error) {
+// The QABaselineCapture result (S2-2) carries a freshly captured baseline
+// document to the caller for control-plane persistence; the zero value
+// means "no new capture" (existing worktree or capture failure).
+func (m *Manager) EnsureWorktree(projectRoot, taskID, baseBranch, featureBranch string) (string, string, error, QABaselineCapture) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	unlock, err := acquireProjectLock(projectRoot)
 	if err != nil {
-		return "", "", err
+		return "", "", err, QABaselineCapture{}
 	}
 	defer unlock()
 
@@ -186,7 +189,7 @@ func (m *Manager) EnsureWorktree(projectRoot, taskID, baseBranch, featureBranch 
 	}
 	baseCommit, err := m.resolveBaseCommit(projectRoot, baseBranch)
 	if err != nil {
-		return "", "", err
+		return "", "", err, QABaselineCapture{}
 	}
 	return m.ensureWorktree(projectRoot, taskID, baseBranch, baseCommit, featureBranch)
 }
@@ -205,13 +208,16 @@ func (m *Manager) ResolveBaseCommit(projectRoot, baseBranch string) (string, err
 }
 
 // EnsureWorktreeAt prepares a task worktree from an already resolved commit.
-// Callers should persist the same commit as the task's baseCommit.
-func (m *Manager) EnsureWorktreeAt(projectRoot, taskID, baseCommit, featureBranch string) (string, string, error) {
+// Callers should persist the same commit as the task's baseCommit. The
+// QABaselineCapture result (S2-2) carries a freshly captured baseline
+// document to the caller for control-plane persistence; the zero value
+// means "no new capture" (existing worktree or capture failure).
+func (m *Manager) EnsureWorktreeAt(projectRoot, taskID, baseCommit, featureBranch string) (string, string, error, QABaselineCapture) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	unlock, err := acquireProjectLock(projectRoot)
 	if err != nil {
-		return "", "", err
+		return "", "", err, QABaselineCapture{}
 	}
 	defer unlock()
 	return m.ensureWorktree(projectRoot, taskID, "", baseCommit, featureBranch)
@@ -401,17 +407,26 @@ func uidOwnedByOther(path string) bool {
 	return int(stat.Uid) != os.Getuid()
 }
 
-func (m *Manager) ensureWorktree(projectRoot, taskID, baseBranch, baseCommit, featureBranch string) (string, string, error) {
+// QABaselineCapture carries a successfully captured baseline document out
+// of ensureWorktree so the API layer can persist it to the control plane
+// (the gitworktree package has no DB access by design).
+type QABaselineCapture struct {
+	Baseline gitworktreeBaseline
+}
+
+type gitworktreeBaseline = QABaseline
+
+func (m *Manager) ensureWorktree(projectRoot, taskID, baseBranch, baseCommit, featureBranch string) (string, string, error, QABaselineCapture) {
 
 	projectRoot = strings.TrimSpace(projectRoot)
 	if projectRoot == "" {
-		return "", "", fmt.Errorf("project root is required")
+		return "", "", fmt.Errorf("project root is required"), QABaselineCapture{}
 	}
 
 	// Verify that projectRoot is a git repository
 	gitDir := filepath.Join(projectRoot, ".git")
 	if _, err := os.Stat(gitDir); err != nil {
-		return "", "", fmt.Errorf("project root is not a git repository: %w", err)
+		return "", "", fmt.Errorf("project root is not a git repository: %w", err), QABaselineCapture{}
 	}
 	sanitizeSharedGitConfig(projectRoot)
 
@@ -420,12 +435,12 @@ func (m *Manager) ensureWorktree(projectRoot, taskID, baseBranch, baseCommit, fe
 		// Worktree directory already exists
 		branch, err := checkedOutBranch(targetDir)
 		if err != nil {
-			return "", "", fmt.Errorf("read existing worktree branch: %w", err)
+			return "", "", fmt.Errorf("read existing worktree branch: %w", err), QABaselineCapture{}
 		}
 		if err := preserveRuntimeContract(projectRoot, targetDir); err != nil {
 			log.Printf("[worktree] preserve runtime contract warning for %s: %v", targetDir, err)
 		}
-		return targetDir, branch, nil
+		return targetDir, branch, nil, QABaselineCapture{}
 	}
 
 	baseBranch = strings.TrimSpace(baseBranch)
@@ -436,7 +451,7 @@ func (m *Manager) ensureWorktree(projectRoot, taskID, baseBranch, baseCommit, fe
 
 	// Create parent directory for worktrees
 	if err := os.MkdirAll(filepath.Dir(targetDir), 0755); err != nil {
-		return "", "", fmt.Errorf("create worktrees parent dir: %w", err)
+		return "", "", fmt.Errorf("create worktrees parent dir: %w", err), QABaselineCapture{}
 	}
 
 	startPoint := strings.TrimSpace(baseCommit)
@@ -447,7 +462,7 @@ func (m *Manager) ensureWorktree(projectRoot, taskID, baseBranch, baseCommit, fe
 		var err error
 		startPoint, err = m.resolveBaseCommit(projectRoot, baseBranch)
 		if err != nil {
-			return "", "", err
+			return "", "", err, QABaselineCapture{}
 		}
 	}
 
@@ -472,27 +487,28 @@ func (m *Manager) ensureWorktree(projectRoot, taskID, baseBranch, baseCommit, fe
 	var stderr bytes.Buffer
 	cmdWorktree.Stderr = &stderr
 	if err := cmdWorktree.Run(); err != nil {
-		return "", "", fmt.Errorf("git worktree add failed: %w (stderr: %s)", err, stderr.String())
+		return "", "", fmt.Errorf("git worktree add failed: %w (stderr: %s)", err, stderr.String()), QABaselineCapture{}
 	}
 
 	branch, err := checkedOutBranch(targetDir)
 	if err != nil {
-		return "", "", fmt.Errorf("read created worktree branch: %w", err)
+		return "", "", fmt.Errorf("read created worktree branch: %w", err), QABaselineCapture{}
 	}
 	if err := preserveRuntimeContract(projectRoot, targetDir); err != nil {
 		log.Printf("[worktree] preserve runtime contract warning for %s: %v", targetDir, err)
 	}
-	// QA baseline (fix round S2-1, Fix B): record the freshly materialized
-	// worktree's file fingerprints BEFORE any agent runs. The touched_paths
-	// gate then measures the task's delivery delta against this baseline
-	// instead of the absolute git status, so pre-existing scaffold/dirty
-	// state can no longer fail an honest completion. Best-effort: a capture
-	// failure is logged and leaves no baseline — the gate falls back to the
-	// fail-closed absolute measurement rather than a fabricated baseline.
-	if err := CaptureQABaseline(targetDir); err != nil {
-		log.Printf("[worktree] qa baseline capture warning for %s: %v", targetDir, err)
+	// QA baseline (fix round S2-1, Fix B; S2-2 hardened): fingerprint the
+	// freshly materialized worktree BEFORE any agent runs and hand the
+	// document to the caller for CONTROL-PLANE persistence — the gate
+	// trusts only the control-plane copy, never a file inside the
+	// agent-writable worktree (reviewer S2-2 P0). Capture failure stays
+	// best-effort (no manifest, no baseline → legacy absolute surface).
+	qaBaseline, qaBaselineErr := CaptureQABaseline(targetDir)
+	if qaBaselineErr != nil {
+		log.Printf("[worktree] qa baseline capture warning for %s: %v", targetDir, qaBaselineErr)
+		return targetDir, branch, nil, QABaselineCapture{}
 	}
-	return targetDir, branch, nil
+	return targetDir, branch, nil, QABaselineCapture{Baseline: qaBaseline}
 }
 
 func hasRemote(remoteList, wanted string) bool {

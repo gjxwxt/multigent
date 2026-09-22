@@ -41,7 +41,7 @@ func TestWorktreeReaperSweep_TerminalOnly(t *testing.T) {
 
 	mkWorktree := func(t *testing.T, taskID string) string {
 		t.Helper()
-		dir, _, err := s.worktreeMgr.EnsureWorktree(gitRoot, taskID, "main", "feat/"+taskID)
+		dir, _, err, _ := s.worktreeMgr.EnsureWorktree(gitRoot, taskID, "main", "feat/"+taskID)
 		if err != nil {
 			t.Fatalf("EnsureWorktree %s: %v", taskID, err)
 		}
@@ -95,7 +95,7 @@ func TestWorktreeReaperSweep_CheckpointsDirtyWorktree(t *testing.T) {
 	if err := s.ts.AddTask("sample", "worker", task); err != nil {
 		t.Fatalf("add task: %v", err)
 	}
-	dir, _, err := s.worktreeMgr.EnsureWorktree(gitRoot, task.ID, "main", "feat/"+task.ID)
+	dir, _, err, _ := s.worktreeMgr.EnsureWorktree(gitRoot, task.ID, "main", "feat/"+task.ID)
 	if err != nil {
 		t.Fatalf("EnsureWorktree: %v", err)
 	}

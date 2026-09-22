@@ -1008,6 +1008,49 @@ func (s *Server) handleRuntimeWorkflowBranchComplete(w http.ResponseWriter, r *h
 	s.completeRuntimeWorkflowBranchHTTP(w, r, principal, t, agent, body)
 }
 
+// resumeArchivedBranchJoin drives the idempotent branch-join path for an
+// ARCHIVED branch child that re-reports its completion (S2-2, reviewer
+// P1-2). The child run is already terminal, so the step-level transition
+// would fail with ErrStaleWorkflowTransition and leave the parent join
+// unattempted on every retry — exactly the wedge the S2 dogfood hit.
+// CompleteBranchAndMaybeAdvance is idempotent for an already-terminal
+// branch instance (returns the recorded result, zero writes), so routing
+// the re-report here resumes the missed parent advance safely. A re-report
+// for a branch that was recorded as FAILED returns the recorded failure
+// verbatim: the agent cannot retry a failed branch by re-reporting (that
+// contract predates S2-2 and the human gate owns failed-branch recovery).
+func (s *Server) resumeArchivedBranchJoin(w http.ResponseWriter, r *http.Request, principal runtimeAgentPrincipal, t *entity.Task, agent string, body runtimeTaskCompleteBody, stepStatus string) {
+	result, err := s.completeRuntimeWorkflowBranch(principal.WorkspaceID, principal.Project, t, body.Outputs, stepStatus)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.auditLog(auditLogInput{
+		WorkspaceID:  principal.WorkspaceID,
+		ActorType:    "agent",
+		ActorID:      runtimeAgentAddress(principal),
+		Action:       "runtime.workflow.branch.complete.resumed",
+		ResourceType: "task",
+		ResourceID:   principal.Project + "/" + agent + "/" + t.ID,
+		Summary:      "Archived branch re-report resumed the parent join",
+		After: map[string]any{
+			"taskId":   t.ID,
+			"branchId": strings.TrimSpace(t.Vars[workflowBranchIDVar]),
+			"allDone":  result.AllDone,
+		},
+		Request: r,
+	})
+	if err := s.advanceParentAfterBranchCompletion(principal.WorkspaceID, principal.Project, result, r); err != nil {
+		s.serverError(w, err)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"task":    taskToRow(t, principal.Project, agent, true),
+		"branch":  result.Branch,
+		"allDone": result.AllDone,
+	})
+}
+
 func (s *Server) completeRuntimeWorkflowBranchHTTP(w http.ResponseWriter, r *http.Request, principal runtimeAgentPrincipal, t *entity.Task, agent string, body runtimeTaskCompleteBody) {
 	doneStatus := normalizeDoneStatus(body.Status, body.Error)
 	stepStatus := "completed"
@@ -1078,6 +1121,17 @@ func (s *Server) handleRuntimeWorkflowStepComplete(w http.ResponseWriter, r *htt
 	t.Summary = strings.TrimSpace(body.Summary)
 	t.LastError = strings.TrimSpace(body.Error)
 	t.UpdatedAt = now
+	// S2-2 (reviewer P1-2): an archived branch child re-reporting after a
+	// partial join (agent retried past a network blip, or the runtime
+	// crashed between child-run completion and the parent join) must
+	// resume the join, not get a stale rejection. The step-level
+	// CompleteAndAdvance below would bounce off the terminal child run
+	// with ErrStaleWorkflowTransition; detect that shape up front and
+	// route the report straight to the idempotent branch-join path.
+	if strings.TrimSpace(t.Vars[workflowBranchIDVar]) != "" && t.Status.IsTerminal() {
+		s.resumeArchivedBranchJoin(w, r, principal, t, agent, body, stepStatus)
+		return
+	}
 	// Platform-owned gates. An agent reporting that CI is ready is not evidence
 	// that CI is ready: recompute here and hold the step when it is not. A failed
 	// completion is never held — trapping an agent that is trying to report a
@@ -1255,9 +1309,21 @@ func (s *Server) precheckBranchJoinGate(workspaceID, project string, t *entity.T
 		return nil
 	}
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	// S2-2 (reviewer P0-2): the join gate runs against the PARENT task's
+	// worktree (CompleteBranchAndMaybeAdvance → checkBranchQAGate receives
+	// rootTaskID), so the precheck must resolve the same surface. The
+	// child's own worktree is a different checkout; measuring it would
+	// verify the wrong delta.
+	rootTaskID := strings.TrimSpace(t.Vars[workflowRootTaskIDVar])
+	if rootTaskID == "" {
+		rootTaskID = t.ID
+	}
 	wfStore.WorktreeResolver = func(project, taskID string) string {
 		return s.resolveTaskWorktreeDir(project, taskID)
 	}
+	// S2-2 (reviewer P0-1): the precheck must measure against the same
+	// trusted baseline the authoritative join gate will use.
+	wfStore.QABaselineLookup = s.QABaselineLookupAdapter()
 	run, ok, err := wfStore.RunForTask(project, t.ID)
 	if err != nil || !ok {
 		// No child run: the store-level gate will judge later; nothing to
@@ -1277,11 +1343,57 @@ func (s *Server) precheckBranchJoinGate(workspaceID, project string, t *entity.T
 		// branch workflow and never reaches the parent join.
 		return nil
 	}
-	// The join consumes the BRANCH's declared output contract, not the
-	// step's (they are identical for generated single-step branches; for
-	// embedded multi-step branches the branch-level contract is what
-	// aggregateBranchOutputs maps through).
-	branchStep := entity.WorkflowStep{ID: current.ID, Title: current.Title, OutputFields: branchOutputFields(def, current)}
+	// The join consumes the PARENT definition's branch contract (S2-2,
+	// reviewer P1-1): CompleteBranchAndMaybeAdvance maps outputs through
+	// branchDef.OutputFields from the PARENT run's snapshot, not the child
+	// definition's step fields. Reading the child's own fields can pass a
+	// contract the join will reject (or vice versa). Fail closed when the
+	// parent run cannot be read: predicting nothing is safer than
+	// predicting a contract that is not the one the join enforces.
+	parentRunID := strings.TrimSpace(t.Vars[workflowRunIDVar])
+	parentRun, parentFound, err := wfStore.RunByID(project, parentRunID)
+	if err != nil {
+		return fmt.Errorf("branch join precheck: read parent run %s: %w", parentRunID, err)
+	}
+	branchStep := entity.WorkflowStep{ID: current.ID, Title: current.Title}
+	// Preferred contract source: the branch INSTANCE's frozen OutputFields
+	// (S2-2, reviewer P1-1) — captured when the run started, immune to later
+	// parent-definition edits, and exactly what the join's aggregate maps
+	// through for new completions. Fallback: the parent definition snapshot.
+	if parentFound {
+		if instances, ierr := wfStore.ListBranchInstances(parentRun.ID); ierr == nil {
+			for _, inst := range instances {
+				if inst.BranchID == strings.TrimSpace(t.Vars[workflowBranchIDVar]) && inst.StepID == strings.TrimSpace(t.Vars[workflowStepIDVar]) && len(inst.OutputFields) > 0 {
+					branchStep.OutputFields = append([]entity.WorkflowField{}, inst.OutputFields...)
+					break
+				}
+			}
+		}
+		if len(branchStep.OutputFields) == 0 {
+			parentDef, ok, err := wfStore.RunDefinition(parentRun)
+			if err != nil {
+				return fmt.Errorf("branch join precheck: read parent definition: %w", err)
+			}
+			if ok {
+				if parentStep, ok := workflowStepByID(parentDef.Steps, strings.TrimSpace(t.Vars[workflowStepIDVar])); ok {
+					if branchDef, ok := workflowstore.WorkflowBranchByID(parentStep.Branches, strings.TrimSpace(t.Vars[workflowBranchIDVar])); ok {
+						branchStep.OutputFields = append([]entity.WorkflowField{}, branchDef.OutputFields...)
+					}
+				}
+			}
+		}
+	}
+	if len(branchStep.OutputFields) == 0 {
+		// Parent contract unavailable: fall back to the child's start-step
+		// fields ONLY for generated single-step branches (where they are
+		// identical by construction); embedded multi-step branches must
+		// fail closed — their contract lives in the parent snapshot and a
+		// wrong prediction here would double-enforce a foreign contract.
+		if branchHasEmbeddedWorkflow(def) {
+			return fmt.Errorf("branch join precheck: parent branch contract for %s/%s is unavailable — refusing to pre-validate against the child step's fields", t.Vars[workflowStepIDVar], t.Vars[workflowBranchIDVar])
+		}
+		branchStep.OutputFields = branchOutputFields(def, current)
+	}
 	values, err := workflowstore.NormalizeWorkflowOutputValuesForPreview(branchStep, outputs, "", "")
 	if err != nil {
 		// Output normalization failures (missing required fields) also
@@ -1289,7 +1401,19 @@ func (s *Server) precheckBranchJoinGate(workspaceID, project string, t *entity.T
 		// fail the same way.
 		return err
 	}
-	return wfStore.PreviewBranchQAGate(project, t.ID, branchStep, values)
+	return wfStore.PreviewBranchQAGate(project, rootTaskID, branchStep, values)
+}
+
+// branchHasEmbeddedWorkflow reports whether a branch definition was derived
+// from an embedded branch.Workflow (multi-step custom branch) rather than a
+// generated single-step stub: the generated stub's start step carries the
+// parent branch contract verbatim, an embedded one does not.
+func branchHasEmbeddedWorkflow(def entity.WorkflowDefinition) bool {
+	if len(def.Steps) != 1 {
+		return true
+	}
+	// Generated stubs always use the canonical "start" step id.
+	return strings.TrimSpace(def.Steps[0].ID) != "start"
 }
 
 func (s *Server) completeRuntimeWorkflowStep(workspaceID, project string, t *entity.Task, outputs map[string]string, stepStatus string) (workflowstore.TransitionResult, bool, error) {
@@ -1304,6 +1428,9 @@ func (s *Server) completeRuntimeWorkflowStep(workspaceID, project string, t *ent
 	wfStore.WorktreeResolver = func(project, taskID string) string {
 		return s.resolveTaskWorktreeDir(project, taskID)
 	}
+	// S2-2 (reviewer P0-1): linear QA steps keep the legacy whitelist
+	// surface, but a lost/tampered baseline still has to fail closed.
+	wfStore.QABaselineLookup = s.QABaselineLookupAdapter()
 	if _, ok, err := wfStore.RunForTask(project, t.ID); err != nil || !ok {
 		return result, false, err
 	}
@@ -1338,6 +1465,10 @@ func (s *Server) completeRuntimeWorkflowBranch(workspaceID, project string, t *e
 	wfStore.WorktreeResolver = func(project, taskID string) string {
 		return s.resolveTaskWorktreeDir(project, taskID)
 	}
+	// S2-2 (reviewer P0-1): the authoritative join gate reads the trusted
+	// baseline from the control plane, never from the agent-writable
+	// worktree copy.
+	wfStore.QABaselineLookup = s.QABaselineLookupAdapter()
 	summary := strings.TrimSpace(t.Summary)
 	if summary == "" {
 		summary = strings.TrimSpace(t.LastError)
@@ -1608,6 +1739,10 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 			UpdatedAt:     now,
 			InputArtifact: inputArtifact,
 			InputValues:   inputValues,
+			// S2-2 (reviewer P1-1): freeze the branch's output contract on the
+			// instance so the join precheck reads the contract the run was
+			// STARTED with, immune to later parent-definition edits.
+			OutputFields: append([]entity.WorkflowField{}, branch.OutputFields...),
 		}
 		if err := wfStore.SaveBranchInstance(inst); err != nil {
 			return err
