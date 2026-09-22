@@ -71,7 +71,7 @@ func TestCommitAndPushReviewChangesDoesNotExecuteRepoConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.commitAndPushReviewChanges("sample", "pm", task); err != nil {
+	if _, _, err := s.commitAndPushReviewChanges("sample", "pm", task); err != nil {
 		t.Fatalf("commitAndPushReviewChanges: %v", err)
 	}
 
@@ -104,7 +104,7 @@ func TestCommitAndPushReviewChangesRespectsProjectLock(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = s.commitAndPushReviewChanges("sample", "pm", task)
+		_, _, _ = s.commitAndPushReviewChanges("sample", "pm", task)
 	}()
 
 	select {
@@ -163,7 +163,7 @@ func TestCommitAndPushReviewChangesCommitWithoutHostIdentity(t *testing.T) {
 
 	// Also prove env hygiene: run the commit with HOME pointed at an empty dir
 	// so even a leaked host env would find no global config.
-	if err := s.commitAndPushReviewChanges("sample", "pm", task); err != nil {
+	if _, _, err := s.commitAndPushReviewChanges("sample", "pm", task); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 
@@ -189,7 +189,7 @@ func TestCommitAndPushReviewChangesCleanTreeWithStderrNoise(t *testing.T) {
 	s, _ := newConnectionGrantPolicyServer(t)
 	task := &entity.Task{ID: "t-quiet", BranchName: "main", WorktreeDir: repo}
 
-	if err := s.commitAndPushReviewChanges("sample", "pm", task); err != nil {
+	if _, _, err := s.commitAndPushReviewChanges("sample", "pm", task); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 
@@ -221,7 +221,7 @@ func TestCommitAndPushReviewChangesConcurrentSerialize(t *testing.T) {
 				WorktreeDir: repo,
 			}
 			_ = os.WriteFile(filepath.Join(repo, "fix_"+string(rune('a'+n))+".txt"), []byte("fix"), 0644)
-			_ = s.commitAndPushReviewChanges("sample", "pm", task)
+			_, _, _ = s.commitAndPushReviewChanges("sample", "pm", task)
 		}(i)
 	}
 	wg.Wait()

@@ -679,7 +679,7 @@ func TestPreviewTurn_CommitReceiptsOnReviewApproval(t *testing.T) {
 	}
 
 	// 2. Run commitAndPushReviewChanges
-	if err := s.commitAndPushReviewChanges("sample", "pm", task); err != nil {
+	if _, _, err := s.commitAndPushReviewChanges("sample", "pm", task); err != nil {
 		t.Fatalf("commitAndPushReviewChanges failed: %v", err)
 	}
 

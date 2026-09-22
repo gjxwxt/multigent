@@ -175,7 +175,7 @@ func TestCommitAndPushReviewChanges(t *testing.T) {
 	}
 
 	// 1. Clean workspace -> nothing committed
-	if err := s.commitAndPushReviewChanges("sample", "pm", task); err != nil {
+	if _, _, err := s.commitAndPushReviewChanges("sample", "pm", task); err != nil {
 		t.Fatalf("commit clean workspace: %v", err)
 	}
 	logCmd := exec.Command("git", "log", "-n", "1", "--oneline")
@@ -187,7 +187,7 @@ func TestCommitAndPushReviewChanges(t *testing.T) {
 
 	// 2. Modified workspace from Preview Copilot -> automatically committed
 	_ = os.WriteFile(filepath.Join(tmpDir, "copilot_fix.txt"), []byte("reviewed and fixed"), 0644)
-	if err := s.commitAndPushReviewChanges("sample", "pm", task); err != nil {
+	if _, _, err := s.commitAndPushReviewChanges("sample", "pm", task); err != nil {
 		t.Fatalf("commit modified workspace: %v", err)
 	}
 

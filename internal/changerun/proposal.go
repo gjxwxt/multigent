@@ -489,3 +489,10 @@ func RedactSecrets(line string) string {
 	out = authHeader.ReplaceAllString(out, "${1}${2}[REDACTED]")
 	return out
 }
+
+// DecodeProposalForTest exposes payload decoding to the api package's
+// regression tests (recordReviewChangeRun asserts the applied proposal's
+// state/patch/postimage through the raw kv records).
+func DecodeProposalForTest(payload string) (*Proposal, error) {
+	return decodeProposal(payload)
+}
