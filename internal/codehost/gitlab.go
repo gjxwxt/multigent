@@ -282,6 +282,13 @@ func normalizeGitLabCloneURL(raw string) string {
 // BaseURL returns the API base URL (including /api/v4) this host talks to.
 // Callers outside the package use it to decide whether a clone URL belongs to
 // this GitLab instance.
+// APIToken exposes the connection's PAT for transient, process-scoped git
+// auth (e.g. GIT_CONFIG_* http.extraHeader during a workspace rebuild clone).
+// The token must never be written to disk, repo config, or a remote URL.
+func (g *GitLabHost) APIToken() string {
+	return g.token
+}
+
 func (g *GitLabHost) BaseURL() string {
 	if g == nil {
 		return ""

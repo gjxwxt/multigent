@@ -136,6 +136,9 @@ type Server struct {
 	agentStartGates map[string]*uint32
 	// agentStartTestHook is nil in production; tests swap the gate body.
 	agentStartTestHook func(key string) func()
+	// workspaceHealthCache dedupes workspace-health origin probes (60s TTL);
+	// invalidated by a successful workspace rebuild.
+	workspaceHealthCache workspaceHealthCache
 	// driftWarnedMu guards driftWarnedNodes: heartbeat handlers run
 	// concurrently per node, and a bare map write under that concurrency is
 	// a fatal `concurrent map writes` crash (GPT review P0-2).
@@ -625,6 +628,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/projects/{name}/agents/{agent}/context-bindings", s.handleAgentContextBindings)
 	mux.HandleFunc("GET /api/v1/projects/{name}/agents/{agent}/context", s.handleGetAgentContext)
 	mux.HandleFunc("GET /api/v1/projects/{name}/agents/{agent}/runtime/readiness", s.handleGetAgentRuntimeReadiness)
+	mux.HandleFunc("GET /api/v1/projects/{name}/workspace/health", s.handleGetProjectWorkspaceHealth)
+	mux.HandleFunc("POST /api/v1/projects/{name}/workspace/rebuild", s.handleRebuildProjectWorkspace)
 	mux.HandleFunc("GET /api/v1/projects/{name}/agents/{agent}/interactions/active", s.handleAgentInteractionStatus)
 	mux.HandleFunc("GET /api/v1/projects/{name}/channels", s.handleListProjectChannels)
 	mux.HandleFunc("POST /api/v1/projects/{name}/channels/provision", s.handleProvisionProjectChannel)
