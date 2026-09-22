@@ -2,8 +2,10 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -151,5 +153,16 @@ func (s *Server) reclaimTerminalWorktree(project string, task *entity.Task, task
 			s.pushTaskBranchBestEffort(project, task, wtDir, sha)
 		}
 	}
-	return s.worktreeMgr.CleanupWorktree(gitRoot, taskID)
+	if err := s.worktreeMgr.CleanupWorktree(gitRoot, taskID); err != nil {
+		// Sandbox-written root-owned files (node_modules etc.) defeat the
+		// service process's rm exactly like the historical project orphans
+		// did. Repair ownership once, retry the removal; if it STILL survives,
+		// surface the same truthful failure the orphan delete endpoint does —
+		// removal then needs elevated permissions on the host.
+		_ = exec.Command("chmod", "-R", "u+rwX", wtDir).Run()
+		if err := s.worktreeMgr.CleanupWorktree(gitRoot, taskID); err != nil {
+			return fmt.Errorf("worktree survives ownership repair (root-owned files? remove manually with elevated permissions): %w", err)
+		}
+	}
+	return nil
 }
