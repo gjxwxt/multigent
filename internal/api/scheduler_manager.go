@@ -423,6 +423,7 @@ func (s *Server) StartWorkspaceScheduler() error {
 		return fmt.Errorf("scheduler manager is unavailable")
 	}
 	s.startRuntimeReaper(context.Background())
+	s.startWorktreeReaper(context.Background())
 	return s.sched.StartWorkspace()
 }
 

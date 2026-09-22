@@ -126,6 +126,9 @@ type Server struct {
 	runtimeReaperOnce           sync.Once
 	runtimeReaperDone           chan struct{}
 	runtimeReaperCancel         context.CancelFunc
+	worktreeReaperOnce          sync.Once
+	worktreeReaperDone          chan struct{}
+	worktreeReaperCancel        context.CancelFunc
 	runtimeTaskTokenMu          sync.Mutex
 	// agentStartMu guards per-worker task/wakeup start serialization (P2 soak
 	// autoStart race): two autoStarts landing on the same agent in the same
@@ -479,6 +482,7 @@ func (s *Server) ShutdownGracefully(ctx context.Context) {
 	// The runtime reaper must exit BEFORE the control DB closes (Q0 PR-2):
 	// its loop queries runtime_runs and would panic against a closed store.
 	s.stopRuntimeReaper()
+	s.stopWorktreeReaper()
 	_ = s.controlDB.Close()
 }
 
