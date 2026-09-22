@@ -628,6 +628,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/projects/{name}/agents/{agent}/context-bindings", s.handleAgentContextBindings)
 	mux.HandleFunc("GET /api/v1/projects/{name}/agents/{agent}/context", s.handleGetAgentContext)
 	mux.HandleFunc("GET /api/v1/projects/{name}/agents/{agent}/runtime/readiness", s.handleGetAgentRuntimeReadiness)
+	mux.HandleFunc("GET /api/v1/projects/{name}/agents/{agent}/runtime/slot", s.handleGetAgentRuntimeSlot)
+	mux.HandleFunc("POST /api/v1/projects/{name}/agents/{agent}/runtime/slot/release", s.handleReleaseAgentRuntimeSlot)
 	mux.HandleFunc("GET /api/v1/projects/{name}/workspace/health", s.handleGetProjectWorkspaceHealth)
 	mux.HandleFunc("POST /api/v1/projects/{name}/workspace/rebuild", s.handleRebuildProjectWorkspace)
 	mux.HandleFunc("GET /api/v1/projects/{name}/agents/{agent}/interactions/active", s.handleAgentInteractionStatus)

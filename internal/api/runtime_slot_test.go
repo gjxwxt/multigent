@@ -1821,3 +1821,69 @@ func TestAgentStartGateSerializesLocalStarts(t *testing.T) {
 		t.Fatalf("both starts must pass the gate, exited=%d", exited)
 	}
 }
+
+// ── Slot observability (scheduling observability module) ────────────────────
+
+func TestRuntimeSlotStateEmpty(t *testing.T) {
+	s, workspaceID := slotTestServer(t)
+	resp := s.runtimeSlotState(workspaceID, "sample", "pm", time.Now().UTC())
+	if resp.Occupied || resp.Stale || resp.Releasable {
+		t.Fatalf("empty slot must report unoccupied, got %+v", resp)
+	}
+}
+
+func TestRuntimeSlotStateOccupiedAndStale(t *testing.T) {
+	s, workspaceID := slotTestServer(t)
+	slotTestNode(t, s, workspaceID)
+	now := time.Now().UTC()
+	task := &entity.Task{ID: "task-slot-holder", Title: "Slot holder", Status: entity.TaskStatusInProgress, Priority: 2, CreatedAt: now, UpdatedAt: now}
+	if err := s.ts.AddTask("sample", "pm", task); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
+	hb := &entity.HeartbeatConfig{}
+	if _, err := s.enqueueSpecificRuntimeTaskRunFromRequest(workspaceID, "sample", "pm", task, hb, "http://127.0.0.1:1", "admin"); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	// Claim the run so it is running with a live lease.
+	claim, ok, err := s.controlDB.ClaimRuntimeRun(workspaceID, "rtn-slot", 90, nil)
+	if err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	// Force the lease far into the past WITHOUT bumping generation (the
+	// renewal path would do that); UpsertRuntimeRun preserves the generation.
+	expired := now.Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+	claim.LeaseExpiresAt = expired
+	if err := s.controlDB.UpsertRuntimeRun(claim); err != nil {
+		t.Fatalf("age lease: %v", err)
+	}
+
+	resp := s.runtimeSlotState(workspaceID, "sample", "pm", now)
+	if !resp.Occupied {
+		t.Fatalf("slot must report occupied, got %+v", resp)
+	}
+	if !resp.Stale || !resp.Releasable {
+		t.Fatalf("expired-lease run must be stale+releasable, got %+v", resp)
+	}
+	if resp.Run == nil || resp.Run.ID != claim.ID || !resp.Run.LeaseExpired {
+		t.Fatalf("run view must name the stale run, got %+v", resp.Run)
+	}
+	if resp.Task == nil || resp.Task.ID != "task-slot-holder" {
+		t.Fatalf("task view must name the holding task, got %+v", resp.Task)
+	}
+
+	// Release via the same fenced path the reaper uses; slot must free up.
+	if err := s.releaseStaleSlot(workspaceID, "sample", "pm", now); err != nil {
+		t.Fatalf("release stale slot: %v", err)
+	}
+	after := s.runtimeSlotState(workspaceID, "sample", "pm", now)
+	if after.Occupied {
+		t.Fatalf("slot must be free after release, got %+v", after)
+	}
+	stored, err := s.ts.GetTask("sample", "pm", "task-slot-holder")
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if stored.Status != entity.TaskStatusPending && stored.Status != entity.TaskStatusDoneFailed {
+		t.Fatalf("reaped task must land in a dispatchable/terminal state per reaper semantics, got %s", stored.Status)
+	}
+}

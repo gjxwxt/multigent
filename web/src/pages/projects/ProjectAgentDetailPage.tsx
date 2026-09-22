@@ -1488,6 +1488,7 @@ export default function ProjectAgentDetailPage({ projectIdOverride, agentNameOve
           const ctx = ctxState.data
           return (
             <div className="space-y-8">
+              {canConfigureThisAgent && <AgentSlotPanel project={projectId} agentName={agentName} />}
               {canConfigureThisAgent && (
                 <section data-tour-agent-model-config>
                   <SectionHeader icon={Settings2} title={t('agentDetail.modelCredentials')} />
@@ -3578,6 +3579,138 @@ function HumanTasksPanel({ project, member }: { project: string; member: string 
           </div>
         )}
         <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
+      </div>
+    </section>
+  )
+}
+
+// ── Agent execution slot observability ──────────────────────────────────────
+// One agent runs one runtime run at a time. This panel shows who holds the
+// slot (run, task, lease) and lets operators release a stale holder — the
+// same fenced transition the reaper would perform.
+
+type SlotRun = {
+  id: string
+  taskId?: string
+  status: string
+  runtimeNodeId?: string
+  startedAt?: string
+  leaseExpiresAt?: string
+  leaseExpired: boolean
+  errorCode?: string
+}
+
+type SlotTask = {
+  id: string
+  title?: string
+  status: string
+  agent?: string
+  summary?: string
+}
+
+type SlotState = {
+  occupied: boolean
+  dispatchable?: boolean
+  stale: boolean
+  releasable: boolean
+  run?: SlotRun
+  task?: SlotTask
+  note?: string
+}
+
+function AgentSlotPanel({ project, agentName }: { project: string; agentName: string }) {
+  const { t } = useTranslation()
+  const formatDateTime = useFormatDateTime()
+  const [state, setState] = useState<SlotState | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [releasing, setReleasing] = useState(false)
+
+  const load = useCallback(async () => {
+    try {
+      setLoadError(null)
+      const data = await apiFetch<SlotState>(
+        `/api/v1/projects/${encodeURIComponent(project)}/agents/${encodeURIComponent(agentName)}/runtime/slot`,
+      )
+      setState(data)
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : String(err))
+    }
+  }, [project, agentName])
+
+  useEffect(() => {
+    void load()
+    const timer = setInterval(() => void load(), 30000)
+    return () => clearInterval(timer)
+  }, [load])
+
+  const release = async () => {
+    setReleasing(true)
+    try {
+      await apiPost(`/api/v1/projects/${encodeURIComponent(project)}/agents/${encodeURIComponent(agentName)}/runtime/slot/release`, {})
+      await load()
+    } finally {
+      setReleasing(false)
+    }
+  }
+
+  const dot = state?.occupied
+    ? state.stale ? 'bg-red-500' : 'bg-emerald-500'
+    : 'bg-neutral-300 dark:bg-zinc-600'
+  const stateLabel = !state
+    ? t('api.loading')
+    : state.occupied
+      ? state.stale
+        ? t('agentSlot.stale', { defaultValue: '槽位被僵尸 run 占用' })
+        : t('agentSlot.busy', { defaultValue: '执行中' })
+      : state.dispatchable === false && state.run
+        ? t('agentSlot.freeing', { defaultValue: '上一 run 已过期，等待回收' })
+        : t('agentSlot.idle', { defaultValue: '空闲' })
+
+  return (
+    <section data-tour-agent-slot>
+      <SectionHeader icon={Activity} title={t('agentSlot.title', { defaultValue: '执行槽位' })} />
+      <p className="mt-1 text-sm text-neutral-500 dark:text-zinc-500">{t('agentSlot.hint', { defaultValue: 'Agent 同一时刻只执行一个 run。卡死时可在这里看到占位者并释放。' })}</p>
+      <div className="mt-3 rounded-lg border border-neutral-200/80 bg-white p-4 dark:border-zinc-700/60 dark:bg-zinc-900/40">
+        {loadError && <p className="text-sm text-red-500 dark:text-red-400">{loadError}</p>}
+        {!loadError && (
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <p className="flex items-center gap-2 text-sm font-medium text-neutral-800 dark:text-zinc-200">
+                <span className={`inline-block size-2 rounded-full ${dot}`} />
+                {stateLabel}
+              </p>
+              {state?.run && (
+                <p className="mt-1 truncate text-xs text-neutral-500 dark:text-zinc-500">
+                  run <span className="font-mono">{state.run.id}</span>
+                  {state.run.status && <> · {state.run.status}</>}
+                  {state.run.startedAt && <> · {t('agentSlot.started', { defaultValue: '开始于' })} {formatDateTime(state.run.startedAt)}</>}
+                </p>
+              )}
+              {state?.task && (
+                <p className="mt-0.5 truncate text-xs text-neutral-500 dark:text-zinc-500">
+                  {t('agentSlot.task', { defaultValue: '任务' })}: {state.task.title || state.task.id} · {state.task.status}
+                </p>
+              )}
+              {state?.run?.leaseExpiresAt && (
+                <p className="mt-0.5 text-xs text-neutral-400 dark:text-zinc-500">
+                  {t('agentSlot.lease', { defaultValue: '租约至' })} {formatDateTime(state.run.leaseExpiresAt)}
+                  {state.run.leaseExpired && <span className="ml-1 text-red-500 dark:text-red-400">{t('agentSlot.leaseExpired', { defaultValue: '（已过期）' })}</span>}
+                </p>
+              )}
+              {state?.note && state.stale && <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">{state.note}</p>}
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <button type="button" onClick={() => void load()} className={secondaryButtonCls} title={t('common.refresh')}>
+                <RefreshCw className="size-3.5" />
+              </button>
+              {state?.releasable && (
+                <button type="button" onClick={() => void release()} disabled={releasing} className={primaryButtonCls}>
+                  {releasing ? t('api.loading') : t('agentSlot.release', { defaultValue: '释放槽位' })}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </section>
   )
