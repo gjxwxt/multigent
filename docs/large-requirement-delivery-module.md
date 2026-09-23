@@ -236,6 +236,26 @@ S1→S2 先行的理由：机制层不动 UI/API，改完立即可验；S3 动 A
 
 ## 7. 执行日志（倒序追加）
 
+- 2026-09-23（S2-2.3 修复轮，用户评审第 1+2 项）：用户对 12f1fe94/f37e85d7 的
+  四项评审中先关闭两项代码问题：①P0 急切白名单——join 闸门在
+  checkBranchQAGate 里直接调 ValidateQATouchedPaths，交付分支声明业务文件
+  在 delivery 语义生效前就被拒绝（低层测试 TestDeliveryCheckpointAllows
+  BusinessFiles 直调 verifyWorktreeDeltaAgainstDeclaration 绕过了正式入口，
+  全绿但入口仍坏）。契约拆分：ValidateTouchedPathFormat（通用：格式 +
+  禁区 CI/部署/凭据/agent-config，两种检查点都拒绝）vs
+  ValidateQATouchedPaths（QA 角色：通用 + 测试工件白名单，仅线性 QA）；
+  交付白名单仍由 verifyDeclared Direction 3 的 surface flag 控制。②P1
+  度量归属——join 前无合并，父工作树不可能持有分支 delta；闸门改为度量
+  分支子任务自身工作树 + 自身捕获时基线：precheck 键 t.ID，权威 join gate
+  新增 deliveryTaskID 参数（taskID 保持 run 查找句柄）。正式入口契约测试
+  TestPrecheckUsesBranchWorktreeNotParentWorktree 重写为双工作树（分支编辑
+  vs 父树噪音）+ 每任务基线、编辑前捕获。收尾补正向全链测试
+  TestBranchJoinHTTPBusinessDeliveryEndToEnd（df3e19cb+fa618213）：业务
+  server.go 经生产 HTTP 入口完成 join，核验子任务归档、子 run 终态、
+  branch 实例记录业务申报、父 run 汇聚推进。本轮权限范围澄清：通用校验
+  禁止 CI/部署/凭据/agent-config 是当前工作包的权限边界，不是所有研发
+  任务的永久规则；需要改这些文件的需求走受控授权步骤。
+
 - 2026-09-23（S2-2.2 修复轮，独立复审）：对 77b9118c+09cb58e5 最终代码的真
   claude-sonnet-4-6 独立复审返回 request_changes（1 P0 + 2 P1 + 3 P2），全部
   修复于 12f1fe94：①P0 崩溃窗口 re-drive 竞态——并发重报的 CAS 败者把
