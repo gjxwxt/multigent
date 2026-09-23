@@ -1,6 +1,7 @@
 package api
 
 import (
+	controldb "github.com/multigent/multigent/internal/db"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -71,6 +72,13 @@ const (
 	workflowRunIDVar      = "workflow_run_id"
 	workflowStepIDVar     = "workflow_step_id"
 	workflowBranchIDVar   = "workflow_branch_id"
+
+	// workflowFanoutBaseCommitVar (closure item 2) persists the fan-out's
+	// frozen base commit on the parent task before the first branch
+	// materialization. Every re-drive reads this var verbatim, so a main
+	// ref that moved between drives can never change the baseline the
+	// branches start from.
+	workflowFanoutBaseCommitVar = "workflow_fanout_base_commit"
 )
 
 type runtimeConfirmRequestBody struct {
@@ -1697,6 +1705,33 @@ func (s *Server) moveWorkflowTaskToAgent(workspaceID, project, previousAgent, ne
 	return nil
 }
 
+// branchTaskHasExecutionEvidence (closure item 3) decides whether a branch
+// task's worktree may be rebuilt after a partial materialization. Positive
+// execution evidence — a child workflow run, a runtime run in any state, or a
+// step instance that advanced past its initial state — means an agent may
+// have touched the worktree; the caller must keep it and fail closed instead
+// of re-capturing a baseline over it. Only "no evidence at all" allows the
+// clean rebuild path.
+func (s *Server) branchTaskHasExecutionEvidence(workspaceID, project, taskID string, wfStore *workflowstore.Store) (bool, string) {
+	if wfStore != nil {
+		if run, found, err := wfStore.RunForTask(project, taskID); err == nil && found {
+			return true, "child workflow run " + run.ID + " (status " + run.Status + ")"
+		}
+	}
+	if s.controlDB != nil && strings.TrimSpace(workspaceID) != "" {
+		runs, err := s.controlDB.ListRuntimeRuns(controldb.RuntimeRunFilter{
+			WorkspaceID: workspaceID,
+			ProjectID:   project,
+			TaskID:      taskID,
+			Limit:       1,
+		})
+		if err == nil && len(runs) > 0 {
+			return true, "runtime run " + runs[0].ID + " (status " + runs[0].Status + ")"
+		}
+	}
+	return false, ""
+}
+
 func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgent string, completed *entity.Task, transition workflowstore.TransitionResult, r *http.Request) error {
 	if completed == nil || transition.Next == nil || transition.NextInst == nil {
 		return nil
@@ -1714,22 +1749,18 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 	for _, inst := range existing {
 		existingByBranch[inst.BranchID] = true
 	}
-	now := time.Now().UTC()
-	completed.Status = entity.TaskStatusInProgress
-	completed.Assignee = project + "/" + previousAgent
-	completed.UpdatedAt = now
-	completed.FinishedAt = nil
-	s.annotateTaskAssignee(workspaceID, project, completed)
-	if err := s.ts.PersistTask(project, previousAgent, completed); err != nil {
-		return err
-	}
-	// Review fix (P1-1): resolve the fan-out baseline ONCE, before the
-	// loop — every branch must inherit the SAME immutable commit. The
-	// parent task's BaseCommit is the frozen value from task creation;
-	// resolving main per-branch inside the loop could observe a moving
-	// ref and give branches different bases.
+	// Review fix round 2 (closure item 2 — baseline frozen ACROSS drives):
+	// resolving main once per CALL is not enough. A partial failure plus a
+	// re-drive after main moved would resolve a DIFFERENT commit on the
+	// second call and hand later branches a different baseline. The frozen
+	// value is therefore persisted in the parent task's Vars BEFORE the
+	// first materialization, and every re-drive reads it verbatim.
 	fanoutBaseCommit := strings.TrimSpace(completed.BaseCommit)
-	if fanoutBaseCommit == "" {
+	if persisted := strings.TrimSpace(completed.Vars[workflowFanoutBaseCommitVar]); persisted != "" {
+		// A previous drive already froze the baseline: it wins over any
+		// recomputation (this is the cross-retry pin).
+		fanoutBaseCommit = persisted
+	} else if fanoutBaseCommit == "" {
 		gitRootForResolve := s.resolveProjectGitRoot(project)
 		if _, statErr := os.Stat(filepath.Join(gitRootForResolve, ".git")); statErr == nil {
 			resolved, rErr := s.worktreeMgr.ResolveBaseCommit(gitRootForResolve, "main")
@@ -1738,6 +1769,21 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 			}
 			fanoutBaseCommit = resolved
 		}
+	}
+	if fanoutBaseCommit != "" && strings.TrimSpace(completed.Vars[workflowFanoutBaseCommitVar]) == "" {
+		if completed.Vars == nil {
+			completed.Vars = map[string]string{}
+		}
+		completed.Vars[workflowFanoutBaseCommitVar] = fanoutBaseCommit
+	}
+	now := time.Now().UTC()
+	completed.Status = entity.TaskStatusInProgress
+	completed.Assignee = project + "/" + previousAgent
+	completed.UpdatedAt = now
+	completed.FinishedAt = nil
+	s.annotateTaskAssignee(workspaceID, project, completed)
+	if err := s.ts.PersistTask(project, previousAgent, completed); err != nil {
+		return err
 	}
 	for _, branch := range step.Branches {
 		branch.ID = strings.TrimSpace(branch.ID)
@@ -1821,7 +1867,13 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 				branchTask.BaseBranch = "main"
 				// branch.ID comes from workflow definitions (template authors),
 				// so sanitize it before it lands in a git refspec argument.
-				branchTask.BranchName = "feature/wf-" + gitworktree.SanitizeTaskID(branch.ID)
+				// Closure item 1: the branch name must be unique ACROSS runs —
+				// a fixed feature/wf-<branchID> would collide when the same
+				// template runs twice, and EnsureWorktreeAt would then check
+				// out the PREVIOUS run's branch tip instead of starting from
+				// the frozen baseline. runID is unique per run, so
+				// runID+branchID is unique per (run, branch).
+				branchTask.BranchName = "feature/wf-" + gitworktree.SanitizeTaskID(transition.Run.ID) + "-" + gitworktree.SanitizeTaskID(branch.ID)
 				wtDir, branchName, wtErr, qaCapture := s.worktreeMgr.EnsureWorktreeAt(gitRoot, branchTask.ID, fanoutBaseCommit, branchTask.BranchName)
 				if wtErr != nil {
 					return fmt.Errorf("fan-out branch %q: materialize worktree: %w", branch.ID, wtErr)
@@ -1848,11 +1900,19 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 					if _, found, lErr := wfStore.LoadQABaselinePayload(project, branchTask.ID); lErr != nil {
 						return fmt.Errorf("fan-out branch %q: check existing qa baseline: %w", branch.ID, lErr)
 					} else if !found {
-						log.Printf("[fanout] branch %q task %s: worktree exists without a control-plane baseline (interrupted prior materialization); rebuilding", branch.ID, branchTask.ID)
-						if _, _, cErr, _ := s.worktreeMgr.EnsureWorktreeAt(gitRoot, branchTask.ID, fanoutBaseCommit, ""); cErr != nil {
-							// best-effort first close is not required; CleanupWorktree below is the real retirement
-							_ = cErr
+						// Closure item 3: "no baseline" alone does NOT prove
+						// the agent never saw this worktree. Rebuild is only
+						// allowed when there is NO execution evidence. Any
+						// positive evidence (child workflow run, runtime run,
+						// non-initial step instance) keeps the worktree and
+						// blocks this fan-out fail-closed: an operator must
+						// resolve it (restore the baseline or cancel the
+						// branch) — silently re-capturing a baseline over an
+						// agent-touched worktree would launder history.
+						if executed, evidence := s.branchTaskHasExecutionEvidence(workspaceID, project, branchTask.ID, wfStore); executed {
+							return fmt.Errorf("fan-out branch %q: task %s has a worktree but no control-plane baseline, and execution evidence exists (%s); refusing to re-capture a baseline over a possibly agent-touched worktree — restore the baseline record or retire the branch explicitly", branch.ID, branchTask.ID, evidence)
 						}
+						log.Printf("[fanout] branch %q task %s: worktree exists without a control-plane baseline and with NO execution evidence (interrupted prior materialization); rebuilding", branch.ID, branchTask.ID)
 						if err := s.worktreeMgr.CleanupWorktree(gitRoot, branchTask.ID); err != nil {
 							return fmt.Errorf("fan-out branch %q: retire unmeasured worktree for clean re-materialization: %w", branch.ID, err)
 						}
