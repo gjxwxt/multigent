@@ -236,6 +236,22 @@ S1→S2 先行的理由：机制层不动 UI/API，改完立即可验；S3 动 A
 
 ## 7. 执行日志（倒序追加）
 
+- 2026-09-23（S2 v2 执行阶段启动，用户批准收尾）：S2-2.3 定点修复与回归通过，
+  进入真实 S2。执行包重写为 v2（work/evidence/s22-round/s2-execution-package.md，
+  本地证据）：①冻结需求版本（SRS @ 项目 repo `309a8d4`）与共同基线 SHA
+  （origin/main @ `f34e686`），两个工作包显式 HTTP 任务创建（BaseBranch=main →
+  各自 worktree + 捕获时基线），不再用 fan-out——现场核实 fan-out 分支子任务
+  无 BaseBranch/WorktreeDir，`AddTask` 直插绕过 write.go 的 EnsureWorktreeAt
+  基线采集路径（机制缺口记录在案，S3 候选修复）；②平台内集成任务产出唯一
+  候选 SHA，废弃平台外手工合并；平台外补状态/补集成不计入自动交付成功；
+  ③独立 QA 针对候选 SHA，qa_signoff 人审收尾。推送范围核实完成：origin/dev
+  落后本地 dev 84 提交（快进推送语义），凭据形态命中均为 redact 测试占位值，
+  runbook 全占位符化，私有未跟踪文件不在任何提交中。历史 run 恢复文档关闭
+  落账问题（b49728c5）：移除"零写入/无部分持久化窗口"虚假声称，改为诚实的
+  部分失败语义（步骤 1/2 间存在持久化窗口，幂等重试收敛），补版本前提/
+  状态备份/并发控制/负责人+通知验证；**继续保持未批准、未执行**。VM 仍跑
+  3c3d6ae4，部署 c1a058ff 是新 S2 的第一步（独立批准项）。
+
 - 2026-09-23（S2-2.3 修复轮，用户评审第 1+2 项）：用户对 12f1fe94/f37e85d7 的
   四项评审中先关闭两项代码问题：①P0 急切白名单——join 闸门在
   checkBranchQAGate 里直接调 ValidateQATouchedPaths，交付分支声明业务文件
