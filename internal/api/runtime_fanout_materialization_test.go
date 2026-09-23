@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -336,4 +337,113 @@ func TestFanoutJoinRejectionKeepsWorktreeRetryable(t *testing.T) {
 	if _, err := os.Stat(task.WorktreeDir); !os.IsNotExist(err) {
 		t.Fatalf("accepted branch worktree must be cleaned up, stat err=%v", err)
 	}
+}
+
+// TestFanoutRebuildsWorktreeWithoutBaseline (review P0-1): a crash between
+// worktree creation and baseline persist leaves a worktree on disk with NO
+// control-plane baseline. A re-drive must detect that shape, retire the
+// unmeasured worktree, and re-materialize so the capture happens — not
+// silently skip the persist and brick the branch at join time.
+func TestFanoutRebuildsWorktreeWithoutBaseline(t *testing.T) {
+	s, workspaceID := newBranchJoinHTTPServer(t)
+	s.worktreeMgr = gitworktreeManagerForTest()
+	gitRoot, baseCommit := buildFanoutGitWorkspace(t, s)
+	seedFanoutParentRun(t, s, workspaceID, baseCommit)
+
+	rec := postBranchStepComplete(t, s, workspaceID, "task-fanout-root", map[string]string{
+		"branch_summary": "contract frozen",
+		"touched_paths":  "contract.md",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("parent start: %d %s", rec.Code, rec.Body.String())
+	}
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	run, _, err := wfStore.RunForTask("sample", "task-fanout-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instances, err := wfStore.BranchInstancesForStep(run.ID, "parallel")
+	if err != nil || len(instances) != 2 {
+		t.Fatalf("instances: %v %d", err, len(instances))
+	}
+
+	// Simulate the interrupted-materialization shape for branch[0]:
+	// worktree on disk, control-plane baseline deleted (as if the crash
+	// happened between EnsureWorktreeAt and CaptureQABaselineRecord, and
+	// the record was rolled back).
+	childID := instances[0].ChildTaskID
+	task, err := s.ts.GetTask("sample", "pm", childID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wfStore.DeleteQABaselineRecord("sample", childID); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, _ := wfStore.LoadQABaselinePayload("sample", childID); found {
+		t.Fatal("precondition: baseline must be gone")
+	}
+	if _, err := os.Stat(task.WorktreeDir); err != nil {
+		t.Fatalf("precondition: worktree must exist: %v", err)
+	}
+
+	// Simulate the crash shape: branch had its worktree created but the
+	// instance never landed (crash between EnsureWorktreeAt and
+	// SaveBranchInstance). The production re-drive re-runs
+	// activateParallelWorkflowStep (the parent transition is retried by
+	// the engine's re-drive), which skips branches WITH instances and
+	// rebuilds the branch whose instance is missing.
+	if err := s.controlDB.DeleteRecord("workflow_branch_instances", workspaceID, []string{run.ID, instances[0].StepID, instances[0].BranchID}); err != nil {
+		t.Fatalf("simulate crash-before-instance: %v", err)
+	}
+	// Re-drive: re-invoke the activation entry with the parent task as the
+	// completed step (same shape the engine's re-drive uses).
+	parentTask, err := s.ts.GetTask("sample", "pm", "task-fanout-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parallelStep := parentStepForTest(t, wfStore, &run)
+	transition := workflowstore.TransitionResult{Run: run, Next: &parallelStep, NextInst: &entity.WorkflowStepInstance{StepID: "parallel", Status: "pending"}}
+	if err := s.activateParallelWorkflowStep(workspaceID, "sample", "pm", parentTask, transition, nil); err != nil {
+		t.Fatalf("re-drive activation: %v", err)
+	}
+
+	// The control-plane baseline must now EXIST for the re-materialized
+	// branch — the rebuild path captured it.
+	if _, found, lErr := wfStore.LoadQABaselinePayload("sample", childID); lErr != nil || !found {
+		t.Fatalf("re-drive must persist a baseline for the rebuilt branch: found=%v err=%v", found, lErr)
+	}
+	// The rebuilt worktree must exist and be a DIFFERENT directory-or-same
+	// but freshly captured; its baseline payload must fingerprint CLEAN
+	// state (no phantom entries).
+	payload, _, _ := wfStore.LoadQABaselinePayload("sample", childID)
+	var baseline struct {
+		Entries map[string]struct {
+			Fingerprint string `json:"fingerprint"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal([]byte(payload), &baseline); err != nil {
+		t.Fatalf("baseline payload: %v", err)
+	}
+	if len(baseline.Entries) == 0 {
+		t.Fatal("rebuilt baseline must have entries")
+	}
+	if _, err := os.Stat(filepath.Join(gitRoot, ".multigent", "worktrees", childID)); err != nil {
+		t.Fatalf("rebuilt worktree must exist: %v", err)
+	}
+}
+
+// parentStepForTest loads the parent run definition's parallel step.
+func parentStepForTest(t *testing.T, wfStore *workflowstore.Store, run *entity.WorkflowRun) entity.WorkflowStep {
+	t.Helper()
+	def, ok, err := wfStore.RunDefinition(*run)
+	if err != nil || !ok {
+		t.Fatalf("run definition: ok=%v err=%v", ok, err)
+	}
+	for _, s := range def.Steps {
+		if s.ID == run.ActiveStepID {
+			return s
+		}
+	}
+	t.Fatalf("parallel step %q not found in parent definition", run.ActiveStepID)
+	return entity.WorkflowStep{}
 }

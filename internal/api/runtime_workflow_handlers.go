@@ -1023,6 +1023,15 @@ func (s *Server) handleRuntimeWorkflowBranchComplete(w http.ResponseWriter, r *h
 // verbatim: the agent cannot retry a failed branch by re-reporting (that
 // contract predates S2-2 and the human gate owns failed-branch recovery).
 func (s *Server) resumeArchivedBranchJoin(w http.ResponseWriter, r *http.Request, principal runtimeAgentPrincipal, t *entity.Task, agent string, body runtimeTaskCompleteBody, stepStatus string) {
+	// Cleanup note (review P2-2): this path handles a branch task whose
+	// completion ALREADY reached the child run's terminal state once —
+	// i.e. the first completion ran handleRuntimeWorkflowStepComplete's
+	// transition.Done branch, where the accepted-join cleanup
+	// (cleanupTaskDeliveryArtifacts after completeRuntimeWorkflowBranch)
+	// already retired the worktree, or the join was rejected and the
+	// worktree was deliberately kept for this retry. Either way this
+	// resume must NOT clean up again here: the join result decides, and
+	// the first completion's cleanup already ran for the accepted case.
 	result, err := s.completeRuntimeWorkflowBranch(principal.WorkspaceID, principal.Project, t, body.Outputs, stepStatus)
 	if err != nil {
 		s.jsonError(w, http.StatusBadRequest, err.Error())
@@ -1714,6 +1723,22 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 	if err := s.ts.PersistTask(project, previousAgent, completed); err != nil {
 		return err
 	}
+	// Review fix (P1-1): resolve the fan-out baseline ONCE, before the
+	// loop — every branch must inherit the SAME immutable commit. The
+	// parent task's BaseCommit is the frozen value from task creation;
+	// resolving main per-branch inside the loop could observe a moving
+	// ref and give branches different bases.
+	fanoutBaseCommit := strings.TrimSpace(completed.BaseCommit)
+	if fanoutBaseCommit == "" {
+		gitRootForResolve := s.resolveProjectGitRoot(project)
+		if _, statErr := os.Stat(filepath.Join(gitRootForResolve, ".git")); statErr == nil {
+			resolved, rErr := s.worktreeMgr.ResolveBaseCommit(gitRootForResolve, "main")
+			if rErr != nil {
+				return fmt.Errorf("fan-out: resolve base commit: %w", rErr)
+			}
+			fanoutBaseCommit = resolved
+		}
+	}
 	for _, branch := range step.Branches {
 		branch.ID = strings.TrimSpace(branch.ID)
 		if branch.ID == "" || existingByBranch[branch.ID] {
@@ -1734,8 +1759,15 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 		inputValues := workflowBranchInputValuesForFields(transition.Current, workflowBranchInputFields(branch, *startStep))
 		inputArtifact := workflowBranchInputArtifact(step, transition.Current, branch, inputValues)
 		branchTask := &entity.Task{
-			ID:          entity.NewTaskID(),
-			Title:       strings.TrimSpace(completed.Title + " · " + branch.Title),
+			ID: entity.NewTaskID(),
+			// Review fix (P0-1 re-drive dedup): the idempotency key makes a
+			// partial-failure re-drive reuse the SAME branch task instead
+			// of creating a duplicate pending task under the same branchID
+			// (which would also orphan the first task's worktree+baseline).
+			// AddTask returns Conflict with t.ID rewritten to the existing
+			// task's ID when the key matches an active task.
+			IdempotencyKey: "fanout/" + transition.Run.ID + "/" + step.ID + "/" + branch.ID,
+			Title:          strings.TrimSpace(completed.Title + " · " + branch.Title),
 			Type:        completed.Type,
 			Priority:    completed.Priority,
 			Assignee:    project + "/" + nextAgent,
@@ -1759,7 +1791,14 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 			branchTask.Type = entity.TaskTypeChore
 		}
 		if err := s.ts.AddTask(project, nextAgent, branchTask); err != nil {
-			return err
+			var conflict *errs.ConflictError
+			if !errors.As(err, &conflict) {
+				return err
+			}
+			// Idempotency hit: branchTask.ID now points at the existing
+			// task (AddTask rewrote it). Keep going — the materialization
+			// below re-checks the worktree/baseline state of THAT task.
+			log.Printf("[fanout] branch %q re-drive reuses existing task %s (idempotency key match)", branch.ID, branchTask.ID)
 		}
 		// S2 v2 materialization seam: fan-out branch tasks must enter the
 		// world exactly like HTTP-created branch tasks do (internal/api/write.go
@@ -1775,20 +1814,15 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 		if s.worktreeMgr != nil {
 			gitRoot := s.resolveProjectGitRoot(project)
 			if _, statErr := os.Stat(filepath.Join(gitRoot, ".git")); statErr == nil {
-				baseCommit := strings.TrimSpace(completed.BaseCommit)
-				if baseCommit == "" {
-					resolved, rErr := s.worktreeMgr.ResolveBaseCommit(gitRoot, "main")
-					if rErr != nil {
-						return fmt.Errorf("fan-out branch %q: resolve base commit: %w", branch.ID, rErr)
-					}
-					baseCommit = resolved
+				if fanoutBaseCommit == "" {
+					return fmt.Errorf("fan-out branch %q: project is a git repository but no base commit could be resolved", branch.ID)
 				}
-				branchTask.BaseCommit = baseCommit
+				branchTask.BaseCommit = fanoutBaseCommit
 				branchTask.BaseBranch = "main"
 				// branch.ID comes from workflow definitions (template authors),
 				// so sanitize it before it lands in a git refspec argument.
 				branchTask.BranchName = "feature/wf-" + gitworktree.SanitizeTaskID(branch.ID)
-				wtDir, branchName, wtErr, qaCapture := s.worktreeMgr.EnsureWorktreeAt(gitRoot, branchTask.ID, baseCommit, branchTask.BranchName)
+				wtDir, branchName, wtErr, qaCapture := s.worktreeMgr.EnsureWorktreeAt(gitRoot, branchTask.ID, fanoutBaseCommit, branchTask.BranchName)
 				if wtErr != nil {
 					return fmt.Errorf("fan-out branch %q: materialize worktree: %w", branch.ID, wtErr)
 				}
@@ -1797,6 +1831,39 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 				// S2-2 trust model: the control-plane capture-time baseline is
 				// the only copy the join gate trusts. Persist BEFORE StartRun
 				// makes the child run (and its attention signal) visible.
+				//
+				// Review fix (P0-1, partial-failure re-drive): a crash between
+				// worktree creation and baseline persist leaves the worktree
+				// on disk with NO control-plane baseline; a re-drive then hits
+				// EnsureWorktreeAt's existing-directory path which returns a
+				// ZERO capture, and skipping the persist would brick the
+				// branch at join time (ErrQABaselineLost fail-closed, no
+				// in-platform recovery). Detect that shape and rebuild from
+				// scratch: retire the stale worktree (it was never measured
+				// and no agent has ever seen it — the child run does not
+				// exist yet on this path) and materialize again so the
+				// capture happens. Worktree retirement failure here is
+				// fatal for THIS fan-out (fail closed), never silent.
+				if qaCapture.Baseline.Entries == nil {
+					if _, found, lErr := wfStore.LoadQABaselinePayload(project, branchTask.ID); lErr != nil {
+						return fmt.Errorf("fan-out branch %q: check existing qa baseline: %w", branch.ID, lErr)
+					} else if !found {
+						log.Printf("[fanout] branch %q task %s: worktree exists without a control-plane baseline (interrupted prior materialization); rebuilding", branch.ID, branchTask.ID)
+						if _, _, cErr, _ := s.worktreeMgr.EnsureWorktreeAt(gitRoot, branchTask.ID, fanoutBaseCommit, ""); cErr != nil {
+							// best-effort first close is not required; CleanupWorktree below is the real retirement
+							_ = cErr
+						}
+						if err := s.worktreeMgr.CleanupWorktree(gitRoot, branchTask.ID); err != nil {
+							return fmt.Errorf("fan-out branch %q: retire unmeasured worktree for clean re-materialization: %w", branch.ID, err)
+						}
+						wtDir, branchName, wtErr, qaCapture = s.worktreeMgr.EnsureWorktreeAt(gitRoot, branchTask.ID, fanoutBaseCommit, branchTask.BranchName)
+						if wtErr != nil {
+							return fmt.Errorf("fan-out branch %q: re-materialize worktree: %w", branch.ID, wtErr)
+						}
+						branchTask.WorktreeDir = wtDir
+						branchTask.BranchName = branchName
+					}
+				}
 				if qaCapture.Baseline.Entries != nil {
 					if err := wfStore.CaptureQABaselineRecord(project, branchTask.ID, wtDir); err != nil {
 						return fmt.Errorf("fan-out branch %q: persist qa baseline: %w", branch.ID, err)
@@ -1805,11 +1872,12 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 				if err := s.ts.PersistTask(project, nextAgent, branchTask); err != nil {
 					return err
 				}
+			} else {
+				// Review fix (P1-2): a non-git project silently skipping
+				// materialization left operators with an unexplained join
+				// blockage later. Surface it now.
+				log.Printf("[fanout] project %s: no git repository at %s; branch %q skips materialization (join gate will fail closed for non-git projects)", project, gitRoot, branch.ID)
 			}
-			// No git repository at the resolved root: keep the pre-seam
-			// behavior (branch task runs in the agent dir). The join gate
-			// will fail closed there, which is the honest outcome for a
-			// non-git project.
 		}
 		childRun, childInstances, err := wfStore.StartRun(project, branchTask.ID, childDef.ID, transition.Run.ActorBindings)
 		if err != nil {
