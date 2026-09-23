@@ -40,6 +40,14 @@ QA 交付物）。评审明确禁止为旧任务补造基线（会漂白闸门�
 
 ## 3. 恢复操作（最小侵入，待批准后执行）
 
+> 2026-09-23 更新（S2-2.2 后的代码路径变化）：修复轮之后，若部署新二进制
+> （≥ 77b9118c…f37e85d7）并补齐基线采集，§2 的 branch/complete 重报将走
+> **幂等 re-drive**（崩溃窗口恢复）而非 400 —— 但本 run 的 worktree 无基线
+> 且评审禁止补造基线，QA 闸门仍按绝对 status 度量拒绝遗留未跟踪文件，
+> 故 §2 的结论不变：该 run 依旧没有正当 API 路径，仍需本节手工恢复。
+> 差异仅一处语义：新代码下 failed branch 重报不再触发 re-drive，
+> 本恢复只落 completed 账目，与该闸门无交集。
+
 原则：不动 tasks、不动子 run、不动子 run 步实例/输出（这些账目是真实的）；
 只把两个 branch instance 推到其应有的终态，然后用**平台自身代码**（store 层
 `CompleteAndAdvance`）推进父 run，让 join 语义、事件、integration_review 激活
