@@ -251,9 +251,8 @@ func TestBranchJoinRejectionLeavesAllStateRetryable(t *testing.T) {
 		t.Fatalf("child run must stay active@start, got %q@%q", run.Status, run.ActiveStepID)
 	}
 
-	// Corrected re-report: the agent REVERTS the business edit (a QA
-	// checkpoint can never declare server.go — whitelist) and re-reports
-	// honestly.
+	// Corrected re-report: the agent REVERTS the undeclared edit (only the
+	// declaration must match the real delta) and re-reports honestly.
 	if err := os.WriteFile(filepath.Join(wt, "server.go"), []byte("package main\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -277,6 +276,81 @@ func TestBranchJoinRejectionLeavesAllStateRetryable(t *testing.T) {
 	}
 	if run.Status != "completed" {
 		t.Fatalf("child run must be completed after correction, got %q", run.Status)
+	}
+}
+
+// TestBranchJoinHTTPBusinessDeliveryEndToEnd (S2-2.3 review closing round):
+// the FULL production HTTP chain for a branch delivering a real BUSINESS
+// file — declare it honestly, POST step/complete, and verify every
+// persisted surface: child task archived done_success, child run
+// completed, branch instance completed with the business declaration
+// recorded, parent run advanced past the parallel stage. This locks the
+// S2-2.3 semantics at the production entry: a delivery branch may hand
+// business code to the join (the gate measures the declaration against the
+// branch worktree's baseline delta — the whitelist never applies here).
+func TestBranchJoinHTTPBusinessDeliveryEndToEnd(t *testing.T) {
+	s, workspaceID := newBranchJoinHTTPServer(t)
+	wt := newBranchJoinWorktree(t)
+	s.worktreeResolveOverride = func(project, taskID string) string { return wt }
+	s.qaBaselineLookupOverride = mustUploadQABaseline(t, s, workspaceID, "sample", "task-join-child", wt)
+	task, childRunID := seedBranchChildRun(t, s, workspaceID)
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	parentRunID := task.Vars[workflowRunIDVar]
+
+	// The branch's real deliverable: a BUSINESS edit, honestly declared.
+	if err := os.WriteFile(filepath.Join(wt, "server.go"), []byte("package main\n\nfunc Delivered() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	outputs := map[string]string{
+		"branch_summary": "delivered the lifecycle change",
+		"touched_paths":  "server.go",
+	}
+	rec := postBranchStepComplete(t, s, workspaceID, task.ID, outputs)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("business delivery must complete over the production HTTP entry, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 1. Child task: archived done_success.
+	child, err := s.ts.GetTask("sample", "pm", task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.Status != entity.TaskStatusDoneSuccess {
+		t.Fatalf("child task must be done_success, got %q", child.Status)
+	}
+
+	// 2. Child run: completed, no active step.
+	childRun, _, err := wfStore.RunForTask("sample", task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if childRun.ID != childRunID || childRun.Status != "completed" || childRun.ActiveStepID != "" {
+		t.Fatalf("child run must be completed, got %s (%s@%q)", childRun.ID, childRun.Status, childRun.ActiveStepID)
+	}
+
+	// 3. Branch instance: completed with the business declaration recorded.
+	branches, err := wfStore.BranchInstancesForStep(parentRunID, "parallel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(branches) != 1 {
+		t.Fatalf("expected exactly one branch instance, got %d", len(branches))
+	}
+	if branches[0].Status != "completed" || branches[0].ChildTaskID != task.ID {
+		t.Fatalf("branch instance must be completed for the child task, got %q (child=%q)", branches[0].Status, branches[0].ChildTaskID)
+	}
+	if branches[0].OutputValues["touched_paths"] != "server.go" {
+		t.Fatalf("branch instance must record the business declaration, got %q", branches[0].OutputValues["touched_paths"])
+	}
+
+	// 4. Parent run: advanced past the parallel stage (its only next edge
+	// goes nowhere in this fixture → completed).
+	parentRun, _, err := wfStore.RunByID("sample", parentRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parentRun.Status != "completed" || parentRun.ActiveStepID != "" {
+		t.Fatalf("parent run must have joined and completed, got %q@%q", parentRun.Status, parentRun.ActiveStepID)
 	}
 }
 
