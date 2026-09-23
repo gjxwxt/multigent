@@ -236,6 +236,20 @@ S1→S2 先行的理由：机制层不动 UI/API，改完立即可验；S3 动 A
 
 ## 7. 执行日志（倒序追加）
 
+- 2026-09-23（S2 v2 前置关闭：fan-out 物化接缝 `273a7fcf`）：用户复审指出 v2
+  执行包用普通任务替代 fan-out 不可接受（不能证明并行分支机制通过）。核实
+  三个耦合缺陷并修复：①activateParallelWorkflowStep 直插 AddTask 无
+  BaseCommit/WorktreeDir/基线（EnsureWorktreeAt 唯一生产入口在 HTTP 创建）→
+  fan-out 与 HTTP 创建同构化（冻结基线→每分支 worktree→StartRun 前落控制面
+  基线，branch.ID 消毒，非 git 项目 fail-closed）；②基线读取 adapter 空
+  workspaceID（生产行永远 miss → ErrQABaselineLost，fixture override 掩盖）
+  → QABaselineLookupForWorkspace 请求态 scoping；③join 闸门排在 worktree
+  清理之后（解析回退面空 delta phantom 拒绝）→ join 先行、被拒保 worktree
+  重试、过闸后清理。回归测试驱动真实生产 fan-out HTTP 链路（无 seed）：
+  双 worktree+基线→诚实交付→父完成；re-drive 幂等；拒绝保 worktree。api
+  全量 127s + workflow + gitworktree 绿。推送范围另经 fetch 实时核实：
+  origin/dev=d2b07aa5，快进至 273a7fcf 需 87 提交（含本轮修复）。
+
 - 2026-09-23（S2 v2 执行阶段启动，用户批准收尾）：S2-2.3 定点修复与回归通过，
   进入真实 S2。执行包重写为 v2（work/evidence/s22-round/s2-execution-package.md，
   本地证据）：①冻结需求版本（SRS @ 项目 repo `309a8d4`）与共同基线 SHA
