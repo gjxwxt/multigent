@@ -109,6 +109,147 @@ func TestPrecheckUsesBranchWorktreeNotParentWorktree(t *testing.T) {
 	}
 }
 
+// TestPrecheckTwoBranchesIsolateWorktreesAndBaselines (S2-2.3 review
+// closing, P1): THREE directories — the parent worktree plus one worktree
+// PER BRANCH — each with its own capture-time baseline. Branch A's gate
+// must judge only A's worktree/baseline: A's undeclared edit is rejected
+// by name, B's edit and the parent's noise never leak into A's verdict,
+// and an honest A declaration passes while B remains undelivered.
+func TestPrecheckTwoBranchesIsolateWorktreesAndBaselines(t *testing.T) {
+	s, wfStore := newPrecheckServer(t)
+	parentWt := newBranchTestWorktree(t)
+	wtA := newBranchTestWorktree(t)
+	wtB := newBranchTestWorktree(t)
+	// Per-task baselines captured at materialization, BEFORE any edit.
+	if err := workflowstore.NewStore(s.controlDB, "ws").CaptureQABaselineRecord("proj", "task-precheck-workstream_1", wtA); err != nil {
+		t.Fatalf("capture ws_a baseline: %v", err)
+	}
+	if err := workflowstore.NewStore(s.controlDB, "ws").CaptureQABaselineRecord("proj", "task-precheck-workstream_2", wtB); err != nil {
+		t.Fatalf("capture ws_b baseline: %v", err)
+	}
+	if err := workflowstore.NewStore(s.controlDB, "ws").CaptureQABaselineRecord("proj", "task-precheck-root", parentWt); err != nil {
+		t.Fatalf("capture parent baseline: %v", err)
+	}
+	// Each surface gets its OWN edit: A edits module_a.go, B edits
+	// module_b.go, the parent tree carries unrelated client.go noise.
+	if err := writeTestFile(t, wtA, "module_a.go", "package main\n\nfunc WorkA() {}\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTestFile(t, wtB, "module_b.go", "package main\n\nfunc WorkB() {}\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTestFile(t, parentWt, "client.go", "package main\n\nfunc ParentNoise() {}\n"); err != nil {
+		t.Fatal(err)
+	}
+	s.worktreeResolveOverride = func(project, taskID string) string {
+		switch taskID {
+		case "task-precheck-workstream_1":
+			return wtA
+		case "task-precheck-workstream_2":
+			return wtB
+		case "task-precheck-root":
+			return parentWt
+		}
+		return ""
+	}
+	// The lookup adapter reads the SAME control DB the baselines were
+	// persisted into (no re-capture — re-running capture after the edits
+	// would fingerprint the dirty trees and launder the edits).
+	s.qaBaselineLookupOverride = workflowstore.NewStore(s.controlDB, "ws").QABaselineLookupAdapter()
+
+	now := time.Now().UTC()
+	parentDef := &entity.WorkflowDefinition{
+		ID: "wf-parent-iso", Name: "Parent ISO", Version: 1, Scope: "workspace", StartStepID: "parallel",
+		Steps: []entity.WorkflowStep{{
+			ID: "parallel", Type: "parallel_stage", Title: "Parallel",
+			Branches: []entity.WorkflowBranch{
+				{ID: "workstream_1", Title: "WS-A", OutputFields: []entity.WorkflowField{
+					{Name: "branch_summary"}, {Name: "touched_paths"},
+				}},
+				{ID: "workstream_2", Title: "WS-B", OutputFields: []entity.WorkflowField{
+					{Name: "branch_summary"}, {Name: "touched_paths"},
+				}},
+			},
+		}},
+		Edges:     []entity.WorkflowEdge{},
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := wfStore.SaveDefinition(parentDef); err != nil {
+		t.Fatal(err)
+	}
+	childDef := &entity.WorkflowDefinition{
+		ID: "wf-branch-single-iso", Name: "Single-step branch ISO", Version: 1,
+		Scope: "workspace", StartStepID: "start",
+		Steps: []entity.WorkflowStep{{
+			ID: "start", Type: "agent_task", Title: "Branch work",
+			OutputFields: []entity.WorkflowField{
+				{Name: "branch_summary"}, {Name: "touched_paths"},
+			},
+		}},
+		Edges:     []entity.WorkflowEdge{},
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := wfStore.SaveDefinition(childDef); err != nil {
+		t.Fatal(err)
+	}
+	parentTask := &entity.Task{ID: "task-precheck-root", Title: "root", Status: entity.TaskStatusInProgress}
+	if _, _, err := wfStore.StartRun("proj", parentTask.ID, parentDef.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	taskA := branchTaskWithVars(t, "workstream_1")
+	taskA.Vars[workflowRootTaskIDVar] = "task-precheck-root"
+	if _, _, err := wfStore.StartRun("proj", taskA.ID, childDef.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	taskB := branchTaskWithVars(t, "workstream_2")
+	taskB.Vars[workflowRootTaskIDVar] = "task-precheck-root"
+	if _, _, err := wfStore.StartRun("proj", taskB.ID, childDef.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Branch A lies ("none") with module_a.go dirty: rejected BY NAME, and
+	// the verdict never mentions B's module_b.go or the parent's client.go.
+	err := s.precheckBranchJoinGate("ws", "proj", taskA, map[string]string{
+		"branch_summary": "ws-a did things",
+		"touched_paths":  "none",
+	})
+	if err == nil || !strings.Contains(err.Error(), "module_a.go") {
+		t.Fatalf("branch A precheck must reject its own undeclared module_a.go, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "module_b.go") || strings.Contains(err.Error(), "client.go") {
+		t.Fatalf("branch A verdict must not leak branch B's or the parent's edits, got: %v", err)
+	}
+
+	// Branch B lies the same way: symmetric isolation.
+	err = s.precheckBranchJoinGate("ws", "proj", taskB, map[string]string{
+		"branch_summary": "ws-b did things",
+		"touched_paths":  "none",
+	})
+	if err == nil || !strings.Contains(err.Error(), "module_b.go") {
+		t.Fatalf("branch B precheck must reject its own undeclared module_b.go, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "module_a.go") || strings.Contains(err.Error(), "client.go") {
+		t.Fatalf("branch B verdict must not leak branch A's or the parent's edits, got: %v", err)
+	}
+
+	// Honest deliveries: each branch declares its own file and passes
+	// independently — A's pass must not consult B's worktree, and B's pass
+	// must not consult A's.
+	if err := s.precheckBranchJoinGate("ws", "proj", taskA, map[string]string{
+		"branch_summary": "ws-a did things",
+		"touched_paths":  "module_a.go",
+	}); err != nil {
+		t.Fatalf("branch A honest delivery must pass, got: %v", err)
+	}
+	if err := s.precheckBranchJoinGate("ws", "proj", taskB, map[string]string{
+		"branch_summary": "ws-b did things",
+		"touched_paths":  "module_b.go",
+	}); err != nil {
+		t.Fatalf("branch B honest delivery must pass, got: %v", err)
+	}
+}
+
 // TestPrecheckRejectsOutputMissingParentContractField (P1-1): the join maps
 // outputs through the PARENT branch contract; an output set that satisfies
 // the child step's fields but lacks a REQUIRED parent branch field must be

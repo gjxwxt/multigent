@@ -98,6 +98,14 @@ func newBranchJoinWorktree(t *testing.T) string {
 // fingerprint the worktree and persist the authoritative baseline into the
 // test control plane, then hand the server a lookup override over the same
 // DB (equivalent to s.QABaselineLookupAdapter with the fixture workspace).
+//
+// ORDERING TRAP (S2-2.3 review P2): call this ONLY at materialization time,
+// BEFORE any edit to the worktree. Re-running it after the tree is dirty
+// re-fingerprints the DIRTY state into the authoritative baseline and
+// launders the edit (the gate then passes "none" over a real delta). If
+// several tasks share one worktree in a fixture, capture each baseline
+// here once, up front, and reuse the same DB's lookup adapter afterwards
+// instead of calling this again.
 func mustUploadQABaseline(t *testing.T, s *Server, workspaceID, project, taskID, wt string) gitworktree.QABaselineLookup {
 	t.Helper()
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)

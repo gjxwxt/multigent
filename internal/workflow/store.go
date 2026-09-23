@@ -1988,9 +1988,13 @@ func (s *Store) checkBranchQAGate(project, taskID string, branchStep entity.Work
 // taskID is the RUN lookup handle (the parent task whose active run holds
 // the parallel step). deliveryTaskID is the QA MEASUREMENT owner (S2-2.3,
 // review round item 2): the branch's own child task, whose worktree and
-// capture-time baseline scope the delivery delta. The two are different
-// tasks by construction — the join runs BEFORE any merge, so the parent
-// worktree cannot hold the branch's delta yet.
+// capture-time baseline scope the delivery delta. In PRODUCTION the two
+// are always different tasks — the join runs BEFORE any merge, so the
+// parent worktree cannot hold the branch's delta yet. Passing the same ID
+// for both (or a library fixture doing so) silently degrades to the
+// pre-S2-2.3 behavior of measuring the run owner's surface; production
+// callers must never do that, and tests that do are only valid because
+// their fixture points both tasks at the same worktree deliberately.
 func (s *Store) CompleteBranchAndMaybeAdvance(project, taskID, runID, stepID, branchID, deliveryTaskID, summary string, outputValues map[string]string, status string) (BranchTransitionResult, error) {
 	var result BranchTransitionResult
 	run, ok, err := s.RunForTask(project, taskID)
