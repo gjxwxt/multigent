@@ -236,6 +236,19 @@ S1→S2 先行的理由：机制层不动 UI/API，改完立即可验；S3 动 A
 
 ## 7. 执行日志（倒序追加）
 
+- 2026-09-23（S2-2.2 修复轮，独立复审）：对 77b9118c+09cb58e5 最终代码的真
+  claude-sonnet-4-6 独立复审返回 request_changes（1 P0 + 2 P1 + 3 P2），全部
+  修复于 12f1fe94：①P0 崩溃窗口 re-drive 竞态——并发重报的 CAS 败者把
+  CompleteAndAdvance 拒绝当错误上抛（幂等 200 变 500），现败者重读 run，
+  已离开 join 步或终态即判定胜者完成了 re-drive，降级为零写回放；②P1
+  re-drive 是成功路径恢复——任一 branch failed 时 stage 即失败，completed
+  branch 重报只回放记录结果，绝不推进（workflowBranchAnyFailed 闸）；③P1
+  embedded 分支 fail-closed 区分"契约真不存在"与"父侧读取瞬时故障"，后者
+  返回可重试错误而非 4xx 判决；④P2 补边界测试（failed branch 重报不推进、
+  交付面下 Direction 1/2 仍生效仅 Direction 3 抑制）+ tamper 错误携带
+  expected/actual digest。教训：并发幂等路径的失败语义与成功语义同等重要，
+  CAS 败者的错误必须分类处置而非一律上抛。
+
 - 2026-09-23（S2-2.1 修复轮，自查发现）：提交后自查探针发现 S2-2 的 ⑤ 决策
   （branch join = 交付增量免白名单）只写在注释里，代码未落地——
   verifyDeclaredAgainstReal 的 Direction 3 无条件对 real delta 跑测试工件白名单，
