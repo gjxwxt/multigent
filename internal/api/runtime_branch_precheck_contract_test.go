@@ -1,8 +1,9 @@
 package api
 
-// Regression tests for fix round S2-2 (review findings P0-2/P1-1/P1-2/P2):
-// the join precheck must judge the PARENT task's worktree under the PARENT
-// run's frozen branch contract, a re-report after a partial join must be
+// Regression tests for fix round S2-2 (review findings P0-2/P1-1/P1-2/P2)
+// and the S2-2.3 review round (item 2): the join precheck judges the
+// BRANCH task's own worktree + capture-time baseline under the PARENT run's
+// frozen branch contract, a re-report after a partial join must be
 // idempotent, and the fingerprint must notice chmod/symlink deltas.
 
 import (
@@ -19,30 +20,50 @@ import (
 	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
 
-// TestPrecheckUsesParentWorktreeNotChild (P0-2): the child task's completion
-// must be judged against the ROOT task's worktree (that is what the join
-// gate reads via CompleteBranchAndMaybeAdvance(project, rootTaskID, ...)),
-// never the child's own (usually nonexistent) worktree.
-func TestPrecheckUsesParentWorktreeNotChild(t *testing.T) {
+// TestPrecheckUsesBranchWorktreeNotParentWorktree (S2-2.3, review round
+// item 2): the branch is developed in its OWN worktree against its OWN
+// capture-time baseline; the join runs BEFORE any merge, so the parent
+// worktree cannot hold the branch's delta yet. The precheck AND the
+// authoritative join gate must both measure the CHILD task's surface:
+//   - an undeclared change in the branch worktree is rejected;
+//   - noise in the PARENT worktree (a different directory) is irrelevant;
+//   - the gate keys on the branch task, not the root task.
+func TestPrecheckUsesBranchWorktreeNotParentWorktree(t *testing.T) {
 	s, wfStore := newPrecheckServer(t)
-	wt := newBranchTestWorktree(t)
-	// The CHILD worktree is empty/clean; the PARENT worktree holds the
-	// undeclared business edit. The old bug resolved the child task's
-	// worktree here and passed precheck, then the join failed on the
-	// parent's dirty tree after terminal state had been persisted.
+	branchWt := newBranchTestWorktree(t)
+	parentWt := newBranchTestWorktree(t)
+	// Baselines are per-task, mirroring production: capture at the
+	// protected materialization point (BEFORE any edit), keyed on each
+	// worktree's OWN task.
+	if err := workflowstore.NewStore(s.controlDB, "ws").CaptureQABaselineRecord("proj", "task-precheck-workstream_2", branchWt); err != nil {
+		t.Fatalf("capture branch baseline: %v", err)
+	}
+	if err := workflowstore.NewStore(s.controlDB, "ws").CaptureQABaselineRecord("proj", "task-precheck-root", parentWt); err != nil {
+		t.Fatalf("capture parent baseline: %v", err)
+	}
+	// Two DIFFERENT directories: the branch worktree holds the undeclared
+	// business edit; the parent worktree holds an unrelated edit. If the
+	// gate measured the parent surface, the verdict would be about the
+	// wrong tree.
+	if err := writeTestFile(t, branchWt, "server.go", "package main\n\nfunc BranchChange() {}\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTestFile(t, parentWt, "client.go", "package main\n\nfunc ParentNoise() {}\n"); err != nil {
+		t.Fatal(err)
+	}
 	s.worktreeResolveOverride = func(project, taskID string) string {
+		if taskID == "task-precheck-workstream_2" {
+			return branchWt
+		}
 		if taskID == "task-precheck-root" {
-			return wt
+			return parentWt
 		}
 		return ""
 	}
-	s.qaBaselineLookupOverride = mustUploadQABaseline(t, s, "ws", "proj", "task-precheck-root", wt)
-	if _, err := gitworktree.CaptureQABaseline(wt); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeTestFile(t, wt, "server.go", "package main\n\nfunc Bad() {}\n"); err != nil {
-		t.Fatal(err)
-	}
+	// The lookup override over the SAME control DB (no re-capture: the
+	// baseline was already persisted above, BEFORE the edit — re-running
+	// capture here would fingerprint the dirty tree and launder the edit).
+	s.qaBaselineLookupOverride = workflowstore.NewStore(s.controlDB, "ws").QABaselineLookupAdapter()
 
 	now := time.Now().UTC()
 	def := &entity.WorkflowDefinition{
@@ -64,12 +85,27 @@ func TestPrecheckUsesParentWorktreeNotChild(t *testing.T) {
 	if _, _, err := wfStore.StartRun("proj", task.ID, def.ID, nil); err != nil {
 		t.Fatal(err)
 	}
+	// Undeclared branch-side change: rejected, and the error is about the
+	// BRANCH worktree's server.go (not the parent's client.go).
 	err := s.precheckBranchJoinGate("ws", "proj", task, map[string]string{
 		"branch_summary": "did things",
-		"touched_paths":  "server_test.go",
+		"touched_paths":  "none",
 	})
-	if err == nil || !strings.Contains(err.Error(), "server.go") {
-		t.Fatalf("precheck must judge the PARENT worktree (undeclared server.go edit), got: %v", err)
+	if err == nil {
+		t.Fatalf("precheck must judge the BRANCH worktree (undeclared server.go edit), got nil")
+	}
+	if strings.Contains(err.Error(), "client.go") {
+		t.Fatalf("precheck must not measure the parent worktree's noise, got: %v", err)
+	}
+
+	// Honest declaration of the branch-side business change: PASSES — the
+	// parent worktree's unrelated noise must not leak into the verdict.
+	err = s.precheckBranchJoinGate("ws", "proj", task, map[string]string{
+		"branch_summary": "did things",
+		"touched_paths":  "server.go",
+	})
+	if err != nil {
+		t.Fatalf("honest branch delivery must pass regardless of parent worktree noise, got: %v", err)
 	}
 }
 
@@ -81,7 +117,11 @@ func TestPrecheckRejectsOutputMissingParentContractField(t *testing.T) {
 	s, wfStore := newPrecheckServer(t)
 	wt := newBranchTestWorktree(t)
 	s.worktreeResolveOverride = func(project, taskID string) string { return wt }
+	// S2-2.3: the gate measures the BRANCH task; give both the root and the
+	// branch task a baseline (same worktree in this fixture — the delta is
+	// empty until the edit below).
 	s.qaBaselineLookupOverride = mustUploadQABaseline(t, s, "ws", "proj", "task-precheck-root", wt)
+	mustUploadQABaseline(t, s, "ws", "proj", "task-precheck-workstream_2", wt)
 	if _, err := gitworktree.CaptureQABaseline(wt); err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +202,11 @@ func TestPrecheckUsesFrozenInstanceContract(t *testing.T) {
 	s, wfStore := newPrecheckServer(t)
 	wt := newBranchTestWorktree(t)
 	s.worktreeResolveOverride = func(project, taskID string) string { return wt }
+	// S2-2.3: the gate measures the BRANCH task; give both the root and the
+	// branch task a baseline (same worktree in this fixture — the delta is
+	// empty until the edit below).
 	s.qaBaselineLookupOverride = mustUploadQABaseline(t, s, "ws", "proj", "task-precheck-root", wt)
+	mustUploadQABaseline(t, s, "ws", "proj", "task-precheck-workstream_2", wt)
 	if _, err := gitworktree.CaptureQABaseline(wt); err != nil {
 		t.Fatal(err)
 	}
@@ -238,10 +282,10 @@ func TestBranchReReportAfterJoinIsIdempotent(t *testing.T) {
 	s, workspaceID := newBranchJoinHTTPServer(t)
 	wt := newBranchJoinWorktree(t)
 	s.worktreeResolveOverride = func(project, taskID string) string { return wt }
+	// S2-2.3: the gate measures the BRANCH task (task-join-child) — its
+	// worktree and its own capture-time baseline. The parent's baseline is
+	// no longer consulted by the join gate.
 	s.qaBaselineLookupOverride = mustUploadQABaseline(t, s, workspaceID, "sample", "task-join-child", wt)
-	if err := workflowstore.NewStore(s.controlDB, workspaceID).CaptureQABaselineRecord("sample", "task-join-root", wt); err != nil {
-		t.Fatalf("upload parent qa baseline: %v", err)
-	}
 	task, runID := seedBranchChildRun(t, s, workspaceID)
 	if err := os.WriteFile(filepath.Join(wt, "server_test.go"), []byte("package main\n\nfunc TestX() {}\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -259,7 +303,7 @@ func TestBranchReReportAfterJoinIsIdempotent(t *testing.T) {
 		t.Fatalf("idempotent re-report must succeed, got %d: %s", rec.Code, rec.Body.String())
 	}
 	var payload struct {
-		Branch entity.WorkflowBranchInstance `json:"branch"`
+		Branch  entity.WorkflowBranchInstance `json:"branch"`
 		AllDone bool                          `json:"allDone"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {

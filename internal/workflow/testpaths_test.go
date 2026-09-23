@@ -87,3 +87,52 @@ func contains(s, sub string) bool {
 		return false
 	})()
 }
+
+// TestValidateTouchedPathFormatUniversal (S2-2.3, review round P0): the
+// universal half of the contract is format + forbidden surfaces, with NO
+// QA-role judgment — a delivery branch declaring real business code must
+// pass this (the delivery surface flag scopes the whitelist inside
+// verifyDeclared), while forbidden surfaces stay rejected everywhere.
+func TestValidateTouchedPathFormatUniversal(t *testing.T) {
+	accepts := map[string]string{
+		"none declaration":   "none",
+		"business code":      "server/store/store.go",
+		"business code html": "web/src/pages/LoginPage.tsx",
+		"test artifact":      "server/store/store_test.go",
+		"mixed delivery":     "server/store/store.go\nserver/store/store_test.go",
+	}
+	for name, raw := range accepts {
+		if err := ValidateTouchedPathFormat(raw); err != nil {
+			t.Fatalf("%s: expected accept, got %v", name, err)
+		}
+	}
+	rejects := map[string]string{
+		"empty declaration":   "",
+		"gitlab ci":           ".gitlab-ci.yml",
+		"deploy dir":          "deploy/prod/patch.yaml",
+		"credentials":         "server/credentials.json",
+		"agent instructions":  "AGENTS.md",
+		"path escape":         "../shared/lib.go",
+		"absolute path":       "/etc/passwd",
+		"backslash separator": `server\store\store.go`,
+	}
+	for name, raw := range rejects {
+		if err := ValidateTouchedPathFormat(raw); err == nil {
+			t.Fatalf("%s: expected reject for %q", name, raw)
+		}
+	}
+}
+
+// TestDeliveryFormatDiffersFromQAWhitelist (S2-2.3): the SAME declaration
+// splits the two checkpoint kinds — business code passes the universal
+// format but fails the linear-QA whitelist. This is the semantic that the
+// eager whitelist check in checkBranchQAGate used to break.
+func TestDeliveryFormatDiffersFromQAWhitelist(t *testing.T) {
+	const businessDecl = "server/store/store.go"
+	if err := ValidateTouchedPathFormat(businessDecl); err != nil {
+		t.Fatalf("delivery checkpoint must accept business code, got %v", err)
+	}
+	if err := ValidateQATouchedPaths(businessDecl); err == nil {
+		t.Fatal("linear QA whitelist must still reject business code")
+	}
+}

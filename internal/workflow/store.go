@@ -1921,13 +1921,33 @@ func (s *Store) PreviewBranchQAGate(project, taskID string, branchStep entity.Wo
 	return s.checkBranchQAGate(project, taskID, branchStep, values, "completed")
 }
 
-// checkBranchQAGate is the QA real-change checkpoint shared by every branch
+// checkBranchQAGate is the real-change checkpoint shared by every branch
 // completion path (round-19 P0, fix round S2-1): both the store-level branch
 // join and the HTTP step-complete precheck must run the SAME gate so a
 // rejection can never land after one path already persisted terminal state.
 // Callers translate the returned error into their own message with the
 // branch title; the error text already carries the deterministic reason
 // (declaration format, observable worktree, or path cross-check).
+//
+// S2-2.3 (review round): two invariants this function must keep.
+//
+//  1. Universal format validation ONLY: the declaration must be well-formed
+//     and avoid forbidden surfaces (CI/deploy/credentials/agent-config), but
+//     the QA test-artifact whitelist is checked in verifyDeclared's
+//     Direction 3 (surface-gated) — never eagerly here. An eager whitelist
+//     check rejected delivery branches BEFORE the delivery flag could apply
+//     (review round 3 P0) and the lower-level tests passed while the real
+//     entry point still failed: semantics must be locked at the entry the
+//     production path takes.
+//
+//  2. The taskID received here is the measurement owner. The join passes
+//     the ROOT task (legacy entry); the HTTP precheck now passes the CHILD
+//     task (S2-2.3, review round P1): a branch is developed in its own
+//     worktree against its own capture-time baseline, and the join runs
+//     BEFORE any merge — the parent worktree cannot hold the branch's delta
+//     yet. Measuring the parent would verify the wrong tree (or a noise-free
+//     wrong one) and measure against the wrong baseline. The authoritative
+//     join gate and the precheck must agree on this.
 func (s *Store) checkBranchQAGate(project, taskID string, branchStep entity.WorkflowStep, values map[string]string, status string) error {
 	if strings.TrimSpace(status) == "failed" {
 		return nil
@@ -1935,7 +1955,9 @@ func (s *Store) checkBranchQAGate(project, taskID string, branchStep entity.Work
 	if !workflowFieldDeclared(branchStep.OutputFields, "touched_paths") {
 		return nil
 	}
-	if err := ValidateQATouchedPaths(values["touched_paths"]); err != nil {
+	// Universal path-sanity + forbidden surfaces — the QA whitelist is NOT
+	// applied here (delivery checkpoint; see verifyDeclared Direction 3).
+	if err := ValidateTouchedPathFormat(values["touched_paths"]); err != nil {
 		return err
 	}
 	if s.WorktreeResolver == nil {
@@ -1945,13 +1967,13 @@ func (s *Store) checkBranchQAGate(project, taskID string, branchStep entity.Work
 	if worktreeDir == "" || !worktreeObservable(worktreeDir) {
 		return fmt.Errorf("touched_paths checkpoint requires an observable worktree for task %s (none found)", taskID)
 	}
-	// S2-2 ⑤: a branch join is a DELIVERY checkpoint — the branch agent's
-	// whole delta vs its baseline is the deliverable, so the test-artifact
-	// whitelist must not apply (it exists for linear QA steps that only
-	// write test files). The trusted baseline (control plane) scopes the
-	// measurement; loss/tamper fail closed (P0-1). The surface flag is what
-	// actually suppresses Direction 3 inside verifyDeclared — a branch
-	// delivering business code must pass the declaration cross-check.
+	// S2-2 ⑤ + S2-2.3: a branch join is a DELIVERY checkpoint measured on
+	// the BRANCH's own worktree against the BRANCH's own capture-time
+	// baseline (the baseline lookup keys on this same taskID). The trusted
+	// baseline lives in the control plane; loss/tamper fail closed (P0-1).
+	// The surface flag suppresses Direction 3 (test-artifact whitelist)
+	// inside verifyDeclared — a branch delivering business code passes the
+	// declaration cross-check, while undeclared/phantom changes still fail.
 	surf, err := resolveQABaselineSurface(worktreeDir, s.QABaselineLookup, project, taskID)
 	if err != nil {
 		return fmt.Errorf("touched_paths checkpoint baseline unavailable for task %s: %w", taskID, err)
@@ -1960,7 +1982,16 @@ func (s *Store) checkBranchQAGate(project, taskID string, branchStep entity.Work
 	return verifyWorktreeDeltaAgainstDeclaration(values["touched_paths"], worktreeDir, surf)
 }
 
-func (s *Store) CompleteBranchAndMaybeAdvance(project, taskID, runID, stepID, branchID, summary string, outputValues map[string]string, status string) (BranchTransitionResult, error) {
+// CompleteBranchAndMaybeAdvance records a branch completion and, when the
+// last branch of the stage has reported, drives the parent join.
+//
+// taskID is the RUN lookup handle (the parent task whose active run holds
+// the parallel step). deliveryTaskID is the QA MEASUREMENT owner (S2-2.3,
+// review round item 2): the branch's own child task, whose worktree and
+// capture-time baseline scope the delivery delta. The two are different
+// tasks by construction — the join runs BEFORE any merge, so the parent
+// worktree cannot hold the branch's delta yet.
+func (s *Store) CompleteBranchAndMaybeAdvance(project, taskID, runID, stepID, branchID, deliveryTaskID, summary string, outputValues map[string]string, status string) (BranchTransitionResult, error) {
 	var result BranchTransitionResult
 	run, ok, err := s.RunForTask(project, taskID)
 	if err != nil || !ok {
@@ -2079,7 +2110,9 @@ func (s *Store) CompleteBranchAndMaybeAdvance(project, taskID, runID, stepID, br
 	// deterministic path matching, never model judgment. Abort happens
 	// before any branch instance write, so the branch stays pending for a
 	// corrected completion.
-	if err := s.checkBranchQAGate(project, taskID, branchStep, values, status); err != nil {
+	// S2-2.3: the QA gate measures the BRANCH's delivery (its own worktree
+	// + its own capture-time baseline), not the parent run's task surface.
+	if err := s.checkBranchQAGate(project, deliveryTaskID, branchStep, values, status); err != nil {
 		return result, fmt.Errorf("workflow branch %q output rejected: %w", branchStep.Title, err)
 	}
 	found := false

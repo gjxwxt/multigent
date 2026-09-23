@@ -94,7 +94,6 @@ func newBranchJoinWorktree(t *testing.T) string {
 	return dir
 }
 
-
 // mustUploadQABaseline mirrors the production capture flow for fixtures:
 // fingerprint the worktree and persist the authoritative baseline into the
 // test control plane, then hand the server a lookup override over the same
@@ -217,10 +216,6 @@ func TestBranchJoinRejectionLeavesAllStateRetryable(t *testing.T) {
 	wt := newBranchJoinWorktree(t)
 	s.worktreeResolveOverride = func(project, taskID string) string { return wt }
 	s.qaBaselineLookupOverride = mustUploadQABaseline(t, s, workspaceID, "sample", "task-join-child", wt)
-	// S2-2 P0-2: precheck + join both run under the PARENT task key now.
-	if err := workflowstore.NewStore(s.controlDB, workspaceID).CaptureQABaselineRecord("sample", "task-join-root", wt); err != nil {
-		t.Fatalf("upload parent qa baseline: %v", err)
-	}
 	task, _ := seedBranchChildRun(t, s, workspaceID)
 
 	// The task's real deliverable (a test-file edit) plus an UNDECLARED
@@ -295,10 +290,6 @@ func TestBranchJoinDuplicateReportCannotDoubleAdvance(t *testing.T) {
 	wt := newBranchJoinWorktree(t)
 	s.worktreeResolveOverride = func(project, taskID string) string { return wt }
 	s.qaBaselineLookupOverride = mustUploadQABaseline(t, s, workspaceID, "sample", "task-join-child", wt)
-	// S2-2 P0-2: precheck + join both run under the PARENT task key now.
-	if err := workflowstore.NewStore(s.controlDB, workspaceID).CaptureQABaselineRecord("sample", "task-join-root", wt); err != nil {
-		t.Fatalf("upload parent qa baseline: %v", err)
-	}
 	task, _ := seedBranchChildRun(t, s, workspaceID)
 
 	// Real delta: one test-file edit, honestly declared.

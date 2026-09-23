@@ -107,9 +107,6 @@ func TestDualBranchCrashWindowResumesParent(t *testing.T) {
 	wt := newBranchJoinWorktree(t)
 	s.worktreeResolveOverride = func(project, taskID string) string { return wt }
 	s.qaBaselineLookupOverride = mustUploadQABaseline(t, s, workspaceID, "sample", "task-dual-ws_b", wt)
-	if err := workflowstore.NewStore(s.controlDB, workspaceID).CaptureQABaselineRecord("sample", "task-join-root-dual", wt); err != nil {
-		t.Fatalf("upload parent qa baseline: %v", err)
-	}
 	task, childRunA, childRunB := seedDualBranchChildRun(t, s, workspaceID)
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
 	parentRunID := task.Vars[workflowRunIDVar]
@@ -167,9 +164,6 @@ func TestDualBranchConcurrentReportsNoDoubleAdvance(t *testing.T) {
 	wt := newBranchJoinWorktree(t)
 	s.worktreeResolveOverride = func(project, taskID string) string { return wt }
 	s.qaBaselineLookupOverride = mustUploadQABaseline(t, s, workspaceID, "sample", "task-dual-ws_b", wt)
-	if err := workflowstore.NewStore(s.controlDB, workspaceID).CaptureQABaselineRecord("sample", "task-join-root-dual", wt); err != nil {
-		t.Fatalf("upload parent qa baseline: %v", err)
-	}
 	task, childRunA, childRunB := seedDualBranchChildRun(t, s, workspaceID)
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
 	parentRunID := task.Vars[workflowRunIDVar]
@@ -203,7 +197,7 @@ func TestDualBranchConcurrentReportsNoDoubleAdvance(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, err := wfStore.CompleteBranchAndMaybeAdvance("sample", "task-join-root-dual", parentRunID, "parallel", "ws_a",
+		_, err := wfStore.CompleteBranchAndMaybeAdvance("sample", "task-join-root-dual", parentRunID, "parallel", "ws_a", "task-dual-ws_a",
 			"delivered ws_a", map[string]string{"branch_summary": "delivered ws_a", "touched_paths": "server_test.go"}, "completed")
 		if err != nil {
 			t.Errorf("ws_a concurrent re-report failed: %v", err)

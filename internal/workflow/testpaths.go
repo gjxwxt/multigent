@@ -25,7 +25,7 @@ var qaTouchedPathAllowlist = []string{
 	".spec.go", ".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx",
 	"_test.py", "test_.py", ".test.py", "test.py",
 	"test.java", "tests.java", "it.java",
-	".rs" /* rust: tests live in src with #[cfg(test)] — handled by dir below */,
+	".rs", /* rust: tests live in src with #[cfg(test)] — handled by dir below */
 	// Fixtures, snapshots, testdata, probes.
 	".fixture", ".fixtures", ".snap", ".golden",
 }
@@ -57,11 +57,66 @@ var qaTouchedPathForbidden = []string{
 	".git/", "hooks/",
 }
 
-// ValidateQATouchedPaths checks the qa step's touched_paths output
-// (newline-separated relative paths). Empty is rejected: the gate's purpose
-// is an explicit declaration — a QA run that changed nothing about the tree
-// may declare e.g. "none" and pass. Blank lines are ignored. One rejected
-// path fails the whole declaration (fail-closed).
+// ValidateTouchedPathFormat is the UNIVERSAL path-sanity half of the
+// touched_paths contract, split from the QA whitelist (S2-2.3, review round
+// P0): non-empty, "none" allowed, forward slashes, relative, inside the
+// project root. It contains NO role judgment — both a delivery branch and a
+// linear QA step must pass it, because declaration cross-checking (Directions
+// 1/2) needs well-formed paths in either checkpoint kind.
+func ValidateTouchedPathFormat(raw string) error {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return fmt.Errorf("touched_paths is required: declare every file the run created or modified (one per line), or \"none\" if the tree is untouched")
+	}
+	if strings.EqualFold(trimmed, "none") {
+		return nil
+	}
+	lines := strings.Split(trimmed, "\n")
+	for i, line := range lines {
+		p := strings.TrimSpace(line)
+		if p == "" {
+			continue
+		}
+		if err := validateTouchedPathFormat(p); err != nil {
+			return fmt.Errorf("touched_paths line %d (%q): %w", i+1, p, err)
+		}
+	}
+	return nil
+}
+
+// validateTouchedPathFormat is the universal half of one path check:
+// backslash/absolute/escape rejection plus the FORBIDDEN-surfaces rule
+// (CI/deploy/credentials/agent-config). The forbidden rule applies in BOTH
+// checkpoint kinds — a delivery branch may hand business code to the join,
+// but CI pipelines, deployment manifests, credentials, and agent-config files
+// remain off-limits everywhere. The test-artifact allowlist (the QA-role
+// judgment) is NOT here — it lives in validateQATouchedPath.
+func validateTouchedPathFormat(p string) error {
+	if strings.ContainsAny(p, "\\") {
+		return fmt.Errorf("use forward slashes; backslashes are not path separators here")
+	}
+	if path.IsAbs(p) || strings.HasPrefix(p, "/") {
+		return fmt.Errorf("paths must be relative to the project root")
+	}
+	cleaned := path.Clean(p)
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return fmt.Errorf("path escapes the project root")
+	}
+	lower := strings.ToLower(cleaned)
+	for _, f := range qaTouchedPathForbidden {
+		if strings.Contains(lower, f) {
+			return fmt.Errorf("path touches a forbidden surface (%s) — neither QA nor delivery may modify CI/deploy/credentials/agent-config files", f)
+		}
+	}
+	return nil
+}
+
+// ValidateQATouchedPaths is the QA-ROLE declaration check: universal path
+// format PLUS the test-artifact allowlist. Used by linear QA checkpoints
+// (step id "qa" / the qa step of the delivery pipeline) where the QA agent
+// may only write test artifacts. Branch completions (delivery checkpoints)
+// must NOT call this — they validate through ValidateTouchedPathFormat plus
+// the delivery-surface cross-check instead.
 func ValidateQATouchedPaths(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -76,34 +131,16 @@ func ValidateQATouchedPaths(raw string) error {
 		if p == "" {
 			continue
 		}
-		if err := validateQATouchedPath(p); err != nil {
+		if err := validateTouchedPathFormat(p); err != nil {
 			return fmt.Errorf("touched_paths line %d (%q): %w", i+1, p, err)
+		}
+		cleaned := path.Clean(p)
+		lower := strings.ToLower(cleaned)
+		if !isQATestArtifactPath(cleaned, lower) {
+			return fmt.Errorf("touched_paths line %d (%q): path does not look like a test artifact (test source, testdata, fixture, or probe script) — QA may only touch test files", i+1, p)
 		}
 	}
 	return nil
-}
-
-func validateQATouchedPath(p string) error {
-	if strings.ContainsAny(p, "\\") {
-		return fmt.Errorf("use forward slashes; backslashes are not path separators here")
-	}
-	if path.IsAbs(p) || strings.HasPrefix(p, "/") {
-		return fmt.Errorf("paths must be relative to the project root")
-	}
-	cleaned := path.Clean(p)
-	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
-		return fmt.Errorf("path escapes the project root")
-	}
-	lower := strings.ToLower(cleaned)
-	for _, f := range qaTouchedPathForbidden {
-		if strings.Contains(lower, f) {
-			return fmt.Errorf("path touches a forbidden surface (%s) — QA may not modify CI/deploy/credentials/agent-config files", f)
-		}
-	}
-	if isQATestArtifactPath(cleaned, lower) {
-		return nil
-	}
-	return fmt.Errorf("path does not look like a test artifact (test source, testdata, fixture, or probe script) — QA may only touch test files")
 }
 
 // workflowFieldDeclared reports whether the field name is declared on the

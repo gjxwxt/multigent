@@ -1309,15 +1309,16 @@ func (s *Server) precheckBranchJoinGate(workspaceID, project string, t *entity.T
 		return nil
 	}
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
-	// S2-2 (reviewer P0-2): the join gate runs against the PARENT task's
-	// worktree (CompleteBranchAndMaybeAdvance → checkBranchQAGate receives
-	// rootTaskID), so the precheck must resolve the same surface. The
-	// child's own worktree is a different checkout; measuring it would
-	// verify the wrong delta.
-	rootTaskID := strings.TrimSpace(t.Vars[workflowRootTaskIDVar])
-	if rootTaskID == "" {
-		rootTaskID = t.ID
-	}
+	// S2-2.3 (review round, item 2): the join gate measures the BRANCH's own
+	// delivery — the branch is developed in its OWN worktree against its OWN
+	// capture-time baseline, and the join runs BEFORE any merge, so the
+	// parent task's worktree cannot hold the branch's delta yet. Both the
+	// precheck and the authoritative join gate (completeRuntimeWorkflowBranch
+	// passes this same taskID into CompleteBranchAndMaybeAdvance) must
+	// resolve THIS branch task's worktree + baseline. The parent worktree is
+	// only relevant AFTER the merge, which happens later in the pipeline.
+	// (workflowRootTaskIDVar stays on the task for run-advance bookkeeping;
+	// it is deliberately NOT used as the QA measurement key anymore.)
 	wfStore.WorktreeResolver = func(project, taskID string) string {
 		return s.resolveTaskWorktreeDir(project, taskID)
 	}
@@ -1416,7 +1417,9 @@ func (s *Server) precheckBranchJoinGate(workspaceID, project string, t *entity.T
 		// fail the same way.
 		return err
 	}
-	return wfStore.PreviewBranchQAGate(project, rootTaskID, branchStep, values)
+	// S2-2.3: measurement owner is the BRANCH task (t.ID) — same key the
+	// authoritative join gate uses.
+	return wfStore.PreviewBranchQAGate(project, t.ID, branchStep, values)
 }
 
 // branchHasEmbeddedWorkflow reports whether a branch definition was derived
@@ -1477,6 +1480,11 @@ func (s *Server) completeRuntimeWorkflowBranch(workspaceID, project string, t *e
 	// Real-change cross-check for the QA touched_paths checkpoint
 	// (round-19 P0): branch completions run the same gate as linear
 	// completions, so this store needs the resolver too.
+	// S2-2.3 (review round, item 2): the gate receives t.ID — the BRANCH
+	// task — so it measures the branch's own delivery worktree against the
+	// branch's own capture-time baseline (the baseline lookup keys on the
+	// same taskID). The join still advances the parent run; only the
+	// measurement surface changed.
 	wfStore.WorktreeResolver = func(project, taskID string) string {
 		return s.resolveTaskWorktreeDir(project, taskID)
 	}
@@ -1488,7 +1496,12 @@ func (s *Server) completeRuntimeWorkflowBranch(workspaceID, project string, t *e
 	if summary == "" {
 		summary = strings.TrimSpace(t.LastError)
 	}
-	return wfStore.CompleteBranchAndMaybeAdvance(project, rootTaskID, runID, stepID, branchID, summary, outputs, stepStatus)
+	// S2-2.3 (review round, item 2): the run handle stays the PARENT task
+	// (rootTaskID) — it owns the active run/step/branch state — while the QA
+	// measurement owner is the BRANCH task (t.ID): its own worktree + its
+	// own capture-time baseline. The join advances the parent run; only the
+	// measurement surface is the branch delivery.
+	return wfStore.CompleteBranchAndMaybeAdvance(project, rootTaskID, runID, stepID, branchID, t.ID, summary, outputs, stepStatus)
 }
 
 func (s *Server) advanceParentAfterBranchCompletion(workspaceID, project string, result workflowstore.BranchTransitionResult, r *http.Request) error {

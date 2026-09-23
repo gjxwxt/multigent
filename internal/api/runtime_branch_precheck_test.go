@@ -118,8 +118,8 @@ func TestPrecheckBranchJoinGateRejectsUndeclaredBusinessChange(t *testing.T) {
 		Scope:       "workspace",
 		StartStepID: "start",
 		Steps: []entity.WorkflowStep{{
-			ID:   "start",
-			Type: "agent_task",
+			ID:    "start",
+			Type:  "agent_task",
 			Title: "Branch work",
 			OutputFields: []entity.WorkflowField{
 				{Name: "branch_summary", Description: "summary"},
@@ -174,8 +174,8 @@ func TestPrecheckBranchJoinGatePassesHonestDeclaration(t *testing.T) {
 		Scope:       "workspace",
 		StartStepID: "start",
 		Steps: []entity.WorkflowStep{{
-			ID:   "start",
-			Type: "agent_task",
+			ID:    "start",
+			Type:  "agent_task",
 			Title: "Branch work",
 			OutputFields: []entity.WorkflowField{
 				{Name: "branch_summary", Description: "summary"},
@@ -303,8 +303,8 @@ func singleStepBranchDef(id string) *entity.WorkflowDefinition {
 		Scope:       "workspace",
 		StartStepID: "start",
 		Steps: []entity.WorkflowStep{{
-			ID:   "start",
-			Type: "agent_task",
+			ID:    "start",
+			Type:  "agent_task",
 			Title: "Branch work",
 			OutputFields: []entity.WorkflowField{
 				{Name: "branch_summary", Description: "summary"},

@@ -801,14 +801,14 @@ func TestCompleteBranchAndMaybeAdvanceWaitsForAllBranches(t *testing.T) {
 			t.Fatalf("save branch instance: %v", err)
 		}
 	}
-	first, err := store.CompleteBranchAndMaybeAdvance("project", "task-1", run.ID, "parallel", "frontend", "frontend done", map[string]string{"frontend_doc_id": "doc-20260730-front1"}, "completed")
+	first, err := store.CompleteBranchAndMaybeAdvance("project", "task-1", run.ID, "parallel", "frontend", "task-1", "frontend done", map[string]string{"frontend_doc_id": "doc-20260730-front1"}, "completed")
 	if err != nil {
 		t.Fatalf("complete first branch: %v", err)
 	}
 	if first.AllDone {
 		t.Fatal("expected first branch completion to wait for the remaining branch")
 	}
-	second, err := store.CompleteBranchAndMaybeAdvance("project", "task-1", run.ID, "parallel", "backend", "backend done", map[string]string{"backend_doc_id": "doc-20260730-back12"}, "completed")
+	second, err := store.CompleteBranchAndMaybeAdvance("project", "task-1", run.ID, "parallel", "backend", "task-1", "backend done", map[string]string{"backend_doc_id": "doc-20260730-back12"}, "completed")
 	if err != nil {
 		t.Fatalf("complete second branch: %v", err)
 	}
@@ -881,7 +881,7 @@ func TestCompleteBranchAndMaybeAdvanceAnyJoinSkipsRemainingBranches(t *testing.T
 			t.Fatalf("save branch instance: %v", err)
 		}
 	}
-	result, err := store.CompleteBranchAndMaybeAdvance("project", "task-1", run.ID, "parallel", "path_a", "path a done", map[string]string{"path_a_doc_id": "doc-20260730-aa11"}, "completed")
+	result, err := store.CompleteBranchAndMaybeAdvance("project", "task-1", run.ID, "parallel", "path_a", "task-1", "path a done", map[string]string{"path_a_doc_id": "doc-20260730-aa11"}, "completed")
 	if err != nil {
 		t.Fatalf("complete branch: %v", err)
 	}

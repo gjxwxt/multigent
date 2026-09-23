@@ -25,9 +25,6 @@ func TestBranchCrashWindowReJoinResumesParent(t *testing.T) {
 	wt := newBranchJoinWorktree(t)
 	s.worktreeResolveOverride = func(project, taskID string) string { return wt }
 	s.qaBaselineLookupOverride = mustUploadQABaseline(t, s, workspaceID, "sample", "task-join-child", wt)
-	if err := workflowstore.NewStore(s.controlDB, workspaceID).CaptureQABaselineRecord("sample", "task-join-root", wt); err != nil {
-		t.Fatalf("upload parent qa baseline: %v", err)
-	}
 	task, _ := seedBranchChildRun(t, s, workspaceID)
 	if err := os.WriteFile(filepath.Join(wt, "server_test.go"), []byte("package main\n\nfunc TestX() {}\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -110,9 +107,6 @@ func TestCrashWindowFailedBranchNoAdvance(t *testing.T) {
 	wt := newBranchJoinWorktree(t)
 	s.worktreeResolveOverride = func(project, taskID string) string { return wt }
 	s.qaBaselineLookupOverride = mustUploadQABaseline(t, s, workspaceID, "sample", "task-join-child", wt)
-	if err := workflowstore.NewStore(s.controlDB, workspaceID).CaptureQABaselineRecord("sample", "task-join-root", wt); err != nil {
-		t.Fatalf("upload parent qa baseline: %v", err)
-	}
 	task, _ := seedBranchChildRun(t, s, workspaceID)
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
 	parentRunID := task.Vars[workflowRunIDVar]

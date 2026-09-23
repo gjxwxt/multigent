@@ -129,7 +129,7 @@ func TestBranchQAGateBlocksUndeclaredBusinessChange(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wt, "server.go"), []byte("package main\n\nfunc Bad() {}\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := store.CompleteBranchAndMaybeAdvance("project", "task-1", runID, stepID, "qa_branch", "qa done",
+	_, err := store.CompleteBranchAndMaybeAdvance("project", "task-1", runID, stepID, "qa_branch", "task-1", "qa done",
 		map[string]string{"risk_coverage_matrix": "[{\"item_id\":\"AC-1\",\"risk_level\":\"low\",\"status\":\"passed\"}]",
 			"touched_paths": "server_test.go", "test_report": "ok"}, "completed")
 	if err == nil || !strings.Contains(err.Error(), "not declared") || !strings.Contains(err.Error(), "server.go") {
@@ -154,7 +154,7 @@ func TestBranchQAGateHappyPathCompletes(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wt, "qa_probe_test.go"), []byte("package main\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	res, err := store.CompleteBranchAndMaybeAdvance("project", "task-1", runID, stepID, "qa_branch", "qa done",
+	res, err := store.CompleteBranchAndMaybeAdvance("project", "task-1", runID, stepID, "qa_branch", "task-1", "qa done",
 		map[string]string{"risk_coverage_matrix": "[{\"item_id\":\"AC-1\",\"risk_level\":\"low\",\"status\":\"passed\"}]",
 			"touched_paths": "qa_probe_test.go", "test_report": "ok"}, "completed")
 	if err != nil {
@@ -170,7 +170,7 @@ func TestBranchQAGateFailClosedWithoutWorktree(t *testing.T) {
 	// Resolver wired but reports no worktree — fail-closed, not silent
 	// declaration-only downgrade.
 	store.WorktreeResolver = func(project, taskID string) string { return "" }
-	_, err := store.CompleteBranchAndMaybeAdvance("project", "task-1", runID, stepID, "qa_branch", "qa done",
+	_, err := store.CompleteBranchAndMaybeAdvance("project", "task-1", runID, stepID, "qa_branch", "task-1", "qa done",
 		map[string]string{"risk_coverage_matrix": "[{\"item_id\":\"AC-1\",\"risk_level\":\"low\",\"status\":\"passed\"}]",
 			"touched_paths": "whatever_test.go", "test_report": "ok"}, "completed")
 	if err == nil || !strings.Contains(err.Error(), "observable worktree") {
@@ -200,8 +200,8 @@ func TestLinearQAGateFailClosedWithBrokenWorktree(t *testing.T) {
 		StartStepID: "qa",
 		Steps: []entity.WorkflowStep{
 			{
-				ID:   "qa",
-				Type: "agent_task",
+				ID:    "qa",
+				Type:  "agent_task",
 				Title: "QA",
 				OutputFields: []entity.WorkflowField{
 					{Name: "touched_paths", Description: "files touched."},
@@ -209,7 +209,7 @@ func TestLinearQAGateFailClosedWithBrokenWorktree(t *testing.T) {
 				Position: entity.WorkflowPosition{X: 0, Y: 0},
 			},
 		},
-		Edges:   []entity.WorkflowEdge{},
+		Edges:     []entity.WorkflowEdge{},
 		CreatedAt: now,
 		UpdatedAt: now,
 	}

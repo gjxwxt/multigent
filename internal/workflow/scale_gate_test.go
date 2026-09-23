@@ -248,7 +248,7 @@ func TestGreenfieldBatchedPathFanOutAndConverge(t *testing.T) {
 	// First branch completes → not all done yet. Branch output fields named
 	// touched_paths opt into the QA real-change gate (module branch path),
 	// so the fixture uses test-file paths.
-	first, err := store.CompleteBranchAndMaybeAdvance(project, "task-batched", run.ID, "parallel_workstreams", "workstream_1", "ws1 done", map[string]string{"branch_summary": "crypto chain built", "touched_paths": "server/a_test.go"}, "completed")
+	first, err := store.CompleteBranchAndMaybeAdvance(project, "task-batched", run.ID, "parallel_workstreams", "workstream_1", "task-batched", "ws1 done", map[string]string{"branch_summary": "crypto chain built", "touched_paths": "server/a_test.go"}, "completed")
 	if err != nil {
 		t.Fatalf("complete branch 1: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestGreenfieldBatchedPathFanOutAndConverge(t *testing.T) {
 	}
 	// Second branch completes → converge into integration_review with the
 	// aggregated branch outputs.
-	second, err := store.CompleteBranchAndMaybeAdvance(project, "task-batched", run.ID, "parallel_workstreams", "workstream_2", "ws2 done", map[string]string{"branch_summary": "state machine built", "touched_paths": "server/b_test.go"}, "completed")
+	second, err := store.CompleteBranchAndMaybeAdvance(project, "task-batched", run.ID, "parallel_workstreams", "workstream_2", "task-batched", "ws2 done", map[string]string{"branch_summary": "state machine built", "touched_paths": "server/b_test.go"}, "completed")
 	if err != nil {
 		t.Fatalf("complete branch 2: %v", err)
 	}
