@@ -236,6 +236,15 @@ S1→S2 先行的理由：机制层不动 UI/API，改完立即可验；S3 动 A
 
 ## 7. 执行日志（倒序追加）
 
+- 2026-09-23（S2-2.1 修复轮，自查发现）：提交后自查探针发现 S2-2 的 ⑤ 决策
+  （branch join = 交付增量免白名单）只写在注释里，代码未落地——
+  verifyDeclaredAgainstReal 的 Direction 3 无条件对 real delta 跑测试工件白名单，
+  分支交付业务代码（server.go）在 join 处被结构性拒绝，S2-1/S2-2 要解的死锁仍在。
+  修复：检查点种类上移到度量面（qaBaselineSurface.deliveryDelta），Direction 3
+  仅对 legacy 线性 QA 检查点生效；checkBranchQAGate 标记交付面。回归
+  TestDeliveryCheckpointAllowsBusinessFiles 双向锁定（业务交付过 join、同 delta
+  过线性 QA 仍拒）。教训：注释与代码语义必须由测试锁定，不能靠评审叙述。
+
 - 2026-09-22（S2-2 修复轮）：S2-1 补丁经 GPT 复核与独立跨模型复审（真
   claude-sonnet-4-6）双通道 request_changes，6 项发现收敛后全部修复：
 
