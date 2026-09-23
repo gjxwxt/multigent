@@ -313,12 +313,12 @@ func (s *Server) handleGetTaskPreview(w http.ResponseWriter, r *http.Request) {
 		projType := preview.DetectProjectType(worktreeDir)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"taskId":        taskID,
-			"project":       project,
-			"type":          string(projType),
-			"status":        "stopped",
-			"url":           s.previewSurfaceURL(taskID),
-			"worktreeDir":   worktreeDir,
+			"taskId":              taskID,
+			"project":             project,
+			"type":                string(projType),
+			"status":              "stopped",
+			"url":                 s.previewSurfaceURL(taskID),
+			"worktreeDir":         worktreeDir,
 			"previewToken":        s.signPreviewToken(taskID, project),
 			"drawerEnabled":       s.PreviewCopilotDrawerEnabled(),
 			"turnReceiptsEnabled": s.PreviewTurnReceiptsEnabledForProject(project),

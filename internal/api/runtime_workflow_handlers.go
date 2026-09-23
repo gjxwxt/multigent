@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/errs"
+	"github.com/multigent/multigent/internal/gitworktree"
 	"github.com/multigent/multigent/internal/taskstore"
 	"github.com/multigent/multigent/internal/tasktemplate"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
@@ -1200,19 +1203,31 @@ func (s *Server) handleRuntimeWorkflowStepComplete(w http.ResponseWriter, r *htt
 			t.Status = entity.TaskStatusDoneFailed
 		}
 		entity.ApplyStatusTimestamps(t, prev, now)
+		// S2 v2 seam fix: for BRANCH completions, the authoritative join
+		// gate (completeRuntimeWorkflowBranch → checkBranchQAGate) still
+		// needs this task's delivery worktree — the QA baseline delta is
+		// measured against the capture-time baseline ON DISK. The old
+		// ordering cleaned up the worktree BEFORE the join ran, so the
+		// gate silently degraded to the project-workspace fallback surface
+		// and phantom-rejected honest deliveries. Cleanup for branch tasks
+		// now happens AFTER the join + parent advance (see below); linear
+		// tasks keep the immediate cleanup.
+		isBranchCompletion := strings.TrimSpace(t.Vars[workflowBranchIDVar]) != ""
 		if t.Status == entity.TaskStatusDoneSuccess {
 			s.captureTaskCompletionSnapshot(t)
 			s.syncTaskCompletionRemote(principal.Project, t)
-			s.cleanupTaskDeliveryArtifacts(principal.Project, t.ID)
+			if !isBranchCompletion {
+				s.cleanupTaskDeliveryArtifacts(principal.Project, t.ID)
+			}
 		}
 		if err := s.ts.ArchiveTask(principal.Project, agent, t); err != nil {
 			s.serverError(w, err)
 			return
 		}
-		if t.CreatedBy != "" && strings.TrimSpace(t.Vars[workflowBranchIDVar]) == "" {
+		if t.CreatedBy != "" && !isBranchCompletion {
 			s.notifyTaskDone(t, principal.Project, agent)
 		}
-		if strings.TrimSpace(t.Vars[workflowBranchIDVar]) != "" {
+		if isBranchCompletion {
 			branchResult, err := s.completeRuntimeWorkflowBranch(principal.WorkspaceID, principal.Project, t, body.Outputs, stepStatus)
 			if err != nil {
 				s.jsonError(w, http.StatusBadRequest, err.Error())
@@ -1221,6 +1236,12 @@ func (s *Server) handleRuntimeWorkflowStepComplete(w http.ResponseWriter, r *htt
 			if err := s.advanceParentAfterBranchCompletion(principal.WorkspaceID, principal.Project, branchResult, r); err != nil {
 				s.serverError(w, err)
 				return
+			}
+			// Join succeeded: the branch delivery is accepted, so the
+			// worktree can now be retired (same contract as the linear
+			// path above, just ordered after the gate that measures it).
+			if t.Status == entity.TaskStatusDoneSuccess {
+				s.cleanupTaskDeliveryArtifacts(principal.Project, t.ID)
 			}
 		}
 	} else if err := s.activateNextWorkflowStep(principal.WorkspaceID, principal.Project, agent, t, transition, r); err != nil {
@@ -1323,8 +1344,10 @@ func (s *Server) precheckBranchJoinGate(workspaceID, project string, t *entity.T
 		return s.resolveTaskWorktreeDir(project, taskID)
 	}
 	// S2-2 (reviewer P0-1): the precheck must measure against the same
-	// trusted baseline the authoritative join gate will use.
-	wfStore.QABaselineLookup = s.QABaselineLookupAdapter()
+	// trusted baseline the authoritative join gate will use. S2 v2 seam
+	// fix: scope the lookup to THIS request's workspace so the read side
+	// hits the rows the capture path wrote.
+	wfStore.QABaselineLookup = s.QABaselineLookupForWorkspace(workspaceID)
 	run, ok, err := wfStore.RunForTask(project, t.ID)
 	if err != nil || !ok {
 		// No child run: the store-level gate will judge later; nothing to
@@ -1448,7 +1471,8 @@ func (s *Server) completeRuntimeWorkflowStep(workspaceID, project string, t *ent
 	}
 	// S2-2 (reviewer P0-1): linear QA steps keep the legacy whitelist
 	// surface, but a lost/tampered baseline still has to fail closed.
-	wfStore.QABaselineLookup = s.QABaselineLookupAdapter()
+	// S2 v2 seam fix: workspace-scoped lookup (see precheckBranchJoinGate).
+	wfStore.QABaselineLookup = s.QABaselineLookupForWorkspace(workspaceID)
 	if _, ok, err := wfStore.RunForTask(project, t.ID); err != nil || !ok {
 		return result, false, err
 	}
@@ -1490,8 +1514,10 @@ func (s *Server) completeRuntimeWorkflowBranch(workspaceID, project string, t *e
 	}
 	// S2-2 (reviewer P0-1): the authoritative join gate reads the trusted
 	// baseline from the control plane, never from the agent-writable
-	// worktree copy.
-	wfStore.QABaselineLookup = s.QABaselineLookupAdapter()
+	// worktree copy. S2 v2 seam fix: workspace-scoped lookup (see
+	// precheckBranchJoinGate) — the zero-arg adapter resolved an
+	// empty-workspace store and silently missed every production row.
+	wfStore.QABaselineLookup = s.QABaselineLookupForWorkspace(workspaceID)
 	summary := strings.TrimSpace(t.Summary)
 	if summary == "" {
 		summary = strings.TrimSpace(t.LastError)
@@ -1734,6 +1760,56 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 		}
 		if err := s.ts.AddTask(project, nextAgent, branchTask); err != nil {
 			return err
+		}
+		// S2 v2 materialization seam: fan-out branch tasks must enter the
+		// world exactly like HTTP-created branch tasks do (internal/api/write.go
+		// handlePostProjectTask): frozen baseCommit → materialized worktree →
+		// capture-time QA baseline persisted to the control plane BEFORE the
+		// child run exists. Without this, the join gate resolves the agent's
+		// own directory (resolver fallback chain) with no control-plane
+		// baseline and fails closed; the agent then works on a self-created
+		// branch the platform never measured. Idempotency: EnsureWorktreeAt
+		// returns the existing worktree (zero capture) on re-drive, and
+		// AddTask dedup is handled by the existingByBranch guard above (a
+		// re-drive skips branches that already have instances).
+		if s.worktreeMgr != nil {
+			gitRoot := s.resolveProjectGitRoot(project)
+			if _, statErr := os.Stat(filepath.Join(gitRoot, ".git")); statErr == nil {
+				baseCommit := strings.TrimSpace(completed.BaseCommit)
+				if baseCommit == "" {
+					resolved, rErr := s.worktreeMgr.ResolveBaseCommit(gitRoot, "main")
+					if rErr != nil {
+						return fmt.Errorf("fan-out branch %q: resolve base commit: %w", branch.ID, rErr)
+					}
+					baseCommit = resolved
+				}
+				branchTask.BaseCommit = baseCommit
+				branchTask.BaseBranch = "main"
+				// branch.ID comes from workflow definitions (template authors),
+				// so sanitize it before it lands in a git refspec argument.
+				branchTask.BranchName = "feature/wf-" + gitworktree.SanitizeTaskID(branch.ID)
+				wtDir, branchName, wtErr, qaCapture := s.worktreeMgr.EnsureWorktreeAt(gitRoot, branchTask.ID, baseCommit, branchTask.BranchName)
+				if wtErr != nil {
+					return fmt.Errorf("fan-out branch %q: materialize worktree: %w", branch.ID, wtErr)
+				}
+				branchTask.WorktreeDir = wtDir
+				branchTask.BranchName = branchName
+				// S2-2 trust model: the control-plane capture-time baseline is
+				// the only copy the join gate trusts. Persist BEFORE StartRun
+				// makes the child run (and its attention signal) visible.
+				if qaCapture.Baseline.Entries != nil {
+					if err := wfStore.CaptureQABaselineRecord(project, branchTask.ID, wtDir); err != nil {
+						return fmt.Errorf("fan-out branch %q: persist qa baseline: %w", branch.ID, err)
+					}
+				}
+				if err := s.ts.PersistTask(project, nextAgent, branchTask); err != nil {
+					return err
+				}
+			}
+			// No git repository at the resolved root: keep the pre-seam
+			// behavior (branch task runs in the agent dir). The join gate
+			// will fail closed there, which is the honest outcome for a
+			// non-git project.
 		}
 		childRun, childInstances, err := wfStore.StartRun(project, branchTask.ID, childDef.ID, transition.Run.ActorBindings)
 		if err != nil {

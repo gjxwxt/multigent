@@ -313,7 +313,34 @@ func (s *Server) QABaselineLookupAdapter() gitworktree.QABaselineLookup {
 	if s != nil && s.qaBaselineLookupOverride != nil {
 		return s.qaBaselineLookupOverride
 	}
-	return workflow.NewStore(s.controlDB, "").LoadQABaselinePayload
+	// S2 v2 seam fix: baselines are persisted under the REAL workspace ID
+	// (the write.go capture path and the runtime fan-out materialization
+	// seam both scope kv_records rows by workspace), so the lookup MUST
+	// scope the same way. The previous empty-workspace store silently
+	// missed every production row (ErrQABaselineLost fail-closed); fixture
+	// tests masked it via qaBaselineLookupOverride. Callers that hold a
+	// request-scoped workspace MUST use QABaselineLookupForWorkspace; this
+	// zero-arg variant stays for callers without one and resolves the
+	// server's own current workspace.
+	workspaceID, err := s.currentWorkspaceID()
+	if err != nil {
+		return func(string, string) (string, bool, error) {
+			return "", false, fmt.Errorf("resolve current workspace for qa baseline lookup: %w", err)
+		}
+	}
+	return workflow.NewStore(s.controlDB, workspaceID).LoadQABaselinePayload
+}
+
+// QABaselineLookupForWorkspace returns the trusted control-plane baseline
+// lookup scoped to an explicit workspace. Request-scoped call sites
+// (runtime precheck, branch join) must use this — never the zero-arg
+// adapter — so the read side hits the same kv_records rows the capture
+// side wrote.
+func (s *Server) QABaselineLookupForWorkspace(workspaceID string) gitworktree.QABaselineLookup {
+	if s != nil && s.qaBaselineLookupOverride != nil {
+		return s.qaBaselineLookupOverride
+	}
+	return workflow.NewStore(s.controlDB, workspaceID).LoadQABaselinePayload
 }
 
 func (s *Server) failStaleInteractionSessionsOnStartup() {
