@@ -254,7 +254,15 @@ S1→S2 先行的理由：机制层不动 UI/API，改完立即可验；S3 动 A
   server.go 经生产 HTTP 入口完成 join，核验子任务归档、子 run 终态、
   branch 实例记录业务申报、父 run 汇聚推进。本轮权限范围澄清：通用校验
   禁止 CI/部署/凭据/agent-config 是当前工作包的权限边界，不是所有研发
-  任务的永久规则；需要改这些文件的需求走受控授权步骤。
+  任务的永久规则；需要改这些文件的需求走受控授权步骤。独立复审（真
+  claude-sonnet-4-6）首遍 request_changes（1 P1 + 2 P2），9a87bbc8 全部
+  关闭：①P1 双分支隔离契约测试 TestPrecheckTwoBranchesIsolateWorktrees
+  AndBaselines——三目录（父+A+B）各自基线编辑前捕获，A/B 未申报编辑按名
+  拒绝且互不泄漏、诚实申报独立通过；②P2 mustUploadQABaseline 时序陷阱
+  文档化（编辑后重捕把脏树洗进权威基线）；③P2 CompleteBranchAndMaybe
+  Advance 文档写明生产 taskID != deliveryTaskID 不变式。第二遍复审
+  approved。教训：fixture helper 的隐式时序依赖必须显式文档，否则下个
+  测试作者必然踩中（本轮契约测试就因此假通过过一次）。
 
 - 2026-09-23（S2-2.2 修复轮，独立复审）：对 77b9118c+09cb58e5 最终代码的真
   claude-sonnet-4-6 独立复审返回 request_changes（1 P0 + 2 P1 + 3 P2），全部
