@@ -279,6 +279,53 @@ func TestDeliveryCheckpointAllowsBusinessFiles(t *testing.T) {
 	}
 }
 
+// TestDeliveryCheckpointKeepsDeclarationDirections (S2-2.2 review P2): the
+// delivery flag suppresses ONLY Direction 3 (the test-artifact whitelist).
+// Directions 1 and 2 — the honest-declaration cross-check — must stay
+// active, or the delivery checkpoint would degrade into a whitelist-only
+// gate that lets undeclared changes through.
+func TestDeliveryCheckpointKeepsDeclarationDirections(t *testing.T) {
+	store := newBaselineStore(t)
+	wt := newGitWorktree(t)
+	captureBaselineForTask(t, store, "proj", "task-delivery-directions", wt)
+	if err := os.WriteFile(filepath.Join(wt, "server.go"), []byte("package main\n\nfunc Delivery() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "client.go"), []byte("package main\n\nfunc Undeclared() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	surf, err := resolveQABaselineSurface(wt, store.QABaselineLookupAdapter(), "proj", "task-delivery-directions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	surf.deliveryDelta = true
+
+	// Direction 1: an undeclared real change must still be rejected.
+	err = verifyWorktreeDeltaAgainstDeclaration("server.go", wt, surf)
+	if err == nil || !strings.Contains(err.Error(), "client.go") {
+		t.Fatalf("delivery checkpoint must keep Direction 1 (undeclared change), got: %v", err)
+	}
+
+	// Direction 2: a "none" declaration over real changes must still fail.
+	err = verifyWorktreeDeltaAgainstDeclaration("none", wt, surf)
+	if err == nil || !strings.Contains(err.Error(), "changed path") {
+		t.Fatalf("delivery checkpoint must keep Direction 2 (none over real changes), got: %v", err)
+	}
+
+	// Phantom declarations (Direction 2b): a declared-but-unchanged path
+	// fails. Direction 1 fires first here (client.go is also undeclared),
+	// so use a declaration that covers the real changes plus one phantom.
+	err = verifyWorktreeDeltaAgainstDeclaration("server.go\nclient.go\nmissing.go", wt, surf)
+	if err == nil || !strings.Contains(err.Error(), "missing.go") {
+		t.Fatalf("delivery checkpoint must keep Direction 2 phantom rejection, got: %v", err)
+	}
+
+	// Honest full declaration still passes.
+	if err := verifyWorktreeDeltaAgainstDeclaration("server.go\nclient.go", wt, surf); err != nil {
+		t.Fatalf("honest full declaration must pass the delivery checkpoint, got: %v", err)
+	}
+}
+
 // TestQAGateNoBaselineFallsBackAbsolute: worktrees created before the fix
 // have NO baseline AND no capture manifest; the gate falls back to the
 // previous absolute status measurement (still fail-closed, still strict).

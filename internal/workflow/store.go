@@ -2022,12 +2022,22 @@ func (s *Store) CompleteBranchAndMaybeAdvance(project, taskID, runID, stepID, br
 			// transition lost its claim). The zero-write replay alone would
 			// leave the parent wedged at the join forever: re-drive the join
 			// from the recorded aggregate now. CAS-claimed, so concurrent
-			// re-reports cannot double-advance; a failed branch re-report
-			// still returns the recorded failure without advancing. Only the
-			// ACTIVE-run crash window re-drives the join: a terminal
-			// run means the join already happened, and CompleteAndAdvance
-			// would refuse re-entry (turning the idempotent 200 into a 400).
-			if result.AllDone && b.Status != "failed" && !workflowRunStatusTerminal(run.Status) {
+			// re-reports cannot double-advance. Only the ACTIVE-run crash
+			// window re-drives the join: a terminal run means the join
+			// already happened, and CompleteAndAdvance would refuse re-entry
+			// (turning the idempotent 200 into a 400).
+			//
+			// S2-2.2 (review round P0/P1): (a) the re-drive only fires when
+			// EVERY terminal branch is completed/skipped — one failed branch
+			// means the stage is a failure and must never advance (a
+			// completed branch's re-report returns the recorded result
+			// instead); (b) a concurrent re-report can win the CAS between
+			// our check and CompleteAndAdvance — its rejection
+			// (ErrStaleWorkflowTransition / no-longer-active) is the WINNER
+			// having done exactly this re-drive, so we re-read the run and
+			// degrade to the zero-write replay instead of surfacing an error
+			// that breaks idempotency.
+			if result.AllDone && !workflowBranchAnyFailed(branches) && !workflowRunStatusTerminal(run.Status) {
 				aggregate := aggregateBranchOutputs(branches)
 				stageSummary := workflowBranchSummary(branches)
 				if stageSummary == "" {
@@ -2035,6 +2045,14 @@ func (s *Store) CompleteBranchAndMaybeAdvance(project, taskID, runID, stepID, br
 				}
 				transition, jerr := s.CompleteAndAdvance(project, taskID, stageSummary, workflowValuesJSON(aggregate), aggregate, "completed")
 				if jerr != nil {
+					// Lost the race or the state moved under us: if the run
+					// has left this join step (or gone terminal), the join
+					// WAS re-driven by the winner — return the recorded
+					// replay result. Only a run still parked at the join
+					// with no advance means the re-drive genuinely failed.
+					if fresh, _, rerr := s.RunForTask(project, taskID); rerr == nil && (fresh.ActiveStepID != strings.TrimSpace(stepID) || workflowRunStatusTerminal(fresh.Status)) {
+						return result, nil
+					}
 					return result, jerr
 				}
 				result.Transition = transition
@@ -2162,6 +2180,20 @@ func workflowBranchAllTerminal(branches []entity.WorkflowBranchInstance) bool {
 		}
 	}
 	return len(branches) > 0
+}
+
+// workflowBranchAnyFailed reports whether ANY branch instance of the stage
+// recorded a failure. The crash-window join re-drive is a SUCCESS-path
+// recovery: with a failed branch the stage is a failure and the parent must
+// not advance (a completed branch's re-report just returns its recorded
+// result).
+func workflowBranchAnyFailed(branches []entity.WorkflowBranchInstance) bool {
+	for _, b := range branches {
+		if strings.TrimSpace(b.Status) == "failed" {
+			return true
+		}
+	}
+	return false
 }
 
 func workflowJoinPolicy(step entity.WorkflowStep) string {

@@ -1,9 +1,13 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	workflowstore "github.com/multigent/multigent/internal/workflow"
@@ -94,5 +98,59 @@ func TestBranchCrashWindowReJoinResumesParent(t *testing.T) {
 	}
 	if parentRun.Status != "completed" {
 		t.Fatalf("parent run must stay completed, got %q", parentRun.Status)
+	}
+}
+
+// TestCrashWindowFailedBranchNoAdvance (S2-2.2 review P1): the crash-window
+// re-drive is a SUCCESS-path recovery. With the branch recorded FAILED, a
+// re-report must return the recorded failure without advancing the parent —
+// never re-drive the join into a success the stage did not earn.
+func TestCrashWindowFailedBranchNoAdvance(t *testing.T) {
+	s, workspaceID := newBranchJoinHTTPServer(t)
+	wt := newBranchJoinWorktree(t)
+	s.worktreeResolveOverride = func(project, taskID string) string { return wt }
+	s.qaBaselineLookupOverride = mustUploadQABaseline(t, s, workspaceID, "sample", "task-join-child", wt)
+	if err := workflowstore.NewStore(s.controlDB, workspaceID).CaptureQABaselineRecord("sample", "task-join-root", wt); err != nil {
+		t.Fatalf("upload parent qa baseline: %v", err)
+	}
+	task, _ := seedBranchChildRun(t, s, workspaceID)
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	parentRunID := task.Vars[workflowRunIDVar]
+	// Crash window with a FAILED branch recorded.
+	instances, err := wfStore.BranchInstancesForStep(parentRunID, "parallel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instances[0].Status = "failed"
+	instances[0].Summary = "branch blew up"
+	if err := wfStore.SaveBranchInstance(&instances[0]); err != nil {
+		t.Fatal(err)
+	}
+	// A failed re-report (status=failed): must return 200 with the recorded
+	// failure, parent run NOT advanced.
+	body, err := json.Marshal(map[string]any{
+		"agent": "pm", "status": "failed", "summary": "branch blew up",
+		"outputs": map[string]string{"branch_summary": "branch blew up"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/tasks/"+task.ID+"/workflow/step/complete", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("id", task.ID)
+	req = req.WithContext(context.WithValue(req.Context(), ctxRuntimeAgentKey, runtimeAgentPrincipal{
+		WorkspaceID: workspaceID, Project: "sample", Agent: "pm", Capabilities: []string{"task.use"},
+	}))
+	rec := httptest.NewRecorder()
+	s.handleRuntimeWorkflowStepComplete(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("failed re-report must replay idempotently, got %d: %s", rec.Code, rec.Body.String())
+	}
+	parentRun, _, err := wfStore.RunByID("sample", parentRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parentRun.Status != "active" || parentRun.ActiveStepID != "parallel" {
+		t.Fatalf("failed branch must NOT advance the parent in the crash window, got %q@%q", parentRun.Status, parentRun.ActiveStepID)
 	}
 }

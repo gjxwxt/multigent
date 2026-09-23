@@ -196,12 +196,15 @@ func LoadQABaselineForGate(worktreeDir string, lookup QABaselineLookup, project,
 	if localPayload, err := os.ReadFile(QABaselinePath(worktreeDir)); err == nil {
 		var local QABaseline
 		if json.Unmarshal(localPayload, &local) != nil || local.SchemaVersion != QABaselineSchemaVersion {
-			return QABaseline{}, ErrQABaselineTampered
+			// S2-2.2 (review round P2): carry the digests in the error so the
+			// operator can see WHICH side moved without re-deriving them.
+			got, gErr := sha256FromBytes(localPayload)
+			return QABaseline{}, fmt.Errorf("%w (worktree copy undecodable, actual digest %s: %v)", ErrQABaselineTampered, got, gErr)
 		}
 		want, dErr := QABaselineDigest(baseline)
 		got, gErr := sha256FromBytes(localPayload)
 		if dErr != nil || gErr != nil || want != got {
-			return QABaseline{}, ErrQABaselineTampered
+			return QABaseline{}, fmt.Errorf("%w (expected %s, actual %s)", ErrQABaselineTampered, want, got)
 		}
 	}
 	return baseline, nil

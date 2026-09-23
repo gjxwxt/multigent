@@ -1356,6 +1356,11 @@ func (s *Server) precheckBranchJoinGate(workspaceID, project string, t *entity.T
 		return fmt.Errorf("branch join precheck: read parent run %s: %w", parentRunID, err)
 	}
 	branchStep := entity.WorkflowStep{ID: current.ID, Title: current.Title}
+	// S2-2.2 (review round P1): remember whether the parent-side contract
+	// lookup itself errored (transient infrastructure), separately from a
+	// clean miss (contract genuinely absent). A transient error must become
+	// a retryable 5xx below, never a 4xx contract verdict.
+	var parentReadError error
 	// Preferred contract source: the branch INSTANCE's frozen OutputFields
 	// (S2-2, reviewer P1-1) — captured when the run started, immune to later
 	// parent-definition edits, and exactly what the join's aggregate maps
@@ -1368,13 +1373,16 @@ func (s *Server) precheckBranchJoinGate(workspaceID, project string, t *entity.T
 					break
 				}
 			}
+		} else if parentReadError == nil {
+			parentReadError = ierr
 		}
 		if len(branchStep.OutputFields) == 0 {
-			parentDef, ok, err := wfStore.RunDefinition(parentRun)
-			if err != nil {
-				return fmt.Errorf("branch join precheck: read parent definition: %w", err)
-			}
-			if ok {
+			parentDef, ok, derr := wfStore.RunDefinition(parentRun)
+			if derr != nil {
+				if parentReadError == nil {
+					parentReadError = derr
+				}
+			} else if ok {
 				if parentStep, ok := workflowStepByID(parentDef.Steps, strings.TrimSpace(t.Vars[workflowStepIDVar])); ok {
 					if branchDef, ok := workflowstore.WorkflowBranchByID(parentStep.Branches, strings.TrimSpace(t.Vars[workflowBranchIDVar])); ok {
 						branchStep.OutputFields = append([]entity.WorkflowField{}, branchDef.OutputFields...)
@@ -1389,6 +1397,13 @@ func (s *Server) precheckBranchJoinGate(workspaceID, project string, t *entity.T
 		// identical by construction); embedded multi-step branches must
 		// fail closed — their contract lives in the parent snapshot and a
 		// wrong prediction here would double-enforce a foreign contract.
+		// S2-2.2 (review round P1): distinguish "the contract genuinely does
+		// not exist yet" from "we could not read it right now" — the latter
+		// is a transient infrastructure failure and must surface as a 5xx
+		// (retryable), not a 4xx rejection the runtime treats as a verdict.
+		if parentReadError != nil {
+			return fmt.Errorf("branch join precheck: parent contract lookup for %s/%s failed transiently: %w", t.Vars[workflowStepIDVar], t.Vars[workflowBranchIDVar], parentReadError)
+		}
 		if branchHasEmbeddedWorkflow(def) {
 			return fmt.Errorf("branch join precheck: parent branch contract for %s/%s is unavailable — refusing to pre-validate against the child step's fields", t.Vars[workflowStepIDVar], t.Vars[workflowBranchIDVar])
 		}
