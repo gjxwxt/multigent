@@ -243,6 +243,42 @@ func TestQAGateCorruptControlPlaneBaselineFailsClosed(t *testing.T) {
 	}
 }
 
+// TestDeliveryCheckpointAllowsBusinessFiles (S2-2 ⑤, fix round S2-2.1): a
+// BRANCH JOIN is a delivery checkpoint — the branch's whole baseline delta
+// IS the deliverable, so the test-artifact whitelist (Direction 3) must NOT
+// apply. A branch delivering business code (server.go) passes the
+// declaration cross-check; the same delta on a linear QA checkpoint
+// (legacy surface) still fails. Regression for the structural deadlock
+// where the whitelist comment existed but Direction 3 fired anyway.
+func TestDeliveryCheckpointAllowsBusinessFiles(t *testing.T) {
+	store := newBaselineStore(t)
+	wt := newGitWorktree(t)
+	captureBaselineForTask(t, store, "proj", "task-delivery", wt)
+	// The branch's real deliverable: a business-code edit, honestly declared.
+	if err := os.WriteFile(filepath.Join(wt, "server.go"), []byte("package main\n\nfunc Delivery() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	surf, err := resolveQABaselineSurface(wt, store.QABaselineLookupAdapter(), "proj", "task-delivery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	surf.deliveryDelta = true // branch-join checkpoint kind
+	if err := verifyWorktreeDeltaAgainstDeclaration("server.go", wt, surf); err != nil {
+		t.Fatalf("delivery checkpoint must accept business-code deliverables, got: %v", err)
+	}
+
+	// Same delta, same baseline, LEGACY linear-QA surface: whitelist still
+	// applies — QA editing business files must keep failing.
+	legacySurf, err := resolveQABaselineSurface(wt, store.QABaselineLookupAdapter(), "proj", "task-delivery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyWorktreeDeltaAgainstDeclaration("server.go", wt, legacySurf); err == nil || !strings.Contains(err.Error(), "test-artifact") {
+		t.Fatalf("legacy QA checkpoint must keep rejecting business files, got: %v", err)
+	}
+}
+
 // TestQAGateNoBaselineFallsBackAbsolute: worktrees created before the fix
 // have NO baseline AND no capture manifest; the gate falls back to the
 // previous absolute status measurement (still fail-closed, still strict).

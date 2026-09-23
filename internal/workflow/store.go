@@ -1949,11 +1949,14 @@ func (s *Store) checkBranchQAGate(project, taskID string, branchStep entity.Work
 	// whole delta vs its baseline is the deliverable, so the test-artifact
 	// whitelist must not apply (it exists for linear QA steps that only
 	// write test files). The trusted baseline (control plane) scopes the
-	// measurement; loss/tamper fail closed (P0-1).
+	// measurement; loss/tamper fail closed (P0-1). The surface flag is what
+	// actually suppresses Direction 3 inside verifyDeclared — a branch
+	// delivering business code must pass the declaration cross-check.
 	surf, err := resolveQABaselineSurface(worktreeDir, s.QABaselineLookup, project, taskID)
 	if err != nil {
 		return fmt.Errorf("touched_paths checkpoint baseline unavailable for task %s: %w", taskID, err)
 	}
+	surf.deliveryDelta = true
 	return verifyWorktreeDeltaAgainstDeclaration(values["touched_paths"], worktreeDir, surf)
 }
 

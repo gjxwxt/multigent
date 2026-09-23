@@ -82,6 +82,13 @@ func worktreeChangedPaths(worktreeDir string) ([]string, error) {
 //     baseline) → the old absolute git-status surface, still strict.
 type qaBaselineSurface struct {
 	baseline *gitworktree.QABaseline
+	// deliveryDelta marks a DELIVERY checkpoint (branch join, S2-2 ⑤):
+	// the branch agent's whole delta vs its baseline IS the deliverable,
+	// so Direction 3 (test-artifact whitelist) must NOT apply — a branch
+	// delivering business code would otherwise be structurally rejected.
+	// The linear QA checkpoint keeps the whitelist: QA edits a business
+	// file "to write a regression test" must keep failing.
+	deliveryDelta bool
 }
 
 // resolveQABaselineSurface decides the measurement surface for a gate run.
@@ -132,13 +139,14 @@ func verifyWorktreeDeltaAgainstDeclaration(declared string, worktreeDir string, 
 	if err != nil {
 		return fmt.Errorf("read worktree changes: %w", err)
 	}
-	return verifyDeclaredAgainstReal(declared, real)
+	return surf.verifyDeclared(declared, real)
 }
 
-// verifyDeclaredAgainstReal applies the declaration contract (directions
-// 1–3, same wording as the historical implementation) to a concrete
-// real-change set — shared by both checkpoint kinds.
-func verifyDeclaredAgainstReal(declared string, real []string) error {
+// verifyDeclared applies the declaration contract (directions 1–3, same
+// wording as the historical implementation) to a concrete real-change set.
+// The checkpoint kind lives on the surface: deliveryDelta suppresses
+// Direction 3 (the test-artifact whitelist), the legacy QA surface keeps it.
+func (surf qaBaselineSurface) verifyDeclared(declared string, real []string) error {
 	declaredSet := map[string]bool{}
 	if strings.TrimSpace(declared) != "" {
 		for _, line := range strings.Split(declared, "\n") {
@@ -185,7 +193,9 @@ func verifyDeclaredAgainstReal(declared string, real []string) error {
 	// Direction 3: the whitelist applies to the REAL delta (same classifier
 	// as the declaration gate) — a declared-and-real business file still
 	// fails; declaration cannot launder a path past the test-artifact rule.
-	if len(real) > 0 {
+	// Delivery checkpoints (branch joins, surf.deliveryDelta) skip it: the
+	// whole baseline delta is the deliverable there (S2-2 ⑤).
+	if !surf.deliveryDelta && len(real) > 0 {
 		if err := ValidateQATouchedPaths(strings.Join(real, "\n")); err != nil {
 			return fmt.Errorf("worktree changes fail the test-artifact rule: %w", err)
 		}
