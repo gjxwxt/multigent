@@ -1717,6 +1717,21 @@ func (s *Server) branchTaskHasExecutionEvidence(workspaceID, project, taskID str
 		if run, found, err := wfStore.RunForTask(project, taskID); err == nil && found {
 			return true, "child workflow run " + run.ID + " (status " + run.Status + ")"
 		}
+		// Defense in depth (review round 3 P1-2): the fan-out loop skips
+		// branches that already have an instance, so a missing instance is
+		// a precondition of the rebuild path — but if that guard ever
+		// changes, instance presence alone must still block the rebuild.
+		// Cheap to check here; an instance means the branch was activated.
+		if s.controlDB != nil {
+			if recs, err := s.controlDB.ListRecords("workflow_branch_instances", workspaceID, []string{}); err == nil {
+				for _, rec := range recs {
+					var inst entity.WorkflowBranchInstance
+					if json.Unmarshal([]byte(rec.Payload), &inst) == nil && inst.ChildTaskID == taskID {
+						return true, "branch instance " + inst.ID + " (branch " + inst.BranchID + ")"
+					}
+				}
+			}
+		}
 	}
 	if s.controlDB != nil && strings.TrimSpace(workspaceID) != "" {
 		runs, err := s.controlDB.ListRuntimeRuns(controldb.RuntimeRunFilter{

@@ -713,3 +713,103 @@ func runFanoutAndCollectBranchNames(t *testing.T, s *Server, workspaceID, baseCo
 	}
 	return out
 }
+
+// TestFanoutBranchNameIsSafeForGitRefspec (review round 3 P2-1): whatever
+// the run ID and branch ID contain, the materialized branch name must be a
+// single safe refspec component (no separators, no traversal, no whitespace).
+// Platform run IDs are generated (wfr-<8 chars>), but branch IDs come from
+// template authors — this pins the sanitizer at the seam.
+func TestFanoutBranchNameIsSafeForGitRefspec(t *testing.T) {
+	s, workspaceID := newBranchJoinHTTPServer(t)
+	s.worktreeMgr = gitworktreeManagerForTest()
+	_, baseCommit := buildFanoutGitWorkspace(t, s)
+	seedFanoutParentRun(t, s, workspaceID, baseCommit)
+
+	rec := postBranchStepComplete(t, s, workspaceID, "task-fanout-root", map[string]string{
+		"branch_summary": "contract frozen",
+		"touched_paths":  "contract.md",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("parent start: %d %s", rec.Code, rec.Body.String())
+	}
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	run, _, err := wfStore.RunForTask("sample", "task-fanout-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instances, err := wfStore.BranchInstancesForStep(run.ID, "parallel")
+	if err != nil || len(instances) != 2 {
+		t.Fatalf("instances: %v %d", err, len(instances))
+	}
+	for _, inst := range instances {
+		child, err := s.ts.GetTask("sample", "pm", inst.ChildTaskID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		name := child.BranchName
+		if name == "" {
+			t.Fatal("branch task must have a materialized branch name")
+		}
+		if !strings.HasPrefix(name, "feature/wf-") {
+			t.Fatalf("branch name %q must be namespaced under feature/wf-", name)
+		}
+		// The name is exactly two refspec components (feature/, wf-<run>-<branch>);
+		// everything after the single namespace slash must be a safe component.
+		rest := strings.TrimPrefix(name, "feature/")
+		if strings.ContainsAny(rest, " /\\:;*?[]~^:\n\t") || strings.Contains(rest, "..") {
+			t.Fatalf("branch name %q contains refspec-unsafe characters in component %q", name, rest)
+		}
+		if !strings.Contains(name, gitworktree.SanitizeTaskID(run.ID)) {
+			t.Fatalf("branch name %q must embed the sanitized run ID %q for cross-run uniqueness", name, gitworktree.SanitizeTaskID(run.ID))
+		}
+	}
+}
+
+// TestFanoutRebuildBlockedByBranchInstance (review round 3 P2-2): the branch
+// instance alone is execution evidence — a worktree with no baseline and no
+// child run must still be blocked from rebuild when an instance points at
+// the branch task.
+func TestFanoutRebuildBlockedByBranchInstance(t *testing.T) {
+	s, workspaceID := newBranchJoinHTTPServer(t)
+	s.worktreeMgr = gitworktreeManagerForTest()
+	_, baseCommit := buildFanoutGitWorkspace(t, s)
+	seedFanoutParentRun(t, s, workspaceID, baseCommit)
+
+	rec := postBranchStepComplete(t, s, workspaceID, "task-fanout-root", map[string]string{
+		"branch_summary": "contract frozen",
+		"touched_paths":  "contract.md",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("parent start: %d %s", rec.Code, rec.Body.String())
+	}
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	run, _, err := wfStore.RunForTask("sample", "task-fanout-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instances, err := wfStore.BranchInstancesForStep(run.ID, "parallel")
+	if err != nil || len(instances) != 2 {
+		t.Fatalf("instances: %v %d", err, len(instances))
+	}
+	childID := instances[0].ChildTaskID
+	// Evidence shape: baseline gone, child run gone, branch instance
+	// KEPT (the loop's existingByBranch guard will skip this branch —
+	// exercise the evidence function directly to pin its contract).
+	if err := wfStore.DeleteQABaselineRecord("sample", childID); err != nil {
+		t.Fatal(err)
+	}
+	if childRun, found, runErr := wfStore.RunForTask("sample", childID); runErr != nil {
+		t.Fatal(runErr)
+	} else if found {
+		if err := s.controlDB.DeleteRecord("workflow_runs", workspaceID, []string{"sample", childID, childRun.ID}); err != nil {
+			t.Fatal(runErr)
+		}
+	}
+	executed, evidence := s.branchTaskHasExecutionEvidence(workspaceID, "sample", childID, wfStore)
+	if !executed {
+		t.Fatalf("branch instance must count as execution evidence, got none")
+	}
+	if !strings.Contains(evidence, "branch instance") {
+		t.Fatalf("evidence must name the branch instance, got: %s", evidence)
+	}
+}
