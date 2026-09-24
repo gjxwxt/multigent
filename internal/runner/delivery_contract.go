@@ -19,6 +19,11 @@ import (
 // contract var = no gating).
 const deliveryContractVar = "MULTIGENT_DELIVERY_CONTRACT"
 
+// DeliveryContractVar exposes the task var key to the API side, which seeds
+// the contract into fan-out branch tasks and enforces the git dimension at
+// the control-plane completion gate.
+const DeliveryContractVar = deliveryContractVar
+
 type deliveryContract struct {
 	// RequireModelActivity: at least one model response must appear in the
 	// transcript. Guard against the zero-output exit-0 false success
@@ -46,9 +51,13 @@ var testsRunRe = regexp.MustCompile(`Tests run:\s*(\d+)`)
 
 // validateDeliveryEvidence checks the contract against the captured run
 // transcript. workspaceDir is the run working directory (empty = skip the
-// git evidence beyond transcript matching). Returned string explains the
-// first unmet requirement; empty means all requirements are met.
-func validateDeliveryEvidence(c deliveryContract, transcript, workspaceDir, baseBranch, branchName string) string {
+// git evidence beyond transcript matching). baseCommit is the task's FROZEN
+// baseline SHA (takes precedence over baseBranch when set — review round 3
+// item 1: the increment must be measured against the exact commit the task
+// was created from, not a branch ref that can move); baseBranch is the
+// fallback. Returned string explains the first unmet requirement; empty
+// means all requirements are met.
+func validateDeliveryEvidence(c deliveryContract, transcript, workspaceDir, baseCommit, baseBranch, branchName string) string {
 	fail := func(what, hint string) string {
 		return fmt.Sprintf("delivery contract unmet: %s (%s)", what, hint)
 	}
@@ -65,25 +74,62 @@ func validateDeliveryEvidence(c deliveryContract, transcript, workspaceDir, base
 		}
 	}
 	if c.RequireGitCommit || c.RequirePush {
-		if strings.TrimSpace(workspaceDir) != "" {
-			commitOK, pushOK, err := gitDeliveryEvidence(workspaceDir, baseBranch, branchName)
-			if err != nil {
-				return fail("git delivery evidence unreadable", err.Error())
-			}
-			if c.RequireGitCommit && !commitOK {
-				return fail("no commit beyond base branch", "commit the delivery on the declared branch")
-			}
-			if c.RequirePush && !pushOK {
-				if strings.TrimSpace(branchName) == "" {
-					return fail("push required but task has no BranchName", "set BranchName on the task")
-				}
-				return fail("branch not found on the remote", "push the declared branch before completing")
-			}
-		} else {
-			return fail("delivery contract requires a git workspace, run has none", "dispatch this task on a runtime node with a workspace mount")
+		if violation := ValidateGitDeliveryEvidence(c, workspaceDir, baseCommit, baseBranch, branchName); violation != "" {
+			return violation
 		}
 	}
 	return ""
+}
+
+// ValidateGitDeliveryEvidence is the git-dimension half of the delivery
+// contract, exported for the API-side completion gate (review round 3, item
+// 3): workflow branch tasks complete via the control plane
+// (completeRuntimeWorkflowBranch), not the runner, so the fan-out delivery
+// contract must be enforceable there too — same rules, same messages.
+func ValidateGitDeliveryEvidence(c deliveryContract, workspaceDir, baseCommit, baseBranch, branchName string) string {
+	fail := func(what, hint string) string {
+		return fmt.Sprintf("delivery contract unmet: %s (%s)", what, hint)
+	}
+	if !c.RequireGitCommit && !c.RequirePush {
+		return ""
+	}
+	if strings.TrimSpace(workspaceDir) == "" {
+		return fail("delivery contract requires a git workspace, run has none", "dispatch this task on a runtime node with a workspace mount")
+	}
+	baseRef := strings.TrimSpace(baseCommit)
+	if baseRef == "" {
+		baseRef = baseBranch
+	}
+	commitOK, push, err := gitDeliveryEvidence(workspaceDir, baseRef, branchName)
+	if err != nil {
+		return fail("git delivery evidence unreadable", err.Error())
+	}
+	if c.RequireGitCommit && !commitOK {
+		return fail("no commit beyond the frozen base "+baseRef, "commit the delivery on the declared branch")
+	}
+	if c.RequirePush {
+		if strings.TrimSpace(branchName) == "" {
+			return fail("push required but task has no BranchName", "set BranchName on the task")
+		}
+		// SHA-accurate push evidence (review round 3, item 2): a remote
+		// branch EXISTING is not proof — it may sit at an older commit while
+		// the local delivery commit is unpushed.
+		if !push.RemoteHasBranch {
+			return fail("branch not found on the remote", "push the declared branch before completing")
+		}
+		if push.RemoteSHA != push.LocalSHA {
+			return fail(fmt.Sprintf("remote branch is at %s but the local delivery commit is %s (unpushed)", shortSHA(push.RemoteSHA), shortSHA(push.LocalSHA)),
+				"push the latest commit so the remote tip matches the delivery")
+		}
+	}
+	return ""
+}
+
+func shortSHA(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
 }
 
 func transcriptHasModelActivity(transcript string) bool {
@@ -128,6 +174,12 @@ func parseDeliveryContract(raw string) (deliveryContract, error) {
 	return c, nil
 }
 
+// ParseDeliveryContract is the exported alias for the API-side completion
+// gate, which reads the same task var from the control plane.
+func ParseDeliveryContract(raw string) (deliveryContract, error) {
+	return parseDeliveryContract(raw)
+}
+
 // applyDeliveryContractGate is the single done_success choke point for task
 // runs (review P1-iii, 2026-09-24): CLI-agent and HTTP-agent paths both call
 // it right after setting TaskStatusDoneSuccess. When the task carries no
@@ -151,7 +203,7 @@ func (r *Runner) applyDeliveryContractGate(result *RunResult, task *entity.Task,
 		}
 		return
 	}
-	violation := validateDeliveryEvidence(contract, transcript, execAgentDir, task.BaseBranch, task.BranchName)
+	violation := validateDeliveryEvidence(contract, transcript, execAgentDir, task.BaseCommit, task.BaseBranch, task.BranchName)
 	if violation == "" {
 		return
 	}

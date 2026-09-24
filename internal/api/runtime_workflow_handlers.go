@@ -1,10 +1,10 @@
 package api
 
 import (
-	controldb "github.com/multigent/multigent/internal/db"
 	"encoding/json"
 	"errors"
 	"fmt"
+	controldb "github.com/multigent/multigent/internal/db"
 	"log"
 	"net/http"
 	"os"
@@ -18,6 +18,7 @@ import (
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/errs"
 	"github.com/multigent/multigent/internal/gitworktree"
+	"github.com/multigent/multigent/internal/runner"
 	"github.com/multigent/multigent/internal/taskstore"
 	"github.com/multigent/multigent/internal/tasktemplate"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
@@ -967,6 +968,24 @@ func (s *Server) handleRuntimeTaskComplete(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	status := normalizeDoneStatus(body.Status, body.Error)
+	// Review round 3, item 3: the plain-task delivery contract gate. Tasks
+	// completed from the sandbox via mga (no runner on the console host) go
+	// through this entry; a contract-bearing task claiming success must
+	// prove the git delivery here too, with the same rules as the runner
+	// gate. Failures are user-visible via the task error path below.
+	if status == entity.TaskStatusDoneSuccess {
+		if raw := strings.TrimSpace(t.Vars[runner.DeliveryContractVar]); raw != "" {
+			contract, pErr := runner.ParseDeliveryContract(raw)
+			if pErr != nil {
+				s.jsonError(w, http.StatusBadRequest, fmt.Sprintf("delivery contract invalid: %v", pErr))
+				return
+			}
+			if violation := runner.ValidateGitDeliveryEvidence(contract, s.resolveTaskWorktreeDir(principal.Project, t.ID), t.BaseCommit, t.BaseBranch, t.BranchName); violation != "" {
+				body.Error = violation
+				status = entity.TaskStatusDoneFailed
+			}
+		}
+	}
 	now := time.Now().UTC()
 	prev := t.Status
 	t.Status = status
@@ -1539,6 +1558,25 @@ func (s *Server) completeRuntimeWorkflowBranch(workspaceID, project string, t *e
 	if summary == "" {
 		summary = strings.TrimSpace(t.LastError)
 	}
+	// Review round 3, item 3: the fan-out delivery contract gate. A branch
+	// child whose parent carries MULTIGENT_DELIVERY_CONTRACT must prove its
+	// delivery HERE — the control-plane completion is the formal entry for
+	// branch tasks (the runner-side gate never sees workflow children).
+	// Measured against the branch task's own frozen BaseCommit and its own
+	// worktree; only successful completions are gated (a failed branch is
+	// already failing). Failure converts the completion into a branch
+	// failure so the join sees an honest state.
+	if stepStatus == "completed" {
+		if raw := strings.TrimSpace(t.Vars[runner.DeliveryContractVar]); raw != "" {
+			contract, pErr := runner.ParseDeliveryContract(raw)
+			if pErr != nil {
+				return result, fmt.Errorf("delivery contract invalid: %w", pErr)
+			}
+			if violation := runner.ValidateGitDeliveryEvidence(contract, s.resolveTaskWorktreeDir(project, t.ID), t.BaseCommit, t.BaseBranch, t.BranchName); violation != "" {
+				return result, fmt.Errorf("%s", violation)
+			}
+		}
+	}
 	// S2-2.3 (review round, item 2): the run handle stays the PARENT task
 	// (rootTaskID) — it owns the active run/step/branch state — while the QA
 	// measurement owner is the BRANCH task (t.ID): its own worktree + its
@@ -1829,23 +1867,30 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 			// task's ID when the key matches an active task.
 			IdempotencyKey: "fanout/" + transition.Run.ID + "/" + step.ID + "/" + branch.ID,
 			Title:          strings.TrimSpace(completed.Title + " · " + branch.Title),
-			Type:        completed.Type,
-			Priority:    completed.Priority,
-			Assignee:    project + "/" + nextAgent,
-			CreatedBy:   completed.CreatedBy,
-			Status:      entity.TaskStatusPending,
-			Description: strings.TrimSpace(branch.Description),
-			Prompt:      workflowBranchTaskPrompt(completed, step, branch, *startStep, inputArtifact),
-			Labels:      append([]string{}, completed.Labels...),
-			ParentID:    completed.ID,
-			CreatedAt:   now,
-			UpdatedAt:   now,
+			Type:           completed.Type,
+			Priority:       completed.Priority,
+			Assignee:       project + "/" + nextAgent,
+			CreatedBy:      completed.CreatedBy,
+			Status:         entity.TaskStatusPending,
+			Description:    strings.TrimSpace(branch.Description),
+			Prompt:         workflowBranchTaskPrompt(completed, step, branch, *startStep, inputArtifact),
+			Labels:         append([]string{}, completed.Labels...),
+			ParentID:       completed.ID,
+			CreatedAt:      now,
+			UpdatedAt:      now,
 			Vars: map[string]string{
 				workflowRootTaskIDVar: completed.ID,
 				workflowRunIDVar:      transition.Run.ID,
 				workflowStepIDVar:     step.ID,
 				workflowBranchIDVar:   branch.ID,
 			},
+		}
+		// Review round 3, item 3: the delivery contract travels WITH the
+		// fan-out — a parent carrying MULTIGENT_DELIVERY_CONTRACT hands it to
+		// every branch child, so a branch that produced no delivery cannot
+		// complete successfully through the control-plane path either.
+		if contract := strings.TrimSpace(completed.Vars[runner.DeliveryContractVar]); contract != "" {
+			branchTask.Vars[runner.DeliveryContractVar] = contract
 		}
 		s.annotateTaskAssignee(workspaceID, project, branchTask)
 		if branchTask.Type == "" {
