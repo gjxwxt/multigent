@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os/exec"
 	"regexp"
 	"strings"
 
@@ -93,8 +94,17 @@ func ValidateGitDeliveryEvidence(c deliveryContract, workspaceDir, baseCommit, b
 	if !c.RequireGitCommit && !c.RequirePush {
 		return ""
 	}
-	if strings.TrimSpace(workspaceDir) == "" {
+	wsDir := strings.TrimSpace(workspaceDir)
+	if wsDir == "" {
 		return fail("delivery contract requires a git workspace, run has none", "dispatch this task on a runtime node with a workspace mount")
+	}
+	// Review round 4 (P0-3): the resolver chain can fall back to paths that
+	// are NOT the task's delivery tree (agent dir, project workspace, project
+	// root). Validating git evidence there would measure the WRONG repository
+	// and could pass by accident. Require the workspace to actually be a git
+	// work tree; anything else fails closed.
+	if _, err := exec.Command("git", "-C", wsDir, "rev-parse", "--is-inside-work-tree").Output(); err != nil {
+		return fail("delivery contract requires a git workspace", fmt.Sprintf("resolved run directory %s is not a git work tree; refusing to measure evidence in the wrong tree", wsDir))
 	}
 	baseRef := strings.TrimSpace(baseCommit)
 	if baseRef == "" {

@@ -1061,6 +1061,13 @@ func (s *Server) resumeArchivedBranchJoin(w http.ResponseWriter, r *http.Request
 	// the first completion's cleanup already ran for the accepted case.
 	result, err := s.completeRuntimeWorkflowBranch(principal.WorkspaceID, principal.Project, t, body.Outputs, stepStatus)
 	if err != nil {
+		// Review round 4 (P0-1): same rejection-visibility contract as the
+		// first-completion path below — the reason lands on the task record.
+		t.LastError = err.Error()
+		t.UpdatedAt = time.Now().UTC()
+		if pErr := s.ts.PersistTask(principal.Project, agent, t); pErr != nil {
+			log.Printf("[workflow] branch %s: persist rejection reason failed: %v", t.ID, pErr)
+		}
 		s.jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -1098,6 +1105,17 @@ func (s *Server) completeRuntimeWorkflowBranchHTTP(w http.ResponseWriter, r *htt
 	}
 	result, err := s.completeRuntimeWorkflowBranch(principal.WorkspaceID, principal.Project, t, body.Outputs, stepStatus)
 	if err != nil {
+		// Review round 4 (P0-1): the completion was rejected (delivery
+		// contract violation, join gate, or branch metadata problem) — the
+		// run does not advance, but the rejection must be visible on the
+		// TASK record too, not only in the 400 body the agent sees. Keep
+		// the task in its current (retryable) state — same semantics as a
+		// join rejection — with the reason in LastError.
+		t.LastError = err.Error()
+		t.UpdatedAt = time.Now().UTC()
+		if pErr := s.ts.PersistTask(principal.Project, agent, t); pErr != nil {
+			log.Printf("[workflow] branch %s: persist rejection reason failed: %v", t.ID, pErr)
+		}
 		s.jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -1266,6 +1284,15 @@ func (s *Server) handleRuntimeWorkflowStepComplete(w http.ResponseWriter, r *htt
 		if isBranchCompletion {
 			branchResult, err := s.completeRuntimeWorkflowBranch(principal.WorkspaceID, principal.Project, t, body.Outputs, stepStatus)
 			if err != nil {
+				// Review round 4 (P0-1): same rejection-visibility contract —
+				// note the task was ALREADY archived as done_success above; the
+				// rejection reason must still land on the record so the agent
+				// and the operator can see why the join did not advance.
+				t.LastError = err.Error()
+				t.UpdatedAt = time.Now().UTC()
+				if pErr := s.ts.PersistTask(principal.Project, agent, t); pErr != nil {
+					log.Printf("[workflow] branch %s: persist rejection reason failed: %v", t.ID, pErr)
+				}
 				s.jsonError(w, http.StatusBadRequest, err.Error())
 				return
 			}
@@ -1889,6 +1916,11 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 		// fan-out — a parent carrying MULTIGENT_DELIVERY_CONTRACT hands it to
 		// every branch child, so a branch that produced no delivery cannot
 		// complete successfully through the control-plane path either.
+		// Review round 4 (P1-2): guard against a future refactor dropping the
+		// Vars initialization above.
+		if branchTask.Vars == nil {
+			branchTask.Vars = map[string]string{}
+		}
 		if contract := strings.TrimSpace(completed.Vars[runner.DeliveryContractVar]); contract != "" {
 			branchTask.Vars[runner.DeliveryContractVar] = contract
 		}

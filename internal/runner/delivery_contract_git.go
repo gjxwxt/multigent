@@ -22,7 +22,13 @@ type pushEvidence struct {
 // baseRef is the FROZEN base (task.BaseCommit when set, else the base
 // branch name — resolved by the caller); commit evidence counts commits on
 // HEAD not reachable from that base ref, so a moved base branch cannot
-// launder or hide the increment. Read-only and local: every git invocation
+// launder or hide the increment.
+//
+// Fallback responsibility (review round 4, P1-1): baseCommit/BaseBranch
+// selection happens entirely in ValidateGitDeliveryEvidence; the final
+// "main" default for a fully-unset task lives HERE and is the only place
+// it does. Changing either side without the other can break the fail-closed
+// guarantee (unresolvable base = error, never a silent success). Read-only and local: every git invocation
 // is `git -C dir`, no fetch, no push; failures return an error for the
 // caller to surface (unprovable is not delivered).
 func gitDeliveryEvidence(dir, baseRef, branchName string) (commitBeyondBase bool, push pushEvidence, err error) {

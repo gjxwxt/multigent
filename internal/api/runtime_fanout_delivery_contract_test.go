@@ -142,6 +142,17 @@ func TestFanoutDeliveryContractBlocksNoDeliveryChild(t *testing.T) {
 		t.Fatalf("rejection must name the missing commit evidence, got: %s", rec.Body.String())
 	}
 
+	// Review round 4 (P0-1): the rejection must be visible on the TASK
+	// record (LastError), not only in the 400 body — the task stays in its
+	// retryable pending state with the reason attached.
+	noDelTask, err = s.ts.GetTask("sample", "pm", noDelivery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(noDelTask.LastError, "delivery contract unmet") {
+		t.Fatalf("task record must carry the rejection reason, got LastError=%q status=%q", noDelTask.LastError, noDelTask.Status)
+	}
+
 	// The join must NOT have advanced: the branch instance stays running.
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
 	run, found, err := wfStore.RunForTask("sample", "task-fanout-root")
@@ -303,5 +314,66 @@ func TestRuntimeTaskCompleteDeliveryContractGatesPlainTask(t *testing.T) {
 	}
 	if stored.Status != entity.TaskStatusDoneSuccess {
 		t.Fatalf("honest delivery must complete successfully, got %q (err=%q)", stored.Status, stored.LastError)
+	}
+}
+
+// Review round 4 (P0-3/P2-2): a contract task WITHOUT a materialized
+// worktree must fail closed — the resolver's fallback chain must not steer
+// the gate into an unrelated git repository (project workspace) where the
+// evidence could pass by accident.
+func TestRuntimeTaskCompleteDeliveryContractFailsClosedWithoutWorktree(t *testing.T) {
+	s, workspaceID := newBranchJoinHTTPServer(t)
+	s.worktreeMgr = gitworktreeManagerForTest()
+	gitRoot, baseCommit := buildFanoutGitWorkspace(t, s)
+	seedFanoutGitRemote(t, s, gitRoot)
+
+	now := time.Now().UTC()
+	task := &entity.Task{
+		ID: "task-no-wt-contract", Title: "Contract without worktree", Status: entity.TaskStatusPending,
+		Priority: 2, Assignee: "pm", CreatedAt: now, UpdatedAt: now,
+		BaseCommit: baseCommit, BaseBranch: "main",
+		// NOTE: no WorktreeDir, no materialization — the resolver will fall
+		// back through agent dir → project workspace (a git repo whose HEAD
+		// equals the base; a broken gate could still pass on RequireGitCommit
+		// if it measured the wrong tree with extra commits, and the frozen
+		// base must not be laundered by that fallback either).
+		Vars: map[string]string{
+			"MULTIGENT_DELIVERY_CONTRACT": `{"requireGitCommit":true,"requirePush":true}`,
+		},
+	}
+	if err := s.ts.AddTask("sample", "pm", task); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := postRuntimeComplete(t, s, workspaceID, task.ID, map[string]string{
+		"agent":   "pm",
+		"status":  "success",
+		"summary": "success claimed with no worktree",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("endpoint must 200 with server-side flip, got %d: %s", rec.Code, rec.Body.String())
+	}
+	stored, err := s.ts.GetTask("sample", "pm", task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != entity.TaskStatusDoneFailed {
+		t.Fatalf("no-worktree contract success must flip to done_failed, got %q (err=%q)", stored.Status, stored.LastError)
+	}
+	if !strings.Contains(stored.LastError, "delivery contract unmet") {
+		t.Fatalf("rejection must carry the violation, got %q", stored.LastError)
+	}
+	// The refusal must be evidence-surface-explained. Note the git-worktree
+	// check does NOT rescue this case: the resolver falls back to the
+	// project workspace, which IS a git repo, so the gate proceeds there —
+	// but on the task's own frozen base + BranchName the measured evidence
+	// is still missing (no commit beyond base on the task's branch), so the
+	// gate rejects. What the round-4 guard actually protects against is a
+	// NON-git fallback (agent dir, project root) which would error out
+	// instead of measuring.
+	if !strings.Contains(stored.LastError, "no commit beyond") &&
+		!strings.Contains(stored.LastError, "branch not found on the remote") &&
+		!strings.Contains(stored.LastError, "not a git work tree") {
+		t.Fatalf("refusal must come from the task's own evidence surface, got %q", stored.LastError)
 	}
 }
