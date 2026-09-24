@@ -631,10 +631,17 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 			base = "main"
 		}
 		scopedBoundary = fmt.Sprintf("【Git Worktree 独立分支安全边界约束】\n- 你当前工作在独立特性分支 `%s` (基于 `%s`) 的专用工作区 (Worktree) 中。\n- 你的工作根目录已映射至 `/workspace`。所有代码修改、新增文件与单测验证必须严格限定在 `/workspace` 内部。\n- 严禁执行 git checkout 切换到其他分支，严禁修改父仓库或其他任务的文件。\n- 严禁执行 `git worktree prune`、`git worktree remove` 或任何修改父仓库 `.git` 目录与共享 Git 配置（含 credential.helper、remote URL）的命令——这些元数据由平台统一管理，破坏会同时毁掉其他任务的工作区。\n- 严禁向 git 配置写入任何凭据（token/密码）；推送凭据由平台在推送瞬时注入，无需也不允许你自行配置。\n- 【工作区环境与依赖状态】当前工作区的所有代码、Git 历史与已安装依赖（如 node_modules）均已持久化就绪。严禁执行 rm -rf .git 或重新 git init，严禁无故全量重装依赖。请直接在现有代码库上进行增量改动、构建和测试。\n\n", task.BranchName, base)
-		if strings.TrimSpace(task.WorktreeDir) != "" {
-			if _, err := os.Stat(task.WorktreeDir); err == nil {
-				execAgentDir = task.WorktreeDir
+		if wtDir := strings.TrimSpace(task.WorktreeDir); wtDir != "" {
+			if _, err := os.Stat(wtDir); err != nil {
+				// D-7 fix (2026-09-24): a task that declares a worktree must
+				// fail closed when that worktree is not accessible on this
+				// host. Silently degrading to the agent home while still
+				// showing the worktree boundary made the agent operate on the
+				// wrong tree under a lying premise. Same contract as the
+				// wakeup path (wakeupRunScope execution_scope_mismatch).
+				return nil, fmt.Errorf("execution_scope_mismatch: task %s targets worktree %s but it is not accessible on this host", task.ID, wtDir)
 			}
+			execAgentDir = wtDir
 		}
 	}
 
@@ -851,6 +858,20 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 	}
 
 	result.Status = entity.TaskStatusDoneSuccess
+	// Delivery contract gate (D-5 fix, 2026-09-24): when the caller attached
+	// a contract, exit 0 alone does not prove the delivery happened. Validate
+	// the declared evidence against the captured transcript and git state;
+	// unmet requirements fail the task instead of reporting a hollow success.
+	if raw := strings.TrimSpace(task.Vars[deliveryContractVar]); raw != "" {
+		if contract, err := parseDeliveryContract(raw); err != nil {
+			result.Status = entity.TaskStatusDoneFailed
+			result.ErrorMsg = fmt.Sprintf("delivery contract invalid: %v", err)
+		} else if violation := validateDeliveryEvidence(contract, outBuf.String(), execAgentDir, task.BaseBranch, task.BranchName); violation != "" {
+			result.Status = entity.TaskStatusDoneFailed
+			result.ErrorMsg = violation
+			fmt.Fprintf(redactedLogFile, "\n=== delivery contract violated ===\n%s\n", violation)
+		}
+	}
 	r.recordAgentRun(telemetry.KindTask, project, agentName, task.ID, task.Title, string(model), sandboxLabel,
 		apiModel, apiBaseURL,
 		runStarted, runFinished, result.Status, &ec, result.SessionID, result.ErrorMsg,

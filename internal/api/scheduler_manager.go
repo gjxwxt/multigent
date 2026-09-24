@@ -898,7 +898,11 @@ func (s *Server) startProjectTaskDirect(workspaceID, project, agent string, task
 		// not here.
 		run, err := s.enqueueSpecificRuntimeTaskRunFromRequest(workspaceID, project, agent, task, hb, externalServerURL(r), requestUsername(r))
 		if err != nil {
-			return 0, "", fmt.Errorf("queue task run failed: %w", err)
+			// D-5 fix (2026-09-24): a worker explicitly bound to a runtime node
+			// must NEVER silently fall back to local console execution — that
+			// fallback produced hollow done_success runs (no model, no delivery).
+			// Fail loudly; the caller surfaces the error to the user.
+			return 0, "", fmt.Errorf("queue task run on runtime node failed: %w", err)
 		}
 		_ = s.saveSchedulerTargetHeartbeat(workspaceID, target, hb)
 		s.auditLog(auditLogInput{
