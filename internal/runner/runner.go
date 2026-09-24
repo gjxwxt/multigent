@@ -1928,7 +1928,11 @@ func (r *Runner) runTaskHTTP(project, agentName, agentDir string, meta *entity.A
 	}
 
 	result.Status = entity.TaskStatusDoneSuccess
-	r.applyDeliveryContractGate(result, task, output, agentDir, logFile)
+	// HTTP agents have no worktree execution scope by design (reviewer round
+	// 2): pass an empty workspace so git evidence requirements fail with the
+	// explicit "requires a git workspace" message instead of reading the
+	// agent home's unrelated git state.
+	r.applyDeliveryContractGate(result, task, output, "", logFile)
 	r.recordAgentRun(telemetry.KindTask, project, agentName, task.ID, task.Title, modelNorm, sandboxLabel,
 		"", "",
 		runStarted, runFinished, result.Status, nil, result.SessionID, result.ErrorMsg,
