@@ -858,20 +858,7 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 	}
 
 	result.Status = entity.TaskStatusDoneSuccess
-	// Delivery contract gate (D-5 fix, 2026-09-24): when the caller attached
-	// a contract, exit 0 alone does not prove the delivery happened. Validate
-	// the declared evidence against the captured transcript and git state;
-	// unmet requirements fail the task instead of reporting a hollow success.
-	if raw := strings.TrimSpace(task.Vars[deliveryContractVar]); raw != "" {
-		if contract, err := parseDeliveryContract(raw); err != nil {
-			result.Status = entity.TaskStatusDoneFailed
-			result.ErrorMsg = fmt.Sprintf("delivery contract invalid: %v", err)
-		} else if violation := validateDeliveryEvidence(contract, outBuf.String(), execAgentDir, task.BaseBranch, task.BranchName); violation != "" {
-			result.Status = entity.TaskStatusDoneFailed
-			result.ErrorMsg = violation
-			fmt.Fprintf(redactedLogFile, "\n=== delivery contract violated ===\n%s\n", violation)
-		}
-	}
+	r.applyDeliveryContractGate(result, task, outBuf.String(), execAgentDir, redactedLogFile)
 	r.recordAgentRun(telemetry.KindTask, project, agentName, task.ID, task.Title, string(model), sandboxLabel,
 		apiModel, apiBaseURL,
 		runStarted, runFinished, result.Status, &ec, result.SessionID, result.ErrorMsg,
@@ -1941,6 +1928,7 @@ func (r *Runner) runTaskHTTP(project, agentName, agentDir string, meta *entity.A
 	}
 
 	result.Status = entity.TaskStatusDoneSuccess
+	r.applyDeliveryContractGate(result, task, output, agentDir, logFile)
 	r.recordAgentRun(telemetry.KindTask, project, agentName, task.ID, task.Title, modelNorm, sandboxLabel,
 		"", "",
 		runStarted, runFinished, result.Status, nil, result.SessionID, result.ErrorMsg,

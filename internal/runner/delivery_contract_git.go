@@ -16,19 +16,16 @@ func gitDeliveryEvidence(dir, baseBranch, branchName string) (commitBeyondBase, 
 		base = "main"
 	}
 	// Commit evidence: at least one commit on HEAD not reachable from base.
-	// On a detached head or missing base, fall back to requiring HEAD != base.
+	// Review fix (P1-ii, 2026-09-24): when base is not resolvable (shallow
+	// clone, renamed base) we MUST fail closed — the previous fallback
+	// (rev-list --count HEAD) turned "cannot prove a commit beyond base"
+	// into "delivered" (count "0" is non-empty), a false positive. Unprovable
+	// is not delivered.
 	out, err := exec.Command("git", "-C", dir, "rev-list", "--count", base+"..HEAD").CombinedOutput()
 	if err != nil {
-		// Base branch may not exist locally (shallow clone without base):
-		// fall back to comparing against the empty tree of HEAD~0 semantics.
-		out2, err2 := exec.Command("git", "-C", dir, "rev-list", "--count", "HEAD").CombinedOutput()
-		if err2 != nil {
-			return false, false, fmt.Errorf("git rev-list: %v: %s", err, strings.TrimSpace(string(out)))
-		}
-		commitBeyondBase = strings.TrimSpace(string(out2)) != ""
-	} else {
-		commitBeyondBase = strings.TrimSpace(string(out)) != "0"
+		return false, false, fmt.Errorf("git rev-list %s..HEAD (base branch not resolvable): %v: %s", base, err, strings.TrimSpace(string(out)))
 	}
+	commitBeyondBase = strings.TrimSpace(string(out)) != "0"
 	branch := strings.TrimSpace(branchName)
 	if branch == "" {
 		return commitBeyondBase, false, nil

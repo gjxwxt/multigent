@@ -3,8 +3,11 @@ package runner
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
+
+	"github.com/multigent/multigent/internal/entity"
 )
 
 // deliveryContractVar is the task var key carrying the caller's completion
@@ -21,6 +24,11 @@ type deliveryContract struct {
 	// transcript. Guard against the zero-output exit-0 false success
 	// (2026-09-24: unbound-node worker fell back to local execution without
 	// model credentials and the task was marked done_success).
+	// Trust boundary (review P1-i): the transcript is written by the local
+	// agent CLI, so a compromised agent could fabricate an assistant line.
+	// This gate is deterministic anti-omission defense, not adversarial
+	// proof — final acceptance still cross-checks the remote SHA and diff
+	// independently of run status.
 	RequireModelActivity bool `json:"requireModelActivity"`
 	// RequireGitCommit: a commit must be observable on the current branch
 	// beyond the task's BaseBranch (or main when unset). When RequirePush is
@@ -118,4 +126,38 @@ func parseDeliveryContract(raw string) (deliveryContract, error) {
 		return c, fmt.Errorf("decode delivery contract: %w", err)
 	}
 	return c, nil
+}
+
+// applyDeliveryContractGate is the single done_success choke point for task
+// runs (review P1-iii, 2026-09-24): CLI-agent and HTTP-agent paths both call
+// it right after setting TaskStatusDoneSuccess. When the task carries no
+// contract var it is a no-op; otherwise an unmet requirement flips the result
+// to done_failed with the violation as ErrorMsg and mirrors it into the
+// redacted run log for the user-visible record.
+func (r *Runner) applyDeliveryContractGate(result *RunResult, task *entity.Task, transcript, execAgentDir string, redactedLog io.Writer) {
+	if result == nil || task == nil || len(task.Vars) == 0 {
+		return
+	}
+	raw := strings.TrimSpace(task.Vars[deliveryContractVar])
+	if raw == "" {
+		return
+	}
+	contract, err := parseDeliveryContract(raw)
+	if err != nil {
+		result.Status = entity.TaskStatusDoneFailed
+		result.ErrorMsg = fmt.Sprintf("delivery contract invalid: %v", err)
+		if redactedLog != nil {
+			fmt.Fprintf(redactedLog, "\n=== delivery contract invalid ===\n%s\n", result.ErrorMsg)
+		}
+		return
+	}
+	violation := validateDeliveryEvidence(contract, transcript, execAgentDir, task.BaseBranch, task.BranchName)
+	if violation == "" {
+		return
+	}
+	result.Status = entity.TaskStatusDoneFailed
+	result.ErrorMsg = violation
+	if redactedLog != nil {
+		fmt.Fprintf(redactedLog, "\n=== delivery contract violated ===\n%s\n", violation)
+	}
 }

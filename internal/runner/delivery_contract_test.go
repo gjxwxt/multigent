@@ -128,3 +128,44 @@ func TestRunTaskPlainTaskWorktreeUnreachableFailsClosed(t *testing.T) {
 		t.Fatalf("expected execution_scope_mismatch, got %v", err)
 	}
 }
+
+// P2-vi (review round): the gate itself — a task carrying a contract var
+// with zero model activity must flip done_success → done_failed.
+func TestApplyDeliveryContractGateFlipsHollowSuccess(t *testing.T) {
+	r := New(t.TempDir(), nil, nil)
+	task := &entity.Task{
+		ID:    "t-contract",
+		Title: "contracted task",
+		Vars: map[string]string{
+			deliveryContractVar: `{"requireModelActivity":true,"requireGitCommit":true}`,
+		},
+		BaseBranch: "main",
+	}
+	result := &RunResult{Status: entity.TaskStatusDoneSuccess}
+	var logBuf strings.Builder
+	r.applyDeliveryContractGate(result, task, "=== exit code: 0 ===", t.TempDir(), &logBuf)
+	if result.Status != entity.TaskStatusDoneFailed {
+		t.Fatalf("hollow success must flip to done_failed, got %s (%s)", result.Status, result.ErrorMsg)
+	}
+	if !strings.Contains(logBuf.String(), "delivery contract violated") {
+		t.Fatalf("violation must be mirrored to the run log, got %q", logBuf.String())
+	}
+}
+
+// Base branch not resolvable (shallow clone) must fail closed — the old
+// rev-list HEAD fallback reported delivered for an empty history.
+func TestGitDeliveryEvidenceMissingBaseFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	seedGitRepo(t, dir, "init", "-b", "task/x")
+	seedGitRepo(t, dir, "config", "user.email", "t@t")
+	seedGitRepo(t, dir, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedGitRepo(t, dir, "add", ".")
+	seedGitRepo(t, dir, "commit", "-m", "only commit")
+	_, _, err := gitDeliveryEvidence(dir, "main", "")
+	if err == nil {
+		t.Fatal("missing base branch must fail closed, not fall back")
+	}
+}
