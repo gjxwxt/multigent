@@ -4,7 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"net"
 	"net/http"
+	"net/url"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -169,6 +173,126 @@ func (s *Server) verifiedGitLabHost(ctx context.Context, projectName string) (*c
 	}
 	_ = p
 	return host, binding, nil
+}
+
+// deliveryEvidenceEnv resolves a TRANSIENT credential env for the API-side
+// delivery-evidence check (round 6, D-D — real S2 run 2026-09-24).
+//
+// Why this exists: the push requirement is proved with a live
+// `git ls-remote origin <branch>`. That check used to run with the console's
+// own process environment, but the credentials-not-on-disk invariant
+// deliberately leaves the host WITHOUT any git credential helper — so on every
+// private remote the read failed ("could not read Username …") and the gate
+// rejected honest deliveries fail-closed. Observed on branch
+// feature/wf-wfr-wlhdwalv-workstream_1 (task t-20260924-hps07k): the commit was
+// pushed and visible via ls-remote from INSIDE the run, yet the control-plane
+// gate reported "git delivery evidence unreadable".
+//
+// Credential source mirrors where the run itself gets its helper materialized:
+// first the project's verified remote binding pin, then the workspace's
+// default GitLab connection (projects adopted without the verify flow — e.g.
+// brownfield projects — still push through the platform connection inside the
+// sandbox, so the gate must resolve the same surface).
+//
+// SECURITY (credential-exfiltration guard): the transient header is injected
+// ONLY when the task worktree's `origin` points at the resolved connection's
+// host (docker alias spellings included). A repository that names a foreign
+// remote gets NO credential — the gate then behaves exactly as before and
+// fails closed. Nothing is ever written to disk, repo config, or the remote
+// URL: the token lives in the child process env of one read-only command.
+func (s *Server) deliveryEvidenceEnv(project, worktreeDir string) []string {
+	if s == nil || s.controlDB == nil || strings.TrimSpace(project) == "" || strings.TrimSpace(worktreeDir) == "" {
+		return nil
+	}
+	host, _, err := s.verifiedGitLabHost(context.Background(), project)
+	if err != nil || host == nil {
+		// Fallback is intentional: projects adopted without the verify flow
+		// (brownfield) still push inside the sandbox through the workspace's
+		// platform connection, so the gate must resolve the same surface.
+		host, _, err = s.resolveGitLabHost("")
+		if err != nil || host == nil {
+			log.Printf("[delivery-evidence-env] project %s: no usable GitLab connection (%v); the push-evidence check will run without credentials and fail closed", project, err)
+			return nil
+		}
+	}
+	originHost := gitRemoteHost(worktreeDir)
+	if originHost == "" {
+		// Review round 6 P1-2: only http(s) remotes are supported here. SSH
+		// remotes (git@host:path / ssh://) resolve to "" and therefore keep
+		// the previous behaviour (process env, fail closed) — the platform's
+		// connection model is HTTP(S)-based, so an SSH project needs an
+		// explicit follow-up rather than a silently weaker guard.
+		log.Printf("[delivery-evidence-env] project %s: worktree %s has no http(s) origin remote; skipping credential injection", project, worktreeDir)
+		return nil
+	}
+	if !sameGitHost(originHost, host.BaseURL()) {
+		// Credential-exfiltration guard: never hand the platform token to a
+		// remote the connection does not name.
+		log.Printf("[delivery-evidence-env] project %s: worktree origin host %s does not match the connection host; skipping credential injection", project, originHost)
+		return nil
+	}
+	env, err := gitlabTransientCloneEnv(host.APIToken())
+	if err != nil {
+		log.Printf("[delivery-evidence-env] project %s: transient credential env unavailable: %v", project, err)
+		return nil
+	}
+	return env
+}
+
+// gitRemoteHost returns the host of the worktree's `origin` remote (no
+// credential helper is needed to read local config). Empty for local paths,
+// file:// remotes, ssh scp-style remotes, or any resolution error.
+func gitRemoteHost(worktreeDir string) string {
+	out, err := exec.Command("git", "-C", worktreeDir, "remote", "get-url", "origin").Output()
+	if err != nil {
+		return ""
+	}
+	raw := strings.TrimSpace(string(out))
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return ""
+	}
+	return parsed.Host
+}
+
+// sameGitHost compares a worktree remote host with the connection base host,
+// accepting the docker/OrbStack alias spellings of the same host
+// (host.docker.internal <-> host.orb.internal) exactly like the runtime
+// credential-helper materialization does.
+func sameGitHost(remoteHost, baseURL string) bool {
+	base, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || base.Host == "" {
+		return false
+	}
+	if strings.EqualFold(remoteHost, base.Host) {
+		return true
+	}
+	alias := func(host, from, to string) string {
+		h, port, err := net.SplitHostPort(host)
+		if err != nil {
+			h = host
+			port = ""
+		}
+		if !strings.EqualFold(h, from) {
+			return ""
+		}
+		if port == "" {
+			return to
+		}
+		return net.JoinHostPort(to, port)
+	}
+	for _, pair := range [][2]string{{"host.docker.internal", "host.orb.internal"}, {"host.orb.internal", "host.docker.internal"}} {
+		if strings.EqualFold(remoteHost, alias(base.Host, pair[0], pair[1])) {
+			return true
+		}
+	}
+	return false
 }
 
 // adoptRemoteBindingAfterSync is the init-flow adoption: after a verified

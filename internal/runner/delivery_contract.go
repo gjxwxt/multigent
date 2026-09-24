@@ -75,7 +75,7 @@ func validateDeliveryEvidence(c deliveryContract, transcript, workspaceDir, base
 		}
 	}
 	if c.RequireGitCommit || c.RequirePush {
-		if violation := ValidateGitDeliveryEvidence(c, workspaceDir, baseCommit, baseBranch, branchName); violation != "" {
+		if violation := ValidateGitDeliveryEvidence(c, workspaceDir, baseCommit, baseBranch, branchName, nil); violation != "" {
 			return violation
 		}
 	}
@@ -87,7 +87,7 @@ func validateDeliveryEvidence(c deliveryContract, transcript, workspaceDir, base
 // 3): workflow branch tasks complete via the control plane
 // (completeRuntimeWorkflowBranch), not the runner, so the fan-out delivery
 // contract must be enforceable there too — same rules, same messages.
-func ValidateGitDeliveryEvidence(c deliveryContract, workspaceDir, baseCommit, baseBranch, branchName string) string {
+func ValidateGitDeliveryEvidence(c deliveryContract, workspaceDir, baseCommit, baseBranch, branchName string, env []string) string {
 	fail := func(what, hint string) string {
 		return fmt.Sprintf("delivery contract unmet: %s (%s)", what, hint)
 	}
@@ -110,7 +110,7 @@ func ValidateGitDeliveryEvidence(c deliveryContract, workspaceDir, baseCommit, b
 	if baseRef == "" {
 		baseRef = baseBranch
 	}
-	commitOK, push, err := gitDeliveryEvidence(workspaceDir, baseRef, branchName)
+	commitOK, push, err := gitDeliveryEvidence(workspaceDir, baseRef, branchName, env)
 	if err != nil {
 		return fail("git delivery evidence unreadable", err.Error())
 	}

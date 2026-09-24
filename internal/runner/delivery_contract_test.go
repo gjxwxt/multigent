@@ -82,7 +82,7 @@ func TestGitDeliveryEvidenceCommitBeyondBase(t *testing.T) {
 	seedGitRepo(t, dir, "add", ".")
 	seedGitRepo(t, dir, "commit", "-m", "base")
 	seedGitRepo(t, dir, "checkout", "-b", "task/x")
-	commitOK, _, err := gitDeliveryEvidence(dir, "main", "")
+	commitOK, _, err := gitDeliveryEvidence(dir, "main", "", nil)
 	if err != nil {
 		t.Fatalf("evidence: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestGitDeliveryEvidenceCommitBeyondBase(t *testing.T) {
 	// Round-3 item 1: the frozen BaseCommit SHA must behave identically to
 	// the branch name when they point at the same commit.
 	baseSHA := strings.TrimSpace(seedGitRepo(t, dir, "rev-parse", "main"))
-	commitOK, _, err = gitDeliveryEvidence(dir, baseSHA, "")
+	commitOK, _, err = gitDeliveryEvidence(dir, baseSHA, "", nil)
 	if err != nil {
 		t.Fatalf("evidence(baseSHA): %v", err)
 	}
@@ -104,7 +104,7 @@ func TestGitDeliveryEvidenceCommitBeyondBase(t *testing.T) {
 	}
 	seedGitRepo(t, dir, "add", ".")
 	seedGitRepo(t, dir, "commit", "-m", "work")
-	commitOK, _, err = gitDeliveryEvidence(dir, "main", "")
+	commitOK, _, err = gitDeliveryEvidence(dir, "main", "", nil)
 	if err != nil {
 		t.Fatalf("evidence: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestGitDeliveryEvidenceMissingBaseFailsClosed(t *testing.T) {
 	}
 	seedGitRepo(t, dir, "add", ".")
 	seedGitRepo(t, dir, "commit", "-m", "only commit")
-	_, _, err := gitDeliveryEvidence(dir, "main", "")
+	_, _, err := gitDeliveryEvidence(dir, "main", "", nil)
 	if err == nil {
 		t.Fatal("missing base branch must fail closed, not fall back")
 	}
@@ -212,7 +212,7 @@ func TestDeliveryContractRemoteStaleWhileLocalAhead(t *testing.T) {
 	seedGitRepo(t, dir, "commit", "-m", "new delivery (unpushed)")
 
 	c := deliveryContract{RequireGitCommit: true, RequirePush: true}
-	v := ValidateGitDeliveryEvidence(c, dir, "", "main", "task/x")
+	v := ValidateGitDeliveryEvidence(c, dir, "", "main", "task/x", nil)
 	if v == "" {
 		t.Fatal("remote at an older commit while local is ahead must NOT count as pushed")
 	}
@@ -223,7 +223,7 @@ func TestDeliveryContractRemoteStaleWhileLocalAhead(t *testing.T) {
 	// The same state WITHOUT the unpushed commit must pass — proves the
 	// gate fails on the stale remote, not on something else.
 	seedGitRepo(t, dir, "reset", "--hard", "HEAD~1")
-	if v := ValidateGitDeliveryEvidence(c, dir, "", "main", "task/x"); v != "" {
+	if v := ValidateGitDeliveryEvidence(c, dir, "", "main", "task/x", nil); v != "" {
 		t.Fatalf("pushed state should satisfy the contract, got %q", v)
 	}
 }
@@ -258,14 +258,131 @@ func TestDeliveryContractFrozenBaseCommitAnchorsIncrement(t *testing.T) {
 	seedGitRepo(t, dir, "checkout", "task/x")
 
 	c := deliveryContract{RequireGitCommit: true}
-	if v := ValidateGitDeliveryEvidence(c, dir, frozenBase, "main", ""); v != "" {
+	if v := ValidateGitDeliveryEvidence(c, dir, frozenBase, "main", "", nil); v != "" {
 		t.Fatalf("frozen base must still see the branch increment: %q", v)
 	}
 	// The frozen SHA is the contract anchor: a branch with no increment
 	// beyond it must fail, and the violation must name the exact base the
 	// increment is measured against (the SHA, not a movable branch name).
 	seedGitRepo(t, dir, "checkout", "-b", "task/empty", frozenBase)
-	if v := ValidateGitDeliveryEvidence(c, dir, frozenBase, "", ""); v == "" || !strings.Contains(v, "no commit beyond the frozen base "+frozenBase) {
+	if v := ValidateGitDeliveryEvidence(c, dir, frozenBase, "", "", nil); v == "" || !strings.Contains(v, "no commit beyond the frozen base "+frozenBase) {
 		t.Fatalf("violation must reference the frozen base commit, got %q", v)
+	}
+}
+
+// TestGitDeliveryEvidenceUsesInjectedCredentialEnv (round 6, D-D). The
+// API-side gate runs on the console host, which by the credentials-not-on-disk
+// invariant has NO git credential helper — a private remote is unreadable with
+// the bare process env, so an honest push was rejected fail-closed on real S2
+// branch task t-20260924-hps07k. The gate must therefore accept a transient
+// credential env for its read-only ls-remote.
+//
+// The test reproduces the shape without a real server: the task worktree's
+// `origin` points at an unreachable HTTPS URL (the credential-less case), and
+// the injected env carries a `url.<local-bare>.insteadOf` mapping that stands
+// in for the credential the platform injects. With the env the remote branch
+// is visible; without it the check fails closed.
+func TestGitDeliveryEvidenceUsesInjectedCredentialEnv(t *testing.T) {
+	remote := t.TempDir()
+	seedGitRepo(t, remote, "init", "--bare", "-b", "main")
+
+	dir := t.TempDir()
+	seedGitRepo(t, dir, "init", "-b", "main")
+	seedGitRepo(t, dir, "config", "user.email", "t@t")
+	seedGitRepo(t, dir, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedGitRepo(t, dir, "add", ".")
+	seedGitRepo(t, dir, "commit", "-m", "base")
+	seedGitRepo(t, dir, "checkout", "-b", "task/push")
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedGitRepo(t, dir, "add", ".")
+	seedGitRepo(t, dir, "commit", "-m", "work")
+
+	// The remote the worktree believes in is unreachable without credentials.
+	const fakeURL = "https://git.example.invalid/private/repo.git"
+	seedGitRepo(t, dir, "remote", "add", "origin", fakeURL)
+	// Push through the mapping (stand-in for the injected credential) so the
+	// remote branch exists.
+	mapped := append(os.Environ(),
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=url.file://"+remote+".insteadOf",
+		"GIT_CONFIG_VALUE_0="+fakeURL,
+	)
+	push := exec.Command("git", "-C", dir, "push", "origin", "task/push")
+	push.Env = mapped
+	if out, err := push.CombinedOutput(); err != nil {
+		t.Fatalf("seed push: %v (%s)", err, out)
+	}
+
+	// Without an injected env the evidence read fails closed.
+	if commitOK, pushEv, err := gitDeliveryEvidence(dir, "main", "task/push", nil); err == nil {
+		t.Fatalf("credential-less host must not read a private remote (commit=%v push=%+v)", commitOK, pushEv)
+	}
+
+	// With the injected env the push is provable (remote SHA == local SHA).
+	commitOK, pushEv, err := gitDeliveryEvidence(dir, "main", "task/push", mapped)
+	if err != nil {
+		t.Fatalf("injected env must make the remote readable: %v", err)
+	}
+	if !commitOK {
+		t.Fatal("expected a commit beyond the frozen base")
+	}
+	if !pushEv.RemoteHasBranch {
+		t.Fatal("expected the remote branch to be observed")
+	}
+	local := strings.TrimSpace(seedGitRepo(t, dir, "rev-parse", "HEAD"))
+	if pushEv.RemoteSHA != local {
+		t.Fatalf("remote SHA %s must equal local HEAD %s", pushEv.RemoteSHA, local)
+	}
+}
+
+// TestDeliveryContractSectionRendersExactEvidenceShapes (round 6, D-E): the
+// contract's run-ending gate matches exact output shapes, so the prompt must
+// spell them out. Guards the drift between what the gate enforces and what the
+// agent is told.
+func TestDeliveryContractSectionRendersExactEvidenceShapes(t *testing.T) {
+	task := &entity.Task{
+		BaseCommit: "f34e686a1f347374690bd18b436c641f663aa29d",
+		BranchName: "feature/wf-x-workstream_1",
+		Vars: map[string]string{
+			DeliveryContractVar: `{"requireModelActivity":true,"requireGitCommit":true,"requirePush":true,"requireTestsRun":true}`,
+		},
+	}
+	section := deliveryContractSection(task)
+	for _, want := range []string{
+		"Delivery contract",
+		"Tests run: <N>",
+		"Write-Output",
+		"do **not** match",
+		"no runnable test suite",
+		"f34e686a1f347374690bd18b436c641f663aa29d",
+		"feature/wf-x-workstream_1",
+		"REMOTE SHA EQUAL to your local HEAD SHA",
+		"Model activity",
+	} {
+		if !strings.Contains(section, want) {
+			t.Fatalf("contract section must mention %q, got:\n%s", want, section)
+		}
+	}
+	// Only the ACTIVE requirements are rendered: the prompt and the gate read
+	// the same parsed contract.
+	lean := &entity.Task{Vars: map[string]string{DeliveryContractVar: `{"requireTestsRun":true}`}}
+	leanSection := deliveryContractSection(lean)
+	if strings.Contains(leanSection, "Model activity") || strings.Contains(leanSection, "Push") {
+		t.Fatalf("inactive requirements must not be rendered:\n%s", leanSection)
+	}
+	if !strings.Contains(leanSection, "Tests run: <N>") {
+		t.Fatalf("active requirement must be rendered:\n%s", leanSection)
+	}
+	if got := deliveryContractSection(&entity.Task{}); got != "" {
+		t.Fatalf("a task without a contract renders no section, got %q", got)
+	}
+	if got := deliveryContractSection(&entity.Task{Vars: map[string]string{DeliveryContractVar: "{not json"}}); got != "" {
+		t.Fatalf("a malformed contract renders no section, got %q", got)
 	}
 }

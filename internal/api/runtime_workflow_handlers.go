@@ -980,7 +980,8 @@ func (s *Server) handleRuntimeTaskComplete(w http.ResponseWriter, r *http.Reques
 				s.jsonError(w, http.StatusBadRequest, fmt.Sprintf("delivery contract invalid: %v", pErr))
 				return
 			}
-			if violation := runner.ValidateGitDeliveryEvidence(contract, s.resolveTaskWorktreeDir(principal.Project, t.ID), t.BaseCommit, t.BaseBranch, t.BranchName); violation != "" {
+			deliveryDir := s.resolveTaskWorktreeDir(principal.Project, t.ID)
+			if violation := runner.ValidateGitDeliveryEvidence(contract, deliveryDir, t.BaseCommit, t.BaseBranch, t.BranchName, s.deliveryEvidenceEnv(principal.Project, deliveryDir)); violation != "" {
 				body.Error = violation
 				status = entity.TaskStatusDoneFailed
 			}
@@ -1599,7 +1600,8 @@ func (s *Server) completeRuntimeWorkflowBranch(workspaceID, project string, t *e
 			if pErr != nil {
 				return result, fmt.Errorf("delivery contract invalid: %w", pErr)
 			}
-			if violation := runner.ValidateGitDeliveryEvidence(contract, s.resolveTaskWorktreeDir(project, t.ID), t.BaseCommit, t.BaseBranch, t.BranchName); violation != "" {
+			deliveryDir := s.resolveTaskWorktreeDir(project, t.ID)
+			if violation := runner.ValidateGitDeliveryEvidence(contract, deliveryDir, t.BaseCommit, t.BaseBranch, t.BranchName, s.deliveryEvidenceEnv(project, deliveryDir)); violation != "" {
 				return result, fmt.Errorf("%s", violation)
 			}
 		}

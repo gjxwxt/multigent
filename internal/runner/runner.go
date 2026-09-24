@@ -871,10 +871,81 @@ func (r *Runner) taskPromptWithWorkflowContext(project, agentName string, task *
 		return ""
 	}
 	ctx := strings.TrimSpace(r.workflowPromptContext(project, agentName, task.ID))
+	// Round 6 (D-E): a contract-bearing task is gated on EXACT output shapes
+	// ("Tests run: N") that no agent can guess, and on git evidence whose
+	// rules (frozen base, remote SHA == local SHA) are not discoverable from
+	// the task record. Real S2 branch run t-20260924-hps07k passed 25/25
+	// tests and pushed its commit, yet the run-level gate rejected it because
+	// the transcript said "vitest 25/25" instead of the expected summary
+	// line. Render the active requirements into the prompt from the SAME
+	// parsed contract the gate uses, so the two can never drift apart.
+	if contract := deliveryContractSection(task); contract != "" {
+		if ctx == "" {
+			ctx = contract
+		} else {
+			ctx = contract + "\n\n" + ctx
+		}
+	}
 	if ctx == "" {
 		return task.Prompt
 	}
 	return ctx + "\n\n---\n## Task Prompt\n\n" + task.Prompt
+}
+
+// deliveryContractSection renders the platform-enforced delivery contract for
+// the run prompt (round 6, D-E). Returns "" when the task carries no contract
+// or the contract does not parse — the run-level gate stays authoritative and
+// a malformed contract must not turn prompt building into an error path.
+func deliveryContractSection(task *entity.Task) string {
+	if task == nil {
+		return ""
+	}
+	raw := strings.TrimSpace(task.Vars[DeliveryContractVar])
+	if raw == "" {
+		return ""
+	}
+	c, err := parseDeliveryContract(raw)
+	if err != nil {
+		return ""
+	}
+	if !c.RequireModelActivity && !c.RequireGitCommit && !c.RequirePush && !c.RequireTestsRun {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Delivery contract (platform-enforced — checked when this run ends)\n\n")
+	b.WriteString("This task carries an explicit delivery contract. When the run ends the platform checks the\n")
+	b.WriteString("evidence below; a missing item fails the run (and, for workflow branches, blocks the join).\n\n")
+	if c.RequireModelActivity {
+		b.WriteString("- **Model activity**: the run must produce model output. A command-only run fails.\n")
+	}
+	if c.RequireTestsRun {
+		b.WriteString("- **Tests run**: your run output MUST contain a summary line matching `Tests run: <N>` with N > 0,\n")
+		b.WriteString("  where N is the number of tests actually executed. Make the test runner print that exact line\n")
+		b.WriteString("  (a plain `echo`/`printf`/`Write-Output` of it is fine). Prose counts such as \"25/25 passed\"\n")
+		b.WriteString("  or \"vitest 25/25\" do **not** match, and a fabricated count fails the platform's honesty rules.\n")
+		b.WriteString("  If the project genuinely has no runnable test suite, say so explicitly in your final summary\n")
+		b.WriteString("  instead of inventing output — an honest \"no tests available\" is a finding, not a failure.\n")
+	}
+	if c.RequireGitCommit {
+		base := strings.TrimSpace(task.BaseCommit)
+		if base == "" {
+			base = strings.TrimSpace(task.BaseBranch)
+		}
+		if base == "" {
+			base = "main"
+		}
+		fmt.Fprintf(&b, "- **Git commit**: at least one commit on HEAD that is not reachable from the frozen base `%s`.\n", base)
+	}
+	if c.RequirePush {
+		branch := strings.TrimSpace(task.BranchName)
+		if branch == "" {
+			branch = "<your branch>"
+		}
+		fmt.Fprintf(&b, "- **Push**: branch `%s` must exist on `origin` with its REMOTE SHA EQUAL to your local HEAD SHA.\n", branch)
+		b.WriteString("  Committing without pushing fails the gate; so does a stale remote. Verify with\n")
+		fmt.Fprintf(&b, "  `git rev-parse HEAD` vs `git ls-remote origin %s` before reporting done.\n", branch)
+	}
+	return b.String()
 }
 
 // taskPromptWithAgentContext makes the workspace-level agent contract part of

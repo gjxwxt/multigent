@@ -1390,6 +1390,14 @@ func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Tas
 		pushCtx, pushCancel := context.WithTimeout(context.Background(), 90*time.Second)
 		pushCmd := exec.CommandContext(pushCtx, "git", neutralizedBaseArgs("push", "origin", branchName)...)
 		pushCmd.Dir = gitRoot
+		// Round 6 (reviewer P1-4): same credential gap as the delivery-evidence
+		// check — the host deliberately has no credential helper, so a review
+		// commit push needs the project connection injected transiently for
+		// this one command. nil keeps the historical host-environment path
+		// (SSH agent / operator helper) unchanged.
+		if credEnv := s.deliveryEvidenceEnv(project, gitRoot); credEnv != nil {
+			pushCmd.Env = credEnv
+		}
 		pushOut, pushErr := pushCmd.CombinedOutput()
 		pushCancel()
 		if pushErr != nil {

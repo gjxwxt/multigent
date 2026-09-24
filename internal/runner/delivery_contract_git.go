@@ -31,7 +31,7 @@ type pushEvidence struct {
 // guarantee (unresolvable base = error, never a silent success). Read-only and local: every git invocation
 // is `git -C dir`, no fetch, no push; failures return an error for the
 // caller to surface (unprovable is not delivered).
-func gitDeliveryEvidence(dir, baseRef, branchName string) (commitBeyondBase bool, push pushEvidence, err error) {
+func gitDeliveryEvidence(dir, baseRef, branchName string, env []string) (commitBeyondBase bool, push pushEvidence, err error) {
 	base := strings.TrimSpace(baseRef)
 	if base == "" {
 		base = "main"
@@ -60,7 +60,20 @@ func gitDeliveryEvidence(dir, baseRef, branchName string) (commitBeyondBase bool
 		return commitBeyondBase, pushEvidence{}, fmt.Errorf("git rev-parse refs/heads/%s: %v: %s", branch, err, strings.TrimSpace(string(localOut)))
 	}
 	push.LocalSHA = strings.TrimSpace(string(localOut))
-	ls, err := exec.Command("git", "-C", dir, "ls-remote", "--heads", "origin", branch).CombinedOutput()
+	lsRemote := exec.Command("git", "-C", dir, "ls-remote", "--heads", "origin", branch)
+	// Round 6 (D-D): the API-side gate runs on the console host, where the
+	// credentials-not-on-disk invariant means no git credential helper is
+	// configured — a bare inheriting process env can never read a PRIVATE
+	// remote, so the push requirement failed closed on every private project.
+	// Callers may now pass a TRANSIENT credential env (the API injects the
+	// project connection token for the duration of this read-only command,
+	// exactly like the workspace clone path does). nil keeps the previous
+	// behaviour (inherit the process env) for the sandbox runner, whose run
+	// environment already carries GIT_CONFIG_GLOBAL.
+	if env != nil {
+		lsRemote.Env = env
+	}
+	ls, err := lsRemote.CombinedOutput()
 	if err != nil {
 		return commitBeyondBase, pushEvidence{}, fmt.Errorf("git ls-remote: %v: %s", err, strings.TrimSpace(string(ls)))
 	}
