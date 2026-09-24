@@ -120,6 +120,58 @@ func WriteQABaselineManifest(worktreeDir string) error {
 	return os.WriteFile(qaBaselineManifestPath(worktreeDir), payload, 0o644)
 }
 
+// RestoreQABaselineMirror rewrites the worktree-side recovery copy from the
+// authoritative control-plane payload and refreshes the capture manifest.
+//
+// It NEVER re-fingerprints the tree: restoring a worktree whose directory was
+// retired (reaper, restart, operator cleanup) must keep the ORIGINAL capture-
+// time baseline as the measurement origin — the restored tree already holds
+// the delivered content, so a fresh capture would move the origin onto the
+// delivery itself and launder the real-change gate. The payload is validated
+// against the canonical digest first, so a malformed or re-serialized record
+// can never be installed as a mirror that disagrees with the gate's own
+// comparison.
+func RestoreQABaselineMirror(worktreeDir, payload string) error {
+	worktreeDir = strings.TrimSpace(worktreeDir)
+	if worktreeDir == "" {
+		return fmt.Errorf("worktree dir is required")
+	}
+	var parsed QABaseline
+	if err := json.Unmarshal([]byte(payload), &parsed); err != nil {
+		return fmt.Errorf("control-plane qa baseline payload is not valid json: %w", err)
+	}
+	if parsed.SchemaVersion != QABaselineSchemaVersion || parsed.Entries == nil {
+		return fmt.Errorf("control-plane qa baseline payload is not restorable (schema %d, entries present: %t)", parsed.SchemaVersion, parsed.Entries != nil)
+	}
+	want, err := QABaselineDigest(parsed)
+	if err != nil {
+		return fmt.Errorf("digest control-plane qa baseline: %w", err)
+	}
+	got, err := sha256FromBytes([]byte(payload))
+	if err != nil {
+		return err
+	}
+	if want != got {
+		return fmt.Errorf("control-plane qa baseline payload is not canonical (digest %s != re-marshaled %s); refusing to install a mirror the gate would reject", got, want)
+	}
+	if err := os.MkdirAll(filepath.Dir(QABaselinePath(worktreeDir)), 0o755); err != nil {
+		return fmt.Errorf("create baseline dir: %w", err)
+	}
+	if err := os.WriteFile(QABaselinePath(worktreeDir), []byte(payload), 0o644); err != nil {
+		return fmt.Errorf("write baseline mirror: %w", err)
+	}
+	// Deliberate semantic choice (round 7 review, P2): the refreshed manifest
+	// records the RESTORE (this worktree, this HEAD — the delivery tip), not
+	// the original capture. Re-installing the capture-time head here would
+	// break the one check the manifest still powers: when the control-plane
+	// record goes missing, LoadQABaselineForGate only reports LOST when the
+	// manifest's head matches the worktree's HEAD. A capture-time head would
+	// never match a delivered tree and the tamper canary would silently stop
+	// firing for restored trees. The manifest stays a canary, never a trust
+	// root: the authoritative record is compared byte for byte above.
+	return WriteQABaselineManifest(worktreeDir)
+}
+
 func qaBaselineManifestPath(worktreeDir string) string {
 	return filepath.Join(worktreeDir, ".multigent", QABaselineManifestName)
 }

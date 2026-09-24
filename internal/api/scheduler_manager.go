@@ -791,6 +791,32 @@ func (s *Server) handleStartProjectTask(w http.ResponseWriter, r *http.Request) 
 		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "workflow task is parked at a "+stepType+" step that no agent owns; resuming it is a workflow action, not a task start (parallel stages dispatch their branch tasks, human gates wait for their reviewer)")
 		return
 	}
+	// S2 round 7 (D-G): a fan-out branch child whose delivery was recorded but
+	// whose join never converged (rejected report, or the evidence worktree was
+	// retired) has no agent left to re-report it — the child run is terminal and
+	// the fan-out re-drive skips branches that already have instances. Manual
+	// start is the platform's operator lever, so it re-drives the join here:
+	// restore the delivery worktree from the recorded branch and re-run the SAME
+	// gate against live evidence with the agent's recorded declaration. Nothing
+	// about the delivery is asserted by the operator.
+	if resumed, status, joinErr := s.resumePendingBranchJoinForTask(workspaceID, project, agent, task, r); resumed {
+		if joinErr != nil {
+			if status == "branch_join_rejected" || status == "branch_join_restore_failed" || status == "branch_join_declaration_missing" {
+				s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, joinErr.Error())
+				return
+			}
+			s.serverError(w, joinErr)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":     true,
+			"status": status,
+			"taskId": task.ID,
+			"detail": "a parked branch join was re-driven: the delivery worktree was restored from the recorded branch and the join gate re-evaluated the agent's recorded declaration against live git evidence",
+		})
+		return
+	}
 	if task.Status.IsTerminal() {
 		if task.Status == entity.TaskStatusDoneFailed || task.Status == entity.TaskStatusCancelled {
 			// Allow restarting/retrying failed or cancelled tasks

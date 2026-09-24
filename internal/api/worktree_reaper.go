@@ -109,6 +109,36 @@ func (s *Server) sweepTerminalTaskWorktrees(ctx context.Context) {
 			if !task.Status.IsTerminal() {
 				continue
 			}
+			// S2 round 7 (D-F): "terminal" is not "join resolved". A fan-out
+			// branch child is archived done_success the moment its run ends,
+			// while its join may still be parked (rejected report awaiting a
+			// re-drive, sibling branch still running). The join gate reads the
+			// git evidence from THIS worktree, so retiring it turned the
+			// documented retry path into an unrecoverable stage — exactly what
+			// happened to both real branches on 2026-09-24. The lookup fails
+			// closed: when the platform cannot PROVE the join resolved, the
+			// worktree is kept and the operator keeps the manual endpoint.
+			workspaceID, wsErr := s.currentWorkspaceID()
+			if wsErr != nil {
+				skipped++
+				log.Printf("[worktree-reaper] task %s (project %s): keeping worktree — cannot resolve workspace for the pending-join check: %v", taskID, name, wsErr)
+				continue
+			}
+			if inst, pending, jErr := s.pendingBranchJoinForTask(workspaceID, name, task); jErr != nil {
+				skipped++
+				log.Printf("[worktree-reaper] task %s (project %s): keeping worktree — pending-join check failed: %v", taskID, name, jErr)
+				continue
+			} else if pending {
+				switch strings.TrimSpace(inst.Status) {
+				case "failed", "skipped":
+					// The workflow already resolved this branch: its delivery is
+					// not part of the join, so the tree is ordinary garbage even
+					// while the stage waits for its siblings.
+				default:
+					log.Printf("[worktree-reaper] task %s (project %s): keeping worktree — branch %s is still parked on its join (run %s, status %s)", taskID, name, inst.BranchID, inst.RunID, inst.Status)
+					continue
+				}
+			}
 			wtDir := taskWorktreeDir(task, gitRoot, taskID)
 			size := dirSize(wtDir)
 			if err := s.reclaimTerminalWorktree(name, task, taskID, gitRoot, wtDir); err != nil {
