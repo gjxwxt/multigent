@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -72,8 +73,31 @@ func seedFanoutParentRun(t *testing.T, s *Server, workspaceID, baseCommit string
 
 func seedFanoutParentRunForTask(t *testing.T, s *Server, workspaceID, taskID, baseCommit string) *entity.Task {
 	t.Helper()
+	return seedFanoutParentRunVariant(t, s, workspaceID, taskID, baseCommit, nil, nil)
+}
+
+// seedFanoutParentRunVariant seeds the same parent fixture with test-supplied
+// branch definitions and actor bindings, so a test can pin the exact
+// binding-key shape under examination. A nil branch list means the fixture
+// default (two role-less branches plus branch-ID-keyed and role-keyed
+// bindings — the shape every producer of branch bindings emits); an empty
+// non-nil list seeds the parked shape a failed activation leaves behind.
+func seedFanoutParentRunVariant(t *testing.T, s *Server, workspaceID, taskID, baseCommit string, branches []entity.WorkflowBranch, bindings map[string]entity.WorkflowActorBinding) *entity.Task {
+	t.Helper()
 	now := time.Now().UTC()
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	if branches == nil {
+		branches = []entity.WorkflowBranch{
+			{
+				ID: "ws_a", Title: "WS-1",
+				OutputFields: []entity.WorkflowField{{Name: "branch_summary"}, {Name: "touched_paths"}},
+			},
+			{
+				ID: "ws_b", Title: "WS-2",
+				OutputFields: []entity.WorkflowField{{Name: "branch_summary"}, {Name: "touched_paths"}},
+			},
+		}
+	}
 	def := &entity.WorkflowDefinition{
 		ID: "wf-fanout-parent", Name: "Fanout parent", Version: 1, Scope: "workspace", StartStepID: "start",
 		Steps: []entity.WorkflowStep{
@@ -83,16 +107,7 @@ func seedFanoutParentRunForTask(t *testing.T, s *Server, workspaceID, taskID, ba
 			},
 			{
 				ID: "parallel", Type: "parallel_stage", Title: "Parallel", JoinPolicy: "all",
-				Branches: []entity.WorkflowBranch{
-					{
-						ID: "ws_a", Title: "WS-1",
-						OutputFields: []entity.WorkflowField{{Name: "branch_summary"}, {Name: "touched_paths"}},
-					},
-					{
-						ID: "ws_b", Title: "WS-2",
-						OutputFields: []entity.WorkflowField{{Name: "branch_summary"}, {Name: "touched_paths"}},
-					},
-				},
+				Branches: branches,
 			},
 		},
 		Edges:     []entity.WorkflowEdge{{From: "start", To: "parallel"}},
@@ -110,12 +125,14 @@ func seedFanoutParentRunForTask(t *testing.T, s *Server, workspaceID, taskID, ba
 	if err := s.ts.AddTask("sample", "pm", parentTask); err != nil {
 		t.Fatal(err)
 	}
-	bindings := map[string]entity.WorkflowActorBinding{
-		// ActorRole keys: the start step + both branch start roles.
-		"pm-agent": {Type: "agent", ID: "pm"},
-		"ws_a":     {Type: "agent", ID: "pm"},
-		"ws_b":     {Type: "agent", ID: "pm"},
-		"parallel": {Type: "agent", ID: "pm"},
+	if bindings == nil {
+		bindings = map[string]entity.WorkflowActorBinding{
+			// ActorRole keys: the start step + both branch start roles.
+			"pm-agent": {Type: "agent", ID: "pm"},
+			"ws_a":     {Type: "agent", ID: "pm"},
+			"ws_b":     {Type: "agent", ID: "pm"},
+			"parallel": {Type: "agent", ID: "pm"},
+		}
 	}
 	if _, _, err := wfStore.StartRun("sample", parentTask.ID, def.ID, bindings); err != nil {
 		t.Fatal(err)
@@ -811,5 +828,158 @@ func TestFanoutRebuildBlockedByBranchInstance(t *testing.T) {
 	}
 	if !strings.Contains(evidence, "branch instance") {
 		t.Fatalf("evidence must name the branch instance, got: %s", evidence)
+	}
+}
+
+// TestFanoutResolvesBranchIDKeyedBindings (review round 5, D-A — real S2 run
+// wfr-wlhdwalv, 2026-09-24). The shipped template stores a DESCRIPTIVE role in
+// branch.ActorRole ("workstream-agent-1") while every producer of branch
+// bindings keys them by the BRANCH ID (CreateTaskDialog.workflowDefaultBindings,
+// the canvas binding editor, the Go fixture below). workflowStartActor's
+// role-first lookup therefore missed every branch: the activation aborted with
+// a 500 AFTER the parent transition had committed, and because the parked
+// stage has no re-drive entry point the run wedged there (the D-C guard now
+// keeps such a run honest; resumeParkedParallelStage resumes it). The
+// activation must accept the producer convention and dispatch each branch to
+// its own agent.
+func TestFanoutResolvesBranchIDKeyedBindings(t *testing.T) {
+	s, workspaceID := newBranchJoinHTTPServer(t)
+	s.worktreeMgr = gitworktreeManagerForTest()
+	_, baseCommit := buildFanoutGitWorkspace(t, s)
+	seedFanoutParentRunVariant(t, s, workspaceID, "task-fanout-root", baseCommit,
+		[]entity.WorkflowBranch{
+			{
+				ID: "ws_a", Title: "WS-A", ActorRole: "workstream-agent-1",
+				OutputFields: []entity.WorkflowField{{Name: "branch_summary"}},
+			},
+			{
+				ID: "ws_b", Title: "WS-B", ActorRole: "workstream-agent-2",
+				OutputFields: []entity.WorkflowField{{Name: "branch_summary"}},
+			},
+		},
+		map[string]entity.WorkflowActorBinding{
+			"pm-agent": {Type: "agent", ID: "pm"},
+			"ws_a":     {Type: "agent", ID: "pm"},
+			"ws_b":     {Type: "agent", ID: "backend"},
+		})
+
+	rec := postBranchStepComplete(t, s, workspaceID, "task-fanout-root", map[string]string{
+		"branch_summary": "contract frozen",
+		"touched_paths":  "contract.md",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("fan-out must resolve branch-ID-keyed bindings: %d %s", rec.Code, rec.Body.String())
+	}
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	run, _, err := wfStore.RunForTask("sample", "task-fanout-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instances, err := wfStore.BranchInstancesForStep(run.ID, "parallel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instances) != 2 {
+		t.Fatalf("expected both branches materialized, got %d", len(instances))
+	}
+	got := map[string]string{}
+	for _, inst := range instances {
+		got[inst.BranchID] = inst.ActorID
+	}
+	if got["ws_a"] != "pm" || got["ws_b"] != "backend" {
+		t.Fatalf("each branch must resolve its own branch-ID-keyed agent, got %v", got)
+	}
+}
+
+// TestFanoutParkedStageResumesFromManualStart (review round 5, D-B). A fan-out
+// activation that fails after the parent transition committed leaves the run
+// parked on the parallel stage with zero branch instances. No production path
+// re-enters activateParallelWorkflowStep (it is reached only from step
+// callbacks whose transition is already consumed) and the parked stage refuses
+// reports, so before this fix the only way out was a hand-rolled DB edit. The
+// sanctioned operator entry — manual start / the console resume action — must
+// re-drive the idempotent activation instead.
+//
+// The parked state is seeded directly because the run's definition snapshot and
+// actor bindings are FROZEN at StartRun (RunDefinition serves the snapshot, not
+// the live definition): a failure cause that lives in that snapshot cannot be
+// "edited away" after the fact, which is exactly why real S2 run wfr-wlhdwalv
+// (2026-09-24) wedged — its branch-ID-keyed bindings were unreadable by the
+// role-first lookup, and the fix had to land in the resolver (D-A) before this
+// re-drive could complete the stage.
+func TestFanoutParkedStageResumesFromManualStart(t *testing.T) {
+	s, workspaceID := newBranchJoinHTTPServer(t)
+	s.worktreeMgr = gitworktreeManagerForTest()
+	_, baseCommit := buildFanoutGitWorkspace(t, s)
+	seedFanoutParentRun(t, s, workspaceID, baseCommit)
+
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	run, _, err := wfStore.RunForTask("sample", "task-fanout-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The parent transition commits (contract stage done) — this is the write
+	// the real review-submit already committed before its activation failed.
+	if _, err := wfStore.CompleteAndAdvance("sample", "task-fanout-root", "contract frozen", "", map[string]string{
+		"branch_summary": "contract frozen",
+		"touched_paths":  "contract.md",
+	}, "completed"); err != nil {
+		t.Fatalf("drive the parent step: %v", err)
+	}
+	if run, _, err = wfStore.RunForTask("sample", "task-fanout-root"); err != nil {
+		t.Fatal(err)
+	}
+	if run.ActiveStepID != "parallel" {
+		t.Fatalf("expected the run parked on parallel, got %q", run.ActiveStepID)
+	}
+	if instances, err := wfStore.BranchInstancesForStep(run.ID, "parallel"); err != nil {
+		t.Fatal(err)
+	} else if len(instances) != 0 {
+		t.Fatalf("parked stage must have zero branch instances, got %d", len(instances))
+	}
+
+	req := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/task-fanout-root/start", "admin", nil)
+	req.SetPathValue("name", "sample")
+	req.SetPathValue("taskId", "task-fanout-root")
+	startRec := httptest.NewRecorder()
+	s.handleStartProjectTask(startRec, req)
+	if startRec.Code != http.StatusOK {
+		t.Fatalf("manual start must resume the parked stage: %d %s", startRec.Code, startRec.Body.String())
+	}
+	if !strings.Contains(startRec.Body.String(), "workflow_stage_resumed") {
+		t.Fatalf("expected the resume response, got %s", startRec.Body.String())
+	}
+	instances, err := wfStore.BranchInstancesForStep(run.ID, "parallel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instances) != 2 {
+		t.Fatalf("resume must materialize both branches, got %d", len(instances))
+	}
+	for _, inst := range instances {
+		if strings.TrimSpace(inst.ChildTaskID) == "" {
+			t.Fatalf("branch %s has no child task", inst.BranchID)
+		}
+		if strings.TrimSpace(inst.ActorID) != "pm" {
+			t.Fatalf("resumed branch %s bound to %q, want pm", inst.BranchID, inst.ActorID)
+		}
+	}
+
+	// Idempotency: a second start must not duplicate the branches, and once
+	// the stage is materialized the parent task is no longer agent-startable.
+	req2 := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/task-fanout-root/start", "admin", nil)
+	req2.SetPathValue("name", "sample")
+	req2.SetPathValue("taskId", "task-fanout-root")
+	secondRec := httptest.NewRecorder()
+	s.handleStartProjectTask(secondRec, req2)
+	if secondRec.Code != http.StatusConflict {
+		t.Fatalf("a materialized parallel stage must refuse parent start, got %d %s", secondRec.Code, secondRec.Body.String())
+	}
+	after, err := wfStore.BranchInstancesForStep(run.ID, "parallel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 2 {
+		t.Fatalf("re-drive must not duplicate branch instances, got %d", len(after))
 	}
 }

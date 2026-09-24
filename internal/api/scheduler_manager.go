@@ -755,13 +755,40 @@ func (s *Server) handleStartProjectTask(w http.ResponseWriter, r *http.Request) 
 		s.jsonErrorCode(w, http.StatusNotFound, ErrCodeValidationFailed, "task not found")
 		return
 	}
-	if err := s.reconcileWorkflowTaskBeforeManualStart(workspaceID, project, taskID, r); err != nil {
+	resumedStage, err := s.reconcileWorkflowTaskBeforeManualStart(workspaceID, project, taskID, r)
+	if err != nil {
 		s.serverError(w, err)
+		return
+	}
+	if resumedStage {
+		// Review round 5 (D-B): the workflow was parked on a parallel stage
+		// whose fan-out never materialized; the reconcile re-drove it and the
+		// branch tasks are now dispatched. Starting an agent run on the PARENT
+		// task here would be wrong (no agent owns the stage) — report the
+		// resume instead of dispatching.
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":     true,
+			"status": "workflow_stage_resumed",
+			"detail": "workflow run was parked on a parallel stage without its branch instances; the fan-out was (re)driven and the branch tasks were dispatched. The parent task is not agent-dispatchable at this step.",
+		})
 		return
 	}
 	task, agent, err = s.findTaskInProject(project, taskID)
 	if err != nil || task == nil {
 		s.jsonErrorCode(w, http.StatusNotFound, ErrCodeValidationFailed, "task not found")
+		return
+	}
+	// Review round 5 (D-B companion): a task whose workflow is parked on a
+	// step that no agent owns (a human gate, or a materialized parallel stage
+	// waiting on its branch children) refuses manual start — the reconcile
+	// above already re-drove anything it could, and dispatching an agent run
+	// at a step the agent does not own only burns a run and muddies the task.
+	if stepType, parked, stepErr := s.workflowActiveStepType(workspaceID, project, taskID); stepErr != nil {
+		s.serverError(w, stepErr)
+		return
+	} else if parked && stepType != "agent_task" {
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "workflow task is parked at a "+stepType+" step that no agent owns; resuming it is a workflow action, not a task start (parallel stages dispatch their branch tasks, human gates wait for their reviewer)")
 		return
 	}
 	if task.Status.IsTerminal() {
@@ -965,19 +992,19 @@ func (s *Server) startProjectTaskDirect(workspaceID, project, agent string, task
 	return pid, "", nil
 }
 
-func (s *Server) reconcileWorkflowTaskBeforeManualStart(workspaceID, project, taskID string, r *http.Request) error {
+func (s *Server) reconcileWorkflowTaskBeforeManualStart(workspaceID, project, taskID string, r *http.Request) (bool, error) {
 	if s == nil || s.controlDB == nil || strings.TrimSpace(workspaceID) == "" {
-		return nil
+		return false, nil
 	}
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
 	run, found, err := wfStore.RunForTask(project, taskID)
 	if err != nil || !found || strings.TrimSpace(run.ActiveStepID) == "" || strings.TrimSpace(run.Status) == "completed" {
-		return err
+		return false, err
 	}
 	if run.DefinitionID == workflowstore.ProjectInitializationWorkflowID && run.Status == "failed" {
 		steps, err := wfStore.ListStepInstances(run.ID)
 		if err != nil {
-			return err
+			return false, err
 		}
 		now := time.Now().UTC()
 		for i := range steps {
@@ -992,25 +1019,117 @@ func (s *Server) reconcileWorkflowTaskBeforeManualStart(workspaceID, project, ta
 			steps[i].FinishedAt = time.Time{}
 			steps[i].UpdatedAt = now
 			if err := wfStore.SaveStepInstance(&steps[i]); err != nil {
-				return err
+				return false, err
 			}
 			break
 		}
 		run.Status = "active"
 		run.UpdatedAt = now
 		if err := wfStore.SaveRun(&run); err != nil {
-			return err
+			return false, err
 		}
 	}
 	def, found, err := wfStore.RunDefinition(run)
 	if err != nil || !found {
-		return err
+		return false, err
 	}
 	steps, err := wfStore.ListStepInstances(run.ID)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return s.reconcileActiveWorkflowTaskQueue(workspaceID, project, taskID, run, def, steps, r)
+	resumed, err := s.resumeParkedParallelStage(workspaceID, project, taskID, run, def, steps, r)
+	if err != nil {
+		return false, err
+	}
+	if err := s.reconcileActiveWorkflowTaskQueue(workspaceID, project, taskID, run, def, steps, r); err != nil {
+		return false, err
+	}
+	return resumed, nil
+}
+
+// resumeParkedParallelStage re-drives the fan-out activation for a run parked
+// on a parallel stage that has NO branch instances (review round 5, D-B).
+//
+// The activation runs AFTER the parent transition commits, so any failure
+// inside it (a missing branch binding, a worktree materialization error)
+// leaves exactly this shape: contract_review completed, the run active on the
+// parallel stage, zero branch instances, and the stage itself refusing step
+// reports (D-C guard). No other production path re-enters
+// activateParallelWorkflowStep — it is reached only from step-completion
+// callbacks whose transition targets the stage, and that transition is
+// already consumed — so real S2 run wfr-wlhdwalv (2026-09-24) deadlocked here
+// until an operator had no sanctioned action at all.
+//
+// The manual start path ("也可手动启动" / the console's resume action) is the
+// sanctioned operator entry, and activateParallelWorkflowStep is idempotent
+// (branches with instances are skipped, and the branch-task idempotency key
+// dedups a partial re-drive), so re-running it here is safe by construction.
+// The frozen fan-out base commit is read from the parent task's Vars, so a
+// late re-drive cannot silently re-baseline the branches against a moved
+// main. Returns true when the stage was resumed.
+func (s *Server) resumeParkedParallelStage(workspaceID, project, taskID string, run entity.WorkflowRun, def entity.WorkflowDefinition, steps []entity.WorkflowStepInstance, r *http.Request) (bool, error) {
+	if s == nil || s.controlDB == nil || strings.TrimSpace(run.ID) == "" || strings.TrimSpace(run.ActiveStepID) == "" {
+		return false, nil
+	}
+	step, ok := workflowDefinitionStepByID(def.Steps, run.ActiveStepID)
+	if !ok || strings.TrimSpace(step.Type) != "parallel_stage" {
+		return false, nil
+	}
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	instances, err := wfStore.BranchInstancesForStep(run.ID, step.ID)
+	if err != nil {
+		return false, err
+	}
+	if len(instances) > 0 {
+		return false, nil
+	}
+	inst, ok := workflowStepInstanceByStepID(steps, run.ActiveStepID)
+	if !ok {
+		return false, nil
+	}
+	task, agent, err := s.findTaskInProject(project, taskID)
+	if err != nil || task == nil {
+		return false, nil
+	}
+	transition := workflowstore.TransitionResult{Run: run, Current: inst, Next: &step, NextInst: &inst}
+	if err := s.activateParallelWorkflowStep(workspaceID, project, agent, task, transition, r); err != nil {
+		return false, err
+	}
+	log.Printf("[fanout] re-drove parked parallel stage %s for run %s (task %s): branches materialized from the manual start path", step.ID, run.ID, taskID)
+	return true, nil
+}
+
+// workflowActiveStepType reports the run's active step type for the manual
+// start path (review round 5, D-B companion). A task whose workflow is parked
+// on a step no agent owns — a human gate, or a parallel stage waiting on its
+// branch children — must not be dispatched as an agent run: the agent would
+// burn a run on work it does not own, and before the D-C guard it could even
+// complete the stage report-style and skip the fan-out.
+func (s *Server) workflowActiveStepType(workspaceID, project, taskID string) (string, bool, error) {
+	if s == nil || s.controlDB == nil {
+		return "", false, nil
+	}
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	run, found, err := wfStore.RunForTask(project, taskID)
+	if err != nil || !found {
+		return "", false, err
+	}
+	switch strings.TrimSpace(run.Status) {
+	case "completed", "failed", "cancelled":
+		return "", false, nil
+	}
+	if strings.TrimSpace(run.ActiveStepID) == "" {
+		return "", false, nil
+	}
+	def, found, err := wfStore.RunDefinition(run)
+	if err != nil || !found {
+		return "", false, err
+	}
+	step, ok := workflowDefinitionStepByID(def.Steps, run.ActiveStepID)
+	if !ok {
+		return "", false, nil
+	}
+	return strings.TrimSpace(step.Type), true, nil
 }
 
 func (s *Server) enqueueSpecificRuntimeTaskRunFromRequest(workspaceID, project, agent string, task *entity.Task, hb *entity.HeartbeatConfig, serverURL, actor string) (controldb.RuntimeRun, error) {

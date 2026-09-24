@@ -1878,8 +1878,27 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 		if !ok || startStep == nil || startInst == nil {
 			return fmt.Errorf("parallel branch %q has no start step", branch.Title)
 		}
+		// Review round 5 (D-A — real S2 run wfr-wlhdwalv, 2026-09-24):
+		// workflowStartActor resolves the synthetic child start step's binding
+		// by [step.ID, step.ActorRole], but EVERY producer of branch bindings
+		// keys them by the BRANCH ID — CreateTaskDialog.workflowDefaultBindings,
+		// the canvas binding editor's slot builder, and the Go default binder's
+		// fixture all emit `branch.id`. The shipped template stores a
+		// DESCRIPTIVE role in branch.ActorRole ("workstream-agent-1"), so the
+		// role-keyed lookup missed every branch, the activation aborted with a
+		// 500 AFTER the parent transition had already committed, and the run
+		// deadlocked on the parallel stage with no re-drive entry point (the
+		// step refuses reports; see the D-C guard in workflow.CompleteAndAdvance).
+		// Accept the producer convention as an explicit fallback so role-keyed
+		// bindings (fixtures, legacy task templates) keep working unchanged.
+		if strings.TrimSpace(startInst.ActorID) == "" {
+			if binding, found := transition.Run.ActorBindings[branch.ID]; found && strings.TrimSpace(binding.Type) == "agent" && strings.TrimSpace(binding.ID) != "" {
+				startInst.ActorType = "agent"
+				startInst.ActorID = strings.TrimSpace(binding.ID)
+			}
+		}
 		if strings.TrimSpace(startInst.ActorType) != "agent" || strings.TrimSpace(startInst.ActorID) == "" {
-			return fmt.Errorf("parallel branch %q requires an agent actor binding for role %q", branch.Title, startStep.ActorRole)
+			return fmt.Errorf("parallel branch %q requires an agent actor binding for role %q or branch key %q (pass workflowActorBindings when the task is created)", branch.Title, startStep.ActorRole, branch.ID)
 		}
 		nextAgent := strings.TrimSpace(startInst.ActorID)
 		inputValues := workflowBranchInputValuesForFields(transition.Current, workflowBranchInputFields(branch, *startStep))

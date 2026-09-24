@@ -1632,6 +1632,19 @@ func (s *Store) WillComplete(project, taskID string, outputValues map[string]str
 	if err != nil {
 		return false, err
 	}
+	// Review round 5 (D-C parity): the read-only preview must agree with the
+	// commit path — a parallel stage can only complete through a finished,
+	// failure-free branch join, so callers that gate on WillComplete (review
+	// cards, PR preflight) never advertise a transition the store would refuse.
+	if currentStep.Type == "parallel_stage" {
+		stageBranches, bErr := s.BranchInstancesForStep(run.ID, currentStep.ID)
+		if bErr != nil {
+			return false, bErr
+		}
+		if !workflowBranchAllTerminal(stageBranches) || workflowBranchAnyFailed(stageBranches) {
+			return false, fmt.Errorf("workflow step %q is a parallel stage: it advances only through its branch join, never through a step report (branch instances: %d, all terminal: %v, any failed: %v)", currentStep.Title, len(stageBranches), workflowBranchAllTerminal(stageBranches), workflowBranchAnyFailed(stageBranches))
+		}
+	}
 	edge, hasNext := chooseNextEdge(def.Edges, currentStep.ID, values, output)
 	if !hasNext && workflowHasOutgoingEdges(def.Edges, currentStep.ID) && !isTerminalReviewApproval(currentStep, def.Edges, values) {
 		return false, fmt.Errorf("workflow step %q output did not match any outgoing route", currentStep.Title)
@@ -2929,6 +2942,36 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 				s.releaseWorkflowTransitionClaim(&run, claimID)
 				return result, fmt.Errorf("workflow step %q output rejected: touched_paths does not match the worktree: %w", currentStep.Title, err)
 			}
+		}
+	}
+	// Review round 5 (D-C, gate integrity): a parallel stage advances ONLY
+	// through its branch join. CompleteBranchAndMaybeAdvance calls back into
+	// this function only once EVERY branch instance is terminal and none of
+	// them failed (it checks the same pair before calling in, both on the
+	// joinPolicy=all path and on the joinPolicy=any path after it marks the
+	// remaining branches skipped), so that pair is exactly "the join is driving
+	// this transition". Anything else is a step REPORT from the parent task —
+	// runtime step/complete, or a review click on a parent parked at the stage.
+	// A report must never complete the stage: normalizeWorkflowOutputValues
+	// deliberately skips field validation for parallel stages, so the stage's
+	// declared contract_artifacts would go unchecked and the default exit edge
+	// would route the run straight past the fan-out as if the workstreams had
+	// been delivered. Real S2 run wfr-wlhdwalv (2026-09-24) sat in exactly the
+	// zero-instance shape after its fan-out activation failed; any stray parent
+	// run (auto-recovery wakeup, manual start) could have faked the stage, and
+	// the same holds for the narrower window while branches are still running
+	// (joinPolicy=any completes on the first branch). Refuse before routing:
+	// no writes, the stage stays pending, and the operator resumes it (the
+	// manual start path re-drives a zero-instance stage).
+	if currentStep.Type == "parallel_stage" {
+		stageBranches, bErr := s.BranchInstancesForStep(run.ID, currentStep.ID)
+		if bErr != nil {
+			s.releaseWorkflowTransitionClaim(&run, claimID)
+			return result, bErr
+		}
+		if !workflowBranchAllTerminal(stageBranches) || workflowBranchAnyFailed(stageBranches) {
+			s.releaseWorkflowTransitionClaim(&run, claimID)
+			return result, fmt.Errorf("workflow step %q is a parallel stage: it advances only through its branch join, never through a step report (branch instances: %d, all terminal: %v, any failed: %v)", currentStep.Title, len(stageBranches), workflowBranchAllTerminal(stageBranches), workflowBranchAnyFailed(stageBranches))
 		}
 	}
 	edge, hasNext := chooseNextEdge(def.Edges, currentStep.ID, values, output)
