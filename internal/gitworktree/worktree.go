@@ -322,6 +322,48 @@ func (m *Manager) resolveBaseCommit(projectRoot, baseBranch string) (string, err
 	return commit, nil
 }
 
+// ResolveLocalCommit resolves a ref to a commit SHA using only local
+// repository state. It never fetches and never consults origin/*: host-side
+// fetches have no credentials by design (the runtime injects them inside the
+// sandbox only), and a moving remote branch must not define the baseline of a
+// derived task. An empty ref resolves HEAD.
+func (m *Manager) ResolveLocalCommit(projectRoot, ref string) (string, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		ref = "HEAD"
+	}
+	return gitRevParse(projectRoot, ref)
+}
+
+// FetchOriginBranch fetches one branch from origin with the caller-supplied
+// environment. Credentials come from that environment only (never from repo
+// config or remote URLs); callers that have no credentials must not call this.
+func (m *Manager) FetchOriginBranch(projectRoot, branch string, env []string) error {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return fmt.Errorf("fetch origin: branch is required")
+	}
+	// The branch name reaches git as an argument, so a value that looks like an
+	// option (or smuggles a refspec) could change what git does. Refuse those
+	// instead of relying on argv parsing.
+	if strings.HasPrefix(branch, "-") || strings.ContainsAny(branch, " :~^?*[\\") || strings.Contains(branch, "..") {
+		return fmt.Errorf("fetch origin: invalid branch name %q", branch)
+	}
+	cmd, cancel := gitLocal(projectRoot, "fetch", "origin", branch)
+	defer cancel()
+	if len(env) > 0 {
+		cmd.Env = env
+	} else {
+		cmd.Env = gitNetworkEnv()
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git fetch origin %s failed: %w (%s)", branch, err, redactGitOutput(stderr.String()))
+	}
+	return nil
+}
+
 // cmdLocalRevParse checks (without error formatting) that a ref resolves.
 func cmdLocalRevParse(projectRoot, ref string) error {
 	cmd, cancel := gitLocal(projectRoot, "rev-parse", "--verify", ref+"^{commit}")
@@ -1101,7 +1143,8 @@ func (m *Manager) MainMatchesRemote(projectRoot, defaultBranch string) (bool, er
 // IsAncestor reports whether ancestor is reachable from descendant. It is
 // used to detect squash/rebase integration where a task completion commit is
 // no longer in the default branch history.
-func (m *Manager) IsAncestor(projectRoot, ancestor, descendant string) (bool, error) {	m.mu.Lock()
+func (m *Manager) IsAncestor(projectRoot, ancestor, descendant string) (bool, error) {
+	m.mu.Lock()
 	defer m.mu.Unlock()
 	unlock, err := acquireProjectLock(projectRoot)
 	if err != nil {

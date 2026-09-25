@@ -57,7 +57,65 @@ func (s *Server) buildDeliveryPlanForFreeze(wfStore *workflowstore.Store, run en
 	anchorJSONs := stepOutputCandidates(outputs, ordered,
 		[]string{"requirement_draft", "requirement_review", "scale_gate", "contract_batch"},
 		[]string{"requirement_items"})
-	return workflowstore.BuildDeliveryPlanFromRunOutputs(run.ID, planJSONs, anchorJSONs)
+	plan, err := workflowstore.BuildDeliveryPlanFromRunOutputs(run.ID, planJSONs, anchorJSONs)
+	if err != nil {
+		return workflowstore.DeliveryPlan{}, err
+	}
+	// D-M fix: pin the pushed contract baseline the run already recorded, so
+	// the frozen plan names an immutable SHA. Before this, the field was never
+	// populated and the fan-out fell back to the workspace HEAD — which in a
+	// deployment where the sandbox pushes (host git has no credentials) is the
+	// scaffold commit, not the contract work every work package depends on.
+	// The value is part of the digest, so freezing it makes it immutable.
+	baseline, err := baselineCommitFromRunOutputs(outputs, ordered)
+	if err != nil {
+		return workflowstore.DeliveryPlan{}, err
+	}
+	if baseline != "" {
+		plan.ResolvedAtBaseCommit = baseline
+	}
+	return plan, nil
+}
+
+// baselineCommitFromRunOutputs returns the newest pushed contract baseline the
+// run recorded in its contract_artifacts outputs, validated as a full commit
+// SHA. A malformed baseline is refused instead of ignored: silently dropping
+// it would re-baseline the derived tasks on the next candidate, which is the
+// failure mode this pin exists to prevent.
+func baselineCommitFromRunOutputs(outputs map[string]map[string]string, ordered []string) (string, error) {
+	candidates := stepOutputCandidates(outputs, ordered,
+		[]string{"contract_batch", "scale_gate"},
+		[]string{"contract_artifacts"})
+	for _, raw := range candidates {
+		var payload struct {
+			BaselineCommit string `json:"baseline_commit"`
+		}
+		if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+			continue
+		}
+		commit := strings.ToLower(strings.TrimSpace(payload.BaselineCommit))
+		switch {
+		case commit == "":
+			continue
+		case !isFullHexSHA(commit):
+			return "", fmt.Errorf("contract baseline %q is not a full 40-hex commit sha", payload.BaselineCommit)
+		default:
+			return commit, nil
+		}
+	}
+	return "", nil
+}
+
+func isFullHexSHA(value string) bool {
+	if len(value) != 40 {
+		return false
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // stepsByRecency orders the instance step ids newest-first: a plan refined

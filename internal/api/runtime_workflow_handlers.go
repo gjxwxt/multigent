@@ -1897,13 +1897,37 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 		// recomputation (this is the cross-retry pin).
 		fanoutBaseCommit = persisted
 	} else if fanoutBaseCommit == "" {
+		// Determinism (AGENTS.md §5.4): a derived task's baseline must be an
+		// immutable SHA the platform already knows — never a moving remote
+		// branch. Resolution is therefore local-only, in this order: the
+		// frozen plan's recorded base, the parent task's completion snapshot,
+		// then the workspace HEAD. No fetch, no origin/* reads: host-side
+		// fetches have no credentials by design, and a freshly created project
+		// has no origin/* refs at all (that combination used to abort the
+		// fan-out before any branch was materialized).
 		gitRootForResolve := s.resolveProjectGitRoot(project)
 		if _, statErr := os.Stat(filepath.Join(gitRootForResolve, ".git")); statErr == nil {
-			resolved, rErr := s.worktreeMgr.ResolveBaseCommit(gitRootForResolve, "main")
-			if rErr != nil {
-				return fmt.Errorf("fan-out: resolve base commit: %w", rErr)
+			candidates := make([]string, 0, 4)
+			if planHint != nil {
+				candidates = append(candidates, strings.TrimSpace(planHint.Plan.ResolvedAtBaseCommit))
 			}
-			fanoutBaseCommit = resolved
+			candidates = append(candidates, strings.TrimSpace(completed.CompletionCommit))
+			candidates = append(candidates, "HEAD")
+			var resolveErrs []string
+			for _, candidate := range candidates {
+				if candidate == "" {
+					continue
+				}
+				resolved, cErr := s.worktreeMgr.ResolveLocalCommit(gitRootForResolve, candidate)
+				if cErr == nil {
+					fanoutBaseCommit = resolved
+					break
+				}
+				resolveErrs = append(resolveErrs, cErr.Error())
+			}
+			if fanoutBaseCommit == "" {
+				return fmt.Errorf("fan-out: no immutable base commit available locally: %s", strings.Join(resolveErrs, "; "))
+			}
 		}
 	}
 	if fanoutBaseCommit != "" && strings.TrimSpace(completed.Vars[workflowFanoutBaseCommitVar]) == "" {

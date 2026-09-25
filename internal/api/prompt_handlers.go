@@ -17,6 +17,7 @@ import (
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/formatter"
+	"github.com/multigent/multigent/internal/gitworktree"
 	"github.com/multigent/multigent/internal/sandbox"
 )
 
@@ -744,30 +745,44 @@ func (s *Server) handlePostProjectSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bin, err := exec.LookPath("multigent")
+	// Project sync refreshes the local remote-tracking ref for the default
+	// branch through the platform git layer. It must not shell out to the
+	// agent-context `sync` CLI: that command has been unsupported since
+	// Multigent 2.x and always failed with `unknown flag: --project`, which
+	// made this endpoint a dead end right when an operator needed it (e.g. to
+	// seed origin/main for a freshly created project).
+	gitRoot := s.resolveProjectGitRoot(project)
+	if _, statErr := os.Stat(filepath.Join(gitRoot, ".git")); statErr != nil {
+		s.jsonError(w, http.StatusConflict, "project workspace is not a git repository")
+		return
+	}
+	defaultBranch := "main"
+	if projectMeta, err := s.st.Project(project); err == nil && strings.TrimSpace(projectMeta.DefaultBranch) != "" {
+		defaultBranch = strings.TrimSpace(projectMeta.DefaultBranch)
+	}
+	agentLabel := strings.TrimSpace(agentName)
+	fetched := true
+	err := s.worktreeMgr.FetchOriginBranch(gitRoot, defaultBranch, gitworktree.PushNetworkEnv())
 	if err != nil {
-		bin, err = os.Executable()
-		if err != nil {
-			s.jsonError(w, http.StatusInternalServerError, "cannot find multigent binary")
+		// Credentials are deployment configuration and may be absent for
+		// host-side git. Fall back to the locally known remote tip, which is
+		// exactly what the fan-out baseline resolver relies on, and say so
+		// instead of failing the operator with a bare error.
+		fetched = false
+		if _, localErr := s.worktreeMgr.ResolveLocalCommit(gitRoot, "origin/"+defaultBranch); localErr != nil {
+			s.jsonError(w, http.StatusBadGateway, "sync failed: "+err.Error())
 			return
 		}
 	}
-
-	args := []string{"sync", "--dir", s.root, "--project", project}
-	if agentName != "" {
-		args = append(args, "--name", agentName)
-	}
-
-	cmd := exec.Command(bin, args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		s.jsonError(w, http.StatusInternalServerError, "sync failed: "+string(out))
-		return
-	}
-
+	commit, _ := s.worktreeMgr.ResolveLocalCommit(gitRoot, "origin/"+defaultBranch)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"ok":     true,
-		"output": string(out),
+		"ok":              true,
+		"project":         project,
+		"branch":          defaultBranch,
+		"fetched":         fetched,
+		"remoteRef":       "origin/" + defaultBranch,
+		"remoteRefCommit": commit,
+		"agent":           agentLabel,
 	})
 }
 
