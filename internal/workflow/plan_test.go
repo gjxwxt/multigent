@@ -75,7 +75,19 @@ func TestDeliveryPlanDigestIsCanonicalAndTamperEvident(t *testing.T) {
 		"agent binding":        func(p *DeliveryPlan) { p.WorkPackages[0].AgentBinding = "Mira" },
 		"shared contract path": func(p *DeliveryPlan) { p.SharedContract[0].Path = "server/AuditController2.java" },
 		"infra prefix":         func(p *DeliveryPlan) { p.WorkPackages[2].AcceptanceCriteria = []string{"infra:ci-baseline-2"} },
-		"plan version":         func(p *DeliveryPlan) { p.Version = 2 },
+		"qa policy":            func(p *DeliveryPlan) { p.QAPolicy = "independent-qa+signoff" },
+	}
+	// The plan TEXT is version-agnostic (the frozen record owns versioning): a
+	// version bump alone must NOT change the digest, otherwise re-approving
+	// identical text would mint a spurious new version.
+	versionBump := fixturePlan()
+	versionBump.Version = 7
+	bumped, err := PlanDigest(versionBump)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bumped != base {
+		t.Fatalf("version field must not change the content digest: %s != %s", bumped, base)
 	}
 	seen := map[string]bool{base: true}
 	for name, edit := range edits {

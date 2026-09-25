@@ -35,6 +35,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	controldb "github.com/multigent/multigent/internal/db"
 )
 
 // planRecordTable is the kv_records namespace for frozen delivery plans.
@@ -73,16 +75,26 @@ type PlanMaterializationEntry struct {
 	MaterializedAt   string `json:"materializedAt,omitempty"`
 }
 
+// PlanApprovalProvenance records WHICH human review froze a version: the
+// review step instance is the machine pointer back to the decision record
+// (its outputValues carry the decision + comments).
+type PlanApprovalProvenance struct {
+	StepID     string `json:"stepId,omitempty"`
+	InstanceID string `json:"instanceId,omitempty"`
+	Comments   string `json:"comments,omitempty"`
+}
+
 // PlanVersionRecord is one frozen (or superseded) version of a plan.
 type PlanVersionRecord struct {
-	Version          int          `json:"version"`
-	Status           string       `json:"status"`
-	Digest           string       `json:"digest"`
-	ApprovedBy       string       `json:"approvedBy,omitempty"`
-	ApprovedAt       string       `json:"approvedAt,omitempty"`
-	FrozenAt         string       `json:"frozenAt,omitempty"`
-	SupersedesDigest string       `json:"supersedesDigest,omitempty"`
-	Plan             DeliveryPlan `json:"plan"`
+	Version          int                     `json:"version"`
+	Status           string                  `json:"status"`
+	Digest           string                  `json:"digest"`
+	ApprovedBy       string                  `json:"approvedBy,omitempty"`
+	ApprovedAt       string                  `json:"approvedAt,omitempty"`
+	FrozenAt         string                  `json:"frozenAt,omitempty"`
+	SupersedesDigest string                  `json:"supersedesDigest,omitempty"`
+	Approval         *PlanApprovalProvenance `json:"approval,omitempty"`
+	Plan             DeliveryPlan            `json:"plan"`
 }
 
 // FrozenPlanRecord is the single control-plane record for a run's plan.
@@ -221,60 +233,39 @@ func (s *Store) FreezeDeliveryPlan(project string, plan DeliveryPlan, approvedBy
 	if err := ValidateDeliveryPlan(plan); err != nil {
 		return FrozenPlanRecord{}, PlanVersionRecord{}, err
 	}
-	digest, err := PlanDigest(plan)
-	if err != nil {
-		return FrozenPlanRecord{}, PlanVersionRecord{}, err
-	}
 	var frozen PlanVersionRecord
+	var createErr error
 	record, err := s.mutatePlanRecord(project, runID,
 		func() (FrozenPlanRecord, bool) {
-			return FrozenPlanRecord{
-				PlanID: strings.TrimSpace(plan.PlanID),
-				Versions: []PlanVersionRecord{{
-					Version:    1,
-					Status:     PlanStatusFrozen,
-					Digest:     digest,
-					ApprovedBy: strings.TrimSpace(approvedBy),
-					ApprovedAt: time.Now().UTC().Format(time.RFC3339),
-					FrozenAt:   time.Now().UTC().Format(time.RFC3339),
-					Plan:       plan,
-				}},
-				CurrentVersion: 1,
-			}, true
+			// Build the initial record WITH the frozen version already applied:
+			// mutatePlanRecord returns right after a successful insert, so a
+			// bare empty record would persist a plan with no version.
+			base := FrozenPlanRecord{}
+			changed, entry, err := applyPlanFreeze(&base, plan, approvedBy, PlanApprovalProvenance{})
+			if err != nil {
+				createErr = err
+				return FrozenPlanRecord{}, false
+			}
+			if !changed {
+				createErr = fmt.Errorf("freeze delivery plan: plan text was not applied to the new record")
+				return FrozenPlanRecord{}, false
+			}
+			frozen = entry
+			return base, true
 		},
 		func(record *FrozenPlanRecord) (bool, error) {
-			if current, ok := record.Current(); ok && current.Status == PlanStatusFrozen && current.Digest == digest {
-				frozen = current
-				return false, nil // identical text already frozen: no new version
+			changed, entry, err := applyPlanFreeze(record, plan, approvedBy, PlanApprovalProvenance{})
+			if err != nil {
+				return false, err
 			}
-			supersedes := ""
-			if current, ok := record.Current(); ok {
-				supersedes = current.Digest
-			}
-			version := 1
-			for _, v := range record.Versions {
-				if v.Version >= version {
-					version = v.Version + 1
-				}
-			}
-			now := time.Now().UTC().Format(time.RFC3339)
-			frozen = PlanVersionRecord{
-				Version:          version,
-				Status:           PlanStatusFrozen,
-				Digest:           digest,
-				ApprovedBy:       strings.TrimSpace(approvedBy),
-				ApprovedAt:       now,
-				FrozenAt:         now,
-				SupersedesDigest: supersedes,
-				Plan:             plan,
-			}
-			record.PlanID = strings.TrimSpace(plan.PlanID)
-			record.CurrentVersion = version
-			record.Versions = append(append([]PlanVersionRecord{}, record.Versions...), frozen)
-			return true, nil
+			frozen = entry
+			return changed, nil
 		})
 	if err != nil {
 		return FrozenPlanRecord{}, PlanVersionRecord{}, err
+	}
+	if createErr != nil {
+		return FrozenPlanRecord{}, PlanVersionRecord{}, createErr
 	}
 	if frozen.Version == 0 {
 		// Mutate reported "no change" (idempotent re-freeze) — surface the
@@ -306,6 +297,121 @@ func (s *Store) LoadPlanRecord(project, runID string) (FrozenPlanRecord, bool, e
 		return FrozenPlanRecord{}, false, fmt.Errorf("decode delivery plan record: %w", err)
 	}
 	return record, true, nil
+}
+
+// applyPlanFreeze appends (or re-uses) the frozen version for a plan inside a
+// record. Shared by the out-of-transaction CAS path (FreezeDeliveryPlan) and
+// the in-transaction approval path (PreparePlanFreezeExtras), so versioning,
+// idempotency and provenance rules cannot drift between them.
+//
+// Returns changed=false when the identical plan text is already the current
+// frozen version: no new version, no write.
+func applyPlanFreeze(record *FrozenPlanRecord, plan DeliveryPlan, approvedBy string, approval PlanApprovalProvenance) (bool, PlanVersionRecord, error) {
+	if record == nil {
+		return false, PlanVersionRecord{}, fmt.Errorf("apply plan freeze requires a record")
+	}
+	approvedBy = strings.TrimSpace(approvedBy)
+	if approvedBy == "" {
+		return false, PlanVersionRecord{}, fmt.Errorf("freeze delivery plan: approvedBy is required (an unapproved plan must never be frozen)")
+	}
+	plan.RunID = strings.TrimSpace(plan.RunID)
+	plan.Version = 1 // version-agnostic text; the record owns versioning
+	if err := ValidateDeliveryPlan(plan); err != nil {
+		return false, PlanVersionRecord{}, err
+	}
+	digest, err := PlanDigest(plan)
+	if err != nil {
+		return false, PlanVersionRecord{}, err
+	}
+	if current, ok := record.Current(); ok && current.Status == PlanStatusFrozen && current.Digest == digest {
+		return false, current, nil // identical text already frozen: no new version
+	}
+	supersedes := ""
+	if current, ok := record.Current(); ok {
+		supersedes = current.Digest
+	}
+	version := 1
+	for _, v := range record.Versions {
+		if v.Version >= version {
+			version = v.Version + 1
+		}
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	stored := plan
+	stored.Version = version
+	entry := PlanVersionRecord{
+		Version:          version,
+		Status:           PlanStatusFrozen,
+		Digest:           digest,
+		ApprovedBy:       approvedBy,
+		ApprovedAt:       now,
+		FrozenAt:         now,
+		SupersedesDigest: supersedes,
+		Plan:             stored,
+	}
+	if approval.StepID != "" || approval.InstanceID != "" || approval.Comments != "" {
+		entry.Approval = &PlanApprovalProvenance{
+			StepID:     strings.TrimSpace(approval.StepID),
+			InstanceID: strings.TrimSpace(approval.InstanceID),
+			Comments:   strings.TrimSpace(approval.Comments),
+		}
+	}
+	record.PlanID = strings.TrimSpace(plan.PlanID)
+	record.CurrentVersion = version
+	record.Versions = append(append([]PlanVersionRecord{}, record.Versions...), entry)
+	return true, entry, nil
+}
+
+// PreparePlanFreezeExtras validates a plan and returns the transition extra
+// writes that freeze it INSIDE the approving review's guarded transaction:
+// same record CAS-free read (the transaction holds the IMMEDIATE lock), same
+// versioning rules. Plan validation happens HERE, before the transition starts,
+// so a bad plan fails closed without any run mutation.
+func (s *Store) PreparePlanFreezeExtras(project, runID string, plan DeliveryPlan, approvedBy string, approval PlanApprovalProvenance) (TransitionExtraWrites, error) {
+	project, runID = strings.TrimSpace(project), strings.TrimSpace(runID)
+	if project == "" || runID == "" {
+		return nil, fmt.Errorf("prepare plan freeze requires project and runID")
+	}
+	plan.RunID = runID
+	plan.Version = 1
+	if err := ValidateDeliveryPlan(plan); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(approvedBy) == "" {
+		return nil, fmt.Errorf("freeze delivery plan: approvedBy is required (an unapproved plan must never be frozen)")
+	}
+	key := []string{project, runID}
+	return func(tx controldb.KVTxReader) ([]controldb.KVWrite, error) {
+		payload, found, err := tx.GetRecord(planRecordTable, s.workspaceID, key)
+		if err != nil {
+			return nil, err
+		}
+		record := FrozenPlanRecord{
+			SchemaVersion: DeliveryPlanSchemaVersion,
+			PlanID:        strings.TrimSpace(plan.PlanID),
+			Project:       project,
+			RunID:         runID,
+			CreatedAt:     time.Now().UTC().Format(time.RFC3339),
+		}
+		if found {
+			if err := json.Unmarshal([]byte(payload), &record); err != nil {
+				return nil, fmt.Errorf("decode delivery plan record: %w", err)
+			}
+		}
+		if _, _, err := applyPlanFreeze(&record, plan, approvedBy, approval); err != nil {
+			return nil, err
+		}
+		record.SchemaVersion = DeliveryPlanSchemaVersion
+		record.Project, record.RunID = project, runID
+		record.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		raw, err := json.Marshal(record)
+		if err != nil {
+			return nil, err
+		}
+		return []controldb.KVWrite{{
+			Table: planRecordTable, Workspace: s.workspaceID, Key: key, Payload: string(raw),
+		}}, nil
+	}, nil
 }
 
 // LoadFrozenPlanForRun is the ONLY trust path to a materializable plan.

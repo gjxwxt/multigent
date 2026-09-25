@@ -2677,15 +2677,68 @@ func (s *Store) releaseWorkflowTransitionClaim(run *entity.WorkflowRun, claimID 
 // The final run write (with the claim prefix stripped by marshalling the
 // plain run entity) replaces the marker, releasing the gate.
 func (s *Store) commitTransitionBatch(run *entity.WorkflowRun, claimID string, current *entity.WorkflowStepInstance, event *entity.WorkflowStepEvent, nextInst *entity.WorkflowStepInstance) error {
+	return s.commitTransitionBatchExtras(run, claimID, current, event, nextInst, nil)
+}
+
+// TransitionExtraWrites contributes writes that must land ATOMICALLY with the
+// transition commit. The function runs INSIDE the transition's guarded
+// transaction (claim already re-verified, IMMEDIATE lock held), so it may READ
+// records via tx and return writes derived from that read — e.g. the delivery
+// plan freeze performed by the approving review. A non-nil error aborts the
+// whole batch: no transition rows, no extra writes.
+type TransitionExtraWrites func(tx controldb.KVTxReader) ([]controldb.KVWrite, error)
+
+// commitTransitionBatchExtras is commitTransitionBatch with the extras hook.
+// Without extras it takes the historical path byte-for-byte.
+func (s *Store) commitTransitionBatchExtras(run *entity.WorkflowRun, claimID string, current *entity.WorkflowStepInstance, event *entity.WorkflowStepEvent, nextInst *entity.WorkflowStepInstance, extras TransitionExtraWrites) error {
 	if run == nil || strings.TrimSpace(claimID) == "" {
 		return fmt.Errorf("transition commit requires a run and a claimID")
+	}
+	runKey := []string{run.Project, run.TaskID, run.ID}
+	writes, err := s.transitionBatchWrites(current, event, run, nextInst)
+	if err != nil {
+		return err
+	}
+	if extras == nil {
+		if err := s.db.CommitTransitionGuarded(s.workspaceID, runKey, claimID, writes); err != nil {
+			s.releaseWorkflowTransitionClaim(run, claimID)
+			return err
+		}
+		return nil
+	}
+	// Atomic extras: the claim is re-verified and the extra writes are computed
+	// inside ONE transaction together with the transition rows.
+	err = s.db.CommitTransitionGuardedTx(s.workspaceID, runKey, claimID, func(tx controldb.KVTxReader) ([]controldb.KVWrite, error) {
+		extraWrites, err := extras(tx)
+		if err != nil {
+			return nil, err
+		}
+		return append(writes, extraWrites...), nil
+	})
+	if err != nil {
+		// The transaction rolled back atomically, so nothing was persisted —
+		// release our own claim marker so a corrected retry (e.g. a re-emitted
+		// delivery plan) is not wedged behind the claim TTL. The TTL takeover
+		// remains the fallback when the process crashes outright.
+		s.releaseWorkflowTransitionClaim(run, claimID)
+	}
+	return err
+}
+
+// transitionBatchWrites builds the transition's write batch (completed step
+// instance, completion event, final run state, next-step reset). The run write
+// is LAST and carries the plain (post-transition) payload, releasing the claim
+// gate on success; the transaction makes the batch atomic regardless of order.
+func (s *Store) transitionBatchWrites(current *entity.WorkflowStepInstance, event *entity.WorkflowStepEvent, run *entity.WorkflowRun, nextInst *entity.WorkflowStepInstance) ([]controldb.KVWrite, error) {
+	if run == nil {
+		return nil, fmt.Errorf("transition write batch requires a run")
 	}
 	runKey := []string{run.Project, run.TaskID, run.ID}
 	writes := make([]controldb.KVWrite, 0, 4)
 	if current != nil {
 		raw, err := json.Marshal(current)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		writes = append(writes, controldb.KVWrite{
 			Table: "workflow_step_instances", Workspace: s.workspaceID,
@@ -2701,7 +2754,7 @@ func (s *Store) commitTransitionBatch(run *entity.WorkflowRun, claimID string, c
 		}
 		raw, err := json.Marshal(event)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		writes = append(writes, controldb.KVWrite{
 			Table: "workflow_step_events", Workspace: s.workspaceID,
@@ -2714,7 +2767,7 @@ func (s *Store) commitTransitionBatch(run *entity.WorkflowRun, claimID string, c
 	// semantically — the transaction makes the batch atomic regardless.
 	runJSON, err := json.Marshal(*run)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	writes = append(writes, controldb.KVWrite{
 		Table: "workflow_runs", Workspace: s.workspaceID, Key: runKey, Payload: string(runJSON),
@@ -2722,17 +2775,32 @@ func (s *Store) commitTransitionBatch(run *entity.WorkflowRun, claimID string, c
 	if nextInst != nil {
 		raw, err := json.Marshal(nextInst)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		writes = append(writes, controldb.KVWrite{
 			Table: "workflow_step_instances", Workspace: s.workspaceID,
 			Key: []string{nextInst.RunID, nextInst.StepID, nextInst.ID}, Payload: string(raw),
 		})
 	}
-	return s.db.CommitTransitionGuarded(s.workspaceID, runKey, claimID, writes)
+	return writes, nil
 }
 
+// CompleteAndAdvance drives a step completion and the following transition.
 func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outputValues map[string]string, status string) (TransitionResult, error) {
+	return s.completeAndAdvanceWithExtras(project, taskID, summary, output, outputValues, status, nil)
+}
+
+// CompleteAndAdvanceWithExtras is CompleteAndAdvance whose terminal commit
+// additionally carries transition-scoped extra writes computed INSIDE the same
+// guarded transaction (see TransitionExtraWrites). The approving contract
+// review uses this for the delivery-plan freeze: the run may not advance to
+// the parallel stage without its frozen plan, and the frozen plan cannot exist
+// unless that very transition committed.
+func (s *Store) CompleteAndAdvanceWithExtras(project, taskID, summary, output string, outputValues map[string]string, status string, extras TransitionExtraWrites) (TransitionResult, error) {
+	return s.completeAndAdvanceWithExtras(project, taskID, summary, output, outputValues, status, extras)
+}
+
+func (s *Store) completeAndAdvanceWithExtras(project, taskID, summary, output string, outputValues map[string]string, status string, extras TransitionExtraWrites) (TransitionResult, error) {
 	var result TransitionResult
 	// The INITIAL read binds the whole transition: run state, stored payload,
 	// and monotonic revision come from ONE SELECT, and the claim CAS below
@@ -2821,7 +2889,7 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 		// Guarded success-path commit (GPT round 3): the claim owner is
 		// re-verified inside the transaction; a stolen claim rejects the
 		// whole batch (instance + event + run) atomically.
-		if err := s.commitTransitionBatch(&run, claimID, current, event, nil); err != nil {
+		if err := s.commitTransitionBatchExtras(&run, claimID, current, event, nil, extras); err != nil {
 			if errors.Is(err, controldb.ErrTransitionClaimLost) {
 				return result, errStaleWorkflowTransitionf("run %s step %s (claim lost before commit)", run.ID, run.ActiveStepID)
 			}
@@ -2880,7 +2948,7 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 		run.FinishedAt = now
 		// Guarded success-path commit (GPT round 3): see the init-failure
 		// branch above.
-		if err := s.commitTransitionBatch(&run, claimID, current, event, nil); err != nil {
+		if err := s.commitTransitionBatchExtras(&run, claimID, current, event, nil, extras); err != nil {
 			if errors.Is(err, controldb.ErrTransitionClaimLost) {
 				return result, errStaleWorkflowTransitionf("run %s step %s (claim lost before commit)", run.ID, run.ActiveStepID)
 			}
@@ -3045,7 +3113,7 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 		// Guarded success-path commit (GPT round 3): the claim owner is
 		// re-verified inside the transaction; a stolen claim rejects the
 		// whole batch (instance + event + run) atomically.
-		if err := s.commitTransitionBatch(&run, claimID, current, event, nil); err != nil {
+		if err := s.commitTransitionBatchExtras(&run, claimID, current, event, nil, extras); err != nil {
 			if errors.Is(err, controldb.ErrTransitionClaimLost) {
 				return result, errStaleWorkflowTransitionf("run %s step %s (claim lost before commit)", run.ID, currentStep.ID)
 			}
@@ -3096,7 +3164,7 @@ func (s *Store) CompleteAndAdvance(project, taskID, summary, output string, outp
 	// claim-owner check runs under BEGIN IMMEDIATE. A transitioner whose claim
 	// was stolen while it prepared this batch gets ErrTransitionClaimLost →
 	// ErrStaleWorkflowTransition and NOTHING of its batch persists.
-	if err := s.commitTransitionBatch(&run, claimID, current, event, nextInst); err != nil {
+	if err := s.commitTransitionBatchExtras(&run, claimID, current, event, nextInst, extras); err != nil {
 		if errors.Is(err, controldb.ErrTransitionClaimLost) {
 			return result, errStaleWorkflowTransitionf("run %s step %s (claim lost before commit)", run.ID, currentStep.ID)
 		}

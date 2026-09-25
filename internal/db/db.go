@@ -41,6 +41,7 @@ type Store interface {
 	RecordRevision(table, workspaceID string, key []string) (string, bool, error)
 	ListRecordsWithRevision(table string, workspaceID string, keyPrefix []string) ([]RecordWithRevision, error)
 	CommitTransitionGuarded(workspaceID string, runKey []string, expectClaimID string, writes []KVWrite) error
+	CommitTransitionGuardedTx(workspaceID string, runKey []string, expectClaimID string, plan func(tx KVTxReader) ([]KVWrite, error)) error
 	CommitRecordWrites(workspaceID string, writes []KVWrite) error
 	CommitRecordWritesGuarded(workspaceID string, guard func(tx KVTxReader) error, writes []KVWrite) error
 	CommitRecordWritesGuardedTx(workspaceID string, plan func(tx KVTxReader) ([]KVWrite, error)) error

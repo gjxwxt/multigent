@@ -166,6 +166,12 @@ const (
 func canonicalDeliveryPlan(plan DeliveryPlan) DeliveryPlan {
 	out := plan
 	out.SchemaVersion = DeliveryPlanSchemaVersion
+	// The plan TEXT is version-agnostic: the frozen record owns versioning
+	// (every re-approval of edited text becomes version+1). Pinning the
+	// canonical version to 1 keeps a version bump from changing the digest, so
+	// "same text, already frozen" stays idempotent and a digest always
+	// identifies plan CONTENT.
+	out.Version = 1
 	out.PlanID = strings.TrimSpace(out.PlanID)
 	out.RunID = strings.TrimSpace(out.RunID)
 	out.ResolvedAtBaseCommit = strings.TrimSpace(out.ResolvedAtBaseCommit)

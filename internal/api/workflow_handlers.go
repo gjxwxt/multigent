@@ -744,7 +744,29 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 			s.recordReviewChangeRun(workspaceID, project, taskID, preimageSHA, checkpointSHA)
 		}
 	}
-	transition, err := wfStore.CompleteAndAdvance(project, taskID, summary, "", outputs, "completed")
+	// Delivery-plan freeze (slice 4): the approving contract review is the ONLY
+	// entry that freezes a batched run's structured delivery plan. The plan is
+	// parsed and validated BEFORE the transition starts, and the frozen record
+	// is written INSIDE the transition's guarded transaction — so the run cannot
+	// advance without a frozen plan and a frozen plan cannot exist without the
+	// approving transition. request_changes never reaches this branch.
+	var planExtras workflowstore.TransitionExtraWrites
+	if runFound && isPlanFreezeStep(currentStep) && isApprovalDecision(outputs["decision"]) {
+		extras, status, freezeErr := s.preparePlanFreezeForReview(wfStore, project, run, currentStep, strings.TrimSpace(t.Assignee), comments)
+		if freezeErr != nil {
+			if status == 0 {
+				status = http.StatusBadRequest
+			}
+			return taskWorkflowResponse{}, status, fmt.Errorf("delivery_plan_freeze_rejected: %w", freezeErr)
+		}
+		planExtras = extras
+	}
+	var transition workflowstore.TransitionResult
+	if planExtras != nil {
+		transition, err = wfStore.CompleteAndAdvanceWithExtras(project, taskID, summary, "", outputs, "completed", planExtras)
+	} else {
+		transition, err = wfStore.CompleteAndAdvance(project, taskID, summary, "", outputs, "completed")
+	}
 	if err != nil {
 		return taskWorkflowResponse{}, http.StatusBadRequest, err
 	}
@@ -1971,4 +1993,3 @@ func (s *Server) recoverStalePreviewReceipts(workspaceID string, records []tasks
 		}
 	}
 }
-

@@ -579,6 +579,66 @@ ON CONFLICT(table_name, workspace_id, k1, k2, k3) DO UPDATE SET payload = exclud
 	return nil
 }
 
+// CommitTransitionGuardedTx is CommitTransitionGuarded with the write batch
+// computed INSIDE the transaction: the claim owner is re-verified first (the
+// same check as CommitTransitionGuarded), then plan(tx) runs on the same
+// connection holding the IMMEDIATE lock, so it may READ records and return
+// writes that must land atomically with the transition (e.g. freezing a
+// delivery plan at the moment a human approval advances the run). A non-nil
+// error from plan aborts the whole batch — nothing persists, including the
+// transition rows.
+func (db *SQLiteStore) CommitTransitionGuardedTx(workspaceID string, runKey []string, expectClaimID string, plan func(tx KVTxReader) ([]KVWrite, error)) error {
+	if db == nil || db.sql == nil {
+		return fmt.Errorf("database not open")
+	}
+	if plan == nil {
+		return fmt.Errorf("transition commit requires a non-nil plan")
+	}
+	conn, err := db.sql.Conn(context.Background())
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	return runImmediateTx(conn, func(tx *immediateTx) error {
+		k1, k2, k3 := normalizeKey(runKey)
+		var payload string
+		err := tx.QueryRow(`SELECT payload FROM kv_records WHERE table_name = 'workflow_runs' AND workspace_id = ? AND k1 = ? AND k2 = ? AND k3 = ?`,
+			workspaceID, k1, k2, k3).Scan(&payload)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: run record missing", ErrTransitionClaimLost)
+		}
+		if err != nil {
+			return err
+		}
+		if !verifyClaimOwner(payload, expectClaimID) {
+			return ErrTransitionClaimLost
+		}
+		writes, err := plan(KVTx{conn: tx.conn})
+		if err != nil {
+			return err
+		}
+		if len(writes) == 0 {
+			return fmt.Errorf("transition commit requires at least one write")
+		}
+		now := nowUTC()
+		for _, w := range writes {
+			wk1, wk2, wk3 := normalizeKey(w.Key)
+			ws := w.Workspace
+			if ws == "" {
+				ws = workspaceID
+			}
+			if _, err := tx.Exec(`INSERT INTO kv_records (table_name, workspace_id, k1, k2, k3, payload, updated_at, revision)
+VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+ON CONFLICT(table_name, workspace_id, k1, k2, k3) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, revision = kv_records.revision + 1`,
+				w.Table, ws, wk1, wk2, wk3, w.Payload, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // CommitRecordWrites commits multiple kv_records writes as ONE atomic
 // transaction (BEGIN IMMEDIATE on a dedicated connection, same discipline as
 // CommitTransitionGuarded without the claim gate): either every write lands

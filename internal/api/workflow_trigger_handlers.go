@@ -509,6 +509,7 @@ func (s *Server) submitWorkflowReviewFromTrigger(workspaceID string, record work
 	}
 	summary := formatWorkflowReviewFields(outputs)
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	var planExtras workflowstore.TransitionExtraWrites
 	deliveryPrepared := false
 	var currentStep entity.WorkflowStep
 	// Task 0.5: delivery routing is definition-version aware; default 1
@@ -549,8 +550,27 @@ func (s *Server) submitWorkflowReviewFromTrigger(workspaceID string, record work
 				}
 			}
 		}
+		// A plan-freezing review reached through a trigger/ChatOps callback
+		// must freeze through the SAME entry as the in-console review: the
+		// approval and the frozen plan ride one guarded transition, and a
+		// malformed plan aborts before any write.
+		if isPlanFreezeStep(currentStep) && isApprovalDecision(outputs["decision"]) {
+			reviewer := strings.TrimSpace(s.currentUser(r).Username)
+			if reviewer == "" {
+				reviewer = strings.TrimSpace(record.RecipientUserID)
+			}
+			extras, _, freezeErr := s.preparePlanFreezeForReview(wfStore, record.Project, run, currentStep, reviewer, comments)
+			if freezeErr != nil {
+				return result, fmt.Errorf("delivery_plan_freeze_rejected: %w", freezeErr)
+			}
+			planExtras = extras
+		}
 	}
-	result, err = wfStore.CompleteAndAdvance(record.Project, record.TaskID, summary, "", outputs, "completed")
+	if planExtras != nil {
+		result, err = wfStore.CompleteAndAdvanceWithExtras(record.Project, record.TaskID, summary, "", outputs, "completed", planExtras)
+	} else {
+		result, err = wfStore.CompleteAndAdvance(record.Project, record.TaskID, summary, "", outputs, "completed")
+	}
 	if err != nil {
 		return result, err
 	}

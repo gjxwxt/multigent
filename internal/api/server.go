@@ -726,6 +726,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/workflows/{workflowId}", s.handleDeleteWorkflow)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/workflow", s.handleGetTaskWorkflow)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/workflow/review/draft", s.handleGetTaskWorkflowReviewDraft)
+	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/workflow/delivery-plan", s.handleGetTaskDeliveryPlan)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/start", s.handleStartProjectTask)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/unblock", s.handleUnblockProjectTask)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/workflow/review", s.handlePostTaskWorkflowReview)

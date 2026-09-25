@@ -24,10 +24,12 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"designTitle":    "Design Confirmation",
 		"designDesc":     "Review the visual prototype produced in OpenDesign (or pick an existing design). Confirm the direction, request changes, or generate a new variant before implementation begins.",
 
-		"scaleGateTitle":    "Delivery Scale Gate",
-		"scaleGateDesc":     "Classify the approved requirement into a delivery shape. Output scale_verdict: linear (single coherent implementation pass — small/medium change, low intra-requirement independence) or batched (large requirement decomposed into parallel workstreams). When batched, also output batch_plan: the workstream list (id, title, cohesive domain rationale, expected UC set) plus the SHARED CONTRACT list (database schema, error codes, API skeleton) that must be committed to the baseline before any workstream starts. The verdict is advisory — the requirement reviewer confirms it; branch editing happens on the canvas before the run reaches the parallel stage.",
-		"scaleVerdictField": "Delivery shape verdict: linear (default when undecided) or batched. Routed deterministically by the platform.",
-		"batchPlanField":    "When batched: JSON plan of workstreams (branch_id, title, cohesive domain, UC set) and the shared-contract artifact list. Consumed by contract_batch and by humans editing the parallel branches on the canvas.",
+		"scaleGateTitle":        "Delivery Scale Gate",
+		"scaleGateDesc":         "Classify the approved requirement into a delivery shape. Output scale_verdict: linear (single coherent implementation pass — small/medium change, low intra-requirement independence) or batched (large requirement decomposed into parallel workstreams). When batched, also output batch_plan: the workstream list (id, title, cohesive domain rationale, expected UC set) plus the SHARED CONTRACT list (database schema, error codes, API skeleton) that must be committed to the baseline before any workstream starts. The verdict is advisory — the requirement reviewer confirms it; branch editing happens on the canvas before the run reaches the parallel stage.",
+		"scaleVerdictField":     "Delivery shape verdict: linear (default when undecided) or batched. Routed deterministically by the platform.",
+		"batchPlanField":        "When batched: structured JSON delivery plan. workPackages[] entries need id (or branchId), title, cohesive domain rationale, dependsOn[] (ids of work packages that must complete first), acceptanceCriteria[] (requirement_items ids from requirement_draft, or \"infra:<name>\" for infrastructure-only packages), agentBinding (the agent that owns the package), and optionally expectedDelivery[] and contractRefs[]. Also: sharedContract[] (id/artifact/path) and optionally planId/integrationPolicy/qaPolicy. This plan is what the contract review freezes; the parallel stage derives one branch per work package from it — no canvas branch editing.",
+		"deliveryPlanField":     "Preferred field name for the structured delivery plan (same schema as batch_plan).",
+		"requirementItemsField": "JSON array of the requirement anchors this delivery traces to: [{id, text, source}]. The ids are frozen by the requirement review and referenced by every non-infrastructure work package's acceptanceCriteria.",
 
 		"contractBatchTitle":     "Shared Contract Batch",
 		"contractBatchDesc":      "BATCHED PATH ONLY. Build the shared foundation every workstream depends on: database schema and migrations, error-code enumeration, API skeleton (paths/auth/error semantics), and the tech-stack skeleton (per batch_plan). Commit to the integration baseline BEFORE parallel work starts — parallel branches cannot see each other's code, so this contract is their only shared surface. Follow the batch_plan contract list; do not implement workstream business logic here.",
@@ -101,10 +103,12 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"designTitle":    "设计确认",
 		"designDesc":     "审阅 OpenDesign 生成的可视化原型（或选择已有设计），确认方向、打回修改或重新生成，然后再进入实现。",
 
-		"scaleGateTitle":    "交付规模裁决",
-		"scaleGateDesc":     "把已批准的需求归类为交付形态。输出 scale_verdict：linear（单条实现线——中小型变更、需求内部独立性低）或 batched（大需求分解为并行工作流）。batched 时同时输出 batch_plan：工作流清单（branch_id、标题、内聚域依据、预期 UC 集合）以及必须在任何工作流开工前提交到基线的共享契约清单（数据库 schema、错误码、API 骨架）。裁决是建议性的——需求审核人最终拍板；run 到达并行阶段前可在画布上编辑分支。",
-		"scaleVerdictField": "交付形态裁决：linear（未决时默认）或 batched。由平台确定性路由。",
-		"batchPlanField":    "batched 时：工作流 JSON 计划（branch_id、标题、内聚域、UC 集合）与共享契约产物清单。供 contract_batch 消费，也供人审后在画布上编辑并行分支时参照。",
+		"scaleGateTitle":        "交付规模裁决",
+		"scaleGateDesc":         "把已批准的需求归类为交付形态。输出 scale_verdict：linear（单条实现线——中小型变更、需求内部独立性低）或 batched（大需求分解为并行工作流）。batched 时同时输出 batch_plan：工作流清单（branch_id、标题、内聚域依据、预期 UC 集合）以及必须在任何工作流开工前提交到基线的共享契约清单（数据库 schema、错误码、API 骨架）。裁决是建议性的——需求审核人最终拍板；run 到达并行阶段前可在画布上编辑分支。",
+		"scaleVerdictField":     "交付形态裁决：linear（未决时默认）或 batched。由平台确定性路由。",
+		"batchPlanField":        "batched 时：结构化 JSON 交付计划。workPackages[] 每项需含 id（或 branchId）、标题、内聚域依据、dependsOn[]（必须先完成的工作包 id）、acceptanceCriteria[]（引用 requirement_draft 的 requirement_items id，或基础设施包用 \"infra:<名称>\"）、agentBinding（承接该包的 agent），可选 expectedDelivery[] 与 contractRefs[]。另可含 sharedContract[] 与 planId/integrationPolicy/qaPolicy。这份计划就是 contract_review 冻结的对象，并行阶段按它派生分支——无需在画布上编辑分支。",
+		"deliveryPlanField":     "结构化交付计划的首选字段名（与 batch_plan 同 schema）。",
+		"requirementItemsField": "本次交付追溯的需求锚点 JSON 数组：[{id, text, source}]。id 由需求评审冻结，所有非基础设施工作包的 acceptanceCriteria 都必须引用它们。",
 
 		"contractBatchTitle":     "共享契约批",
 		"contractBatchDesc":      "仅 batched 路径。构建所有工作流共同依赖的共享地基：数据库 schema 与迁移、错误码枚举、API 骨架（路径/鉴权/错误语义）与技术栈骨架（按 batch_plan）。在并行工作开始前提交到集线基线——并行分支互相看不见对方代码，这份契约是它们唯一的共享面。按 batch_plan 的契约清单执行；不要在此实现工作流的业务逻辑。",
@@ -208,10 +212,12 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		[]entity.WorkflowField{
 			field("approved_requirement", "requestField"),
 			optionalField("requirement_draft", "requestField"),
+			optionalField("requirement_items", "requirementItemsField"),
 			optionalField("approved_design_snapshot_path", "designSnapshotField"),
 		},
 		[]entity.WorkflowField{
 			field("scale_verdict", "scaleVerdictField"),
+			optionalField("delivery_plan", "deliveryPlanField"),
 			optionalField("batch_plan", "batchPlanField"),
 		})
 
@@ -222,22 +228,32 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 	contractBatchStep := tmplStep("contract_batch", "agent_task", text["contractBatchTitle"], text["contractBatchDesc"], "developer-agent", "violet", 700,
 		[]entity.WorkflowField{
 			field("approved_requirement", "requestField"),
+			optionalField("delivery_plan", "deliveryPlanField"),
 			optionalField("batch_plan", "batchPlanField"),
+			optionalField("requirement_items", "requirementItemsField"),
 			optionalField("approved_design_snapshot_path", "designSnapshotField"),
 		},
 		[]entity.WorkflowField{
 			field("contract_artifacts", "contractArtifactsField"),
+			optionalField("delivery_plan", "deliveryPlanField"),
 		})
 
 	contractReviewStep := tmplStep("contract_review", "human_review", text["contractReviewTitle"], text["contractReviewDesc"], "owner-engineer", "amber", 860,
 		[]entity.WorkflowField{
 			field("contract_artifacts", "contractArtifactsField"),
+			optionalField("delivery_plan", "deliveryPlanField"),
 			optionalField("batch_plan", "batchPlanField"),
+			optionalField("requirement_items", "requirementItemsField"),
 		},
 		[]entity.WorkflowField{
 			field("decision", "decisionField"),
 			field("comments", "commentsField"),
 		})
+	// The approving contract review is the ONLY entry that freezes the
+	// delivery plan: on approve the platform validates the structured plan and
+	// commits the frozen record INSIDE the same transition that advances the
+	// run; request_changes never freezes.
+	contractReviewStep.Config[PlanFreezeConfigKey] = "true"
 
 	// Parallel workstream stage (batched path). Branches are STATIC at
 	// instantiation (module DM4): two generic workstream branches ship with
@@ -245,13 +261,17 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 	// roles, descriptions and input fields on the canvas following the
 	// batch_plan BEFORE the run reaches this step. Engine-side, each branch
 	// spawns a child task + sub-run and must carry an agent actor binding.
-	parallelStep := tmplStep("parallel_workstreams", "parallel_stage", "Parallel Workstreams", "Fan-out of the decomposed workstreams. Branches are edited on the canvas per batch_plan before this step activates; each branch binds its own agent.", "", "violet", 1020,
+	parallelStep := tmplStep("parallel_workstreams", "parallel_stage", "Parallel Workstreams", "Fan-out of the decomposed workstreams. Branches are derived from the FROZEN delivery plan approved at the contract review (one branch per work package, dependency order); no canvas editing is required. The static branches below are the legacy fallback for runs without a frozen plan.", "", "violet", 1020,
 		[]entity.WorkflowField{
 			field("contract_artifacts", "contractArtifactsField"),
 			optionalField("approved_requirement", "requestField"),
 		},
 		nil)
 	parallelStep.JoinPolicy = "all"
+	// Plan-driven stage: with a frozen plan the branch list is derived from the
+	// plan's ready work packages; without one the stage refuses (fail-closed)
+	// rather than falling back to generic branches.
+	parallelStep.Config = map[string]string{"planMaterialization": "frozen"}
 	parallelStep.Branches = []entity.WorkflowBranch{
 		{
 			ID:          "workstream_1",
@@ -313,9 +333,9 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		[]entity.WorkflowStep{
 			tmplStep("requirement_draft", "agent_task", text["reqDraftTitle"], text["reqDraftDesc"], "pm-agent", "sky", 80,
 				[]entity.WorkflowField{field("request", "requestField"), field("context", "contextField")},
-				[]entity.WorkflowField{field("requirement_draft", "requestField"), field("open_questions", "contextField")}),
+				[]entity.WorkflowField{field("requirement_draft", "requestField"), field("open_questions", "contextField"), optionalField("requirement_items", "requirementItemsField")}),
 			tmplStep("requirement_review", "human_review", text["reqReviewTitle"], text["reqReviewDesc"], "product-owner", "amber", 360,
-				[]entity.WorkflowField{field("requirement_draft", "requestField")},
+				[]entity.WorkflowField{field("requirement_draft", "requestField"), optionalField("requirement_items", "requirementItemsField")},
 				[]entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("approved_requirement", "requestField")}),
 			designStep,
 			scaleGateStep,
@@ -436,6 +456,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			edge("e-req-review-design", "requirement_review", "design_review", text["approved"], cond("decision", "eq", "approve"), map[string]string{
 				"approved_requirement": "$output.approved_requirement",
 				"requirement_draft":    "$input.requirement_draft",
+				"requirement_items":    "$input.requirement_items",
 			}, false),
 			edge("e-req-review-rework", "requirement_review", "requirement_draft", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "previous_draft": "$input.requirement_draft"}, false),
 			// Design gate approve now routes to the scale gate (large-requirement
@@ -444,6 +465,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			edge("e-design-approve", "design_review", "scale_gate", text["approved"], cond("decision", "eq", "approve"), map[string]string{
 				"approved_requirement":          "$input.approved_requirement",
 				"requirement_draft":             "$input.requirement_draft",
+				"requirement_items":             "$input.requirement_items",
 				"approved_design_source":        "$output.approved_design_source",
 				"approved_design_project_id":    "$output.approved_design_project_id",
 				"approved_design_preview_url":   "$output.approved_design_preview_url",
@@ -467,6 +489,8 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			}, false),
 			edge("e-scale-batched", "scale_gate", "contract_batch", "batched", cond("scale_verdict", "eq", "batched"), map[string]string{
 				"approved_requirement":          "$input.approved_requirement",
+				"requirement_items":             "$input.requirement_items",
+				"delivery_plan":                 "$output.delivery_plan",
 				"batch_plan":                    "$output.batch_plan",
 				"approved_design_source":        "$input.approved_design_source",
 				"approved_design_project_id":    "$input.approved_design_project_id",
@@ -489,15 +513,19 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			// Contract batch → human contract review → parallel fan-out.
 			edge("e-contract-batch-review", "contract_batch", "contract_review", "", nil, map[string]string{
 				"contract_artifacts": "$output.contract_artifacts",
+				"delivery_plan":      "$input.delivery_plan",
 				"batch_plan":         "$input.batch_plan",
+				"requirement_items":  "$input.requirement_items",
 			}, true),
 			edge("e-contract-review-rework", "contract_review", "contract_batch", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{
 				"review_comments":               "$output.comments",
 				"batch_plan":                    "$input.batch_plan",
+				"requirement_items":             "$input.requirement_items",
 				"approved_requirement":          "$input.approved_requirement",
 				"approved_design_snapshot_path": "$input.approved_design_snapshot_path",
 			}, false),
 			edge("e-contract-review-parallel", "contract_review", "parallel_workstreams", text["approved"], cond("decision", "eq", "approve"), map[string]string{
+				"delivery_plan":                 "$input.delivery_plan",
 				"contract_artifacts":            "$input.contract_artifacts",
 				"approved_requirement":          "$input.approved_requirement",
 				"approved_design_snapshot_path": "$input.approved_design_snapshot_path",
