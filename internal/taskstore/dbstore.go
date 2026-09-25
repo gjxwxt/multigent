@@ -161,6 +161,74 @@ func (s *DBStore) OverwriteArchive(project, agent string, tasks []*entity.Task) 
 	return nil
 }
 
+// MoveTask relocates a task record between agent queues.
+//
+// Ordering is the contract: WRITE the destination, read it back at the exact
+// key that was written, and only then remove the source. The delete-first
+// ordering this replaces permanently lost the live task of a running workflow
+// when the destination write failed (hooks-relay rehearsal, 2026-09-25): the
+// step actor changed, the write hit a failure, and the task disappeared from
+// every queue while its run kept advancing.
+//
+// The read-back deliberately does not go through GetTask: GetTask scans every
+// alias of the agent, so an older copy under another alias would satisfy the
+// check while the write to the destination key had in fact failed. The
+// destination key itself reuses an existing record's key when the target
+// already holds the task (writing a second copy would make it visible twice) and
+// otherwise the raw target agent name, matching AddTask — the key the API-side
+// mover uses.
+//
+// A blank target, a failed write or a failed read-back all leave the source
+// record untouched.
+//
+// Known boundary: if the target agent already holds historical copies of the
+// same task under several aliases, only the key that is found first is
+// rewritten; the others are left alone, because DeleteTask removes the task ID
+// from every alias of the agent and would delete the copy just written. New
+// writes always land on the existing key or on toAgent, so this path does not
+// create fresh duplicates.
+func (s *DBStore) MoveTask(project, fromAgent, toAgent string, task *entity.Task) error {
+	if task == nil || strings.TrimSpace(task.ID) == "" {
+		return errs.Usage("move task requires a task with an id")
+	}
+	project = strings.TrimSpace(project)
+	taskID := strings.TrimSpace(task.ID)
+	fromAgent = strings.TrimSpace(fromAgent)
+	toAgent = strings.TrimSpace(toAgent)
+	if project == "" {
+		return errs.Usage("move task requires a project")
+	}
+	if toAgent == "" {
+		return errs.Usage("move task requires a target agent")
+	}
+	if sameIdentity(fromAgent, toAgent) {
+		return s.PersistTask(project, toAgent, task)
+	}
+	targetKey := toAgent
+	if keys, err := s.taskAgentKeys(project, toAgent); err == nil {
+		for _, key := range keys {
+			if _, ok, err := s.db.GetRecord("tasks", s.workspaceID, []string{project, key, taskID}); err != nil {
+				return err
+			} else if ok {
+				targetKey = key
+				break
+			}
+		}
+	}
+	if err := s.putJSON("tasks", []string{project, targetKey, taskID}, task); err != nil {
+		return err
+	}
+	if _, ok, err := s.db.GetRecord("tasks", s.workspaceID, []string{project, targetKey, taskID}); err != nil {
+		return fmt.Errorf("move task %s to agent %q: destination key %q unreadable after write: %w", taskID, toAgent, targetKey, err)
+	} else if !ok {
+		return fmt.Errorf("move task %s to agent %q: destination key %q missing after write", taskID, toAgent, targetKey)
+	}
+	if err := s.DeleteTask(project, fromAgent, taskID); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *DBStore) DeleteTask(project, agent, taskID string) error {
 	keys, err := s.taskAgentKeys(project, agent)
 	if err != nil {

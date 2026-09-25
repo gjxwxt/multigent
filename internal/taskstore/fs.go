@@ -467,6 +467,52 @@ func (s *FSStore) OverwriteArchive(project, agent string, tasks []*entity.Task) 
 	return writeYAMLAtomic(filepath.Join(dir, archiveFile), tasks)
 }
 
+// MoveTask relocates a task record between agent queues with the same
+// destination-first ordering as the DB backend: the caller's payload is written
+// first and read back before the source is removed, so a failed write can never
+// lose the task from every queue. Unlike the DB backend the file store has no
+// alias keys, so the read-back uses the plain per-agent read.
+func (s *FSStore) MoveTask(project, fromAgent, toAgent string, task *entity.Task) error {
+	if task == nil || strings.TrimSpace(task.ID) == "" {
+		return errs.Usage("move task requires a task with an id")
+	}
+	project = strings.TrimSpace(project)
+	taskID := strings.TrimSpace(task.ID)
+	fromAgent = strings.TrimSpace(fromAgent)
+	toAgent = strings.TrimSpace(toAgent)
+	if project == "" {
+		return errs.Usage("move task requires a project")
+	}
+	if toAgent == "" {
+		return errs.Usage("move task requires a target agent")
+	}
+	if sameIdentity(fromAgent, toAgent) {
+		return s.PersistTask(project, toAgent, task)
+	}
+	if err := s.AddTask(project, toAgent, task); err != nil {
+		return err
+	}
+	// Read the destination queue back from disk rather than through GetTask: the
+	// contract is that the file that was just written holds the record, and the
+	// check must not quietly widen if the shared read path ever changes (a
+	// readable record somewhere else must not mask a failed destination write).
+	queued, err := s.loadTasks(project, toAgent)
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, existing := range queued {
+		if existing != nil && existing.ID == taskID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("move task %s to agent %q: destination queue does not contain the task after write", taskID, toAgent)
+	}
+	return s.DeleteTask(project, fromAgent, taskID)
+}
+
 func (s *FSStore) DeleteTask(project, agent, taskID string) error {
 	tasks, err := s.loadTasks(project, agent)
 	if err != nil {

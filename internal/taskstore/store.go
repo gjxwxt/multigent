@@ -47,6 +47,13 @@ type Store interface {
 	// DeleteTask removes a task by ID from the active queue or the archive.
 	DeleteTask(project, agent, taskID string) error
 
+	// MoveTask relocates a task record (with the caller's payload) from one
+	// agent's queue to another's. The destination write happens FIRST, is
+	// verified readable at the exact key that was written, and only then is the
+	// source removed: a failed destination write must leave the task visible
+	// under its current agent rather than missing from every queue.
+	MoveTask(project, fromAgent, toAgent string, task *entity.Task) error
+
 	// ClearTasks removes all tasks (active and archived) for the given agent.
 	ClearTasks(project, agent string) error
 

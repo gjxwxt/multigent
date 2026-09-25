@@ -1807,6 +1807,12 @@ func (s *Server) moveWorkflowTaskToAgent(workspaceID, project, previousAgent, ne
 		}
 	}
 	if previousAgent != "" {
+		// Same ordering contract as taskstore.MoveTask and the scheduler side:
+		// the source is only removed after the destination write has been
+		// verified (the early returns above skip this line on any write
+		// failure). The delete error stays tolerated on purpose — a failed
+		// removal leaves the task visible under both agents, which must not
+		// block step advancement now that the destination copy is readable.
 		_ = s.ts.DeleteTask(project, previousAgent, task.ID)
 	}
 	return nil

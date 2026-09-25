@@ -1431,15 +1431,47 @@ func syncWorkflowHandledDuringRun(root string, ts taskstore.Store, project, agen
 		}
 		fresh.Status = entity.TaskStatusPending
 		fresh.Assignee = project + "/" + activeAgent
-		if err := ts.DeleteTask(project, agentName, fresh.ID); err != nil {
-			return false, err
-		}
-		if err := ts.AddTask(project, activeAgent, fresh); err != nil {
+		if err := relocateWorkflowTaskToStepActor(ts, project, agentName, activeAgent, fresh); err != nil {
 			return false, err
 		}
 		return true, nil
 	}
 	return false, nil
+}
+
+// relocateWorkflowTaskToStepActor hands a workflow task to the actor of its
+// newly active step.
+//
+// Destination write first, source removal last (taskstore.MoveTask enforces the
+// read-back). The delete-first ordering this replaces lost the live task of a
+// running workflow when the destination write failed, leaving the run active
+// while no agent could read or report the task. When the task already lives
+// under the new actor (the API-side mover wrote it first), the fresh payload is
+// persisted there instead of moving again.
+func relocateWorkflowTaskToStepActor(ts taskstore.Store, project, agentName, activeAgent string, fresh *entity.Task) error {
+	if fresh == nil || strings.TrimSpace(fresh.ID) == "" {
+		return fmt.Errorf("relocate workflow task: task is required")
+	}
+	activeAgent = strings.TrimSpace(activeAgent)
+	if activeAgent == "" {
+		return fmt.Errorf("relocate workflow task %s: step actor is required", fresh.ID)
+	}
+	// A workflow task reused across steps may carry a stale ArchivedAt from a
+	// scheduler failure archive; if it is not cleared, ListTasks hides it from
+	// the queue forever and the workflow deadlocks on the next agent step. The
+	// API-side mover clears it for the same reason, so a relocation that goes
+	// through the API first and the scheduler second still lands cleared.
+	fresh.ArchivedAt = nil
+	if _, err := ts.GetTask(project, activeAgent, fresh.ID); err == nil {
+		// Task already in the target actor's queue (GetTask only reads that
+		// agent's aliases): persist the fresh payload, which the caller has just
+		// pointed at the same actor, instead of moving again.
+		return ts.PersistTask(project, activeAgent, fresh)
+	}
+	if err := ts.MoveTask(project, agentName, activeAgent, fresh); err != nil {
+		return fmt.Errorf("relocate workflow task %s to agent %q: %w", fresh.ID, activeAgent, err)
+	}
+	return nil
 }
 
 // agentDir returns the filesystem path of an agent's workspace.
