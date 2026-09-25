@@ -230,3 +230,97 @@ func TestLinearQAGateFailClosedWithBrokenWorktree(t *testing.T) {
 		t.Fatalf("broken worktree must fail closed, got: %v", err)
 	}
 }
+
+// newLinearQAGateStore builds a one-step linear workflow whose qa step
+// declares touched_paths (the D-N fixture shape).
+func newLinearQAGateStore(t *testing.T) *Store {
+	t.Helper()
+	controlDB, err := db.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { controlDB.Close() })
+	if err := controlDB.UpsertWorkspace(db.Workspace{ID: "workspace-1", Name: "Workspace", Slug: "workspace", Root: t.TempDir()}); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	linStore := NewStore(controlDB, "workspace-1")
+	now := time.Now().UTC()
+	def := &entity.WorkflowDefinition{
+		ID:          "wf-linear-qa-dn",
+		Name:        "Linear QA D-N",
+		Version:     1,
+		Scope:       "workspace",
+		StartStepID: "qa",
+		Steps: []entity.WorkflowStep{
+			{
+				ID:    "qa",
+				Type:  "agent_task",
+				Title: "QA",
+				OutputFields: []entity.WorkflowField{
+					{Name: "touched_paths", Description: "files touched."},
+				},
+				Position: entity.WorkflowPosition{X: 0, Y: 0},
+			},
+		},
+		Edges:     []entity.WorkflowEdge{},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := linStore.SaveDefinition(def); err != nil {
+		t.Fatalf("save definition: %v", err)
+	}
+	if _, _, err := linStore.StartRun("project", "task-1", def.ID, nil); err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	return linStore
+}
+
+// D-N regression 1: a hub-branch run keeps its deltas on branch tasks, so
+// the root task has NO code worktree. When the resolver reports that
+// honestly (empty string), the linear QA gate must downgrade to the
+// declaration-only allowlist instead of wedging behind "requires an
+// observable worktree".
+func TestLinearQAGateDowngradesToDeclarationOnlyWhenNoCodeWorktree(t *testing.T) {
+	linStore := newLinearQAGateStore(t)
+	linStore.WorktreeResolver = func(project, taskID string) string { return "" }
+	res, err := linStore.CompleteAndAdvance("project", "task-1", "qa done", "", map[string]string{
+		"touched_paths": "qa_probe_test.go",
+	}, "completed")
+	if err != nil {
+		t.Fatalf("declaration-only completion with no code worktree must pass: %v", err)
+	}
+	if res.Run.Status != "completed" {
+		t.Fatalf("run must complete, got %s", res.Run.Status)
+	}
+}
+
+// D-N regression 2: a resolver that names an unobservable directory still
+// fails closed — the downgrade above is reserved for the explicit "no code
+// worktree" answer, never for a missing/unreadable one.
+func TestLinearQAGateStillFailsClosedOnUnobservablePath(t *testing.T) {
+	linStore := newLinearQAGateStore(t)
+	broken := t.TempDir()
+	linStore.WorktreeResolver = func(project, taskID string) string { return broken }
+	_, err := linStore.CompleteAndAdvance("project", "task-1", "qa done", "", map[string]string{
+		"touched_paths": "qa_probe_test.go",
+	}, "completed")
+	if err == nil || !strings.Contains(err.Error(), "observable worktree") {
+		t.Fatalf("unobservable path must fail closed, got: %v", err)
+	}
+}
+
+// D-N regression 3: with a REAL observable worktree the cross-check stays
+// in force — a declared path with no real change is still a phantom.
+func TestLinearQAGateCrossCheckStaysOnRealWorktree(t *testing.T) {
+	linStore := newLinearQAGateStore(t)
+	wt := newGitWorktree(t)
+	linStore.WorktreeResolver = func(project, taskID string) string { return wt }
+	// qa_probe_test.go does not exist as an uncommitted change: declaring it
+	// must hit Direction 2 (phantom path).
+	_, err := linStore.CompleteAndAdvance("project", "task-1", "qa done", "", map[string]string{
+		"touched_paths": "qa_probe_test.go",
+	}, "completed")
+	if err == nil || !strings.Contains(err.Error(), "does not match the worktree") {
+		t.Fatalf("phantom declaration on a real worktree must fail, got: %v", err)
+	}
+}

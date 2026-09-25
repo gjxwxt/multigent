@@ -1202,41 +1202,72 @@ func (s *Server) resolveTaskWorktreeDir(project, taskID string) string {
 
 // resolveTaskWorktreeDirFromDB is the production resolver path, split out so
 // the test seam stays a pure override.
+//
+// Fallback contract (D-N): a candidate that exists but is NOT a readable git
+// worktree (e.g. the per-agent home dir, which is not a repository) must not
+// shadow later candidates — the QA real-change gate measures only an
+// observable worktree, so returning such a directory wedges every linear QA
+// completion behind "requires an observable worktree". Each non-declared
+// candidate is therefore checked with the same observable test the gate
+// applies, and the first OBSERVABLE candidate wins; when none is observable
+// the resolver reports "this task genuinely has no code worktree" (empty
+// string) and the linear QA gate downgrades to the declaration-only
+// allowlist. A DECLARED task.WorktreeDir that is missing or unreadable is
+// still returned as-is: the gate then fails closed on it — a declared
+// worktree going missing is worktree loss, not "no code worktree".
 func (s *Server) resolveTaskWorktreeDirFromDB(project, taskID string) string {
+	observable := func(dir string) bool {
+		if dir == "" {
+			return false
+		}
+		cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+		cmd.Dir = dir
+		cmd.Env = gitworktree.SanitizedGitEnv()
+		out, err := cmd.Output()
+		return err == nil && strings.TrimSpace(string(out)) == "true"
+	}
+
 	task, agent, err := s.findTaskInProject(project, taskID)
 	if err == nil && task != nil && strings.TrimSpace(task.WorktreeDir) != "" {
-		if _, err := os.Stat(task.WorktreeDir); err == nil {
-			return task.WorktreeDir
-		}
+		// Declared worktree: returned even when missing/unreadable so the
+		// gate's fail-closed contract (worktree missing ≠ no worktree)
+		// still applies.
+		return strings.TrimSpace(task.WorktreeDir)
 	}
 
 	// Check standard worktree path
 	stdWt := gitworktree.WorktreeDir(s.st.ProjectDir(project), taskID)
-	if _, err := os.Stat(stdWt); err == nil {
+	if _, err := os.Stat(stdWt); err == nil && observable(stdWt) {
 		return stdWt
 	}
 
 	// Check agent workspace path
 	if task != nil && agent != "" {
 		agentDir := filepath.Join(s.st.ProjectDir(project), "agents", agent)
-		if _, err := os.Stat(agentDir); err == nil {
+		if _, err := os.Stat(agentDir); err == nil && observable(agentDir) {
 			return agentDir
 		}
 	}
 
 	// Check project repo if configured
 	if p, err := s.st.Project(project); err == nil && p != nil && p.Repo != "" {
-		if _, err := os.Stat(p.Repo); err == nil {
+		if _, err := os.Stat(p.Repo); err == nil && observable(p.Repo) {
 			return p.Repo
 		}
 	}
 
 	// Fallback to project workspace directory
 	wsDir := filepath.Join(s.st.ProjectDir(project), "workspace")
-	if _, err := os.Stat(wsDir); err == nil {
+	if _, err := os.Stat(wsDir); err == nil && observable(wsDir) {
 		return wsDir
 	}
-	return s.st.ProjectDir(project)
+	// Project dir itself only counts when it is an observable worktree;
+	// otherwise report "no code worktree" honestly.
+	projectDir := s.st.ProjectDir(project)
+	if observable(projectDir) {
+		return projectDir
+	}
+	return ""
 }
 
 func (s *Server) previewInstanceReadOnly(taskID string) bool {

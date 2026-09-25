@@ -2996,27 +2996,36 @@ func (s *Store) completeAndAdvanceWithExtras(project, taskID, summary, output st
 		// the worktree's actual git delta — both directions plus the same
 		// test-artifact whitelist applied to the real surface. FAIL-CLOSED
 		// (round-19 P0): when the step opted into the checkpoint but the
-		// platform cannot observe the worktree (no resolver, no worktree
-		// dir, git status failure), the completion is rejected — silently
-		// falling back to the declaration-only gate would make the real-
-		// change contract bypassable by an unobservable worktree. Only a
-		// resolver that reports "this task genuinely has no code worktree"
-		// (empty string) downgrades to declaration-only, and the resolver
-		// implementations distinguish that from "worktree missing".
+		// resolver names an UNOBSERVABLE worktree (missing dir, git status
+		// failure), the completion is rejected — silently falling back to
+		// the declaration-only gate would make the real-change contract
+		// bypassable by an unobservable worktree. D-N: the two resolver
+		// answers are now distinguished as the contract always intended —
+		// an empty string means "this task genuinely has no code worktree"
+		// (hub-branch runs keep their deltas on branch tasks, the root task
+		// has none), and the gate downgrades to the declaration-only
+		// allowlist above; a non-empty unobservable path still fails
+		// closed. Resolvers return "" only after exhausting observable
+		// candidates; a DECLARED worktree is returned even when missing so
+		// its loss stays a hard failure.
 		if s.WorktreeResolver != nil {
 			worktreeDir := strings.TrimSpace(s.WorktreeResolver(run.Project, run.TaskID))
-			if worktreeDir == "" || !worktreeObservable(worktreeDir) {
+			if worktreeDir != "" && !worktreeObservable(worktreeDir) {
 				s.releaseWorkflowTransitionClaim(&run, claimID)
 				return result, fmt.Errorf("workflow step %q output rejected: touched_paths checkpoint requires an observable worktree for task %s (none found) — complete the step from a code task with a worktree, or drop the touched_paths output", currentStep.Title, run.TaskID)
 			}
+			// worktreeDir == "": genuine no-code-worktree — the allowlist
+			// validation above is the whole contract; nothing to measure.
 			// S2-2 ⑤: a linear QA step remains a WHITELIST checkpoint — the
 			// QA agent may only write test artifacts, so the strict legacy
 			// surface (absolute status + test-artifact whitelist) applies.
 			// The baseline delta is deliberately NOT used here: QA edits a
 			// business file to "write a regression test" must keep failing.
-			if err := verifyQATouchedPathsAgainstWorktree(values["touched_paths"], worktreeDir); err != nil {
-				s.releaseWorkflowTransitionClaim(&run, claimID)
-				return result, fmt.Errorf("workflow step %q output rejected: touched_paths does not match the worktree: %w", currentStep.Title, err)
+			if worktreeDir != "" {
+				if err := verifyQATouchedPathsAgainstWorktree(values["touched_paths"], worktreeDir); err != nil {
+					s.releaseWorkflowTransitionClaim(&run, claimID)
+					return result, fmt.Errorf("workflow step %q output rejected: touched_paths does not match the worktree: %w", currentStep.Title, err)
+				}
 			}
 		}
 	}

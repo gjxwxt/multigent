@@ -98,10 +98,20 @@ func TestResolveTaskWorktreeDir(t *testing.T) {
 	s, _ := newConnectionGrantPolicyServer(t)
 	_ = s.st.SaveProject("myproj", &entity.Project{Name: "myproj"})
 
-	// Setup fake workspace dir
+	// Setup fake workspace dir. D-N: the resolver only returns OBSERVABLE
+	// worktree candidates, so a bare (non-git) workspace directory must
+	// resolve to "" ("no code worktree"), not to the directory itself.
 	wsDir := filepath.Join(s.st.ProjectDir("myproj"), "workspace")
 	_ = os.MkdirAll(wsDir, 0755)
 
+	if res := s.resolveTaskWorktreeDir("myproj", "t-123"); res != "" {
+		t.Fatalf("a non-git workspace must not resolve as a worktree, got %q", res)
+	}
+	// Make it observable: the resolver then returns it.
+	replaceGitDir := observableGitDir(t)
+	if err := os.Rename(filepath.Join(replaceGitDir, ".git"), filepath.Join(wsDir, ".git")); err != nil {
+		t.Fatal(err)
+	}
 	res := s.resolveTaskWorktreeDir("myproj", "t-123")
 	if !strings.Contains(res, "workspace") && !strings.Contains(res, "myproj") {
 		t.Fatalf("expected resolved workspace dir, got %s", res)
