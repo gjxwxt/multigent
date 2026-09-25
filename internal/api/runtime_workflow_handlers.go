@@ -1088,7 +1088,7 @@ func (s *Server) resumeArchivedBranchJoin(w http.ResponseWriter, r *http.Request
 		Request: r,
 	})
 	if err := s.advanceParentAfterBranchCompletion(principal.WorkspaceID, principal.Project, result, r); err != nil {
-		s.serverError(w, err)
+		s.workflowAdvanceError(w, err)
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -1132,7 +1132,7 @@ func (s *Server) completeRuntimeWorkflowBranchHTTP(w http.ResponseWriter, r *htt
 		return
 	}
 	if err := s.advanceParentAfterBranchCompletion(principal.WorkspaceID, principal.Project, result, r); err != nil {
-		s.serverError(w, err)
+		s.workflowAdvanceError(w, err)
 		return
 	}
 	s.auditLog(auditLogInput{
@@ -1298,7 +1298,7 @@ func (s *Server) handleRuntimeWorkflowStepComplete(w http.ResponseWriter, r *htt
 				return
 			}
 			if err := s.advanceParentAfterBranchCompletion(principal.WorkspaceID, principal.Project, branchResult, r); err != nil {
-				s.serverError(w, err)
+				s.workflowAdvanceError(w, err)
 				return
 			}
 			// Join succeeded: the branch delivery is accepted, so the
@@ -1309,7 +1309,7 @@ func (s *Server) handleRuntimeWorkflowStepComplete(w http.ResponseWriter, r *htt
 			}
 		}
 	} else if err := s.activateNextWorkflowStep(principal.WorkspaceID, principal.Project, agent, t, transition, r); err != nil {
-		s.serverError(w, err)
+		s.workflowAdvanceError(w, err)
 		return
 	}
 	// Persist the next human-review assignee before projecting the review card.
@@ -1614,6 +1614,25 @@ func (s *Server) completeRuntimeWorkflowBranch(workspaceID, project string, t *e
 	return wfStore.CompleteBranchAndMaybeAdvance(project, rootTaskID, runID, stepID, branchID, t.ID, summary, outputs, stepStatus)
 }
 
+// workflowAdvanceStatus picks the HTTP status for an advance failure:
+// fail-closed plan refusals are a visible 409, everything else stays 500.
+func workflowAdvanceStatus(err error) int {
+	if _, isRefusal := planRefusalReason(err); isRefusal {
+		return http.StatusConflict
+	}
+	return http.StatusInternalServerError
+}
+
+// workflowAdvanceError maps fail-closed delivery-plan refusals to a visible
+// 409 with the reason; every other advance failure keeps the generic 500.
+func (s *Server) workflowAdvanceError(w http.ResponseWriter, err error) {
+	if reason, isRefusal := planRefusalReason(err); isRefusal {
+		s.jsonError(w, http.StatusConflict, reason)
+		return
+	}
+	s.serverError(w, err)
+}
+
 func (s *Server) advanceParentAfterBranchCompletion(workspaceID, project string, result workflowstore.BranchTransitionResult, r *http.Request) error {
 	rootTaskID := strings.TrimSpace(result.Transition.Run.TaskID)
 	if rootTaskID == "" {
@@ -1630,7 +1649,28 @@ func (s *Server) advanceParentAfterBranchCompletion(workspaceID, project string,
 		root.UpdatedAt = now
 		return s.ts.PersistTask(project, rootAgent, root)
 	}
-	if !result.AllDone {
+	// Frozen-plan wave trigger (minimal closed loop, slice 3): a completed
+	// branch may have satisfied the dependencies of un-materialized work
+	// packages. This runs BEFORE the all-done guard on purpose — dependent
+	// work starts as soon as its own dependencies are complete, not when the
+	// whole wave happens to finish. The blocked set is surfaced as an error
+	// instead of a silent stall.
+	if materialized, planErr := s.materializeNextPlanWave(workspaceID, project, rootAgent, root, result, r); planErr != nil {
+		return planErr
+	} else if materialized {
+		return nil
+	}
+	// Stale-AllDone guard (GPT pre-commit review item 3): result.AllDone was
+	// computed by the store against the instance set as of THAT branch's
+	// completion, so a concurrent completion may have materialized a new wave
+	// after that snapshot. Re-check the live state before advancing; the
+	// plan-driven path can never advance past a running or unmaterialized
+	// work package.
+	authoritative, authErr := s.stageAuthoritativelyComplete(workspaceID, project, result)
+	if authErr != nil {
+		return authErr
+	}
+	if !authoritative {
 		return nil
 	}
 	if result.Transition.Done {
@@ -1819,9 +1859,6 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 		return nil
 	}
 	step := *transition.Next
-	if len(step.Branches) == 0 {
-		return fmt.Errorf("parallel workflow step %q has no branches", step.Title)
-	}
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
 	existing, err := wfStore.BranchInstancesForStep(transition.Run.ID, step.ID)
 	if err != nil {
@@ -1830,6 +1867,25 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 	existingByBranch := make(map[string]bool, len(existing))
 	for _, inst := range existing {
 		existingByBranch[inst.BranchID] = true
+	}
+	// Delivery plan materialization (minimal closed loop, slice 3): a frozen
+	// plan for this run replaces the static branch list with its READY work
+	// packages. Legacy stages (no plan record and no planMaterialization
+	// config) keep the static list byte-for-byte unchanged.
+	branchList := step.Branches
+	var planHint *planStageHints
+	if planBranches, hints, planErr := s.planStageBranches(project, transition.Run.ID, step, existing, wfStore, step.Branches); planErr != nil {
+		return planErr
+	} else if planBranches != nil {
+		branchList = planBranches
+		planHint = hints
+	}
+	if planHint != nil && len(branchList) == 0 {
+		// A wave is still running and no further work package is ready yet.
+		return nil
+	}
+	if len(branchList) == 0 {
+		return fmt.Errorf("parallel workflow step %q has no branches", step.Title)
 	}
 	// Review fix round 2 (closure item 2 — baseline frozen ACROSS drives):
 	// resolving main once per CALL is not enough. A partial failure plus a
@@ -1867,10 +1923,28 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 	if err := s.ts.PersistTask(project, previousAgent, completed); err != nil {
 		return err
 	}
-	for _, branch := range step.Branches {
+	for _, branch := range branchList {
 		branch.ID = strings.TrimSpace(branch.ID)
 		if branch.ID == "" || existingByBranch[branch.ID] {
 			continue
+		}
+		// Plan-driven branches are claimed in the frozen plan record BEFORE any
+		// task/instance is created: the CAS claim admits exactly one live
+		// claimant per work package, so two racing activations cannot
+		// materialize the same work package twice (1:1:1:1). A sibling that
+		// already owns (or already materialized) the package is skipped, not
+		// duplicated.
+		var planClaim workflowstore.PlanClaim
+		if planHint != nil {
+			claim, claimErr := wfStore.ClaimPlanWorkPackage(project, transition.Run.ID, branch.ID)
+			if claimErr != nil {
+				return fmt.Errorf("parallel branch %q: claim work package: %w", branch.ID, claimErr)
+			}
+			if !claim.Claimed {
+				log.Printf("[plan-materialize] branch %q already owned (task %q) by another materialization; skipping", branch.ID, claim.ExistingTaskID)
+				continue
+			}
+			planClaim = claim
 		}
 		childDef := workflowDefinitionForBranch(transition.Run.DefinitionID, step, branch)
 		if err := wfStore.SaveDefinition(&childDef); err != nil {
@@ -1899,6 +1973,18 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 				startInst.ActorID = strings.TrimSpace(binding.ID)
 			}
 		}
+		// The approved plan is the authoritative actor source for a plan-derived
+		// branch: a human approved this binding, so it wins over canvas and
+		// fixture binding keys (round-5 D-A taught us what a missing binding
+		// does to the stage).
+		if planHint != nil {
+			if wp, found := planHint.WPByID[branch.ID]; found {
+				if agent := strings.TrimSpace(wp.AgentBinding); agent != "" {
+					startInst.ActorType = "agent"
+					startInst.ActorID = agent
+				}
+			}
+		}
 		if strings.TrimSpace(startInst.ActorType) != "agent" || strings.TrimSpace(startInst.ActorID) == "" {
 			return fmt.Errorf("parallel branch %q requires an agent actor binding for role %q or branch key %q (pass workflowActorBindings when the task is created)", branch.Title, startStep.ActorRole, branch.ID)
 		}
@@ -1913,7 +1999,7 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 			// (which would also orphan the first task's worktree+baseline).
 			// AddTask returns Conflict with t.ID rewritten to the existing
 			// task's ID when the key matches an active task.
-			IdempotencyKey: "fanout/" + transition.Run.ID + "/" + step.ID + "/" + branch.ID,
+			IdempotencyKey: branchIdempotencyKey(planHint, transition.Run.ID, step.ID, branch.ID),
 			Title:          strings.TrimSpace(completed.Title + " · " + branch.Title),
 			Type:           completed.Type,
 			Priority:       completed.Priority,
@@ -1944,6 +2030,18 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 		}
 		if contract := strings.TrimSpace(completed.Vars[runner.DeliveryContractVar]); contract != "" {
 			branchTask.Vars[runner.DeliveryContractVar] = contract
+		}
+		// Plan identity travels with the branch task: it is the audit trail
+		// from a delivered branch back to the approved plan version, and it is
+		// what the acceptance table cites alongside the delivery SHA.
+		if planHint != nil {
+			branchTask.Vars[workflowPlanIDVar] = planHint.PlanID
+			branchTask.Vars[workflowPlanVersionVar] = strconv.Itoa(planHint.Version)
+			branchTask.Vars[workflowPlanDigestVar] = planHint.Digest
+			branchTask.Vars[workflowPlanWPIDVar] = branch.ID
+			if wp, found := planHint.WPByID[branch.ID]; found && len(wp.DependsOn) > 0 {
+				branchTask.Vars[workflowPlanDependsVar] = strings.Join(wp.DependsOn, ",")
+			}
 		}
 		s.annotateTaskAssignee(workspaceID, project, branchTask)
 		if branchTask.Type == "" {
@@ -2091,6 +2189,31 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 		}
 		if err := wfStore.SaveBranchInstance(inst); err != nil {
 			return err
+		}
+		// Pin the runtime-derived branch definition (snapshot + canonical hash)
+		// in the frozen plan record: re-driving the same work package can only
+		// reuse this identity, never mint a second one.
+		if planHint != nil {
+			defDigest, dErr := planDefinitionDigest(childDef)
+			if dErr != nil {
+				return fmt.Errorf("parallel branch %q: hash runtime branch definition: %w", branch.ID, dErr)
+			}
+			waveIndex := planHint.WaveIndex
+			if idx := workflowstore.PlanWaveIndex(planHint.Plan, branch.ID); idx >= 0 {
+				waveIndex = idx
+			}
+			if _, mErr := wfStore.RecordPlanMaterialization(project, transition.Run.ID, workflowstore.PlanMaterializationEntry{
+				WPID:             branch.ID,
+				BranchID:         branch.ID,
+				ClaimToken:       planClaim.Token,
+				DefinitionID:     childDef.ID,
+				DefinitionDigest: defDigest,
+				TaskID:           branchTask.ID,
+				ChildRunID:       childRun.ID,
+				WaveIndex:        waveIndex,
+			}); mErr != nil {
+				return fmt.Errorf("parallel branch %q: record plan materialization: %w", branch.ID, mErr)
+			}
 		}
 		if err := s.fireTaskTriggerOrQueueRuntime(workspaceID, project, nextAgent, branchTask, r, "workflow branch task "+branchTask.ID); err != nil {
 			return err

@@ -820,6 +820,10 @@ func (s *Server) handleStartProjectTask(w http.ResponseWriter, r *http.Request) 
 				s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, joinErr.Error())
 				return
 			}
+			if reason, isRefusal := planRefusalReason(joinErr); isRefusal {
+				s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, reason)
+				return
+			}
 			s.serverError(w, joinErr)
 			return
 		}

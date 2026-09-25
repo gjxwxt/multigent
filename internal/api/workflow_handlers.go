@@ -775,11 +775,11 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 				return taskWorkflowResponse{}, http.StatusBadRequest, err
 			}
 			if err := s.advanceParentAfterBranchCompletion(workspaceID, project, branchResult, r); err != nil {
-				return taskWorkflowResponse{}, http.StatusInternalServerError, err
+				return taskWorkflowResponse{}, workflowAdvanceStatus(err), err
 			}
 		}
 	} else if err := s.activateNextWorkflowStep(workspaceID, project, agent, t, transition, r); err != nil {
-		return taskWorkflowResponse{}, http.StatusInternalServerError, err
+		return taskWorkflowResponse{}, workflowAdvanceStatus(err), err
 	}
 	// Project the next review only after the task's new assignee/status and
 	// UpdatedAt have been persisted. Otherwise the card token is stale on

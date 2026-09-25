@@ -2046,7 +2046,15 @@ func (s *Store) CompleteBranchAndMaybeAdvance(project, taskID, runID, stepID, br
 	if step.Type != "parallel_stage" {
 		return result, fmt.Errorf("workflow step %q is not a parallel stage", step.Title)
 	}
-	branchDef, ok := workflowBranchByID(step.Branches, branchID)
+	// Branch resolution: the stage's static branches first (legacy, byte-for
+	// -byte unchanged), then the run's FROZEN plan (plan-driven stage). A
+	// runtime-derived branch is resolved from the plan on every report — it
+	// is never written into the run snapshot, so concurrent materializations
+	// have no shared record to lose each other's branches in.
+	branchDef, ok, resolveErr := s.ResolveStageBranch(project, run.ID, step, branchID)
+	if resolveErr != nil {
+		return result, resolveErr
+	}
 	if !ok {
 		return result, fmt.Errorf("workflow branch %q not found", branchID)
 	}
