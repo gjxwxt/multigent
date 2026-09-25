@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
 )
 
@@ -110,4 +111,43 @@ func TestFailedWorkflowTaskMoveKeepsTaskReadable(t *testing.T) {
 		t.Fatalf("second move from an emptied source must fail")
 	}
 	assertTaskVisibleOnEveryReadPath(t, s, workspaceID, "backend", task.ID, "after replaying the move")
+}
+
+// The API-side mover must use the same key-scoped source removal as the
+// scheduler: the scheduler names an agent by its directory ("S2 Dev A") while a
+// workflow step names the actor by the worker name ("s2-dev-a"), and both
+// spellings resolve to one AgentWorker whose alias set contains "s2-dev-a".
+// Removing the source by agent therefore deleted the copy that had just been
+// written under the destination key (hooks-relay rehearsal, run 2).
+func TestMoveWorkflowTaskToAgentKeepsTaskWhenQueuesShareWorkerAliases(t *testing.T) {
+	s, workspaceID := newBranchJoinHTTPServer(t)
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := s.controlDB.UpsertAgentWorker(controldb.AgentWorker{
+		ID: "aw-s2-dev-a", WorkspaceID: workspaceID, Name: "s2-dev-a", DisplayName: "S2 Dev A",
+		Model: "codex", Status: "available", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed worker: %v", err)
+	}
+	if err := s.controlDB.UpsertProjectMembership(controldb.ProjectMembership{
+		ID: "pm-aw-s2-dev-a", WorkspaceID: workspaceID, ProjectID: "sample", MemberType: "agent_worker",
+		MemberID: "aw-s2-dev-a", Title: "S2 Dev A", Role: "developer", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed membership: %v", err)
+	}
+	task := seedLifecycleTask(t, s, "S2 Dev A")
+
+	if err := s.moveWorkflowTaskToAgent(workspaceID, "sample", "S2 Dev A", "s2-dev-a", task, entity.TaskStatusPending, time.Now().UTC()); err != nil {
+		t.Fatalf("moveWorkflowTaskToAgent: %v", err)
+	}
+	assertTaskVisibleOnEveryReadPath(t, s, workspaceID, "s2-dev-a", task.ID, "after API-side move between two spellings of one worker")
+	records, err := s.ts.ListAllTaskRecords("sample")
+	if err != nil {
+		t.Fatalf("ListAllTaskRecords: %v", err)
+	}
+	for _, record := range records {
+		if record.Task != nil && record.Task.ID == task.ID {
+			return
+		}
+	}
+	t.Fatalf("task missing from the project-wide listing after the API-side move")
 }

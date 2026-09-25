@@ -181,12 +181,20 @@ func (s *DBStore) OverwriteArchive(project, agent string, tasks []*entity.Task) 
 // A blank target, a failed write or a failed read-back all leave the source
 // record untouched.
 //
+// Source removal is key-scoped and skips the destination key. Deleting the
+// source by agent (DeleteTask loops over every alias of the agent) is lossy
+// whenever the two spellings of one agent share aliases: the scheduler
+// addresses a worker by its directory name ("S2 Dev A") while a workflow step
+// names the actor by the worker name ("s2-dev-a"), and taskAgentKeys returns
+// worker.ID/Name/DisplayName for both — so the source alias set contains the
+// destination key, and an alias-wide delete removed the copy that had just
+// been written there (hooks-relay rehearsal, run 2, 2026-09-25).
+//
 // Known boundary: if the target agent already holds historical copies of the
 // same task under several aliases, only the key that is found first is
-// rewritten; the others are left alone, because DeleteTask removes the task ID
-// from every alias of the agent and would delete the copy just written. New
-// writes always land on the existing key or on toAgent, so this path does not
-// create fresh duplicates.
+// rewritten; the others are left alone, because they may be the same aliases
+// the source removal must skip. New writes always land on the existing key or
+// on toAgent, so this path does not create fresh duplicates.
 func (s *DBStore) MoveTask(project, fromAgent, toAgent string, task *entity.Task) error {
 	if task == nil || strings.TrimSpace(task.ID) == "" {
 		return errs.Usage("move task requires a task with an id")
@@ -204,8 +212,16 @@ func (s *DBStore) MoveTask(project, fromAgent, toAgent string, task *entity.Task
 	if sameIdentity(fromAgent, toAgent) {
 		return s.PersistTask(project, toAgent, task)
 	}
+	// Resolve the source alias keys before touching anything, so a key lookup
+	// failure cannot leave the destination written and the source unfetched.
+	sourceKeys, err := s.taskAgentKeys(project, fromAgent)
+	if err != nil {
+		return err
+	}
 	targetKey := toAgent
-	if keys, err := s.taskAgentKeys(project, toAgent); err == nil {
+	if keys, err := s.taskAgentKeys(project, toAgent); err != nil {
+		return err
+	} else {
 		for _, key := range keys {
 			if _, ok, err := s.db.GetRecord("tasks", s.workspaceID, []string{project, key, taskID}); err != nil {
 				return err
@@ -223,8 +239,17 @@ func (s *DBStore) MoveTask(project, fromAgent, toAgent string, task *entity.Task
 	} else if !ok {
 		return fmt.Errorf("move task %s to agent %q: destination key %q missing after write", taskID, toAgent, targetKey)
 	}
-	if err := s.DeleteTask(project, fromAgent, taskID); err != nil {
-		return err
+	// Remove only the source copies that are not the destination key. When the
+	// two agents are spellings of the same worker, the shared alias is the
+	// queue the task now lives in and must survive.
+	for _, key := range sourceKeys {
+		if sameIdentity(key, targetKey) {
+			continue
+		}
+		if err := s.db.DeleteRecord("tasks", s.workspaceID, []string{project, key, taskID}); err != nil {
+			return err
+		}
+		_ = s.files.DeleteTask(project, key, taskID)
 	}
 	return nil
 }

@@ -29,6 +29,12 @@ func (writeFailingStore) MoveTask(project, fromAgent, toAgent string, task *enti
 
 func newMoveTestStore(t *testing.T) taskstore.Store {
 	t.Helper()
+	ts, _, _ := newMoveTestStoreWithDB(t)
+	return ts
+}
+
+func newMoveTestStoreWithDB(t *testing.T) (taskstore.Store, *controldb.SQLiteStore, string) {
+	t.Helper()
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".multigent"), 0o755); err != nil {
 		t.Fatal(err)
@@ -46,7 +52,17 @@ func newMoveTestStore(t *testing.T) taskstore.Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return taskstore.NewDB(root, db)
+	ts := taskstore.NewDB(root, db)
+	workspaceID := filepath.Base(root)
+	if rows, err := db.ListWorkspaces(); err == nil {
+		for _, row := range rows {
+			if row.Root == root || row.ID != "" {
+				workspaceID = row.ID
+				break
+			}
+		}
+	}
+	return ts, db, workspaceID
 }
 
 func seedMoveTask(t *testing.T, ts taskstore.Store, agent string) *entity.Task {
@@ -179,4 +195,64 @@ func TestFileBackendMoveKeepsTaskReadableWhenDestinationWriteFails(t *testing.T)
 		}
 	}
 	t.Fatalf("file backend task missing from the project-wide listing after a failed move")
+}
+
+// The scheduler addresses an agent by the directory name it runs ("S2 Dev A")
+// while a workflow step's actor id is the worker name ("s2-dev-a"). Both
+// spellings resolve to the same AgentWorker, so their alias sets overlap:
+// taskAgentKeys("S2 Dev A") also yields worker.Name == "s2-dev-a". A
+// relocation whose source removal loops over every source alias therefore
+// deletes the copy that was just written under the destination key. This is
+// the hooks-relay loss, reproduced deterministically.
+func TestMoveTaskKeepsDestinationWhenSourceAndTargetShareWorkerAliases(t *testing.T) {
+	ts, db, workspaceID := newMoveTestStoreWithDB(t)
+	seedAliasedWorkerForTest(t, db, workspaceID, "hooks-relay", "S2 Dev A", "s2-dev-a", "S2 Dev A")
+	task := seedMoveTask(t, ts, "S2 Dev A")
+
+	if err := ts.MoveTask("hooks-relay", "S2 Dev A", "s2-dev-a", task); err != nil {
+		t.Fatalf("MoveTask: %v", err)
+	}
+	if _, err := ts.GetTask("hooks-relay", "s2-dev-a", task.ID); err != nil {
+		t.Fatalf("task lost after relocating between two spellings of the same agent: %v", err)
+	}
+	records, err := ts.ListAllTaskRecords("hooks-relay")
+	if err != nil {
+		t.Fatalf("ListAllTaskRecords: %v", err)
+	}
+	for _, record := range records {
+		if record.Task != nil && record.Task.ID == task.ID {
+			return
+		}
+	}
+	t.Fatalf("task missing from the project-wide listing after an alias-overlapping move")
+}
+
+func seedAliasedWorkerForTest(t *testing.T, db *controldb.SQLiteStore, workspaceID, project, memberTitle, workerName, displayName string) {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := db.UpsertAgentWorker(controldb.AgentWorker{
+		ID:           "aw-s2-dev-a",
+		WorkspaceID:  workspaceID,
+		Name:         workerName,
+		DisplayName:  displayName,
+		Model:        "claude-code",
+		ScheduleJSON: "{}",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}); err != nil {
+		t.Fatalf("seed worker: %v", err)
+	}
+	if err := db.UpsertProjectMembership(controldb.ProjectMembership{
+		ID:          "pm-aw-s2-dev-a",
+		WorkspaceID: workspaceID,
+		ProjectID:   project,
+		MemberType:  "agent_worker",
+		MemberID:    "aw-s2-dev-a",
+		Role:        "developer",
+		Title:       memberTitle,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("seed membership: %v", err)
+	}
 }

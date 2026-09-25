@@ -1793,27 +1793,19 @@ func (s *Server) moveWorkflowTaskToAgent(workspaceID, project, previousAgent, ne
 		}
 		return nil
 	}
-	if _, err := s.ts.GetTask(project, nextAgent, task.ID); err == nil {
-		if err := s.ts.PersistTask(project, nextAgent, task); err != nil {
+	// Hand-over goes through the same primitive as the scheduler side:
+	// destination written first, read back at the exact key, and the source
+	// removed per key while skipping the destination key. Removing the source by
+	// agent (DeleteTask loops over every alias) is lossy when both spellings of
+	// one worker share aliases — the directory name ("S2 Dev A") and the worker
+	// name ("s2-dev-a") do — because the alias-wide delete also removes the copy
+	// that was just written under the destination key. The destination write is
+	// the hard contract, so a failure to clean up a leftover source copy must
+	// not block step advancement.
+	if err := s.ts.MoveTask(project, previousAgent, nextAgent, task); err != nil {
+		if _, verifyErr := s.ts.GetTask(project, nextAgent, task.ID); verifyErr != nil {
 			return err
 		}
-	} else {
-		var notFound *errs.NotFoundError
-		if !errors.As(err, &notFound) {
-			return err
-		}
-		if err := s.ts.AddTask(project, nextAgent, task); err != nil {
-			return err
-		}
-	}
-	if previousAgent != "" {
-		// Same ordering contract as taskstore.MoveTask and the scheduler side:
-		// the source is only removed after the destination write has been
-		// verified (the early returns above skip this line on any write
-		// failure). The delete error stays tolerated on purpose — a failed
-		// removal leaves the task visible under both agents, which must not
-		// block step advancement now that the destination copy is readable.
-		_ = s.ts.DeleteTask(project, previousAgent, task.ID)
 	}
 	return nil
 }
