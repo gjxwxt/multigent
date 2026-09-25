@@ -1539,7 +1539,13 @@ func (s *Server) syncTaskCompletionRemote(project string, task *entity.Task) {
 	}
 	task.RemoteSyncAttempts++
 	task.RemoteSyncStatus = "syncing"
-	if err := s.worktreeMgr.PushBranch(s.resolveProjectGitRoot(project), task.BranchName, task.CompletionCommit); err != nil {
+	gitRoot := s.resolveProjectGitRoot(project)
+	// S2 round 8 (D-I): the same credential gap the push-EVIDENCE check had (D-D) also
+	// made this host-side completion push impossible against a private remote.
+	// Inject the project connection transiently for the one push command; nil
+	// (unresolvable connection, foreign host, SSH remote) keeps the historical
+	// ambient-environment behaviour and the failure is recorded honestly.
+	if err := s.worktreeMgr.PushBranchWithEnv(gitRoot, task.BranchName, task.CompletionCommit, s.deliveryEvidenceEnv(project, gitRoot)); err != nil {
 		task.RemoteSyncStatus = "failed"
 		task.RemoteSyncError = err.Error()
 		return

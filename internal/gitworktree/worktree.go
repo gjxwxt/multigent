@@ -863,6 +863,21 @@ func (m *Manager) CaptureSnapshot(worktreeDir string) (string, error) {
 // PushBranch pushes a task branch to origin and verifies that the remote ref
 // points to expectedCommit. The command never embeds credentials in its args.
 func (m *Manager) PushBranch(projectRoot, branch, expectedCommit string) error {
+	return m.PushBranchWithEnv(projectRoot, branch, expectedCommit, nil)
+}
+
+// PushBranchWithEnv is PushBranch with a caller-provided command environment.
+//
+// S2 round 8: the console host deliberately keeps NO credential anywhere on
+// disk (credentials are injected per operation), so the historical
+// "ambient environment only" push could never reach a private remote — the
+// real fan-out's implementation step merged the branches, committed, and then
+// hit `could not read Username` on every push attempt, leaving the delivery
+// contract's remote-SHA check unsatisfiable. Callers on a credential-less
+// host pass the same transient, process-scoped environment the push-evidence
+// check uses (see Server.deliveryEvidenceEnv); nil keeps the historical
+// gitNetworkEnv() behaviour exactly.
+func (m *Manager) PushBranchWithEnv(projectRoot, branch, expectedCommit string, env []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	unlock, err := acquireProjectLock(projectRoot)
@@ -880,7 +895,14 @@ func (m *Manager) PushBranch(projectRoot, branch, expectedCommit string) error {
 	sanitizeSharedGitConfig(projectRoot)
 
 	cmd, pushCancel := gitRemote(projectRoot, "push", "origin", "refs/heads/"+branch+":refs/heads/"+branch)
-	cmd.Env = gitNetworkEnv()
+	if len(env) > 0 {
+		// The injected environment already carries the process environment plus
+		// the transient credential config, so it replaces gitNetworkEnv()
+		// wholesale rather than merging two GIT_CONFIG_* blocks.
+		cmd.Env = env
+	} else {
+		cmd.Env = gitNetworkEnv()
+	}
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
@@ -891,6 +913,11 @@ func (m *Manager) PushBranch(projectRoot, branch, expectedCommit string) error {
 	pushCancel()
 
 	verify, verifyCancel := gitRemote(projectRoot, "ls-remote", "--heads", "origin", "refs/heads/"+branch)
+	if len(env) > 0 {
+		// The verification reads the same remote the push just wrote; it needs
+		// the same transient credential on a credential-less host.
+		verify.Env = env
+	}
 	out, err := verify.Output()
 	verifyCancel()
 	if err != nil {

@@ -781,3 +781,77 @@ func TestPreserveRuntimeContract(t *testing.T) {
 		t.Fatalf("contract was not repaired: got %s, want %s", string(repairedContent), validContract)
 	}
 }
+
+// TestPushBranchWithEnvUsesInjectedCredentialEnv (S2 round 8, D-I): a console
+// host with no credential on disk cannot reach a private remote with the
+// historical ambient-environment push — the real implementation step merged,
+// committed, and then failed every push with `could not read Username`, which
+// made the delivery contract's remote-SHA check unsatisfiable. The injected
+// environment (the same transient connection credential the push-evidence
+// check uses) must make both the push AND its verification work.
+//
+// Reverse validation: with PushBranchWithEnv delegating to the historical
+// gitNetworkEnv() path, the first assertion fails (the bug reproduces).
+func TestPushBranchWithEnvUsesInjectedCredentialEnv(t *testing.T) {
+	root := t.TempDir()
+	bare := filepath.Join(root, "remote.git")
+	repo := filepath.Join(root, "repo")
+	gitRun := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+			"GIT_CONFIG_NOSYSTEM=1", "HOME="+dir)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v (%s): %v (%s)", args, dir, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if err := os.MkdirAll(bare, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(root, "init", "--bare", "-b", "main", bare)
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(repo, "init", "-b", "main")
+	gitRun(repo, "config", "user.email", "t@t")
+	gitRun(repo, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(repo, "add", ".")
+	gitRun(repo, "commit", "-m", "base")
+	gitRun(repo, "checkout", "-b", "feature/deliver")
+	if err := os.WriteFile(filepath.Join(repo, "g.txt"), []byte("y\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(repo, "add", ".")
+	gitRun(repo, "commit", "-m", "deliver")
+	sha := gitRun(repo, "rev-parse", "HEAD")
+
+	// The remote URL is unreachable by itself (connection refused); only the
+	// injected config can resolve it, exactly like a private GitLab needs the
+	// platform's connection token.
+	unreachable := "http://127.0.0.1:1/group/project.git"
+	gitRun(repo, "remote", "add", "origin", unreachable)
+
+	mgr := NewManager()
+	if err := mgr.PushBranch(repo, "feature/deliver", sha); err == nil {
+		t.Fatalf("ambient-environment push must NOT reach a credential-protected remote")
+	}
+	env := append(os.Environ(),
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=url.file://"+bare+".insteadOf",
+		"GIT_CONFIG_VALUE_0="+unreachable,
+	)
+	if err := mgr.PushBranchWithEnv(repo, "feature/deliver", sha, env); err != nil {
+		t.Fatalf("injected credential env must push and verify: %v", err)
+	}
+	if got := gitRun(bare, "rev-parse", "refs/heads/feature/deliver"); got != sha {
+		t.Fatalf("bare remote ref = %s, want %s", got, sha)
+	}
+}
