@@ -3714,3 +3714,120 @@ func buildNextInputArtifact(current entity.WorkflowStep, currentInst entity.Work
 	}
 	return string(raw)
 }
+
+// ReactivateFailedRunForStep is the operator-initiated retry for a workflow run
+// that a terminal failure left unable to advance (S2 round 9, defect D-J).
+//
+// Background: a console restart mid-run marks the in-flight agent task failed,
+// and the failure path marks BOTH the step instance and the run failed. From
+// that moment the run refuses re-entry (claimWorkflowTransition rejects
+// terminal runs), and the platform offers no run-level recovery — the real S2
+// acceptance run died at its implementation step after a deployment restart
+// with no sanctioned way forward.
+//
+// Manual start is the platform's existing operator lever, so the retry lives
+// here: reset ONLY the failed step (the run's own history of completed steps
+// is untouched) and put the run back on it. Callers must have verified that
+// the step is the one the run actually failed on and that the requesting
+// surface (an agent start) owns it.
+func (s *Store) ReactivateFailedRunForStep(project, taskID, runID, stepID, reason string) (entity.WorkflowRun, error) {
+	empty := entity.WorkflowRun{}
+	if s == nil || s.db == nil {
+		return empty, fmt.Errorf("workflow store is not available")
+	}
+	project = strings.TrimSpace(project)
+	taskID = strings.TrimSpace(taskID)
+	runID = strings.TrimSpace(runID)
+	stepID = strings.TrimSpace(stepID)
+	if project == "" || taskID == "" || runID == "" || stepID == "" {
+		return empty, fmt.Errorf("project, task, run, and step are required")
+	}
+	run, found, err := s.RunForTask(project, taskID)
+	if err != nil {
+		return empty, err
+	}
+	if !found || strings.TrimSpace(run.ID) != runID {
+		return empty, fmt.Errorf("workflow run %s not found for task %s", runID, taskID)
+	}
+	if status := strings.TrimSpace(run.Status); status != "failed" {
+		return empty, fmt.Errorf("workflow run %s is %s, not failed; nothing to reactivate", runID, status)
+	}
+	def, ok, err := s.RunDefinition(run)
+	if err != nil {
+		return empty, err
+	}
+	if !ok {
+		return empty, fmt.Errorf("workflow definition for run %s is unavailable", runID)
+	}
+	var step entity.WorkflowStep
+	foundStep := false
+	for _, candidate := range def.Steps {
+		if strings.TrimSpace(candidate.ID) == stepID {
+			step = candidate
+			foundStep = true
+			break
+		}
+	}
+	if !foundStep {
+		return empty, fmt.Errorf("workflow step %s is not part of run %s", stepID, runID)
+	}
+	instances, err := s.ListStepInstances(runID)
+	if err != nil {
+		return empty, err
+	}
+	// Pick the NEWEST failed instance of the step (review round 9, P1-1): a run
+	// that failed, was retried and failed again carries more than one failed
+	// instance, and the iteration order of the store is not a timeline.
+	target := -1
+	for i := range instances {
+		if strings.TrimSpace(instances[i].StepID) != stepID {
+			continue
+		}
+		if strings.TrimSpace(instances[i].Status) != "failed" {
+			return empty, fmt.Errorf("step %s of run %s is %q, not failed; refusing to reactivate a step the run did not fail on", stepID, runID, instances[i].Status)
+		}
+		if target < 0 || instances[i].FinishedAt.After(instances[target].FinishedAt) {
+			target = i
+		}
+	}
+	if target < 0 {
+		return empty, fmt.Errorf("no step instance for %s in run %s", stepID, runID)
+	}
+	now := time.Now().UTC()
+	inst := instances[target]
+	inst.Status = "pending"
+	inst.StartedAt = time.Time{}
+	inst.FinishedAt = time.Time{}
+	inst.Summary = ""
+	inst.OutputArtifact = ""
+	inst.OutputValues = nil
+	inst.UpdatedAt = now
+	if err := s.SaveStepInstance(&inst); err != nil {
+		return empty, err
+	}
+	run.Status = "active"
+	run.ActiveStepID = step.ID
+	run.UpdatedAt = now
+	s.annotateRunCurrentAssignee(&run, step)
+	if err := s.SaveRun(&run); err != nil {
+		return empty, err
+	}
+	// Traceability: the retry is an operator action and must be visible in the
+	// run's event stream next to the failure it answers.
+	// The instance's failure summary is reset above, so the event must carry it
+	// (review round 9, P1-2): the audit trail has to keep WHAT failed, not only
+	// that a retry happened.
+	eventSummary := strings.TrimSpace(reason)
+	if previous := strings.TrimSpace(inst.Summary); previous != "" {
+		eventSummary = strings.TrimSpace(eventSummary + " | previous failure: " + previous)
+	}
+	_ = s.SaveStepEvent(&entity.WorkflowStepEvent{
+		ID:        "evt_" + strings.TrimSpace(runID) + "_reactivated_" + strconv.FormatInt(now.UnixNano(), 36),
+		RunID:     run.ID,
+		StepID:    step.ID,
+		Status:    "reactivated",
+		Summary:   eventSummary,
+		CreatedAt: now,
+	})
+	return run, nil
+}

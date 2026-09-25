@@ -289,3 +289,91 @@ func stageResolution(result workflowstore.BranchTransitionResult) string {
 	}
 	return "awaiting other branches"
 }
+
+// failedRunStepForTask returns the step a FAILED workflow run died on — the
+// step instance the failure path marked failed — for the task's current run.
+// ok=false means the run is not in the failed shape this lever answers.
+func (s *Server) failedRunStepForTask(workspaceID, project string, task *entity.Task) (entity.WorkflowRun, entity.WorkflowStep, entity.WorkflowStepInstance, bool, error) {
+	var zeroRun entity.WorkflowRun
+	var zeroStep entity.WorkflowStep
+	var zeroInst entity.WorkflowStepInstance
+	if s == nil || s.controlDB == nil || task == nil {
+		return zeroRun, zeroStep, zeroInst, false, nil
+	}
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	run, found, err := wfStore.RunForTask(project, task.ID)
+	if err != nil {
+		return zeroRun, zeroStep, zeroInst, false, err
+	}
+	if !found || strings.TrimSpace(run.Status) != "failed" {
+		return zeroRun, zeroStep, zeroInst, false, nil
+	}
+	def, ok, err := wfStore.RunDefinition(run)
+	if err != nil {
+		return zeroRun, zeroStep, zeroInst, false, err
+	}
+	if !ok {
+		return zeroRun, zeroStep, zeroInst, false, nil
+	}
+	instances, err := wfStore.ListStepInstances(run.ID)
+	if err != nil {
+		return zeroRun, zeroStep, zeroInst, false, err
+	}
+	// Newest failed instance wins (review round 9, P1-1): a retried-then-failed
+	// run can carry several failed instances and store order is not a timeline.
+	best := -1
+	for i := range instances {
+		if strings.TrimSpace(instances[i].Status) != "failed" {
+			continue
+		}
+		if best < 0 || instances[i].FinishedAt.After(instances[best].FinishedAt) {
+			best = i
+		}
+	}
+	if best < 0 {
+		return zeroRun, zeroStep, zeroInst, false, nil
+	}
+	for _, candidate := range def.Steps {
+		if strings.TrimSpace(candidate.ID) != strings.TrimSpace(instances[best].StepID) {
+			continue
+		}
+		return run, candidate, instances[best], true, nil
+	}
+	return zeroRun, zeroStep, zeroInst, false, nil
+}
+
+// reactivateFailedRunForManualStart is the run-level half of the operator
+// retry lever (S2 round 9, D-J): a console restart mid-run marks the in-flight
+// agent task and its workflow run failed, and the run then refuses re-entry
+// with no platform recovery. Manual start resets ONLY that failed step and
+// puts the run back on it, so the normal dispatch below can pick the work up.
+//
+// Returns handled=true when the run was reactivated (the caller must then
+// continue into the ordinary agent dispatch, NOT return early: unlike the
+// round-5/7 resumes, this lever's whole point is to run the agent).
+func (s *Server) reactivateFailedRunForManualStart(workspaceID, project, agent string, task *entity.Task) (bool, string, error) {
+	run, step, inst, ok, err := s.failedRunStepForTask(workspaceID, project, task)
+	if err != nil || !ok {
+		return false, "", err
+	}
+	if stepType := strings.TrimSpace(step.Type); stepType != "agent_task" {
+		return false, "", fmt.Errorf("workflow run %s failed on a %s step; reactivating it is a workflow (human) action, not a task start", run.ID, stepType)
+	}
+	// The retry runs the step again, so it must be dispatched to the agent the
+	// run binds to that step — starting a DIFFERENT agent on it would burn a
+	// run on work it does not own.
+	if binding, found := workflowActorBindingForStep(run.ActorBindings, step); found && strings.TrimSpace(binding.Type) == "agent" {
+		// A bound step may only be re-run by ITS agent (review round 9, P2-1):
+		// an empty/unknown requester is a refusal too, not a bypass.
+		if bound := strings.TrimSpace(binding.ID); bound != "" && !strings.EqualFold(bound, agent) {
+			return false, "", fmt.Errorf("workflow run %s is bound to agent %s for step %s; start it with that agent", run.ID, bound, step.ID)
+		}
+	}
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	if _, err := wfStore.ReactivateFailedRunForStep(project, task.ID, run.ID, step.ID,
+		fmt.Sprintf("operator manual start re-activated the run after a failed %s step (failed instance %s)", step.ID, inst.ID)); err != nil {
+		return false, "", err
+	}
+	log.Printf("[workflow-run-reactivate] task %s: re-activated failed run %s on step %s (previous failure: %s)", task.ID, run.ID, step.ID, strings.TrimSpace(inst.Summary))
+	return true, "workflow_run_reactivated", nil
+}

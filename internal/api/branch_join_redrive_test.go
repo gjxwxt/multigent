@@ -349,3 +349,107 @@ func TestManualStartRefusesRedriveWithoutRecordedDeclaration(t *testing.T) {
 		t.Fatalf("refusal must name the missing declaration, got %s", rec.Body.String())
 	}
 }
+
+// T6 — D-J: a console restart mid-run leaves the workflow run FAILED, and a
+// failed run refuses re-entry forever. Manual start must re-activate exactly
+// the failed step and dispatch the agent again.
+func TestManualStartReactivatesFailedWorkflowRunOnItsStep(t *testing.T) {
+	s, workspaceID := newBranchJoinHTTPServer(t)
+	_, baseCommit := buildFanoutGitWorkspace(t, s)
+	seedFanoutParentRun(t, s, workspaceID, baseCommit)
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	run, _, err := wfStore.RunForTask("sample", "task-fanout-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Advance to the fan-out stage, then fail the run exactly like a killed
+	// in-flight agent does (the platform's own failure path).
+	if _, err := wfStore.CompleteAndAdvance("sample", "task-fanout-root", "contract frozen", "", map[string]string{
+		"branch_summary": "contract frozen",
+		"touched_paths":  "contract.md",
+	}, "completed"); err != nil {
+		t.Fatalf("advance to parallel: %v", err)
+	}
+	run, _, err = wfStore.RunForTask("sample", "task-fanout-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parallelStep := run.ActiveStepID
+	if parallelStep == "" {
+		t.Fatalf("fixture must park the run on the parallel stage")
+	}
+	if _, err := wfStore.CompleteAndAdvance("sample", "task-fanout-root", "agent died with the console", "", nil, "failed"); err != nil {
+		t.Fatalf("fail the stage: %v", err)
+	}
+	run, _, err = wfStore.RunForTask("sample", "task-fanout-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The parallel stage is not an agent step: reactivation must refuse it
+	// rather than burn a run on a workflow-owned stage.
+	req := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/task-fanout-root/start", "admin", nil)
+	req.SetPathValue("name", "sample")
+	req.SetPathValue("taskId", "task-fanout-root")
+	rec := httptest.NewRecorder()
+	s.handleStartProjectTask(rec, req)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "not a task start") {
+		t.Fatalf("reactivating a non-agent step must be refused with the workflow reason: %d %s", rec.Code, rec.Body.String())
+	}
+	if run, _, _ = wfStore.RunForTask("sample", "task-fanout-root"); strings.TrimSpace(run.Status) != "failed" {
+		t.Fatalf("a refused reactivation must not touch the run, got %q", run.Status)
+	}
+
+	// The agent-owned failure is the shape the lever answers: reactivate and
+	// dispatch. Drive the store directly to build it (the fixture's parallel
+	// stage has no agent step to fail on).
+	agentStepDef := entity.WorkflowDefinition{
+		ID: "wf-reactivate-child", Name: "child", Version: 1, Scope: "workspace", StartStepID: "work",
+		Steps: []entity.WorkflowStep{{
+			ID: "work", Type: "agent_task", Title: "work", ActorRole: "pm-agent",
+		}},
+	}
+	if err := wfStore.SaveDefinition(&agentStepDef); err != nil {
+		t.Fatal(err)
+	}
+	childTask := &entity.Task{ID: "task-reactivate", Title: "reactivate", Status: entity.TaskStatusInProgress,
+		Priority: 2, Assignee: "pm", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := s.ts.AddTask("sample", "pm", childTask); err != nil {
+		t.Fatal(err)
+	}
+	childRun, childInstances, err := wfStore.StartRun("sample", childTask.ID, agentStepDef.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wfStore.CompleteAndAdvance("sample", childTask.ID, "died with the console", "", nil, "failed"); err != nil {
+		t.Fatalf("fail the agent step: %v", err)
+	}
+	req2 := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/"+childTask.ID+"/start", "admin", nil)
+	req2.SetPathValue("name", "sample")
+	req2.SetPathValue("taskId", childTask.ID)
+	rec2 := httptest.NewRecorder()
+	s.handleStartProjectTask(rec2, req2)
+	// The dispatch itself may be refused by runtime readiness in this fixture;
+	// the RUN state is what this lever owns and must be restored either way.
+	run2, _, err := wfStore.RunForTask("sample", childTask.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(run2.Status) != "active" || strings.TrimSpace(run2.ActiveStepID) != "work" {
+		t.Fatalf("failed agent step must be re-activated by manual start, got %q@%q (resp %d %s)",
+			run2.Status, run2.ActiveStepID, rec2.Code, rec2.Body.String())
+	}
+	instances, err := wfStore.ListStepInstances(childRun.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundPending := false
+	for _, inst := range instances {
+		if inst.StepID == "work" && inst.Status == "pending" {
+			foundPending = true
+		}
+	}
+	if !foundPending {
+		t.Fatalf("the re-activated step instance must be pending again, got %+v", instances)
+	}
+	_ = childInstances
+}

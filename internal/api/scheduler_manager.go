@@ -779,6 +779,21 @@ func (s *Server) handleStartProjectTask(w http.ResponseWriter, r *http.Request) 
 		s.jsonErrorCode(w, http.StatusNotFound, ErrCodeValidationFailed, "task not found")
 		return
 	}
+	// S2 round 9 (D-J): a run that a terminated console left FAILED refuses
+	// re-entry forever and the platform has no run-level recovery — the real
+	// acceptance run died at its implementation step after a deploy restart.
+	// Manual start re-activates exactly that failed step and FALLS THROUGH into
+	// the ordinary dispatch below (this lever exists to run the agent again).
+	reactivated, _, rErr := s.reactivateFailedRunForManualStart(workspaceID, project, agent, task)
+	if rErr != nil {
+		// A refusal (non-agent step, wrong agent) is an operator error, not a
+		// server fault: surface it as a conflict with the workflow's message.
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, rErr.Error())
+		return
+	}
+	if reactivated {
+		log.Printf("[workflow-run-reactivate] task %s: continuing into the normal dispatch after re-activating the failed run", task.ID)
+	}
 	// Review round 5 (D-B companion): a task whose workflow is parked on a
 	// step that no agent owns (a human gate, or a materialized parallel stage
 	// waiting on its branch children) refuses manual start — the reconcile
