@@ -2094,6 +2094,21 @@ func (s *Store) CompleteBranchAndMaybeAdvance(project, taskID, runID, stepID, br
 			// degrade to the zero-write replay instead of surfacing an error
 			// that breaks idempotency.
 			if result.AllDone && !workflowBranchAnyFailed(branches) && !workflowRunStatusTerminal(run.Status) {
+				// Plan-aware join guard (S2 run5 premature-join fix): the
+				// crash-window re-drive must also respect un-materialized plan
+				// work packages; otherwise a replayed completion could advance
+				// the stage while later waves have not been materialized yet.
+				joinAllowed, perr := s.stageJoinAllowedByPlan(project, run, branches)
+				if perr != nil {
+					return result, perr
+				}
+				if !joinAllowed {
+					// AllDone was pre-set by workflowBranchAllTerminal above;
+					// a refused join is NOT all-done for the caller: the API
+					// layer must materialize the next wave, not advance.
+					result.AllDone = false
+					return result, nil
+				}
 				aggregate := aggregateBranchOutputs(branches)
 				stageSummary := workflowBranchSummary(branches)
 				if stageSummary == "" {
@@ -2197,6 +2212,21 @@ func (s *Store) CompleteBranchAndMaybeAdvance(project, taskID, runID, stepID, br
 		}
 	}
 	result.AllDone = true
+	// Plan-aware join gate (S2 run5 premature-join fix): a frozen plan with
+	// un-materialized or unfinished work packages keeps the stage active. The
+	// branch instance for THIS completion is already saved above, so a later
+	// completion (or re-report) re-drives the join from the full set. The
+	// result carries AllDone=false and no transition: the API layer's
+	// advanceParentAfterBranchCompletion then materializes the next wave
+	// instead of advancing the parent run.
+	joinAllowed, perr := s.stageJoinAllowedByPlan(project, run, branches)
+	if perr != nil {
+		return result, perr
+	}
+	if !joinAllowed {
+		result.AllDone = false
+		return result, nil
+	}
 	aggregate := aggregateBranchOutputs(branches)
 	if result.Branch.BranchID != "" {
 		for key, value := range result.Branch.OutputValues {
@@ -2252,6 +2282,55 @@ func workflowBranchAnyFailed(branches []entity.WorkflowBranchInstance) bool {
 		}
 	}
 	return false
+}
+
+// stageJoinAllowedByPlan guards the plan-driven premature-join defect (S2 run5,
+// 2026-09-26): for a parallel_stage whose run has a FROZEN delivery plan, the
+// stage may only advance when EVERY plan work package is materialized (its
+// branch instance exists) AND completed. Branch instances exist only for
+// materialized work; downstream packages materialize AFTER a dependency
+// completes (wave unlock lives in the API layer), so the instance set alone
+// always under-reports remaining work — the set ([infra]) looked all-terminal
+// and the stage closed while waves 1..n were still un-materialized. With no
+// frozen plan (legacy static branches) this returns true unchanged.
+// Fail-closed: plan-state evaluation errors refuse the join rather than
+// guessing.
+func (s *Store) stageJoinAllowedByPlan(project string, run entity.WorkflowRun, branches []entity.WorkflowBranchInstance) (bool, error) {
+	_, version, ok, err := s.LoadFrozenPlanForRun(strings.TrimSpace(project), run.ID)
+	if err != nil {
+		return false, fmt.Errorf("plan-aware join check for run %s: %w", run.ID, err)
+	}
+	if !ok {
+		return true, nil
+	}
+	states := make(map[string]string, len(branches))
+	for _, inst := range branches {
+		states[inst.BranchID] = strings.TrimSpace(inst.Status)
+	}
+	progress, err := EvaluatePlanProgress(version.Plan, states)
+	if err != nil {
+		return false, fmt.Errorf("plan-aware join check for plan %s v%d: %w", version.Plan.PlanID, version.Version, err)
+	}
+	// Any un-materialized work package is absent from states (state ""), so
+	// it lands in Ready or Waiting; a running/failed/skipped package lands in
+	// InProgress/Blocked. The stage may join only when none of those exist.
+	if len(progress.Ready)+len(progress.Waiting)+len(progress.InProgress)+len(progress.Blocked) > 0 {
+		return false, nil
+	}
+	// Mixed mode guard (mirrors stageAuthoritativelyComplete): every plan work
+	// package must be materialized per-work-package (not by counting
+	// instances), and every existing branch of the stage must be completed.
+	for _, wp := range version.Plan.WorkPackages {
+		if states[strings.TrimSpace(wp.ID)] != PlanWPStateCompleted {
+			return false, nil
+		}
+	}
+	for _, inst := range branches {
+		if strings.TrimSpace(inst.Status) != PlanWPStateCompleted {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func workflowJoinPolicy(step entity.WorkflowStep) string {
