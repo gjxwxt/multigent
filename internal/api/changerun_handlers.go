@@ -43,6 +43,15 @@ func (s *Server) resolveChangeRunTask(w http.ResponseWriter, r *http.Request, pr
 		return "", "", false
 	}
 	worktreeDir = s.resolveTaskWorktreeDir(project, taskID)
+	// D-N follow-up: the resolver returns "" for a task with no observable
+	// worktree anywhere. Check that explicitly: stat("") would evaluate
+	// ".git" against the SERVER process CWD, so a dev host running the
+	// console from inside a git checkout would wrongly pass this guard and
+	// fail later inside the engine with a misleading error.
+	if strings.TrimSpace(worktreeDir) == "" {
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeValidationFailed, "task has no git worktree to change-run against")
+		return "", "", false
+	}
 	if _, statErr := os.Stat(filepath.Join(worktreeDir, ".git")); statErr != nil {
 		s.jsonErrorCode(w, http.StatusConflict, ErrCodeValidationFailed, "task has no git worktree to change-run against")
 		return "", "", false

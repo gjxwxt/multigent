@@ -1216,16 +1216,7 @@ func (s *Server) resolveTaskWorktreeDir(project, taskID string) string {
 // still returned as-is: the gate then fails closed on it — a declared
 // worktree going missing is worktree loss, not "no code worktree".
 func (s *Server) resolveTaskWorktreeDirFromDB(project, taskID string) string {
-	observable := func(dir string) bool {
-		if dir == "" {
-			return false
-		}
-		cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
-		cmd.Dir = dir
-		cmd.Env = gitworktree.SanitizedGitEnv()
-		out, err := cmd.Output()
-		return err == nil && strings.TrimSpace(string(out)) == "true"
-	}
+	observable := gitworktree.ObservableWorktree
 
 	task, agent, err := s.findTaskInProject(project, taskID)
 	if err == nil && task != nil && strings.TrimSpace(task.WorktreeDir) != "" {

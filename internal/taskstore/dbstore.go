@@ -41,7 +41,11 @@ func (s *DBStore) AddTask(project, agent string, t *entity.Task) error {
 			}
 		}
 	}
-	return s.putJSON("tasks", []string{project, agent, t.ID}, t)
+	key, err := s.canonicalTaskAgentKey(project, agent)
+	if err != nil {
+		return err
+	}
+	return s.putJSON("tasks", []string{project, key, t.ID}, t)
 }
 
 func (s *DBStore) GetTask(project, agent, id string) (*entity.Task, error) {
@@ -230,6 +234,19 @@ func (s *DBStore) MoveTask(project, fromAgent, toAgent string, task *entity.Task
 				break
 			}
 		}
+		// No existing copy anywhere in the destination alias set: file the
+		// fresh copy under the canonical spelling so the destination queue's
+		// own reads and alias-wide deletes can see and manage it. Falling back
+		// to the raw caller spelling would strand the copy at a byte key the
+		// canonical spelling can never resolve (the residue shape this store
+		// layer exists to prevent).
+		if targetKey == toAgent {
+			canonical, err := s.canonicalTaskAgentKey(project, toAgent)
+			if err != nil {
+				return err
+			}
+			targetKey = canonical
+		}
 	}
 	if err := s.putJSON("tasks", []string{project, targetKey, taskID}, task); err != nil {
 		return err
@@ -282,7 +299,7 @@ func (s *DBStore) ClearTasks(project, agent string) error {
 }
 
 func (s *DBStore) GetHeartbeat(project, agent string) (*entity.HeartbeatConfig, error) {
-	if worker, ok, err := s.resolveAgentWorker(project, agent); err != nil {
+	if worker, _, ok, err := s.resolveAgentWorker(project, agent); err != nil {
 		return nil, err
 	} else if ok {
 		hb := &entity.HeartbeatConfig{}
@@ -296,7 +313,7 @@ func (s *DBStore) GetHeartbeat(project, agent string) (*entity.HeartbeatConfig, 
 	return nil, fmt.Errorf("agent worker not found for %s/%s", project, agent)
 }
 func (s *DBStore) SaveHeartbeat(project, agent string, h *entity.HeartbeatConfig) error {
-	if worker, ok, err := s.resolveAgentWorker(project, agent); err != nil {
+	if worker, _, ok, err := s.resolveAgentWorker(project, agent); err != nil {
 		return err
 	} else if ok {
 		if h == nil {
@@ -675,6 +692,11 @@ func (s *DBStore) listTasks(project, agent string) ([]*entity.Task, error) {
 // taskAgentKeys keeps task queues addressable by every stable worker identity.
 // Workflow code may receive a worker ID while project pages and the scheduler
 // use the worker name; both must resolve to the same queue.
+//
+// The alias set is deduplicated BYTE-EXACTLY, not case-folded: this set is
+// what reads scan and what alias-wide deletes wipe. A case-folded dedup would
+// silently drop a case-variant byte key that already holds a residue copy,
+// hiding the duplicate from every read and every cleanup.
 func (s *DBStore) taskAgentKeys(project, agent string) ([]string, error) {
 	keys := make([]string, 0, 4)
 	add := func(value string) {
@@ -683,23 +705,59 @@ func (s *DBStore) taskAgentKeys(project, agent string) ([]string, error) {
 			return
 		}
 		for _, existing := range keys {
-			if sameIdentity(existing, value) {
+			if existing == value {
 				return
 			}
 		}
 		keys = append(keys, value)
 	}
 	add(agent)
-	worker, ok, err := s.resolveAgentWorker(project, agent)
+	worker, membership, ok, err := s.resolveAgentWorker(project, agent)
 	if err != nil {
 		return nil, err
 	}
 	if ok {
+		add(membership.Title)
 		add(worker.ID)
 		add(worker.Name)
 		add(worker.DisplayName)
 	}
 	return keys, nil
+}
+
+// canonicalTaskAgentKey returns THE byte key a task write should land on
+// for this project+agent. Keeping every write on one canonical byte key
+// closes the residue-copy hole where case-folded alias resolution
+// (sameIdentity, EqualFold) happily READS any spelling while the WRITE path
+// filed copies under whichever spelling the caller happened to use — two
+// queues, one worker, divergent content depending on which copy a read
+// happened to hit first.
+//
+// The canonical spelling is the DIRECTORY-VISIBLE one — membership.Title,
+// then DisplayName, then Name — not the worker ID. Task storage keys double
+// as the agent's directory identity for every consumer: FS agent dirs,
+// runner RunLogDir, the runtime node's projects/<p>/agents/<agent> path, the
+// prompt meta footer, scheduler targets, and the store layer's own
+// resolveAgentWorkerMembership. None of those resolve a worker ID, so a
+// worker-ID byte key would strand the queue away from its agent; the title
+// spelling is the one the whole system already speaks.
+func (s *DBStore) canonicalTaskAgentKey(project, agent string) (string, error) {
+	agent = strings.TrimSpace(agent)
+	worker, membership, ok, err := s.resolveAgentWorker(project, agent)
+	if err != nil {
+		return "", err
+	}
+	if ok {
+		for _, candidate := range []string{membership.Title, worker.DisplayName, worker.Name} {
+			if key := strings.TrimSpace(candidate); key != "" {
+				return key, nil
+			}
+		}
+	}
+	if agent == "" {
+		return "", errs.Usage("task write requires an agent")
+	}
+	return agent, nil
 }
 
 func (s *DBStore) taskStorageAgent(project, agent, taskID string) (string, error) {
@@ -825,9 +883,13 @@ func samePath(a, b string) bool {
 	return filepath.Clean(a) == filepath.Clean(b)
 }
 
-func (s *DBStore) resolveAgentWorker(project, agent string) (controldb.AgentWorker, bool, error) {
+// resolveAgentWorker resolves an agent alias (request spelling, membership
+// title, worker ID/name/display name) to its worker record, together with the
+// project membership that bound the two — callers building canonical storage
+// keys need the membership title, the directory-visible spelling.
+func (s *DBStore) resolveAgentWorker(project, agent string) (controldb.AgentWorker, controldb.ProjectMembership, bool, error) {
 	if s == nil || s.db == nil {
-		return controldb.AgentWorker{}, false, nil
+		return controldb.AgentWorker{}, controldb.ProjectMembership{}, false, nil
 	}
 	memberships, err := s.db.ListProjectMemberships(controldb.ProjectMembershipFilter{
 		WorkspaceID: s.workspaceID,
@@ -835,21 +897,21 @@ func (s *DBStore) resolveAgentWorker(project, agent string) (controldb.AgentWork
 		MemberType:  "agent_worker",
 	})
 	if err != nil {
-		return controldb.AgentWorker{}, false, err
+		return controldb.AgentWorker{}, controldb.ProjectMembership{}, false, err
 	}
 	for _, membership := range memberships {
 		worker, ok, err := s.db.AgentWorkerByID(s.workspaceID, membership.MemberID)
 		if err != nil {
-			return controldb.AgentWorker{}, false, err
+			return controldb.AgentWorker{}, controldb.ProjectMembership{}, false, err
 		}
 		if !ok {
 			continue
 		}
 		if sameIdentity(membership.MemberID, agent) || sameIdentity(membership.Title, agent) || sameIdentity(worker.ID, agent) || sameIdentity(worker.Name, agent) || sameIdentity(worker.DisplayName, agent) {
-			return worker, true, nil
+			return worker, membership, true, nil
 		}
 	}
-	return controldb.AgentWorker{}, false, nil
+	return controldb.AgentWorker{}, controldb.ProjectMembership{}, false, nil
 }
 
 func sameIdentity(a, b string) bool {

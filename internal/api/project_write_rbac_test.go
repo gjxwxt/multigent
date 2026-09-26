@@ -456,6 +456,103 @@ func TestUpdateTaskAssigneeMovesAgentQueue(t *testing.T) {
 	}
 }
 
+// Alias-overlapping reassignment (D-L companion, hardening round): when the
+// two agent spellings resolve to the SAME worker, the old delete-first
+// ordering wiped the destination copy along with the source — DeleteTask
+// loops over every alias of the source agent, and the destination key is
+// one of those aliases (hooks-relay run 2, 2026-09-25). The task must land
+// in the target queue exactly once, and the disjoint spelling (a different
+// worker's queue) must be untouched.
+func TestUpdateTaskAssigneeAliasOverlapKeepsExactlyOneCopy(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+	// One worker registered under the directory name "S2 Dev A"; the worker
+	// name and membership title coincide, and a case-variant caller spelling
+	// ("s2 dev a") resolves to the same worker through EqualFold alias
+	// matching — the alias overlap the hooks-relay rehearsal tripped over.
+	seedAgentWorkerWithIDForTest(t, s, workspaceID, "sample", "S2 Dev A", "aw-dev-a", "pm-dev-a")
+	seedAgentWorkerWithIDForTest(t, s, workspaceID, "sample", "backend", "aw-backend", "pm-sample-backend")
+	now := time.Now().UTC()
+	// Seed the task under the case-variant spelling.
+	if err := s.ts.AddTask("sample", "s2 dev a", &entity.Task{
+		ID:        "task-alias-overlap",
+		Title:     "Overlap me",
+		Prompt:    "x",
+		Status:    entity.TaskStatusPending,
+		Priority:  2,
+		Assignee:  "sample/s2 dev a",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := providerTestRequest(http.MethodPut, "/api/v1/tasks/update", "admin", updateTaskBody{
+		Project:  "sample",
+		Agent:    "s2 dev a",
+		ID:       "task-alias-overlap",
+		Assignee: strPtr("sample/S2 Dev A"),
+	})
+	s.handlePutUpdateTask(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update assignee status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Exactly one copy, reachable under both spellings.
+	for _, spelling := range []string{"s2 dev a", "S2 Dev A"} {
+		got, err := s.ts.GetTask("sample", spelling, "task-alias-overlap")
+		if err != nil {
+			t.Fatalf("task unreadable via %q: %v", spelling, err)
+		}
+		if got.Assignee != "sample/S2 Dev A" {
+			t.Fatalf("spelling %q: stale assignee %q", spelling, got.Assignee)
+		}
+	}
+	if records, err := s.ts.ListAllTaskRecords("sample"); err != nil {
+		t.Fatalf("list records: %v", err)
+	} else {
+		n := 0
+		for _, r := range records {
+			if r.Task != nil && r.Task.ID == "task-alias-overlap" {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Fatalf("alias-overlap move left %d copies, want exactly 1", n)
+		}
+	}
+
+	// Disjoint control: moving a task to a DIFFERENT worker's queue must not
+	// disturb the first task.
+	rec2 := httptest.NewRecorder()
+	req2 := providerTestRequest(http.MethodPut, "/api/v1/tasks/update", "admin", updateTaskBody{
+		Project:  "sample",
+		Agent:    "S2 Dev A",
+		ID:       "task-alias-overlap",
+		Assignee: strPtr("sample/backend"),
+	})
+	s.handlePutUpdateTask(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("disjoint move status=%d body=%s", rec2.Code, rec2.Body.String())
+	}
+	if _, err := s.ts.GetTask("sample", "backend", "task-alias-overlap"); err != nil {
+		t.Fatalf("task not in backend queue: %v", err)
+	}
+	if records, err := s.ts.ListAllTaskRecords("sample"); err != nil {
+		t.Fatalf("list records: %v", err)
+	} else {
+		n := 0
+		for _, r := range records {
+			if r.Task != nil && r.Task.ID == "task-alias-overlap" {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Fatalf("disjoint move left %d copies, want exactly 1", n)
+		}
+	}
+}
+
 func containsAll(s string, substr string) bool {
 	return strings.Contains(s, substr)
 }
@@ -599,4 +696,3 @@ func TestProjectCreate_ChannelFailureRollsBackUserAssignments(t *testing.T) {
 		}
 	}
 }
-

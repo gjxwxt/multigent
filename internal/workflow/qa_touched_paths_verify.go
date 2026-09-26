@@ -10,7 +10,6 @@ package workflow
 import (
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -237,22 +236,14 @@ func unquoteGitPath(p string) string {
 	return b.String()
 }
 
-// worktreeObservable reports whether dir exists AND is a readable git
-// worktree. The QA real-change gate is fail-closed (round-19 P0): a
-// declared touched_paths step whose worktree is missing or unreadable must
-// NOT silently downgrade to declaration-only — the caller rejects the
-// completion instead. (An unreadable-but-existing dir also fails here; the
-// distinction is surfaced by the gate's error message.)
+// worktreeObservable reports whether dir is an observable git worktree for
+// the QA real-change gate. It delegates to gitworktree.ObservableWorktree —
+// the single shared implementation — so the gate and the api-side resolver
+// (which skips resolver candidates by the same test) can never drift apart
+// (D-N: a resolver/gate disagreement is exactly what wedged qa completions
+// behind "requires an observable worktree").
 func worktreeObservable(worktreeDir string) bool {
-	info, err := os.Stat(worktreeDir)
-	if err != nil || !info.IsDir() {
-		return false
-	}
-	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
-	cmd.Dir = worktreeDir
-	cmd.Env = gitworktree.SanitizedGitEnv()
-	out, err := cmd.Output()
-	return err == nil && strings.TrimSpace(string(out)) == "true"
+	return gitworktree.ObservableWorktree(worktreeDir)
 }
 
 // verifyQATouchedPathsAgainstWorktree cross-checks the declared paths

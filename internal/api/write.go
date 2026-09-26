@@ -819,15 +819,20 @@ func (s *Server) handlePutUpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if routeToAgent != agent {
-		if err := s.ts.DeleteTask(project, agent, id); err != nil {
+		// Destination-first relocation (hardening round, D-L shape): the old
+		// delete-then-add ordering destroyed the task from every queue when
+		// the destination AddTask failed — and when the two spellings resolve
+		// to the SAME worker, the alias-wide source delete also removed the
+		// copy that had just been written to the destination key (hooks-relay
+		// run 2, 2026-09-25). MoveTask writes the destination first, verifies
+		// it readable at the exact key written, and only then removes the
+		// source copies that are NOT the destination key — the task can
+		// never end up missing from every queue.
+		if err := s.ts.MoveTask(project, agent, routeToAgent, t); err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				s.jsonError(w, http.StatusNotFound, "task not found")
 				return
 			}
-			s.serverError(w, err)
-			return
-		}
-		if err := s.ts.AddTask(routeToProject, routeToAgent, t); err != nil {
 			s.serverError(w, err)
 			return
 		}

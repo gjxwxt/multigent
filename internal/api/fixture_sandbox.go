@@ -69,7 +69,16 @@ func (s *Server) handleGetTaskFixtureSandbox(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// D-N follow-up: the resolver reports "" for a task with genuinely no
+	// code worktree. A fixture contract lives INSIDE the worktree, so no
+	// worktree ⇒ no contract: answer the structured HasContract:false shape
+	// directly instead of letting loadContract("") turn it into a 500.
 	worktreeDir := s.resolveTaskWorktreeDir(project, taskID)
+	if strings.TrimSpace(worktreeDir) == "" {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(fixturesandbox.TaskSandboxStatus{HasContract: false})
+		return
+	}
 	status, err := s.fixtureSandbox.TaskStatus(r.Context(), taskID, project, worktreeDir)
 	if err != nil {
 		s.jsonError(w, http.StatusInternalServerError, "failed to query sandbox status: "+err.Error())
@@ -104,7 +113,14 @@ func (s *Server) handleResetTaskFixtureSandbox(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// D-N follow-up: "" means no observable worktree anywhere; reset needs
+	// a real worktree, so fail with an explicit 409 instead of letting the
+	// provisioner fail on an empty dir (misleading error surface).
 	worktreeDir := s.resolveTaskWorktreeDir(project, taskID)
+	if strings.TrimSpace(worktreeDir) == "" {
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeValidationFailed, "task has no git worktree; the test-data sandbox contract lives inside a worktree")
+		return
+	}
 	res, err := s.fixtureSandbox.ResetTask(r.Context(), taskID, project, worktreeDir)
 	if err != nil {
 		s.jsonError(w, http.StatusBadRequest, "reset sandbox failed: "+err.Error())
@@ -171,7 +187,13 @@ func (s *Server) handleSwitchTaskFixtureSandboxScenario(w http.ResponseWriter, r
 		return
 	}
 
+	// D-N follow-up: same empty-resolver branch as reset — switching a
+	// scenario requires a worktree-bound contract; "" ⇒ explicit 409.
 	worktreeDir := s.resolveTaskWorktreeDir(project, taskID)
+	if strings.TrimSpace(worktreeDir) == "" {
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeValidationFailed, "task has no git worktree; the test-data sandbox contract lives inside a worktree")
+		return
+	}
 	res, err := s.fixtureSandbox.SwitchScenario(r.Context(), taskID, project, worktreeDir, req.Scenario)
 	if err != nil {
 		s.jsonError(w, http.StatusBadRequest, "switch sandbox scenario failed: "+err.Error())
@@ -203,4 +225,3 @@ func (s *Server) handleSwitchTaskFixtureSandboxScenario(w http.ResponseWriter, r
 		"expiresAt":      res.Lease.ExpiresAt,
 	})
 }
-
