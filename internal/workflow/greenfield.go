@@ -40,9 +40,9 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"contractReviewNotesField": "Review notes for the shared contract; edits requested here go back to contract_batch.",
 
 		"integrationReviewTitle": "Integration Review",
-		"integrationReviewDesc":  "Human gate after parallel workstreams converge (joinPolicy all): verify the branches merge cleanly on the shared contract — no schema drift, no duplicate/conflicting error codes, no API contract violations. Seam problems found here route to the linear implementation step as unified rework; branch-internal problems were already caught inside each branch.",
+		"integrationReviewDesc":  "Human gate after parallel workstreams converge (joinPolicy all): verify the branches merge cleanly on the shared contract — no schema drift, no duplicate/conflicting error codes, no API contract violations. Seam problems found here route through Acceptance Test Design first (the spec must reflect the integration verdict before the reworked implementation starts), then into the linear implementation step as unified rework; branch-internal problems were already caught inside each branch.",
 		"atdTitle":               "Acceptance Test Design",
-		"atdDesc":                "Independent QA agent produces a risk-driven acceptance test specification BEFORE coding starts, so the developer's TDD has explicit external behavior targets. Inputs: the approved requirement (ACs, non-goals, constraints), the frozen design references, and the project's runtime capabilities. Output contract: test_spec_doc holds the full specification document (one section per case: case_id, ac_id, scenario Given/When/Then, expected_result observable and assertable); test_spec_manifest holds a JSON array — every entry exactly {\"case_id\" (unique, stable, e.g. AUTH-001), \"ac_id\" (linked acceptance criterion or requirement section), \"risk_level\" (high|medium|low), \"automation_level\" (unit|api_integration|ui_e2e|manual), \"execution_type\" (auto|manual|environment_blocked), \"expected_result\" (non-empty)}. Hard rules: high-risk cases must have an executable verification path or an explicit manual waiver premise; 'to be observed' or 'as appropriate' is never a valid expected_result; do not pad the case list with scenarios that link to no AC. test_spec_summary states the case count, risk distribution, non-automatable items and environment prerequisites.",
+		"atdDesc":                "Independent QA agent produces a risk-driven acceptance test specification BEFORE coding starts, so the developer's TDD has explicit external behavior targets. Inputs: the approved requirement (ACs, non-goals, constraints), the frozen design references, and the project's runtime capabilities. Output contract: test_spec_doc holds the full specification document (one section per case: case_id, ac_id, scenario Given/When/Then, expected_result observable and assertable); test_spec_manifest holds a JSON array — every entry exactly {\"case_id\" (unique, stable, e.g. AUTH-001), \"ac_id\" (linked acceptance criterion or requirement section), \"risk_level\" (high|medium|low), \"automation_level\" (unit|api_integration|ui_e2e|manual), \"execution_type\" (auto|manual|environment_blocked), \"expected_result\" (non-empty)}. Hard rules: high-risk cases must have an executable verification path or an explicit manual waiver premise; 'to be observed' or 'as appropriate' is never a valid expected_result; do not pad the case list with scenarios that link to no AC. test_spec_summary states the case count, risk distribution, non-automatable items and environment prerequisites. When review_comments is present, this is a post-integration-rework entry: the spec MUST absorb the integration verdict (seam problems become cases) before the reworked implementation starts.",
 		"implTitle":              "Implementation",
 		"implDesc":               "Implement the approved requirement following the approved design references AND the acceptance test specification (test_spec_doc + manifest): every automated case in the manifest is an external behavior target — write the failing test first (TDD), then make it pass. Record the PR, tests executed (with case_id mapping in test_implementation_evidence), and any risks.",
 		"selfReviewTitle":        "Agent Self Review",
@@ -65,6 +65,8 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"designPreviewField":     "Optional. Preview URL of the approved design for downstream reference.",
 		"designHTMLField":        "Optional. Frozen HTML of the approved design captured at confirm time; consumers must use this copy, not the live OD project.",
 		"designSnapshotField":    "Optional. Workspace-relative path of the frozen design snapshot bundle (see manifest.json).",
+		"atdReviewCommentsField": "Optional. Integration-review verdict comments when this spec is (re)designed after a request_changes rework; empty on first entry.",
+		"atdBranchReportsField":  "Optional. Aggregated parallel-branch reports carried from integration review; context for what was already delivered when redesigning the spec after integration rework.",
 		"testSpecDocField":       "Full acceptance test specification document (one section per case with Given/When/Then and observable expected results).",
 		"testSpecManifestField":  "JSON array of test case entries: case_id, ac_id, risk_level, automation_level, execution_type, expected_result. Validated structurally by the platform.",
 		"testSpecSummaryField":   "Case count, risk distribution, non-automatable items and environment prerequisites.",
@@ -119,9 +121,9 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"contractReviewNotesField": "共享契约的审核意见；此处要求的修改打回 contract_batch。",
 
 		"integrationReviewTitle": "集成评审",
-		"integrationReviewDesc":  "并行工作流汇聚后（joinPolicy all）的人工闸门：核对各分支在共享契约上无缝合并——无 schema 漂移、无错误码重复/冲突、无 API 契约违约。此处发现的接缝问题路由到线性实现步骤统一返工；分支内部问题已在各分支内消化。",
+		"integrationReviewDesc":  "并行工作流汇聚后（joinPolicy all）的人工闸门：核对各分支在共享契约上无缝合并——无 schema 漂移、无错误码重复/冲突、无 API 契约违约。此处发现的接缝问题先经验收测试设计刷新规格（规格必须吸收集成评审裁决后再进入返工实现），再路由到线性实现步骤统一返工；分支内部问题已在各分支内消化。",
 		"atdTitle":               "验收测试设计",
-		"atdDesc":                "独立 QA Agent 在编码开始前产出风险驱动的验收测试规格，让研发的 TDD 有清晰的外部行为目标。输入：已审核需求全文（验收标准、非目标、约束）、已冻结的设计引用、项目运行时能力。输出契约：test_spec_doc 为完整规格文档（每条 Case 一节：case_id、ac_id、Given/When/Then 场景、可观察可断言的 expected_result）；test_spec_manifest 为 JSON 数组——每项恰好包含 {\"case_id\"（唯一稳定，如 AUTH-001）、\"ac_id\"（关联验收标准或需求章节）、\"risk_level\"（high|medium|low）、\"automation_level\"（unit|api_integration|ui_e2e|manual）、\"execution_type\"（auto|manual|environment_blocked）、\"expected_result\"（非空）}。硬规则：高风险 Case 必须有可执行验证路径或明确的人工豁免前提；「待观察」「视情况」不构成合法预期结果；禁止生成不关联任何 AC 的凑数 Case。test_spec_summary 概述用例数量、风险分布、不可自动化项与环境前提。",
+		"atdDesc":                "独立 QA Agent 在编码开始前产出风险驱动的验收测试规格，让研发的 TDD 有清晰的外部行为目标。输入：已审核需求全文（验收标准、非目标、约束）、已冻结的设计引用、项目运行时能力。输出契约：test_spec_doc 为完整规格文档（每条 Case 一节：case_id、ac_id、Given/When/Then 场景、可观察可断言的 expected_result）；test_spec_manifest 为 JSON 数组——每项恰好包含 {\"case_id\"（唯一稳定，如 AUTH-001）、\"ac_id\"（关联验收标准或需求章节）、\"risk_level\"（high|medium|low）、\"automation_level\"（unit|api_integration|ui_e2e|manual）、\"execution_type\"（auto|manual|environment_blocked）、\"expected_result\"（非空）}。硬规则：高风险 Case 必须有可执行验证路径或明确的人工豁免前提；「待观察」「视情况」不构成合法预期结果；禁止生成不关联任何 AC 的凑数 Case。test_spec_summary 概述用例数量、风险分布、不可自动化项与环境前提。当 review_comments 非空时，本次是集成返工后的进入：规格必须吸收集成评审裁决（接缝问题转化为 Case）后才能开始返工实现。",
 		"implTitle":              "实现编码",
 		"implDesc":               "以已确认的设计产物和验收测试规格（test_spec_doc + manifest）为参考实现需求：manifest 中每条 auto Case 都是外部行为目标——先写失败测试（TDD），再使其通过。记录 PR、执行的测试（在 test_implementation_evidence 中给出 case_id 映射）与风险。",
 		"selfReviewTitle":        "Agent 初审",
@@ -148,6 +150,8 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"designPreviewField":     "可选。已确认设计的预览地址，供下游参考。",
 		"designHTMLField":        "可选。确认时冻结的已确认设计 HTML 快照；下游一律使用此副本，不读 OD 实时项目。",
 		"designSnapshotField":    "可选。冻结设计快照包的工作区相对路径（见 manifest.json）。",
+		"atdReviewCommentsField": "可选。因集成评审 request_changes 返工而（重）设计规格时的人工裁决意见；首次进入为空。",
+		"atdBranchReportsField":  "可选。集成评审携带的并行分支聚合报告；集成返工后重设计规格时作为已交付内容的上下文。",
 		"testSpecDocField":       "完整验收测试规格文档（每条 Case 一节，含 Given/When/Then 与可观察的预期结果）。",
 		"testSpecManifestField":  "测试用例 JSON 数组：case_id、ac_id、risk_level、automation_level、execution_type、expected_result。平台做结构化校验。",
 		"testSpecSummaryField":   "用例数量、风险分布、不可自动化项与环境前提。",
@@ -334,6 +338,8 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			optionalField("approved_design_preview_url", "designPreviewField"),
 			optionalField("approved_design_html", "designHTMLField"),
 			optionalField("approved_design_snapshot_path", "designSnapshotField"),
+			optionalField("review_comments", "atdReviewCommentsField"),
+			optionalField("branch_reports", "atdBranchReportsField"),
 		},
 		[]entity.WorkflowField{
 			field("test_spec_doc", "testSpecDocField"),
@@ -573,17 +579,19 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"test_spec_summary":  "$input.test_spec_summary",
 			}, false),
 
-			// Integration rework: seam problems route to the LINEAR implementation
-			// step as unified rework (re-entering the parallel stage would require
-			// branch-instance resets — deliberately out of scope for v1). The spec
-			// fields flow via pass-through: integration_review carries them as
-			// optional inputs fed by e-integration-approve? No — atd runs AFTER
-			// integration in the batched path, so the spec does not exist yet and
-			// implementation's spec inputs stay empty (contract: batched-path
-			// acceptance baseline is produced post-integration, same as linear).
-			edge("e-integration-rework", "integration_review", "implementation", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{
+			// Integration rework (S2 run5, 2026-09-26): seam problems found at
+			// integration MUST NOT reach implementation directly — on the batched
+			// path the acceptance baseline is produced AFTER integration (post-
+			// integration contract), so a direct edge starves QA of its required
+			// test_spec inputs (observed live: wfr-g6shgofc failed twice at qa
+			// with empty test_spec_*). Route rework through acceptance_test_design
+			// first: it (re)designs the spec against the integration verdict, then
+			// e-atd-impl carries spec + verdict context into the linear rework.
+			// Re-entering the parallel stage itself would require branch-instance
+			// resets — deliberately out of scope for v1.
+			edge("e-integration-rework", "integration_review", "acceptance_test_design", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{
 				"review_comments":               "$output.comments",
-				"previous_pr":                   "$input.branch_reports",
+				"branch_reports":                "$input.branch_reports",
 				"approved_requirement":          "$input.approved_requirement",
 				"approved_design_source":        "$input.approved_design_source",
 				"approved_design_project_id":    "$input.approved_design_project_id",
@@ -592,9 +600,12 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"approved_design_snapshot_path": "$input.approved_design_snapshot_path",
 				"design_waiver_reason":          "$input.design_waiver_reason",
 				"design_waived":                 "$input.design_waived",
-				// vNext spec pass-through: empty on first entry (spec is designed
-				// after integration in the batched path), but if implementation was
-				// reworked before and a spec exists, the loop must not lose it.
+				// Defensive spec pass-through: on the current topology
+				// integration_review has no inbound edge carrying spec fields
+				// (single entry: e-parallel-integration), so these always
+				// resolve empty here. Kept so a future loop back into
+				// integration_review cannot silently drop an existing baseline;
+				// ATD (re)designs the spec either way.
 				"test_spec_doc":      "$input.test_spec_doc",
 				"test_spec_manifest": "$input.test_spec_manifest",
 				"test_spec_summary":  "$input.test_spec_summary",
@@ -611,6 +622,11 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"test_spec_doc":                 "$output.test_spec_doc",
 				"test_spec_manifest":            "$output.test_spec_manifest",
 				"test_spec_summary":             "$output.test_spec_summary",
+				// Integration-rework context: on the approve path both are empty;
+				// after a request_changes rework they carry the human verdict and
+				// the aggregated branch reports the rework must reconcile.
+				"review_comments": "$input.review_comments",
+				"previous_pr":     "$input.branch_reports",
 			}, true),
 			edge("e-design-rework", "design_review", "requirement_draft", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "previous_draft": "$input.requirement_draft"}, false),
 			edge("e-impl-self-review", "implementation", "self_review", "", nil, map[string]string{
