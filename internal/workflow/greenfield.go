@@ -32,8 +32,8 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"requirementItemsField": "JSON array of the requirement anchors this delivery traces to: [{id, text, source}]. The ids are frozen by the requirement review and referenced by every non-infrastructure work package's acceptanceCriteria.",
 
 		"contractBatchTitle":     "Shared Contract Batch",
-		"contractBatchDesc":      "BATCHED PATH ONLY. Build the shared foundation every workstream depends on: database schema and migrations, error-code enumeration, API skeleton (paths/auth/error semantics), and the tech-stack skeleton (per batch_plan). Commit to the integration baseline BEFORE parallel work starts — parallel branches cannot see each other's code, so this contract is their only shared surface. Follow the batch_plan contract list; do not implement workstream business logic here.",
-		"contractArtifactsField": "Committed shared-contract summary: schema objects, error codes, API paths, and the baseline commit SHA carrying them.",
+		"contractBatchDesc":      "BATCHED PATH ONLY. Build the shared foundation every workstream depends on: database schema and migrations, error-code enumeration, API skeleton (paths/auth/error semantics), and the tech-stack skeleton (per batch_plan). Commit to the integration baseline BEFORE parallel work starts — parallel branches cannot see each other's code, so this contract is their only shared surface. Follow the batch_plan contract list; do not implement workstream business logic here. When entering this step through a rework loop (or whenever the upstream requirement snapshot was malformed), you MUST re-emit requirement_items as a structured output: a JSON array of {\"id\",\"text\",\"source\"} objects covering every requirement anchor — the human contract review and the plan freeze both consume this output.",
+		"contractArtifactsField": "Committed shared-contract summary: schema objects, error codes, API paths, and the baseline commit SHA carrying them. The baseline commit SHA must be a full 40-hex commit SHA or be omitted entirely — a short SHA or branch name is refused at the freeze gate.",
 
 		"contractReviewTitle":      "Shared Contract Review",
 		"contractReviewDesc":       "Human gate: confirm the committed contract (schema, error codes, API skeleton, stack skeleton) is complete and correct before parallel workstreams fork from it. Contract errors multiply into every branch — approve only with the baseline SHA recorded.",
@@ -111,8 +111,8 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"requirementItemsField": "本次交付追溯的需求锚点 JSON 数组：[{id, text, source}]。id 由需求评审冻结，所有非基础设施工作包的 acceptanceCriteria 都必须引用它们。",
 
 		"contractBatchTitle":     "共享契约批",
-		"contractBatchDesc":      "仅 batched 路径。构建所有工作流共同依赖的共享地基：数据库 schema 与迁移、错误码枚举、API 骨架（路径/鉴权/错误语义）与技术栈骨架（按 batch_plan）。在并行工作开始前提交到集线基线——并行分支互相看不见对方代码，这份契约是它们唯一的共享面。按 batch_plan 的契约清单执行；不要在此实现工作流的业务逻辑。",
-		"contractArtifactsField": "已提交的共享契约摘要：schema 对象、错误码、API 路径，以及承载它们的基线 commit SHA。",
+		"contractBatchDesc":      "仅 batched 路径。构建所有工作流共同依赖的共享地基：数据库 schema 与迁移、错误码枚举、API 骨架（路径/鉴权/错误语义）与技术栈骨架（按 batch_plan）。在并行工作开始前提交到集线基线——并行分支互相看不见对方代码，这份契约是它们唯一的共享面。按 batch_plan 的契约清单执行；不要在此实现工作流的业务逻辑。经返工环进入本步骤（或上游需求快照畸形）时，必须把 requirement_items 作为结构化输出重新提交：JSON 数组，每项含 {\"id\",\"text\",\"source\"}，覆盖全部需求锚点——人工契约评审与计划冻结都以这份输出为准。",
+		"contractArtifactsField": "已提交的共享契约摘要：schema 对象、错误码、API 路径，以及承载它们的基线 commit SHA。基线 commit SHA 必须是完整 40 位十六进制 SHA，否则整字段省略——短 SHA 或分支名会在冻结闸门被拒。",
 
 		"contractReviewTitle":      "共享契约评审",
 		"contractReviewDesc":       "人工闸门：确认已提交的契约（schema、错误码、API 骨架、栈骨架）完整且正确，然后才允许并行工作流从它分叉。契约错误会放大到每一个分支——仅在基线 SHA 记录在案后批准。",
@@ -236,6 +236,18 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		[]entity.WorkflowField{
 			field("contract_artifacts", "contractArtifactsField"),
 			optionalField("delivery_plan", "deliveryPlanField"),
+			// S2 hardening batch 2 (run4 finding): requirement_items is an
+			// INPUT-only field on this step, yet the freeze anchor chain
+			// (plan_freeze.go) reads it from contract_batch OUTPUTS — the
+			// request_changes→contract_batch rework loop could never repair a
+			// malformed requirement_draft snapshot because the step-complete
+			// whitelist rejected the field before it could flow to the freeze.
+			// Declaring it here makes the rework loop able to land corrected
+			// anchors; the freeze validation itself stays unchanged and
+			// fail-closed. The e-contract-batch-review edge forwards THIS
+			// output to the human review so what the reviewer sees is what
+			// the freeze consumes.
+			optionalField("requirement_items", "requirementItemsField"),
 		})
 
 	contractReviewStep := tmplStep("contract_review", "human_review", text["contractReviewTitle"], text["contractReviewDesc"], "owner-engineer", "amber", 860,
@@ -515,7 +527,13 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"contract_artifacts": "$output.contract_artifacts",
 				"delivery_plan":      "$input.delivery_plan",
 				"batch_plan":         "$input.batch_plan",
-				"requirement_items":  "$input.requirement_items",
+				// S2 hardening batch 2 (P1-1, review round): forward the OUTPUT
+				// side. The freeze anchor chain reads contract_batch outputs
+				// (newest-producer-first), so the human review must see the
+				// same snapshot the freeze will consume — forwarding the input
+				// side let a reviewer approve anchors the freeze would replace
+				// with the reworked output (or vice versa).
+				"requirement_items": "$output.requirement_items",
 			}, true),
 			edge("e-contract-review-rework", "contract_review", "contract_batch", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{
 				"review_comments":               "$output.comments",

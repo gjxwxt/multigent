@@ -119,22 +119,13 @@ func activeCLIInteractionSession(db controldb.Store, session controldb.Interacti
 	return db.ActiveInteractionSession(session.WorkspaceID, session.ProjectID, session.AgentID)
 }
 
+// shouldRecoverStaleCLIInteraction delegates to the shared store-level rule
+// (S2 hardening batch 2): the control-plane manual-start busy check and the
+// CLI's own acquisition must answer staleness identically — a split decision
+// lets the API start an agent run the CLI then refuses ("agent is busy in
+// scheduler session"), silently dropping the manual start (run4 finding).
 func shouldRecoverStaleCLIInteraction(active controldb.InteractionSession, sourceKind, reason string) bool {
-	if strings.TrimSpace(sourceKind) != "scheduler" || strings.TrimSpace(reason) != "running_task" {
-		return false
-	}
-	if strings.TrimSpace(active.SourceKind) != "scheduler" || strings.TrimSpace(active.LockReason) != "running_task" {
-		return false
-	}
-	lastRaw := strings.TrimSpace(active.LastActivityAt)
-	if lastRaw == "" {
-		lastRaw = strings.TrimSpace(active.UpdatedAt)
-	}
-	last, err := time.Parse(time.RFC3339, lastRaw)
-	if err != nil {
-		return false
-	}
-	return time.Since(last) > 2*time.Minute
+	return controldb.ShouldRecoverStaleInteraction(active, sourceKind, reason)
 }
 
 func (l *cliInteractionLease) Release() {

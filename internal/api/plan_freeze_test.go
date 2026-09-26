@@ -138,6 +138,133 @@ func runForTask(t *testing.T, s *Server, workspaceID, taskID string) entity.Work
 	return run
 }
 
+// TestContractBatchReworkRepairsRequirementAnchors is the S2 hardening batch 2
+// regression for the run4 finding (task t-20260926-jy5o8b shape): the freeze
+// anchor chain reads requirement_items from contract_batch OUTPUTS, but the
+// template declared the field input-only, so the request_changes→contract_batch
+// rework loop could never repair a malformed requirement_draft snapshot — the
+// step-complete whitelist rejected the field before it could flow to the
+// freeze ("workflow output field %q is not defined on step"). The rehearsal
+// only escaped via prompt-level workarounds.
+//
+// The test walks the exact task2 shape: requirement_draft emits a BARE string
+// array (malformed), the first freeze attempt is refused (fail-closed), then
+// contract_batch re-emits corrected requirement_items as its OUTPUT through
+// the rework loop, and the freeze succeeds with the REWORKED anchors.
+//
+// Boundary (run4 task2 evidence, documented not fixed): the rework loop can
+// only repair OUTPUT-shape defects. A rework that omits the field still
+// freezes nothing — the anchor chain falls through to the malformed
+// requirement_draft output and the freeze refuses again (fail-closed kept).
+func TestContractBatchReworkRepairsRequirementAnchors(t *testing.T) {
+	s, workspaceID := newBranchJoinHTTPServer(t)
+	s.worktreeMgr = gitworktreeManagerForTest()
+	_, baseCommit := buildFanoutGitWorkspace(t, s)
+	seedGreenfieldRunTask(t, s, workspaceID, "task-anchor-rework", baseCommit)
+
+	// Walk the chain with a MALFORMED requirement snapshot (bare string
+	// array — what the run4 agent actually produced): the task2 prompt shape.
+	malformedAnchors := `["uc-1:POST /fingerprints computes SHA-256","uc-2:same fingerprint dedupes"]`
+	rec := postBranchStepComplete(t, s, workspaceID, "task-anchor-rework", map[string]string{
+		"requirement_draft": "The service must fingerprint content and dedupe registrations.",
+		"open_questions":    "none",
+		"requirement_items": malformedAnchors,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("requirement_draft completion must be 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, status, err := s.submitTaskWorkflowReview(httptest.NewRequest(http.MethodPost, "/", nil), workspaceID, "sample", "task-anchor-rework", workflowReviewBody{
+		Decision: "approve", Comments: "requirement approved",
+	}); err != nil {
+		t.Fatalf("requirement_review approve failed (%d): %v", status, err)
+	}
+	if _, status, err := s.submitTaskWorkflowReview(httptest.NewRequest(http.MethodPost, "/", nil), workspaceID, "sample", "task-anchor-rework", workflowReviewBody{
+		Decision: "approve", Comments: "design approved with waiver",
+		Outputs: map[string]string{"design_waiver_reason": "acceptance run: UI prototype not required"},
+	}); err != nil {
+		t.Fatalf("design_review approve failed (%d): %v", status, err)
+	}
+	rec = postBranchStepComplete(t, s, workspaceID, "task-anchor-rework", map[string]string{
+		"scale_verdict": "batched",
+		"delivery_plan": samplePlanJSON(),
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("scale_gate completion must be 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = postBranchStepComplete(t, s, workspaceID, "task-anchor-rework", map[string]string{
+		"contract_artifacts": "schema + error codes committed",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("contract_batch completion must be 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// The rework edge forwards the OUTPUT side (P1-1), so the human review's
+	// anchor view is empty until contract_batch re-emits the field. That is
+	// fail-closed: approving still refuses the freeze because the anchor
+	// chain falls back to the malformed requirement_draft output. (The
+	// previous edge forwarded the stale INPUT snapshot instead, letting a
+	// reviewer approve anchors the freeze would not consume.)
+	if status, err := approveContractReview(t, s, workspaceID, "task-anchor-rework"); err == nil {
+		t.Fatalf("approving with an unrepaired malformed anchor snapshot must refuse the freeze (got status %d)", status)
+	}
+
+	// Request changes → contract_batch re-emits CORRECTED requirement_items
+	// as its OUTPUT (now that the template declares it), then approve → the
+	// freeze succeeds and carries the reworked anchors.
+	if _, status, err := s.submitTaskWorkflowReview(httptest.NewRequest(http.MethodPost, "/", nil), workspaceID, "sample", "task-anchor-rework", workflowReviewBody{
+		Decision: "request_changes", Comments: "requirement_items malformed; re-emit as structured output",
+	}); err != nil {
+		t.Fatalf("contract_review request_changes failed (%d): %v", status, err)
+	}
+	rec = postBranchStepComplete(t, s, workspaceID, "task-anchor-rework", map[string]string{
+		"contract_artifacts": "schema + error codes committed (rework)",
+		"requirement_items":  requirementItemsJSON(),
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reworked contract_batch completion must accept the requirement_items output, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// The reworked output must flow to the human review through the re-mapped
+	// edge (P1-1): the reviewer sees exactly what the freeze will consume.
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	run := runForTask(t, s, workspaceID, "task-anchor-rework")
+	instances, err := wfStore.ListStepInstances(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reviewInput string
+	for _, inst := range instances {
+		if inst.StepID == "contract_review" {
+			reviewInput = inst.InputValues["requirement_items"]
+		}
+	}
+	if !strings.Contains(reviewInput, "session expiry clears local state") {
+		t.Fatalf("contract_review must receive the REWORKED requirement_items output, got %q", reviewInput)
+	}
+
+	if status, err := approveContractReview(t, s, workspaceID, "task-anchor-rework"); err != nil {
+		t.Fatalf("contract_review approve after rework failed (%d): %v", status, err)
+	}
+	record, _, ok, err := wfStore.LoadFrozenPlanForRun("sample", run.ID)
+	if err != nil || !ok {
+		t.Fatalf("approve after rework must freeze the plan: ok=%v err=%v", ok, err)
+	}
+	version, vOK := record.Current()
+	if !vOK {
+		t.Fatalf("frozen record must carry a current version: %+v", record)
+	}
+	if len(version.Plan.RequirementItems) != 2 || version.Plan.RequirementItems[0].ID != "uc-1" || version.Plan.RequirementItems[0].Text != "session expiry clears local state" {
+		t.Fatalf("the frozen plan must carry the REWORKED anchors, got %+v", version.Plan.RequirementItems)
+	}
+	// The malformed requirement_draft snapshot must not leak into the freeze.
+	for _, item := range version.Plan.RequirementItems {
+		if strings.HasPrefix(item.Text, "uc-") {
+			t.Fatalf("frozen anchors must not come from the malformed bare-array snapshot: %+v", item)
+		}
+	}
+	_ = baseCommit
+}
+
 // TestFormalEntryChainFreezesPlanAndDrivesPlannedWaves is the mandated
 // end-to-end chain: requirement_review → scale_gate → contract_batch →
 // contract_review approve → wave 1 → dependency-unlocked wave 2 → join, all

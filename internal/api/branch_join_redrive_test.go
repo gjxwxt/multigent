@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/gitworktree"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
@@ -452,4 +453,164 @@ func TestManualStartReactivatesFailedWorkflowRunOnItsStep(t *testing.T) {
 		t.Fatalf("the re-activated step instance must be pending again, got %+v", instances)
 	}
 	_ = childInstances
+}
+
+// TestManualStartBusySchedulerSessionQueuesViaAttention is the S2 hardening
+// batch 2 regression for the run4 finding (qa recovery needed TWO /start
+// calls). The manual-start lever re-activates the failed run and then spawns
+// `multigent run --task` fire-and-forget; a live scheduler interaction
+// session holds the agent's CLI lock, so the spawned process exited
+// immediately ("agent is busy in scheduler session from scheduler") AFTER the
+// API had already reported ok+pid — the manual start silently did nothing
+// (managed-manual-task log, 2026-09-26T07:03:17Z). The fix checks the same
+// interaction lock on the API side and falls back to the platform's own
+// busy-path semantics: record an attention signal and fire the task trigger
+// so the session-holding scheduler cycle picks the task up itself, with an
+// honest queued_via_attention response.
+func TestManualStartBusySchedulerSessionQueuesViaAttention(t *testing.T) {
+	s, workspaceID := newBranchJoinHTTPServer(t)
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	// A single agent_task step is the shape the lever owns.
+	def := entity.WorkflowDefinition{
+		ID: "wf-busy-recovery", Name: "busy recovery", Version: 1, Scope: "workspace", StartStepID: "work",
+		Steps: []entity.WorkflowStep{{
+			ID: "work", Type: "agent_task", Title: "work", ActorRole: "pm-agent",
+		}},
+	}
+	if err := wfStore.SaveDefinition(&def); err != nil {
+		t.Fatal(err)
+	}
+	task := &entity.Task{ID: "task-busy-recovery", Title: "busy recovery", Status: entity.TaskStatusInProgress,
+		Priority: 2, Assignee: "pm", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := s.ts.AddTask("sample", "pm", task); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := wfStore.StartRun("sample", task.ID, def.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wfStore.CompleteAndAdvance("sample", task.ID, "agent died mid-step", "", nil, "failed"); err != nil {
+		t.Fatalf("fail the agent step: %v", err)
+	}
+
+	// The fixture worker runs on the "human" model so the sandbox/readiness
+	// ladder is a no-op and the test isolates exactly the interaction-lock
+	// behavior (the run4 agent had a configured runtime; the collision is
+	// orthogonal to readiness).
+	if err := s.controlDB.UpsertAgentWorker(controldb.AgentWorker{
+		ID: "aw-pm", WorkspaceID: workspaceID, Name: "pm", DisplayName: "pm",
+		Model: "human", Status: "available",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339), UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Enable attention on the pm membership so the fallback can record a
+	// signal (the fixture seeder leaves it disabled).
+	membership, ok, err := s.controlDB.ProjectMembershipByID(workspaceID, "pm-sample-pm")
+	if err != nil || !ok {
+		t.Fatalf("membership lookup: ok=%v err=%v", ok, err)
+	}
+	membership.AttentionEnabled = true
+	membership.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := s.controlDB.UpsertProjectMembership(membership); err != nil {
+		t.Fatal(err)
+	}
+
+	// A LIVE scheduler interaction session on the agent: exactly what the
+	// first run4 /start collided with (heartbeat PID was 0, so the existing
+	// ladders passed and the doomed spawn slipped through).
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := s.controlDB.CreateInteractionSession(controldb.InteractionSession{
+		ID: "sess-busy-fixture", WorkspaceID: workspaceID, AgentWorkerID: "aw-pm",
+		ProjectID: "sample", AgentID: "pm", SourceKind: "scheduler", SourceChannel: "scheduler",
+		ActorType: "system", ActorID: "scheduler", Status: "active",
+		LockReason: "running_task", MetadataJSON: "{}", CreatedAt: now, UpdatedAt: now, LastActivityAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stub the scheduler spawn with a binary that exits busy immediately —
+	// the shape the doomed run4 spawn had. With the fix in place the API must
+	// never reach this spawn; without the busy check (reverse validation) the
+	// spawn succeeds and the API returns the ok+pid lie this regression
+	// forbids.
+	stub := filepath.Join(t.TempDir(), "stub-multigent")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s.sched = newSchedulerManager(t.TempDir())
+	s.sched.binPath = stub
+
+	req := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/"+task.ID+"/start", "admin", nil)
+	req.SetPathValue("name", "sample")
+	req.SetPathValue("taskId", task.ID)
+	rec := httptest.NewRecorder()
+	s.handleStartProjectTask(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("manual start under a live scheduler session must queue via attention, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Status string `json:"status"`
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "queued_via_attention" {
+		t.Fatalf("response must be honest about the attention hand-off, got status %q body %s", resp.Status, rec.Body.String())
+	}
+	// The run must STILL be re-activated (the lever's own contract is intact).
+	run, _, err := wfStore.RunForTask("sample", task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != "active" || run.ActiveStepID != "work" {
+		t.Fatalf("failed agent step must still be re-activated by manual start, got %q@%q", run.Status, run.ActiveStepID)
+	}
+	// The attention hand-off must be durable: a pending task_assigned signal
+	// for this agent/task exists (the session-holding cycle polls these).
+	signals, err := s.controlDB.ListAttentionSignals(controldb.AttentionSignalFilter{
+		WorkspaceID: workspaceID,
+		Statuses:    []string{"pending"},
+		Limit:       50,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundSignal := false
+	for _, sig := range signals {
+		if sig.SourceKind == "task" && sig.SourceID == task.ID && strings.Contains(strings.ToLower(sig.Reason), "task_assigned") {
+			foundSignal = true
+		}
+	}
+	if !foundSignal {
+		t.Fatalf("manual start under a live scheduler session must record a pending attention signal for the hand-off, got %+v", signals)
+	}
+
+	// A STALE scheduler session (idle beyond the shared 2-minute recovery
+	// window) must NOT take the attention fallback: the spawn path is allowed
+	// through exactly like the CLI's own stale recovery would.
+	stale := time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339)
+	row, _, err := s.controlDB.ActiveInteractionSessionForWorker(workspaceID, "aw-pm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	row.UpdatedAt = stale
+	row.LastActivityAt = stale
+	if err := s.controlDB.UpdateInteractionSession(row); err != nil {
+		t.Fatal(err)
+	}
+	// Mark the first signal handled so the second /start records a fresh one.
+	for _, sig := range signals {
+		if sig.SourceKind == "task" && sig.SourceID == task.ID {
+			_ = s.controlDB.MarkAttentionSignalStatus(workspaceID, sig.ID, "handled")
+		}
+	}
+	req2 := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/tasks/"+task.ID+"/start", "admin", nil)
+	req2.SetPathValue("name", "sample")
+	req2.SetPathValue("taskId", task.ID)
+	rec2 := httptest.NewRecorder()
+	s.handleStartProjectTask(rec2, req2)
+	if rec2.Code == http.StatusConflict && strings.Contains(rec2.Body.String(), "busy in a scheduler session") {
+		t.Fatalf("a stale scheduler session must not block the manual start: %d %s", rec2.Code, rec2.Body.String())
+	}
 }

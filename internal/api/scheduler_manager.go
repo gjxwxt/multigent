@@ -879,6 +879,47 @@ func (s *Server) handleStartProjectTask(w http.ResponseWriter, r *http.Request) 
 			s.jsonErrorCode(w, http.StatusConflict, ErrCodeRuntimeNotReady, err.Error())
 			return
 		}
+		// S2 hardening batch 2 (run4 finding): a live scheduler session holds
+		// the agent's interaction lock, so spawning the local run now would
+		// silently exit busy AFTER a fake ok+pid response. Fall back to the
+		// platform's own busy-path semantics: record the attention signal and
+		// fire the trigger so the session-holding scheduler cycle picks the
+		// task up itself. When attention is unavailable (no directory entry or
+		// attention disabled) or no trigger is configured, refuse honestly
+		// instead of either lying with a pid or lying with a queued status.
+		if errors.Is(err, errAgentBusySchedulerSession) {
+			signalID := s.recordTaskAttentionSignal(workspaceID, project, agent, task, "task_assigned")
+			if signalID == "" {
+				s.jsonErrorCode(w, http.StatusConflict, ErrCodeSchedulerWakeupFailed, err.Error()+"; manual start not queued: agent attention is unavailable, retry after the scheduler session ends")
+				return
+			}
+			if s.triggers != nil {
+				s.triggers.Fire(project, agent, entity.TriggerOnTask, "manual start while busy: task "+task.ID)
+			}
+			s.auditLog(auditLogInput{
+				Action:       "task.start",
+				ResourceType: "task",
+				ResourceID:   project + "/" + agent + "/" + task.ID,
+				Summary:      "Manual start queued via attention signal (agent busy in scheduler session)",
+				After: map[string]any{
+					"project":   project,
+					"agent":     agent,
+					"taskId":    task.ID,
+					"signalId":  signalID,
+					"queuedVia": "attention",
+				},
+				Request: r,
+			})
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":     true,
+				"status": "queued_via_attention",
+				"detail": "the agent is busy in a scheduler session; the start was queued as an attention signal and the running scheduler cycle will pick the task up (the previous behavior reported ok+pid while the spawned run silently exited busy — run4 finding)",
+				"taskId": task.ID,
+				"agent":  agent,
+			})
+			return
+		}
 		s.jsonErrorCode(w, http.StatusInternalServerError, ErrCodeSchedulerWakeupFailed, err.Error())
 		return
 	}
@@ -892,6 +933,15 @@ func (s *Server) handleStartProjectTask(w http.ResponseWriter, r *http.Request) 
 var (
 	errAgentAlreadyRunning = errors.New("agent is already running")
 	errRuntimeNotReady     = errors.New("runtime not ready")
+	// errAgentBusySchedulerSession: a live scheduler interaction session holds
+	// the agent's CLI interaction lock, so a locally spawned `multigent run
+	// --task` would exit immediately with "agent is busy in scheduler session"
+	// — invisible to this fire-and-forget spawn. The run4 rehearsal hit
+	// exactly that: manual start returned ok+pid while the step never ran,
+	// and only a SECOND manual start (after the scheduler session ended)
+	// drove it. Callers convert this into the attention-signal fallback so
+	// the session-holding scheduler cycle picks the task up itself.
+	errAgentBusySchedulerSession = errors.New("agent is busy in a scheduler session")
 )
 
 // acquireAgentStartGate serializes task/wakeup starts per agent (P2 soak
@@ -952,6 +1002,31 @@ func (s *Server) startProjectTaskDirect(workspaceID, project, agent string, task
 	}
 	if hb.PID > 0 && hb.LastWakeupStatus == "running" && processAlive(hb.PID) {
 		return 0, "", fmt.Errorf("%w: agent %s/%s is already running", errAgentAlreadyRunning, project, agent)
+	}
+	// S2 hardening batch 2 (run4 finding): a live scheduler interaction
+	// session holds the agent's CLI interaction lock — the heartbeat PID
+	// ladder above cannot see it — so a locally spawned `multigent run
+	// --task` would exit immediately with "agent is busy in scheduler
+	// session" AFTER this function reported ok+pid, and the manual start
+	// silently did nothing (the run4 qa recovery needed two /start calls).
+	// Check the same lock here, before readiness: the attention fallback
+	// needs no sandbox (the session-holding scheduler cycle runs the task in
+	// its own environment), and a stale session beyond the shared recovery
+	// window passes through exactly like the CLI's own stale recovery. The
+	// stale rule is shared with the CLI (internal/db) so both sides cannot
+	// disagree about recoverability.
+	if s.controlDB != nil {
+		var activeInteraction controldb.InteractionSession
+		var interactionFound bool
+		if workerID, _ := s.agentWorkerContextForProjectAgent(workspaceID, project, agent); strings.TrimSpace(workerID) != "" {
+			activeInteraction, interactionFound, _ = s.controlDB.ActiveInteractionSessionForWorker(workspaceID, workerID)
+		} else {
+			activeInteraction, interactionFound, _ = s.controlDB.ActiveInteractionSession(workspaceID, project, agent)
+		}
+		if interactionFound && !controldb.ShouldRecoverStaleInteraction(activeInteraction, "scheduler", "running_task") {
+			return 0, "", fmt.Errorf("%w: agent %s/%s is busy in %s session from %s (since %s)",
+				errAgentBusySchedulerSession, project, agent, activeInteraction.SourceKind, activeInteraction.SourceChannel, strings.TrimSpace(activeInteraction.UpdatedAt))
+		}
 	}
 	meta, err := s.agentMetaForProjectMember(workspaceID, project, agent)
 	if err != nil {
