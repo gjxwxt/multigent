@@ -768,7 +768,42 @@
       "emerald": "綠色",
       "rose": "玫紅"
     },
-    "autoLayout": "一鍵整理"
+    "autoLayout": "一鍵整理",
+    "acceptance": {
+      "loading": "正在讀取驗收表…",
+      "loadFailed": "驗收表讀取失敗",
+      "notFrozenTitle": "交付計畫尚未凍結",
+      "notFrozenBody": "執行已存在，但契約評審尚未批准凍結交付計畫；批准凍結後此處顯示驗收表。",
+      "noRunBody": "該任務尚未啟動工作流執行，因此還沒有交付計畫。",
+      "frozenTitle": "交付計畫已凍結",
+      "digest": "摘要",
+      "approvedBy": "批准人",
+      "noRows": "凍結計畫中沒有工作包物化記錄。",
+      "emptyCell": "—",
+      "colWp": "工作包 / 波次",
+      "colRun": "子執行",
+      "colBranch": "分支",
+      "colDelivery": "交付 SHA",
+      "colIntegration": "整合候選",
+      "colQa": "QA",
+      "colTask": "任務",
+      "qaBaselineOk": "基線在檔",
+      "signoffs": "人工簽核",
+      "readOnlyNote": "唯讀檢視：資料來自凍結計畫記錄，無操作入口。"
+    },
+    "freezeRejection": {
+      "title": "凍結拒收定位",
+      "field": "欄位",
+      "expected": "期望形狀",
+      "fix": "修復指引",
+      "resubmit": "走 request_changes 重發後重新批准即可，無需其他操作。"
+    },
+    "qa": {
+      "surfaceTitle": "QA 測量面說明",
+      "surfaceLinear": "線性（根）QA 閘門始終測工作區絕對 git 狀態（整個工作區），不做基線增量——基線增量屬於分支交付閘門。未聲明的改動都會被拒。",
+      "surfaceNone": "宣告 touched_paths 為 none 僅在報告時工作區確實乾淨時成立；閘門按同一絕對測量面核驗，虛報會 fail。",
+      "surfaceBranch": "分支交付閘門（波次 join）測該分支自己的工作樹增量，且允許交付業務代碼；線性 QA 仍禁止業務代碼，只允許測試/夾具/探測腳本。"
+    }
   },
   "projectSettings": {
     "subtitle": "專案設定與提示詞管理。",

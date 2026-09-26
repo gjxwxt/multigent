@@ -9,6 +9,7 @@ import { ClipboardCopy, ExternalLink, GitPullRequest, Globe, Info, MessageSquare
 import { cn } from '../../lib/cn'
 import { apiDelete, apiFetch, apiPost, apiPut } from '../../lib/api'
 import { copyTextToClipboard } from '../../lib/clipboard'
+import { describeFreezeRejection } from '../../lib/plan-freeze-errors'
 import { useFormatDateTime } from '../../lib/format-datetime'
 import { useApiJson } from '../../lib/use-api'
 import { useAuth } from '../../lib/auth'
@@ -1202,6 +1203,7 @@ export function WorkflowRuntimePanel({
   const decisionOptions = decisionField ? workflowDecisionOptions(decisionField.description) : []
   const usesDefaultReviewButtons = !decisionField || decisionOptions.length === 0 || isStandardReviewDecisionOptions(decisionOptions)
   const editableOutputFields = (step.outputFields ?? []).filter((field) => field.name !== 'decision')
+  const declaresTouchedPaths = (step.outputFields ?? []).some((field) => field.name === 'touched_paths')
   const reviewInputClass = (fieldName: string) => cn(
     'mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm text-neutral-900 outline-none dark:bg-zinc-900 dark:text-zinc-100',
     missingReviewField === fieldName
@@ -1295,6 +1297,7 @@ export function WorkflowRuntimePanel({
                   className={cn(reviewInputClass('comments'), 'resize-y')}
                 />
               )}
+              {declaresTouchedPaths && <QAMeasurementSurfaceNote />}
               {decisionField && !usesDefaultReviewButtons && (
                 <label className="block">
                   <WorkflowFieldTitle fieldName={decisionField.name} description={decisionField.description} required />
@@ -1413,7 +1416,12 @@ export function WorkflowRuntimePanel({
                   </div>
                 </div>
               )}
-              {reviewErr && <p className="text-sm text-red-600 dark:text-red-400">{reviewErr}</p>}
+              {reviewErr && (
+                <div className="space-y-1">
+                  <p className="text-sm text-red-600 dark:text-red-400">{reviewErr}</p>
+                  <FreezeRejectionHint message={reviewErr} />
+                </div>
+              )}
               <div className="flex justify-end gap-2">
                 {usesDefaultReviewButtons ? (
                   <>
@@ -2690,5 +2698,48 @@ function CopyRunResumeCmd({ model, sessionId, agent, project }: { model?: string
         ? <span className="text-[10px] font-medium text-emerald-600 dark:text-emerald-400">✓</span>
         : <ClipboardCopy className="size-3.5" strokeWidth={2} />}
     </button>
+  )
+}
+
+// Structured transparency for delivery-plan freeze refusals (operability
+// slice 1): the server message already fails closed with field-level detail;
+// this only re-renders it as which-field / expected-shape / one-line-fix.
+// Unrecognized messages pass through untouched (null → no extra block), and
+// the resubmit path remains the existing request_changes review channel —
+// no new buttons, no new logic.
+function FreezeRejectionHint({ message }: { message: string }) {
+  const { t } = useTranslation()
+  const hint = describeFreezeRejection(message)
+  if (!hint) return null
+  return (
+    <div className="rounded-lg border border-amber-200 bg-amber-50/70 px-2.5 py-2 text-xs leading-relaxed text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-300">
+      <p className="font-semibold">{t('workflows.freezeRejection.title', { defaultValue: '冻结拒收定位' })}</p>
+      <p className="mt-0.5"><span className="font-medium">{t('workflows.freezeRejection.field', { defaultValue: '字段' })}:</span> <span className="font-mono">{hint.field}</span></p>
+      <p className="mt-0.5"><span className="font-medium">{t('workflows.freezeRejection.expected', { defaultValue: '期望形状' })}:</span> {hint.expected}</p>
+      <p className="mt-0.5"><span className="font-medium">{t('workflows.freezeRejection.fix', { defaultValue: '修复指引' })}:</span> {hint.fix}</p>
+      <p className="mt-1 text-[11px] text-amber-700/80 dark:text-amber-400/80">{t('workflows.freezeRejection.resubmit', { defaultValue: '走 request_changes 重发后重新批准即可，无需其他操作。' })}</p>
+    </div>
+  )
+}
+
+// Explainer copy for the QA measurement surface (operability slice 1, copy
+// only): the LINEAR (root) QA gate ALWAYS measures the ABSOLUTE workspace
+// git status — the whole worktree, never a baseline delta (store.go:3021-3025
+// deliberately skips the baseline surface there; baseline delta belongs to
+// the branch delivery gate, checkBranchQAGate). So "touched_paths: none"
+// only holds when the workspace is genuinely clean, and undeclared edits
+// fail either way. This block renders explanatory text only; the gate
+// itself is untouched.
+function QAMeasurementSurfaceNote() {
+  const { t } = useTranslation()
+  return (
+    <div className="rounded-lg border border-neutral-200 bg-neutral-50/70 px-2.5 py-2 text-xs leading-relaxed text-neutral-600 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-400">
+      <p className="font-semibold text-neutral-700 dark:text-zinc-300">{t('workflows.qa.surfaceTitle', { defaultValue: 'QA 测量面说明' })}</p>
+      <ul className="mt-1 list-disc space-y-0.5 pl-4">
+        <li>{t('workflows.qa.surfaceLinear', { defaultValue: '线性（根）QA 闸门始终测工作区绝对 git 状态（整个工作区），不做基线增量——基线增量属于分支交付闸门。未声明的改动都会被拒。' })}</li>
+        <li>{t('workflows.qa.surfaceNone', { defaultValue: '声明 touched_paths 为 none 仅在报告时工作区确实干净时成立；闸门按同一绝对测量面核验，虚报会 fail。' })}</li>
+        <li>{t('workflows.qa.surfaceBranch', { defaultValue: '分支交付闸门（波次 join）测该分支自己的工作树增量，且允许交付业务代码；线性 QA 仍禁止业务代码，只允许测试/夹具/探测脚本。' })}</li>
+      </ul>
+    </div>
   )
 }

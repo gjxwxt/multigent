@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { ExternalLink, GitBranch, Globe, Play, RefreshCw, Sparkles, X } from 'lucide-react'
 import { PreviewDrawer } from '../../components/task/PreviewDrawer'
 import { WorkflowBoard } from '../../components/workflow/WorkflowBoard'
+import { DeliveryPlanAcceptanceTable } from '../../components/workflow/DeliveryPlanAcceptanceTable'
 import { ConversationLog } from '../../components/ui/ConversationLog'
 import { PlaceholderCard } from '../../components/ui/PlaceholderCard'
 import {
@@ -670,6 +671,11 @@ export default function ProjectTaskFollowPage() {
                 // swallow the rejection so it doesn't surface as unhandled.
                 onSubmitReview={(decision) => submitWorkflowReview(decision).catch(() => {})}
               />
+              {/* Read-only acceptance table: consumes the frozen delivery-plan
+                  record (GET delivery-plan) — no write entry points. */}
+              {displayTask && (
+                <DeliveryPlanAcceptanceTable project={displayTask.project} taskId={displayTask.id} reloadKey={reloadKey} />
+              )}
               {isDesignGate && (
                 <section className="mx-4 mb-4 rounded-xl border border-neutral-200 bg-white px-4 py-4 dark:border-zinc-700 dark:bg-zinc-950">
                   <p className="text-sm text-neutral-700 dark:text-zinc-300">{activeStep?.description}</p>

@@ -864,7 +864,40 @@
       "highRiskFailedAlert": "High-risk test items have failed. Merge to main is strictly blocked. Click 'Request changes' to rework.",
       "highRiskWaiverRequired": "Unpassed or blocked high-risk items require explicit per-item human sign-off:",
       "highRiskBlockedTitle": "High-risk test failed; merge blocked",
-      "waiverPlaceholder": "Explain manual verification / waiver rationale (required)"
+      "waiverPlaceholder": "Explain manual verification / waiver rationale (required)",
+      "surfaceTitle": "QA measurement surface",
+      "surfaceLinear": "Linear (root) QA measures the ABSOLUTE workspace git status — always the whole worktree, never a baseline delta (that surface belongs to the branch delivery gate). Undeclared edits fail.",
+      "surfaceNone": "Declaring touched_paths as none only holds when the workspace is genuinely clean at report time; the gate verifies against the same absolute surface, so a false claim fails.",
+      "surfaceBranch": "The branch delivery gate (wave join) measures that branch's own worktree delta and allows delivering business code; linear QA still forbids business code — tests, fixtures and probe scripts only."
+    },
+    "acceptance": {
+      "loading": "Loading acceptance table…",
+      "loadFailed": "Failed to load the acceptance table",
+      "notFrozenTitle": "Delivery plan not frozen yet",
+      "notFrozenBody": "The run exists, but the contract review has not approved a frozen delivery plan yet; the acceptance table appears here once frozen.",
+      "noRunBody": "This task has no workflow run yet, so there is no delivery plan.",
+      "frozenTitle": "Delivery plan frozen",
+      "digest": "digest",
+      "approvedBy": "approved by",
+      "noRows": "No work-package materializations in the frozen plan.",
+      "emptyCell": "—",
+      "colWp": "Work package / wave",
+      "colRun": "Child run",
+      "colBranch": "Branch",
+      "colDelivery": "Delivery SHA",
+      "colIntegration": "Integration candidate",
+      "colQa": "QA",
+      "colTask": "Task",
+      "qaBaselineOk": "baseline on file",
+      "signoffs": "Human sign-offs",
+      "readOnlyNote": "Read-only view: data comes from the frozen plan record; no actions here."
+    },
+    "freezeRejection": {
+      "title": "Freeze refusal locator",
+      "field": "Field",
+      "expected": "Expected shape",
+      "fix": "Fix",
+      "resubmit": "Resend via request_changes, then approve again — no other action needed."
     }
   },
   "projectSettings": {

@@ -768,7 +768,42 @@
       "emerald": "グリーン",
       "rose": "ローズ"
     },
-    "autoLayout": "自動整列"
+    "autoLayout": "自動整列",
+    "acceptance": {
+      "loading": "受け入れ表を読み込み中…",
+      "loadFailed": "受け入れ表の読み込みに失敗しました",
+      "notFrozenTitle": "デリバリー計画は未凍結です",
+      "notFrozenBody": "実行は存在しますが、契約レビューがまだ凍結を承認していません。承認するとここに受け入れ表が表示されます。",
+      "noRunBody": "このタスクにはまだワークフロー実行がなく、デリバリー計画もありません。",
+      "frozenTitle": "デリバリー計画は凍結済み",
+      "digest": "ダイジェスト",
+      "approvedBy": "承認者",
+      "noRows": "凍結された計画には作業パッケージの実体化記録がありません。",
+      "emptyCell": "—",
+      "colWp": "作業パッケージ / ウェーブ",
+      "colRun": "子実行",
+      "colBranch": "ブランチ",
+      "colDelivery": "デリバリー SHA",
+      "colIntegration": "統合候補",
+      "colQa": "QA",
+      "colTask": "タスク",
+      "qaBaselineOk": "ベースライン保管済み",
+      "signoffs": "人事サインオフ",
+      "readOnlyNote": "閲覧専用ビュー：データは凍結済み計画レコードから取得され、操作入口はありません。"
+    },
+    "freezeRejection": {
+      "title": "凍結拒否の特定",
+      "field": "フィールド",
+      "expected": "期待される形状",
+      "fix": "修正ガイド",
+      "resubmit": "request_changes で再送信し、再度承認してください — それ以外の操作は不要です。"
+    },
+    "qa": {
+      "surfaceTitle": "QA 測定面の説明",
+      "surfaceLinear": "線形（ルート）QA ゲートはワークスペースの絶対的な git 状態を常に測定します（ワークツリー全体）。ベースライン差分は使いません（それはブランチ納品ゲートの測定面です）。未申告の変更は拒否されます。",
+      "surfaceNone": "touched_paths を none と申告できるのは、報告時点でワークスペースが実際にクリーンな場合のみです。ゲートは同じ絶対測定面で検証するため虚偽の申告は失敗します。",
+      "surfaceBranch": "ブランチ納品ゲート（ウェーブ join）はそのブランチ自身のワークツリー差分を測定し、業務コードの納品を許容します。線形 QA は引き続き業務コードを禁止し、テスト/フィクスチャ/プローブスクリプトのみ許可します。"
+    }
   },
   "projectSettings": {
     "subtitle": "プロジェクト設定とプロンプト管理。",

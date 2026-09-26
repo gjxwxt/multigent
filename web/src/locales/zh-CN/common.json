@@ -864,7 +864,40 @@
       "highRiskFailedAlert": "存在高风险测试失败项，准入主干已被系统硬阻断。请点击「需要修改」打回修复。",
       "highRiskWaiverRequired": "存在未执行或阻塞的高风险项，必须逐项填写特批豁免理由后方可批准：",
       "highRiskBlockedTitle": "存在高风险失败项，禁止准入",
-      "waiverPlaceholder": "填写该高风险项的人工豁免/验证理由（必填）"
+      "waiverPlaceholder": "填写该高风险项的人工豁免/验证理由（必填）",
+      "surfaceTitle": "QA 测量面说明",
+      "surfaceLinear": "线性（根）QA 闸门始终测工作区绝对 git 状态（整个工作区），不做基线增量——基线增量属于分支交付闸门。未声明的改动都会被拒。",
+      "surfaceNone": "声明 touched_paths 为 none 仅在报告时工作区确实干净时成立；闸门按同一绝对测量面核验，虚报会 fail。",
+      "surfaceBranch": "分支交付闸门（波次 join）测该分支自己的工作树增量，且允许交付业务代码；线性 QA 仍禁止业务代码，只允许测试/夹具/探测脚本。"
+    },
+    "acceptance": {
+      "loading": "正在读取验收表…",
+      "loadFailed": "验收表读取失败",
+      "notFrozenTitle": "交付计划尚未冻结",
+      "notFrozenBody": "运行已存在，但契约评审尚未批准冻结交付计划；批准冻结后此处显示验收表。",
+      "noRunBody": "该任务尚未启动工作流运行，因此还没有交付计划。",
+      "frozenTitle": "交付计划已冻结",
+      "digest": "摘要",
+      "approvedBy": "批准人",
+      "noRows": "冻结计划中没有工作包物化记录。",
+      "emptyCell": "—",
+      "colWp": "工作包 / 波次",
+      "colRun": "子运行",
+      "colBranch": "分支",
+      "colDelivery": "交付 SHA",
+      "colIntegration": "集成候选",
+      "colQa": "QA",
+      "colTask": "任务",
+      "qaBaselineOk": "基线在档",
+      "signoffs": "人工签核",
+      "readOnlyNote": "只读视图：数据来自冻结计划记录，无操作入口。"
+    },
+    "freezeRejection": {
+      "title": "冻结拒收定位",
+      "field": "字段",
+      "expected": "期望形状",
+      "fix": "修复指引",
+      "resubmit": "走 request_changes 重发后重新批准即可，无需其他操作。"
     }
   },
   "projectSettings": {
