@@ -898,6 +898,11 @@
       "expected": "期望形状",
       "fix": "修复指引",
       "resubmit": "走 request_changes 重发后重新批准即可，无需其他操作。"
+    },
+    "release": {
+      "emptyOutputsTitle": "release 产物未记录",
+      "emptyOutputsBody": "该 release 步骤已完成，但 agent 输出未记录（为空或缺失）：tag / deployed_version / health_status 均无。",
+      "emptyOutputsPointers": "产物指针以现有记录为准：合并提交见上一步 pr_open_and_merge 的 merged_sha 输出；运行 journal 见部署环境服务日志与任务工作流记录。"
     }
   },
   "projectSettings": {

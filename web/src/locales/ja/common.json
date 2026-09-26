@@ -803,6 +803,11 @@
       "surfaceLinear": "線形（ルート）QA ゲートはワークスペースの絶対的な git 状態を常に測定します（ワークツリー全体）。ベースライン差分は使いません（それはブランチ納品ゲートの測定面です）。未申告の変更は拒否されます。",
       "surfaceNone": "touched_paths を none と申告できるのは、報告時点でワークスペースが実際にクリーンな場合のみです。ゲートは同じ絶対測定面で検証するため虚偽の申告は失敗します。",
       "surfaceBranch": "ブランチ納品ゲート（ウェーブ join）はそのブランチ自身のワークツリー差分を測定し、業務コードの納品を許容します。線形 QA は引き続き業務コードを禁止し、テスト/フィクスチャ/プローブスクリプトのみ許可します。"
+    },
+    "release": {
+      "emptyOutputsTitle": "release 成果物は未記録",
+      "emptyOutputsBody": "release ステップは完了しましたが、エージェント出力は記録されていません（空または欠落）：tag / deployed_version / health_status がありません。",
+      "emptyOutputsPointers": "成果物のポインタは既存レコードに従います：マージコミットは前の pr_open_and_merge ステップの merged_sha 出力を参照。実行ジャーナルはデプロイ環境のサービスログとタスクワークフローレコードを参照。"
     }
   },
   "projectSettings": {

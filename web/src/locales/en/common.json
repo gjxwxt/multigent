@@ -898,6 +898,11 @@
       "expected": "Expected shape",
       "fix": "Fix",
       "resubmit": "Resend via request_changes, then approve again — no other action needed."
+    },
+    "release": {
+      "emptyOutputsTitle": "Release artifacts not recorded",
+      "emptyOutputsBody": "The release step completed, but the agent output was not recorded (empty or missing): tag / deployed_version / health_status are absent.",
+      "emptyOutputsPointers": "Artifact pointers follow existing records: the merge commit is the merged_sha output of the preceding pr_open_and_merge step; the run journal lives in the deployment-environment service logs and the task workflow records."
     }
   },
   "projectSettings": {

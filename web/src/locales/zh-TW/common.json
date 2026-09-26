@@ -803,6 +803,11 @@
       "surfaceLinear": "線性（根）QA 閘門始終測工作區絕對 git 狀態（整個工作區），不做基線增量——基線增量屬於分支交付閘門。未聲明的改動都會被拒。",
       "surfaceNone": "宣告 touched_paths 為 none 僅在報告時工作區確實乾淨時成立；閘門按同一絕對測量面核驗，虛報會 fail。",
       "surfaceBranch": "分支交付閘門（波次 join）測該分支自己的工作樹增量，且允許交付業務代碼；線性 QA 仍禁止業務代碼，只允許測試/夾具/探測腳本。"
+    },
+    "release": {
+      "emptyOutputsTitle": "release 產物未記錄",
+      "emptyOutputsBody": "該 release 步驟已完成，但 agent 輸出未記錄（為空或缺失）：tag / deployed_version / health_status 均無。",
+      "emptyOutputsPointers": "產物指標以現有記錄為準：合併提交見上一步 pr_open_and_merge 的 merged_sha 輸出；執行 journal 見部署環境服務日誌與任務工作流記錄。"
     }
   },
   "projectSettings": {

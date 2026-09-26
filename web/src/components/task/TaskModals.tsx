@@ -1563,6 +1563,27 @@ function WorkflowRecordCard({ record, step, run, actorLabels, project, taskID }:
             )}
           </div>
         )}
+        {!hasOutput && record.status === 'completed' && step && (step.outputFields ?? []).some((f) => ['tag', 'deployed_version', 'health_status'].includes(f.name)) && (
+          <div>
+            <p className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-neutral-400 dark:text-zinc-500">{t('workflows.detail.output')}</p>
+            {/* Release-artifact provenance (operability slice 2, read-only,
+                DEFENSIVE): as of 2026-09-26 the control DB holds zero release
+                steps completed with empty outputs (run4 recorded a full
+                triple: tag/deployed_version/health_status), so this branch is
+                a guard for a latent gap, not a fix for an observed one —
+                today an empty-outputs completion silently omits the whole
+                output section. If it ever happens, present the fact honestly
+                plus the pointers that DO exist (the merge commit recorded by
+                pr_open_and_merge, and the deployment-environment journal). No
+                write entry points; PushTag itself is out of scope by
+                directive. */}
+            <div className="rounded-lg border border-amber-200 bg-amber-50/60 px-2.5 py-2 text-xs leading-relaxed text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-300">
+              <p className="font-semibold">{t('workflows.release.emptyOutputsTitle', { defaultValue: 'release 产物未记录' })}</p>
+              <p className="mt-0.5">{t('workflows.release.emptyOutputsBody', { defaultValue: '该 release 步骤已完成，但 agent 输出未记录（为空或缺失）：tag / deployed_version / health_status 均无。' })}</p>
+              <p className="mt-1">{t('workflows.release.emptyOutputsPointers', { defaultValue: '产物指针以现有记录为准：合并提交见上一步 pr_open_and_merge 的 merged_sha 输出；运行 journal 见部署环境服务日志与任务工作流记录。' })}</p>
+            </div>
+          </div>
+        )}
       </div>}
     </div>
   )
