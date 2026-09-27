@@ -6,13 +6,15 @@ import (
 	"strings"
 )
 
-// pushEvidence is the SHA-accurate push state of the delivery branch
+// PushEvidence is the SHA-accurate push state of the delivery branch
 // (review round 3, item 2): a remote branch merely EXISTING is not push
 // evidence — it may sit at an older commit while the local delivery commit
 // is unpushed. RemoteHasBranch + RemoteSHA == LocalSHA is the only "pushed"
 // answer; the SHAs are surfaced so the failure message can tell the user
-// exactly what the remote is missing.
-type pushEvidence struct {
+// exactly what the remote is missing, and the proven pair is returned to
+// the API-side completion gate for the delivery SHA hand-off (the full
+// RemoteSHA is the machine-verified candidate anchor for QA).
+type PushEvidence struct {
 	RemoteHasBranch bool
 	RemoteSHA       string
 	LocalSHA        string
@@ -31,7 +33,7 @@ type pushEvidence struct {
 // guarantee (unresolvable base = error, never a silent success). Read-only and local: every git invocation
 // is `git -C dir`, no fetch, no push; failures return an error for the
 // caller to surface (unprovable is not delivered).
-func gitDeliveryEvidence(dir, baseRef, branchName string, env []string) (commitBeyondBase bool, push pushEvidence, err error) {
+func gitDeliveryEvidence(dir, baseRef, branchName string, env []string) (commitBeyondBase bool, push PushEvidence, err error) {
 	base := strings.TrimSpace(baseRef)
 	if base == "" {
 		base = "main"
@@ -46,18 +48,18 @@ func gitDeliveryEvidence(dir, baseRef, branchName string, env []string) (commitB
 	// baseline the task was created from.
 	out, err := exec.Command("git", "-C", dir, "rev-list", "--count", base+"..HEAD").CombinedOutput()
 	if err != nil {
-		return false, pushEvidence{}, fmt.Errorf("git rev-list %s..HEAD (base ref not resolvable): %v: %s", base, err, strings.TrimSpace(string(out)))
+		return false, PushEvidence{}, fmt.Errorf("git rev-list %s..HEAD (base ref not resolvable): %v: %s", base, err, strings.TrimSpace(string(out)))
 	}
 	commitBeyondBase = strings.TrimSpace(string(out)) != "0"
 	branch := strings.TrimSpace(branchName)
 	if branch == "" {
-		return commitBeyondBase, pushEvidence{}, nil
+		return commitBeyondBase, PushEvidence{}, nil
 	}
 	// Local branch tip — resolved via refs/heads/<branch>, not HEAD: a
 	// detached worktree must not silently compare a different ref.
 	localOut, err := exec.Command("git", "-C", dir, "rev-parse", "--verify", "refs/heads/"+branch).CombinedOutput()
 	if err != nil {
-		return commitBeyondBase, pushEvidence{}, fmt.Errorf("git rev-parse refs/heads/%s: %v: %s", branch, err, strings.TrimSpace(string(localOut)))
+		return commitBeyondBase, PushEvidence{}, fmt.Errorf("git rev-parse refs/heads/%s: %v: %s", branch, err, strings.TrimSpace(string(localOut)))
 	}
 	push.LocalSHA = strings.TrimSpace(string(localOut))
 	lsRemote := exec.Command("git", "-C", dir, "ls-remote", "--heads", "origin", branch)
@@ -75,7 +77,7 @@ func gitDeliveryEvidence(dir, baseRef, branchName string, env []string) (commitB
 	}
 	ls, err := lsRemote.CombinedOutput()
 	if err != nil {
-		return commitBeyondBase, pushEvidence{}, fmt.Errorf("git ls-remote: %v: %s", err, strings.TrimSpace(string(ls)))
+		return commitBeyondBase, PushEvidence{}, fmt.Errorf("git ls-remote: %v: %s", err, strings.TrimSpace(string(ls)))
 	}
 	if line := strings.TrimSpace(string(ls)); line != "" {
 		fields := strings.Fields(line)

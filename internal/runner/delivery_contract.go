@@ -75,7 +75,7 @@ func validateDeliveryEvidence(c deliveryContract, transcript, workspaceDir, base
 		}
 	}
 	if c.RequireGitCommit || c.RequirePush {
-		if violation := ValidateGitDeliveryEvidence(c, workspaceDir, baseCommit, baseBranch, branchName, nil); violation != "" {
+		if violation, _ := ValidateGitDeliveryEvidence(c, workspaceDir, baseCommit, baseBranch, branchName, nil); violation != "" {
 			return violation
 		}
 	}
@@ -87,16 +87,20 @@ func validateDeliveryEvidence(c deliveryContract, transcript, workspaceDir, base
 // 3): workflow branch tasks complete via the control plane
 // (completeRuntimeWorkflowBranch), not the runner, so the fan-out delivery
 // contract must be enforceable there too — same rules, same messages.
-func ValidateGitDeliveryEvidence(c deliveryContract, workspaceDir, baseCommit, baseBranch, branchName string, env []string) string {
+// The proven push evidence is returned alongside the violation so the
+// caller can hand the machine-verified candidate SHA to downstream
+// acceptance steps (delivery SHA hand-off): a non-empty violation means the
+// evidence was NOT proven and must be discarded.
+func ValidateGitDeliveryEvidence(c deliveryContract, workspaceDir, baseCommit, baseBranch, branchName string, env []string) (string, PushEvidence) {
 	fail := func(what, hint string) string {
 		return fmt.Sprintf("delivery contract unmet: %s (%s)", what, hint)
 	}
 	if !c.RequireGitCommit && !c.RequirePush {
-		return ""
+		return "", PushEvidence{}
 	}
 	wsDir := strings.TrimSpace(workspaceDir)
 	if wsDir == "" {
-		return fail("delivery contract requires a git workspace, run has none", "dispatch this task on a runtime node with a workspace mount")
+		return fail("delivery contract requires a git workspace, run has none", "dispatch this task on a runtime node with a workspace mount"), PushEvidence{}
 	}
 	// Review round 4 (P0-3): the resolver chain can fall back to paths that
 	// are NOT the task's delivery tree (agent dir, project workspace, project
@@ -104,7 +108,7 @@ func ValidateGitDeliveryEvidence(c deliveryContract, workspaceDir, baseCommit, b
 	// and could pass by accident. Require the workspace to actually be a git
 	// work tree; anything else fails closed.
 	if _, err := exec.Command("git", "-C", wsDir, "rev-parse", "--is-inside-work-tree").Output(); err != nil {
-		return fail("delivery contract requires a git workspace", fmt.Sprintf("resolved run directory %s is not a git work tree; refusing to measure evidence in the wrong tree", wsDir))
+		return fail("delivery contract requires a git workspace", fmt.Sprintf("resolved run directory %s is not a git work tree; refusing to measure evidence in the wrong tree", wsDir)), PushEvidence{}
 	}
 	baseRef := strings.TrimSpace(baseCommit)
 	if baseRef == "" {
@@ -112,27 +116,67 @@ func ValidateGitDeliveryEvidence(c deliveryContract, workspaceDir, baseCommit, b
 	}
 	commitOK, push, err := gitDeliveryEvidence(workspaceDir, baseRef, branchName, env)
 	if err != nil {
-		return fail("git delivery evidence unreadable", err.Error())
+		return fail("git delivery evidence unreadable", err.Error()), PushEvidence{}
 	}
 	if c.RequireGitCommit && !commitOK {
-		return fail("no commit beyond the frozen base "+baseRef, "commit the delivery on the declared branch")
+		return fail("no commit beyond the frozen base "+baseRef, "commit the delivery on the declared branch"), PushEvidence{}
 	}
 	if c.RequirePush {
 		if strings.TrimSpace(branchName) == "" {
-			return fail("push required but task has no BranchName", "set BranchName on the task")
+			return fail("push required but task has no BranchName", "set BranchName on the task"), PushEvidence{}
 		}
 		// SHA-accurate push evidence (review round 3, item 2): a remote
 		// branch EXISTING is not proof — it may sit at an older commit while
 		// the local delivery commit is unpushed.
 		if !push.RemoteHasBranch {
-			return fail("branch not found on the remote", "push the declared branch before completing")
+			return fail("branch not found on the remote", "push the declared branch before completing"), PushEvidence{}
 		}
 		if push.RemoteSHA != push.LocalSHA {
 			return fail(fmt.Sprintf("remote branch is at %s but the local delivery commit is %s (unpushed)", shortSHA(push.RemoteSHA), shortSHA(push.LocalSHA)),
-				"push the latest commit so the remote tip matches the delivery")
+				"push the latest commit so the remote tip matches the delivery"), PushEvidence{}
 		}
 	}
-	return ""
+	return "", push
+}
+
+// DeliveryEvidenceFieldSHA / DeliveryEvidenceFieldBranch are the
+// machine-generated output keys carrying the proven candidate SHA to
+// downstream acceptance steps (delivery SHA hand-off). The completion gate
+// writes them AFTER the push evidence has been verified; they always
+// overwrite agent-provided values so the QA anchor can never be authored by
+// the agent's free text.
+const (
+	DeliveryEvidenceFieldSHA    = "delivery_sha"
+	DeliveryEvidenceFieldBranch = "delivery_branch"
+)
+
+// MergeDeliveryEvidence overwrites the delivery-evidence output keys with
+// the gate-proven values. It only injects when the evidence is actually
+// proven: RemoteSHA present, exactly 40 hex chars (full SHA, never short),
+// and equal to LocalSHA. Anything else leaves the outputs untouched so a
+// downstream consumer can treat "key absent" as "evidence not proven".
+func MergeDeliveryEvidence(outputs map[string]string, branchName string, push PushEvidence) {
+	if outputs == nil {
+		return
+	}
+	sha := strings.TrimSpace(push.RemoteSHA)
+	local := strings.TrimSpace(push.LocalSHA)
+	if sha == "" || sha != local || len(sha) != 40 || !isHex(sha) {
+		return
+	}
+	outputs[DeliveryEvidenceFieldSHA] = sha
+	if bn := strings.TrimSpace(branchName); bn != "" {
+		outputs[DeliveryEvidenceFieldBranch] = bn
+	}
+}
+
+func isHex(s string) bool {
+	for _, r := range s {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 func shortSHA(sha string) string {

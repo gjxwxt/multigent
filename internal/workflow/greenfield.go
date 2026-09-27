@@ -70,6 +70,8 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"testSpecDocField":       "Full acceptance test specification document (one section per case with Given/When/Then and observable expected results).",
 		"testSpecManifestField":  "JSON array of test case entries: case_id, ac_id, risk_level, automation_level, execution_type, expected_result. Validated structurally by the platform.",
 		"testSpecSummaryField":   "Case count, risk distribution, non-automatable items and environment prerequisites.",
+		"deliveryShaField":       "Machine-verified full 40-hex commit SHA of the candidate delivery, proven by the platform's git delivery gate (remote tip == local HEAD at completion). The ONLY valid anchor for locating the candidate code: clone the authorized remote, checkout this exact SHA, verify with `git rev-parse HEAD`. Empty or mismatched at QA time means the evidence chain broke — report the run as failed honestly; never fall back to the agent's free-text PR summary.",
+		"deliveryBranchField":    "Machine-verified branch name carrying the candidate delivery (recorded together with delivery_sha by the platform gate). Context for the clone/checkout; delivery_sha remains the exact anchor.",
 		"prField":                "PR or patch summary produced by implementation.",
 		"testsField":             "Tests executed with evidence.",
 		"risksField":             "Known risks and follow-ups.",
@@ -131,7 +133,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"codeReviewTitle":        "人工代码审核",
 		"codeReviewDesc":         "人工审核实现证据，决定是否进入 QA 验证。",
 		"qaTitle":                "QA 测试与风险矩阵",
-		"qaDesc":                 "独立 QA Agent 以验收测试规格为基线（而非研发自述）审查候选变更：将原始 test_spec_manifest、实际 base/head diff 与研发的 test_implementation_evidence 映射对账；独立执行 auto Case；补充规格蕴含的边界、异常、鉴权、幂等与回归验证；产出结构化风险-覆盖矩阵。QA 可编写回归测试，但只允许修改测试文件/夹具/探测脚本——禁止顺手修改业务代码。沙箱无法验证的外部系统或长时任务必须在矩阵中标注 environment_blocked 或 manual——严禁静默标绿。",
+		"qaDesc":                 "独立 QA Agent 以验收测试规格为基线（而非研发自述）审查候选变更：将原始 test_spec_manifest、实际 base/head diff 与研发的 test_implementation_evidence 映射对账；独立执行 auto Case；补充规格蕴含的边界、异常、鉴权、幂等与回归验证；产出结构化风险-覆盖矩阵。QA 可编写回归测试，但只允许修改测试文件/夹具/探测脚本——禁止顺手修改业务代码。沙箱无法验证的外部系统或长时任务必须在矩阵中标注 environment_blocked 或 manual——严禁静默标绿。候选代码定位的唯一有效锚点是机器证据 delivery_sha（完整 40 位 commit SHA）：必须使用已授权远端 clone，checkout delivery_sha，并用 `git rev-parse HEAD` 核对一致后才允许开展测试；delivery_sha 缺失、checkout 后核对不一致或无法 clone 时，如实把本次运行判为失败并说明原因——严禁回退用 pr/approved_change 自由文本定位代码，严禁静默标绿。",
 		"qaSignoffTitle":         "QA 准出签核",
 		"qaSignoffDesc":          "人工 QA 审核风险-覆盖矩阵与测试报告。高风险未测/阻塞项必须由人类按 item_id 逐项签核豁免理由后方可准入主干。",
 		"prMergeTitle":           "开 PR 并合并",
@@ -155,6 +157,8 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"testSpecDocField":       "完整验收测试规格文档（每条 Case 一节，含 Given/When/Then 与可观察的预期结果）。",
 		"testSpecManifestField":  "测试用例 JSON 数组：case_id、ac_id、risk_level、automation_level、execution_type、expected_result。平台做结构化校验。",
 		"testSpecSummaryField":   "用例数量、风险分布、不可自动化项与环境前提。",
+		"deliveryShaField":       "平台 git 交付闸门验证过的候选提交完整 40 位 SHA（完成时远端 tip == 本地 HEAD 才会产出）。这是定位候选代码的唯一有效锚点：用已授权远端 clone、checkout 该 SHA、用 `git rev-parse HEAD` 核对。QA 时缺失或不匹配即证据链断裂——如实判 fail，严禁回退到研发自由文本 PR 摘要。",
+		"deliveryBranchField":    "平台闸门与 delivery_sha 一同记录的候选交付分支名。作为 clone/checkout 的上下文；精确锚点始终是 delivery_sha。",
 		"prField":                "实现产出的 PR 或补丁摘要。",
 		"testsField":             "已执行的测试与证据。",
 		"risksField":             "已知风险与后续事项。",
@@ -298,7 +302,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				field("contract_artifacts", "contractArtifactsField"),
 				optionalField("approved_requirement", "requestField"),
 			},
-			OutputFields: []entity.WorkflowField{field("branch_summary", "prField"), field("touched_paths", "qaTouchedPathsField")},
+			OutputFields: []entity.WorkflowField{field("branch_summary", "prField"), field("touched_paths", "qaTouchedPathsField"), optionalField("delivery_sha", "deliveryShaField"), optionalField("delivery_branch", "deliveryBranchField")},
 		},
 		{
 			ID:          "workstream_2",
@@ -309,7 +313,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				field("contract_artifacts", "contractArtifactsField"),
 				optionalField("approved_requirement", "requestField"),
 			},
-			OutputFields: []entity.WorkflowField{field("branch_summary", "prField"), field("touched_paths", "qaTouchedPathsField")},
+			OutputFields: []entity.WorkflowField{field("branch_summary", "prField"), field("touched_paths", "qaTouchedPathsField"), optionalField("delivery_sha", "deliveryShaField"), optionalField("delivery_branch", "deliveryBranchField")},
 		},
 	}
 
@@ -377,7 +381,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 					optionalField("previous_pr", "prField"),
 					optionalField("qa_rework_items", "qaReworkItemsField"),
 				},
-				[]entity.WorkflowField{field("pr", "prField"), field("tests_run", "testsField"), field("risks", "risksField"), field("test_implementation_evidence", "testReportField")}),
+				[]entity.WorkflowField{field("pr", "prField"), field("tests_run", "testsField"), field("risks", "risksField"), field("test_implementation_evidence", "testReportField"), optionalField("delivery_sha", "deliveryShaField"), optionalField("delivery_branch", "deliveryBranchField")}),
 			tmplStep("self_review", "agent_task", text["selfReviewTitle"], text["selfReviewDesc"], "reviewer-agent", "rose", 1200,
 				[]entity.WorkflowField{
 					field("pr", "prField"),
@@ -419,6 +423,14 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 					field("pr", "prField"),
 					field("approved_change", "prField"),
 					field("approved_requirement", "requestField"),
+					// Machine-verified delivery anchor (delivery SHA hand-off):
+					// the ONLY sanctioned code locator for QA. Produced by the
+					// platform's git delivery gate at implementation (or branch)
+					// completion, threaded here via the edge mappings. Absent
+					// means the evidence chain broke — qaDesc instructs an
+					// honest fail instead of free-text fallback.
+					field("delivery_sha", "deliveryShaField"),
+					optionalField("delivery_branch", "deliveryBranchField"),
 					optionalField("approved_design_snapshot_path", "designSnapshotField"),
 					field("test_spec_doc", "testSpecDocField"),
 					field("test_spec_manifest", "testSpecManifestField"),
@@ -442,6 +454,11 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 					optionalField("design_waived", "designWaivedField"),
 					field("pr", "prField"),
 					field("approved_change", "prField"),
+					// Machine-verified delivery anchor carried from QA for the
+					// sign-off record and the audited PR/merge step (exactly
+					// which proven commit was accepted).
+					optionalField("delivery_sha", "deliveryShaField"),
+					optionalField("delivery_branch", "deliveryBranchField"),
 					optionalField("approved_requirement", "requestField"),
 					optionalField("test_spec_doc", "testSpecDocField"),
 					optionalField("test_spec_manifest", "testSpecManifestField"),
@@ -561,6 +578,14 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"contract_artifacts":   "$input.contract_artifacts",
 				"approved_requirement": "$input.approved_requirement",
 				"branch_reports":       "$output.branch_reports",
+				// Delivery SHA hand-off: first-wave evidence from the branch
+				// completions' delivery gates. Single-workstream batches surface
+				// it unprefixed (aggregateBranchOutputs); with multiple streams
+				// the per-branch prefixed copies remain in step outputs for
+				// audit. QA's authoritative anchor is always re-proven after the
+				// linear rework implementation completes.
+				"delivery_sha":    "$output.delivery_sha",
+				"delivery_branch": "$output.delivery_branch",
 			}, true),
 			edge("e-integration-approve", "integration_review", "acceptance_test_design", text["approved"], cond("decision", "eq", "approve"), map[string]string{
 				"approved_requirement":          "$input.approved_requirement",
@@ -627,6 +652,11 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				// the aggregated branch reports the rework must reconcile.
 				"review_comments": "$input.review_comments",
 				"previous_pr":     "$input.branch_reports",
+				// delivery_sha is deliberately NOT carried here: the first-wave
+				// branch evidence predates the upcoming rework implementation,
+				// and an anchor for code about to be rewritten would hand QA a
+				// stale commit. Implementation's own completion gate emits fresh
+				// evidence that e-impl-self-review threads to QA.
 			}, true),
 			edge("e-design-rework", "design_review", "requirement_draft", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "previous_draft": "$input.requirement_draft"}, false),
 			edge("e-impl-self-review", "implementation", "self_review", "", nil, map[string]string{
@@ -643,6 +673,11 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"test_spec_manifest":            "$input.test_spec_manifest",
 				"test_spec_summary":             "$input.test_spec_summary",
 				"test_implementation_evidence":  "$output.test_implementation_evidence",
+				// FRESH machine evidence: emitted by the delivery gate when this
+				// implementation completion was persisted — this is the QA
+				// anchor for everything this step just delivered.
+				"delivery_sha":    "$output.delivery_sha",
+				"delivery_branch": "$output.delivery_branch",
 			}, true),
 			edge("e-self-review-pass", "self_review", "code_review", "", nil, map[string]string{
 				"pr":                            "$input.pr",
@@ -657,6 +692,8 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"test_spec_manifest":            "$input.test_spec_manifest",
 				"test_spec_summary":             "$input.test_spec_summary",
 				"test_implementation_evidence":  "$input.test_implementation_evidence",
+				"delivery_sha":                  "$input.delivery_sha",
+				"delivery_branch":               "$input.delivery_branch",
 			}, true),
 			// Rework 1: self_review -> implementation
 			edge("e-self-review-rework", "self_review", "implementation", text["changesRequested"], cond("self_review_verdict", "eq", "issues_fixed"), map[string]string{
@@ -682,6 +719,12 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"test_spec_manifest":            "$input.test_spec_manifest",
 				"test_spec_summary":             "$input.test_spec_summary",
 				"test_implementation_evidence":  "$input.test_implementation_evidence",
+				// The machine-verified candidate anchor: proven by the delivery
+				// gate at implementation completion, threaded through self_review
+				// and code_review. QA must clone+checkout+rev-parse against it
+				// (see qaDesc) — never the agent free-text pr/approved_change.
+				"delivery_sha":    "$input.delivery_sha",
+				"delivery_branch": "$input.delivery_branch",
 			}, false),
 			// Rework 2: code_review -> implementation
 			edge("e-code-review-rework", "code_review", "implementation", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{
@@ -710,6 +753,8 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"test_spec_manifest":            "$input.test_spec_manifest",
 				"test_spec_summary":             "$input.test_spec_summary",
 				"test_implementation_evidence":  "$input.test_implementation_evidence",
+				"delivery_sha":                  "$input.delivery_sha",
+				"delivery_branch":               "$input.delivery_branch",
 			}, true),
 			// Rework 3: qa_signoff -> implementation
 			edge("e-qa-rework", "qa_signoff", "implementation", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{
@@ -730,6 +775,10 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			edge("e-qa-signoff-approve", "qa_signoff", "pr_open_and_merge", text["approved"], cond("decision", "eq", "approve"), map[string]string{
 				"approved_change": "$input.approved_change",
 				"pr":              "$input.pr",
+				// The proven candidate SHA rides to the merge step so the audited
+				// PR/merge record names the exact machine-verified commit.
+				"delivery_sha":    "$input.delivery_sha",
+				"delivery_branch": "$input.delivery_branch",
 			}, false),
 			edge("e-pr-merge-release", "pr_open_and_merge", "release", "", nil, map[string]string{"merged_sha": "$output.merged_sha", "pr_url": "$output.pr_url"}, true),
 			edge("e-release-go-live", "release", "go_live_confirm", "", nil, map[string]string{"tag": "$output.tag", "deployed_version": "$output.deployed_version", "health_status": "$output.health_status"}, true),

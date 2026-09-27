@@ -3358,6 +3358,20 @@ func normalizeWorkflowOutputValues(step entity.WorkflowStep, values map[string]s
 			allowed["risk_coverage_matrix"] = entity.WorkflowField{Name: "risk_coverage_matrix", Optional: true}
 		}
 	}
+	// Delivery SHA hand-off (platform-derived, server-written): the
+	// completion gate stamps the proven remote==local SHA pair into
+	// delivery_sha/delivery_branch AFTER the agent's outputs are normalized,
+	// overwriting any agent-provided values. Exempting the two keys here
+	// keeps definitions that predate the hand-off (in-flight contracted
+	// runs) completable post-deploy; trust comes from the gate overwrite,
+	// not from the whitelist: without a delivery contract no edge maps
+	// these fields anywhere, so an agent-supplied value is inert context at
+	// worst.
+	for _, name := range []string{"delivery_sha", "delivery_branch"} {
+		if _, ok := allowed[name]; !ok {
+			allowed[name] = entity.WorkflowField{Name: name, Optional: true}
+		}
+	}
 	if len(out) == 0 && !failed {
 		return nil, fmt.Errorf("workflow step %q requires structured outputs: %s", step.Title, strings.Join(workflowFieldNames(step.OutputFields), ", "))
 	}

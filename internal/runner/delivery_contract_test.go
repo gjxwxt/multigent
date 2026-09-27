@@ -212,19 +212,34 @@ func TestDeliveryContractRemoteStaleWhileLocalAhead(t *testing.T) {
 	seedGitRepo(t, dir, "commit", "-m", "new delivery (unpushed)")
 
 	c := deliveryContract{RequireGitCommit: true, RequirePush: true}
-	v := ValidateGitDeliveryEvidence(c, dir, "", "main", "task/x", nil)
+	v, push := ValidateGitDeliveryEvidence(c, dir, "", "main", "task/x", nil)
 	if v == "" {
 		t.Fatal("remote at an older commit while local is ahead must NOT count as pushed")
 	}
 	if !strings.Contains(v, "unpushed") || !strings.Contains(v, "remote branch is at") {
 		t.Fatalf("violation must name the stale remote state, got %q", v)
 	}
+	// Delivery SHA hand-off: a violated gate must NOT emit usable evidence.
+	if push.RemoteSHA != "" || push.LocalSHA != "" {
+		t.Fatalf("failed gate must not surface push evidence, got %+v", push)
+	}
 
 	// The same state WITHOUT the unpushed commit must pass — proves the
 	// gate fails on the stale remote, not on something else.
 	seedGitRepo(t, dir, "reset", "--hard", "HEAD~1")
-	if v := ValidateGitDeliveryEvidence(c, dir, "", "main", "task/x", nil); v != "" {
+	v, push = ValidateGitDeliveryEvidence(c, dir, "", "main", "task/x", nil)
+	if v != "" {
 		t.Fatalf("pushed state should satisfy the contract, got %q", v)
+	}
+	// Delivery SHA hand-off: the passing gate surfaces the proven pair —
+	// full 40-hex remote SHA equal to local HEAD — which is exactly what
+	// the platform merges into delivery_sha/delivery_branch outputs.
+	if push.RemoteSHA == "" || push.LocalSHA == "" || push.RemoteSHA != push.LocalSHA || len(push.RemoteSHA) != 40 {
+		t.Fatalf("passing gate must surface the proven SHA pair, got %+v", push)
+	}
+	local := strings.TrimSpace(seedGitRepo(t, dir, "rev-parse", "HEAD"))
+	if push.LocalSHA != local {
+		t.Fatalf("proven local SHA %q must equal git rev-parse HEAD %q", push.LocalSHA, local)
 	}
 }
 
@@ -258,14 +273,14 @@ func TestDeliveryContractFrozenBaseCommitAnchorsIncrement(t *testing.T) {
 	seedGitRepo(t, dir, "checkout", "task/x")
 
 	c := deliveryContract{RequireGitCommit: true}
-	if v := ValidateGitDeliveryEvidence(c, dir, frozenBase, "main", "", nil); v != "" {
+	if v, _ := ValidateGitDeliveryEvidence(c, dir, frozenBase, "main", "", nil); v != "" {
 		t.Fatalf("frozen base must still see the branch increment: %q", v)
 	}
 	// The frozen SHA is the contract anchor: a branch with no increment
 	// beyond it must fail, and the violation must name the exact base the
 	// increment is measured against (the SHA, not a movable branch name).
 	seedGitRepo(t, dir, "checkout", "-b", "task/empty", frozenBase)
-	if v := ValidateGitDeliveryEvidence(c, dir, frozenBase, "", "", nil); v == "" || !strings.Contains(v, "no commit beyond the frozen base "+frozenBase) {
+	if v, _ := ValidateGitDeliveryEvidence(c, dir, frozenBase, "", "", nil); v == "" || !strings.Contains(v, "no commit beyond the frozen base "+frozenBase) {
 		t.Fatalf("violation must reference the frozen base commit, got %q", v)
 	}
 }
@@ -384,5 +399,39 @@ func TestDeliveryContractSectionRendersExactEvidenceShapes(t *testing.T) {
 	}
 	if got := deliveryContractSection(&entity.Task{Vars: map[string]string{DeliveryContractVar: "{not json"}}); got != "" {
 		t.Fatalf("a malformed contract renders no section, got %q", got)
+	}
+}
+
+// Delivery SHA hand-off: MergeDeliveryEvidence only injects a PROVEN pair —
+// full 40-hex, remote == local. Anything else leaves the outputs untouched
+// so "key absent" reliably means "evidence not proven" downstream.
+func TestMergeDeliveryEvidenceOnlyInjectsProvenPair(t *testing.T) {
+	full := strings.Repeat("a", 40)
+	// Proven pair: injected, overwriting agent-forged values.
+	out := map[string]string{"delivery_sha": "forged", "pr": "branch:x"}
+	MergeDeliveryEvidence(out, "task/x", PushEvidence{RemoteHasBranch: true, RemoteSHA: full, LocalSHA: full})
+	if out["delivery_sha"] != full {
+		t.Fatalf("proven pair must overwrite the forged anchor, got %q", out["delivery_sha"])
+	}
+	if out["delivery_branch"] != "task/x" {
+		t.Fatalf("branch must ride the proven evidence, got %q", out["delivery_branch"])
+	}
+	// Short SHA (the run6 failure mode): never injected.
+	out = map[string]string{}
+	MergeDeliveryEvidence(out, "task/x", PushEvidence{RemoteHasBranch: true, RemoteSHA: "b2388d6", LocalSHA: "b2388d6"})
+	if _, ok := out["delivery_sha"]; ok {
+		t.Fatal("a short SHA must never be handed to QA as the anchor")
+	}
+	// Mismatched pair: never injected.
+	out = map[string]string{}
+	MergeDeliveryEvidence(out, "task/x", PushEvidence{RemoteHasBranch: true, RemoteSHA: full, LocalSHA: strings.Repeat("b", 40)})
+	if _, ok := out["delivery_sha"]; ok {
+		t.Fatal("a remote!=local pair must never be handed to QA as the anchor")
+	}
+	// Empty evidence: never injected.
+	out = map[string]string{}
+	MergeDeliveryEvidence(out, "task/x", PushEvidence{})
+	if _, ok := out["delivery_sha"]; ok {
+		t.Fatal("empty evidence must never be handed to QA as the anchor")
 	}
 }

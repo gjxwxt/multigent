@@ -981,7 +981,7 @@ func (s *Server) handleRuntimeTaskComplete(w http.ResponseWriter, r *http.Reques
 				return
 			}
 			deliveryDir := s.resolveTaskWorktreeDir(principal.Project, t.ID)
-			if violation := runner.ValidateGitDeliveryEvidence(contract, deliveryDir, t.BaseCommit, t.BaseBranch, t.BranchName, s.deliveryEvidenceEnv(principal.Project, deliveryDir)); violation != "" {
+			if violation, _ := runner.ValidateGitDeliveryEvidence(contract, deliveryDir, t.BaseCommit, t.BaseBranch, t.BranchName, s.deliveryEvidenceEnv(principal.Project, deliveryDir)); violation != "" {
 				body.Error = violation
 				status = entity.TaskStatusDoneFailed
 			}
@@ -1235,6 +1235,40 @@ func (s *Server) handleRuntimeWorkflowStepComplete(w http.ResponseWriter, r *htt
 		if err := s.precheckBranchJoinGate(principal.WorkspaceID, principal.Project, t, body.Outputs); err != nil {
 			s.jsonError(w, http.StatusBadRequest, err.Error())
 			return
+		}
+	}
+	// Delivery SHA hand-off for LINEAR workflow steps (delivery-contract
+	// gate on the formal completion): a task carrying the delivery contract
+	// var whose CURRENT step declares a `pr` output (declaration-as-opt-in —
+	// the same contract the branch QA gate uses for touched_paths) must
+	// prove its git delivery here, exactly like the branch path, BEFORE the
+	// completion persists. On success the proven remote==local SHA pair is
+	// merged into the step outputs (machine keys overwrite agent values),
+	// giving the downstream QA step a fresh, run-current candidate anchor
+	// even after rework re-entered implementation. Steps that do not declare
+	// `pr` (spec design, reviews, QA itself) never run this gate, so legacy
+	// linear flows without the contract var are byte-for-byte unchanged.
+	if stepStatus == "completed" && strings.TrimSpace(t.Vars[workflowBranchIDVar]) == "" {
+		if raw := strings.TrimSpace(t.Vars[runner.DeliveryContractVar]); raw != "" {
+			declaresPR, stepErr := s.workflowStepDeclaresOutput(principal.WorkspaceID, principal.Project, t, "pr")
+			if stepErr != nil {
+				s.jsonError(w, http.StatusInternalServerError, "could not inspect the workflow step for the delivery gate: "+stepErr.Error())
+				return
+			}
+			if declaresPR {
+				contract, pErr := runner.ParseDeliveryContract(raw)
+				if pErr != nil {
+					s.jsonError(w, http.StatusBadRequest, fmt.Sprintf("delivery contract invalid: %v", pErr))
+					return
+				}
+				deliveryDir := s.resolveTaskWorktreeDir(principal.Project, t.ID)
+				violation, push := runner.ValidateGitDeliveryEvidence(contract, deliveryDir, t.BaseCommit, t.BaseBranch, t.BranchName, s.deliveryEvidenceEnv(principal.Project, deliveryDir))
+				if violation != "" {
+					s.jsonError(w, http.StatusBadRequest, violation)
+					return
+				}
+				runner.MergeDeliveryEvidence(body.Outputs, t.BranchName, push)
+			}
 		}
 	}
 	transition, transitioned, err := s.completeRuntimeWorkflowStep(principal.WorkspaceID, principal.Project, t, body.Outputs, stepStatus)
@@ -1521,6 +1555,43 @@ func branchHasEmbeddedWorkflow(def entity.WorkflowDefinition) bool {
 	return strings.TrimSpace(def.Steps[0].ID) != "start"
 }
 
+// workflowStepDeclaresOutput reports whether the task's CURRENT workflow
+// step declares the named output field. It is the declaration-as-opt-in
+// signal for the linear delivery-contract gate: only steps whose contract
+// explicitly includes a delivery artifact (e.g. `pr` on implementation)
+// get git-gated, so spec/review/QA steps on the same contracted task are
+// never measured against a delivery they do not own.
+func (s *Server) workflowStepDeclaresOutput(workspaceID, project string, t *entity.Task, name string) (bool, error) {
+	if s == nil || s.controlDB == nil || t == nil {
+		return false, fmt.Errorf("workflow store is not available")
+	}
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	run, ok, err := wfStore.RunForTask(project, t.ID)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, fmt.Errorf("task is not attached to a workflow")
+	}
+	def, ok, err := wfStore.RunDefinition(run)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, fmt.Errorf("workflow definition %q not found", run.DefinitionID)
+	}
+	step, ok := workflowStepByID(def.Steps, run.ActiveStepID)
+	if !ok {
+		return false, fmt.Errorf("workflow step %q not found", run.ActiveStepID)
+	}
+	for _, f := range step.OutputFields {
+		if strings.TrimSpace(f.Name) == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *Server) completeRuntimeWorkflowStep(workspaceID, project string, t *entity.Task, outputs map[string]string, stepStatus string) (workflowstore.TransitionResult, bool, error) {
 	var result workflowstore.TransitionResult
 	if s == nil || s.controlDB == nil || t == nil || strings.TrimSpace(workspaceID) == "" {
@@ -1601,9 +1672,18 @@ func (s *Server) completeRuntimeWorkflowBranch(workspaceID, project string, t *e
 				return result, fmt.Errorf("delivery contract invalid: %w", pErr)
 			}
 			deliveryDir := s.resolveTaskWorktreeDir(project, t.ID)
-			if violation := runner.ValidateGitDeliveryEvidence(contract, deliveryDir, t.BaseCommit, t.BaseBranch, t.BranchName, s.deliveryEvidenceEnv(project, deliveryDir)); violation != "" {
+			// Delivery SHA hand-off: when the gate PROVES remote SHA == local
+			// HEAD, the proven pair rides the formal completion outputs
+			// (delivery_sha/delivery_branch) so the QA step anchors on a
+			// machine-verified candidate commit instead of the agent's free
+			// text. The merge overwrites any agent-provided values for those
+			// keys (anti-forgery) and skips injection entirely when the
+			// evidence is not a proven full 40-hex pair.
+			violation, push := runner.ValidateGitDeliveryEvidence(contract, deliveryDir, t.BaseCommit, t.BaseBranch, t.BranchName, s.deliveryEvidenceEnv(project, deliveryDir))
+			if violation != "" {
 				return result, fmt.Errorf("%s", violation)
 			}
+			runner.MergeDeliveryEvidence(outputs, t.BranchName, push)
 		}
 	}
 	// S2-2.3 (review round, item 2): the run handle stays the PARENT task
