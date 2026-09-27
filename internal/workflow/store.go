@@ -3363,10 +3363,13 @@ func normalizeWorkflowOutputValues(step entity.WorkflowStep, values map[string]s
 	// delivery_sha/delivery_branch AFTER the agent's outputs are normalized,
 	// overwriting any agent-provided values. Exempting the two keys here
 	// keeps definitions that predate the hand-off (in-flight contracted
-	// runs) completable post-deploy; trust comes from the gate overwrite,
-	// not from the whitelist: without a delivery contract no edge maps
-	// these fields anywhere, so an agent-supplied value is inert context at
-	// worst.
+	// runs) completable post-deploy. Trust hierarchy: on a contracted run
+	// the gate overwrite is authoritative; on a run WITHOUT the delivery
+	// contract var no gate ever fires, and templates that map these fields
+	// (greenfield) pass the agent-supplied value through — there the
+	// QA-side verification protocol (clone + checkout + rev-parse against
+	// the authorized remote, per qaDesc) is the backstop, which is why
+	// deployments running contracted greenfield must seed the contract var.
 	for _, name := range []string{"delivery_sha", "delivery_branch"} {
 		if _, ok := allowed[name]; !ok {
 			allowed[name] = entity.WorkflowField{Name: name, Optional: true}

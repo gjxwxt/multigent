@@ -8,6 +8,7 @@ package workflow
 // completion — a carried pre-rework SHA would hand QA a stale commit).
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/multigent/multigent/internal/entity"
@@ -59,20 +60,27 @@ func TestGreenfieldQADeclaresMachineAnchorInputs(t *testing.T) {
 		gfHasInput(t, qa, "delivery_sha", false)
 		gfHasInput(t, qa, "delivery_branch", true)
 		// The qaDesc must instruct the clone+checkout+rev-parse protocol and
-		// forbid the free-text fallback.
-		desc := ""
-		if locale == "zh-CN" {
-			desc = tmpl.Description // existence probe only
-		}
-		_ = desc
-		qaDescFound := false
-		for _, s := range tmpl.Steps {
-			if s.ID == "qa" && s.Description != "" {
-				qaDescFound = true
+		// forbid the free-text fallback: breaking any of these phrases means
+		// the agent could regress to anchoring on pr/approved_change free
+		// text (the run6 failure mode).
+		for _, phrase := range []string{"delivery_sha", "git rev-parse HEAD"} {
+			if !strings.Contains(qa.Description, phrase) {
+				t.Fatalf("qa description (locale %s) must instruct the verification protocol: missing %q", locale, phrase)
 			}
 		}
-		if !qaDescFound {
-			t.Fatal("qa step must carry the anchor protocol description")
+		if locale == "en" {
+			for _, phrase := range []string{"never fall back", "free-text PR summary"} {
+				if !strings.Contains(qa.Description, phrase) {
+					t.Fatalf("qa description must forbid the free-text fallback: missing %q", phrase)
+				}
+			}
+		}
+		if locale == "zh-CN" {
+			for _, phrase := range []string{"严禁回退", "自由文本", "如实"} {
+				if !strings.Contains(qa.Description, phrase) {
+					t.Fatalf("qa description must forbid the free-text fallback: missing %q", phrase)
+				}
+			}
 		}
 	}
 }

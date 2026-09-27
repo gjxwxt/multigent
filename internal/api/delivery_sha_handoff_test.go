@@ -481,3 +481,152 @@ func TestWorkflowStepDeclaresOutputGuard(t *testing.T) {
 		t.Fatal("a task without a workflow must surface an error, not silently skip the gate")
 	}
 }
+
+// TestReworkReprovesFreshSHA (anti-staleness end-to-end): after a rework
+// round, the QA-facing anchor must be the SECOND delivery's proven SHA —
+// the first delivery's evidence must not survive anywhere on the path to
+// qa. Fixes the blind-review P2: no direct regression guarded the
+// title-level freshness guarantee.
+func TestReworkReprovesFreshSHA(t *testing.T) {
+	s, workspaceID := newBranchJoinHTTPServer(t)
+	wt := newBranchJoinWorktree(t)
+	s.worktreeResolveOverride = func(project, taskID string) string { return wt }
+	s.qaBaselineLookupOverride = mustUploadQABaseline(t, s, workspaceID, "sample", "task-delivery-rework", wt)
+	base := gitOut(t, wt, "rev-parse", "HEAD")
+
+	// Three-step linear mirror of the greenfield chain:
+	// impl -> self_review (rework loop back to impl) -> qa.
+	now := time.Now().UTC()
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	def := &entity.WorkflowDefinition{
+		ID: "wf-delivery-rework", Name: "Rework delivery", Version: 1, Scope: "workspace", StartStepID: "impl",
+		Steps: []entity.WorkflowStep{
+			{
+				ID: "impl", Type: "agent_task", Title: "Implement", ActorRole: "pm-agent",
+				InputFields:  []entity.WorkflowField{{Name: "request"}, {Name: "review_comments"}},
+				OutputFields: []entity.WorkflowField{{Name: "pr"}, {Name: "self_verdict"}},
+			},
+			{
+				ID: "review", Type: "agent_task", Title: "Self review", ActorRole: "qa-agent",
+				InputFields:  []entity.WorkflowField{{Name: "pr"}, {Name: "delivery_sha"}},
+				OutputFields: []entity.WorkflowField{{Name: "verdict"}, {Name: "review_comments"}},
+			},
+			{
+				ID: "qa", Type: "agent_task", Title: "QA", ActorRole: "owner-engineer",
+				InputFields:  []entity.WorkflowField{{Name: "pr"}, {Name: "delivery_sha"}},
+				OutputFields: []entity.WorkflowField{{Name: "test_report"}},
+			},
+		},
+		Edges: []entity.WorkflowEdge{
+			{From: "impl", To: "review", InputMapping: map[string]string{"pr": "$output.pr", "delivery_sha": "$output.delivery_sha"}},
+			// Rework edge: deliberately NO delivery_sha mapping (stale anchor).
+			{From: "review", To: "impl", Condition: &entity.WorkflowEdgeCondition{Field: "verdict", Operator: "eq", Value: "rework"}, InputMapping: map[string]string{"review_comments": "$output.review_comments", "pr": "$input.pr"}},
+			{From: "review", To: "qa", InputMapping: map[string]string{"pr": "$input.pr", "delivery_sha": "$input.delivery_sha"}},
+		},
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := wfStore.SaveDefinition(def); err != nil {
+		t.Fatal(err)
+	}
+	task := &entity.Task{
+		ID: "task-delivery-rework", Title: "Rework delivery", Status: entity.TaskStatusInProgress,
+		Priority: 2, Assignee: "pm", CreatedAt: now, UpdatedAt: now,
+		BaseCommit: base, BaseBranch: "main", BranchName: "task/x",
+		Vars: map[string]string{runner.DeliveryContractVar: `{"requireGitCommit":true,"requirePush":true}`},
+	}
+	if err := s.ts.AddTask("sample", "pm", task); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := wfStore.StartRun("sample", task.ID, def.ID, map[string]entity.WorkflowActorBinding{
+		"pm-agent":       {Type: "agent", ID: "pm"},
+		"qa-agent":       {Type: "agent", ID: "pm"},
+		"owner-engineer": {Type: "agent", ID: "pm"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	if err := os.MkdirAll(remote, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, remote, "init", "--bare", "-b", "main")
+	gitRun(t, wt, "remote", "add", "origin", remote)
+	gitRun(t, wt, "push", "origin", "main")
+	gitRun(t, wt, "checkout", "-b", "task/x")
+
+	deliver := func(msg string) string {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(wt, "server.go"), []byte("package main\n\n// "+msg+"\nfunc D() {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitRun(t, wt, "add", ".")
+		gitRun(t, wt, "commit", "-m", msg)
+		gitRun(t, wt, "push", "origin", "task/x")
+		return gitOut(t, wt, "rev-parse", "HEAD")
+	}
+
+	// Delivery #1 and its completion — the first (soon stale) anchor.
+	first := deliver("delivery one")
+	rec := postLinearStepComplete(t, s, workspaceID, task.ID, "pm", map[string]any{
+		"status": "success", "summary": "delivered one",
+		"outputs": map[string]string{"pr": "branch:task/x", "self_verdict": "done"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("impl completion #1 rejected: %d %s", rec.Code, rec.Body.String())
+	}
+	if got, _ := stepOutput(t, s, workspaceID, task.ID, "impl", "delivery_sha"); got != first {
+		t.Fatalf("impl #1 evidence must be the first SHA %q, got %q", first, got)
+	}
+
+	// Self review demands rework — the stale first anchor must NOT ride
+	// back to impl.
+	rec = postLinearStepComplete(t, s, workspaceID, task.ID, "pm", map[string]any{
+		"status": "success", "summary": "rework needed",
+		"outputs": map[string]string{"verdict": "rework", "review_comments": "fix it"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("review rework completion rejected: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Delivery #2: a NEW commit, pushed. The impl gate re-runs and the
+	// second proven SHA must overwrite the first on the path to qa.
+	second := deliver("delivery two (rework)")
+	rec = postLinearStepComplete(t, s, workspaceID, task.ID, "pm", map[string]any{
+		"status": "success", "summary": "delivered two",
+		"outputs": map[string]string{"pr": "branch:task/x", "self_verdict": "done"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("impl completion #2 rejected: %d %s", rec.Code, rec.Body.String())
+	}
+	if got, _ := stepOutput(t, s, workspaceID, task.ID, "impl", "delivery_sha"); got != second {
+		t.Fatalf("impl #2 evidence must be the FRESH SHA %q, got %q (stale %q must be gone)", second, got, first)
+	}
+
+	// Self review passes this time; the threaded anchor into qa must be the
+	// SECOND SHA, never the first.
+	rec = postLinearStepComplete(t, s, workspaceID, task.ID, "pm", map[string]any{
+		"status": "success", "summary": "review pass",
+		"outputs": map[string]string{"verdict": "pass", "review_comments": "ok"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("review pass completion rejected: %d %s", rec.Code, rec.Body.String())
+	}
+	run, found, err := wfStore.RunForTask("sample", task.ID)
+	if err != nil || !found {
+		t.Fatalf("run lookup: found=%v err=%v", found, err)
+	}
+	insts, err := wfStore.ListStepInstances(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, inst := range insts {
+		if inst.StepID != "qa" {
+			continue
+		}
+		if got := inst.InputValues["delivery_sha"]; got != second {
+			t.Fatalf("qa anchor must be the fresh SHA %q after rework, got %q (stale %q leaked)", second, got, first)
+		}
+		return
+	}
+	t.Fatal("qa step instance not found after rework loop")
+}
