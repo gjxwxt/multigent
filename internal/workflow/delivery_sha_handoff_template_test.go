@@ -122,15 +122,19 @@ func TestGreenfieldReworkEdgesCarryNoStaleAnchor(t *testing.T) {
 }
 
 // TestGreenfieldParallelEvidenceContextOnly: the parallel-stage aggregate
-// carries the first-wave branch evidence into integration_review as CONTEXT;
-// it must not be confused with the post-rework proof (that path only exists
-// on the linear chain), which is why integration edges forward it as input
-// context while the QA-facing chain is fed from the linear completion gate.
+// must NOT surface a single scalar delivery_sha into integration_review —
+// with multiple workstreams the unprefixed aggregate key is whichever
+// branch wrote first, and one arbitrary workstream SHA masquerading as
+// "the" candidate would mislead the reviewer. QA's authoritative anchor
+// comes only from the integrated implementation's own completion gate.
 func TestGreenfieldParallelEvidenceContextOnly(t *testing.T) {
 	tmpl := greenfieldDeliveryTemplate("en")
 	e := gfEdge(t, tmpl, "e-parallel-integration")
-	if got := e.InputMapping["delivery_sha"]; got != "$output.delivery_sha" {
-		t.Fatalf("e-parallel-integration must surface first-wave branch evidence, got %q", got)
+	if v, ok := e.InputMapping["delivery_sha"]; ok {
+		t.Fatalf("e-parallel-integration must NOT map a scalar delivery_sha (multi-branch first-writer masquerade), got %q", v)
+	}
+	if v, ok := e.InputMapping["delivery_branch"]; ok {
+		t.Fatalf("e-parallel-integration must NOT map a scalar delivery_branch, got %q", v)
 	}
 	// qa_signoff records the anchor for the audited merge step.
 	signoff := gfStep(t, tmpl, "qa_signoff")
@@ -139,6 +143,10 @@ func TestGreenfieldParallelEvidenceContextOnly(t *testing.T) {
 	if got := mergeEdge.InputMapping["delivery_sha"]; got != "$input.delivery_sha" {
 		t.Fatalf("e-qa-signoff-approve must carry the proven SHA to the merge step, got %q", got)
 	}
+	// The middle hand-off steps declare the threaded anchor so the input
+	// contract is visible where the values land.
+	gfHasInput(t, gfStep(t, tmpl, "self_review"), "delivery_sha", true)
+	gfHasInput(t, gfStep(t, tmpl, "code_review"), "delivery_sha", true)
 }
 
 // TestGreenfieldImplDeclaresOptionalEvidenceOutputs: the implementation step

@@ -385,6 +385,12 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			tmplStep("self_review", "agent_task", text["selfReviewTitle"], text["selfReviewDesc"], "reviewer-agent", "rose", 1200,
 				[]entity.WorkflowField{
 					field("pr", "prField"),
+					// The threaded machine anchor is part of the declared input
+					// contract (values flow via the edge mapping regardless;
+					// declaring it surfaces the anchor in "expected input
+					// fields" for the reviewer agent).
+					optionalField("delivery_sha", "deliveryShaField"),
+					optionalField("delivery_branch", "deliveryBranchField"),
 					field("approved_requirement", "requestField"),
 					optionalField("approved_design_source", "designSourceField"),
 					optionalField("approved_design_project_id", "designProjectField"),
@@ -406,6 +412,10 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			tmplStep("code_review", "human_review", text["codeReviewTitle"], text["codeReviewDesc"], "owner-engineer", "amber", 1480,
 				[]entity.WorkflowField{
 					field("pr", "prField"),
+					// The threaded machine anchor: the human gate sees exactly
+					// which proven commit it is approving.
+					optionalField("delivery_sha", "deliveryShaField"),
+					optionalField("delivery_branch", "deliveryBranchField"),
 					field("approved_requirement", "requestField"),
 					optionalField("approved_design_preview_url", "designPreviewField"),
 					optionalField("approved_design_snapshot_path", "designSnapshotField"),
@@ -578,14 +588,14 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"contract_artifacts":   "$input.contract_artifacts",
 				"approved_requirement": "$input.approved_requirement",
 				"branch_reports":       "$output.branch_reports",
-				// Delivery SHA hand-off: first-wave evidence from the branch
-				// completions' delivery gates. Single-workstream batches surface
-				// it unprefixed (aggregateBranchOutputs); with multiple streams
-				// the per-branch prefixed copies remain in step outputs for
-				// audit. QA's authoritative anchor is always re-proven after the
-				// linear rework implementation completes.
-				"delivery_sha":    "$output.delivery_sha",
-				"delivery_branch": "$output.delivery_branch",
+				// NO scalar delivery_sha here: with multiple workstreams the
+				// aggregate's unprefixed key is whichever branch wrote first —
+				// presenting one arbitrary workstream SHA as "the" candidate
+				// would mislead integration review. Per-branch evidence stays
+				// in the step outputs (delivery_sha_<branchID> keys) for
+				// audit; QA's authoritative anchor is ALWAYS re-proven by the
+				// gate at the integrated implementation's completion and
+				// threads from there (e-impl-self-review).
 			}, true),
 			edge("e-integration-approve", "integration_review", "acceptance_test_design", text["approved"], cond("decision", "eq", "approve"), map[string]string{
 				"approved_requirement":          "$input.approved_requirement",

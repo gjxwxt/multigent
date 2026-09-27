@@ -32,7 +32,13 @@ func seedGreenfieldRunTask(t *testing.T, s *Server, workspaceID, taskID, baseCom
 	task := &entity.Task{
 		ID: taskID, Title: "GF delivery " + taskID, Status: entity.TaskStatusInProgress,
 		Priority: 2, Assignee: "sample/pm", CreatedAt: now, UpdatedAt: now,
-		BaseCommit: baseCommit, BaseBranch: "main", Vars: map[string]string{},
+		BaseCommit: baseCommit, BaseBranch: "main",
+		// Mirror what the creation handlers auto-seed for anchor templates
+		// (full git contract): this fixture bypasses the HTTP creation
+		// entries, so seed explicitly. Branch children inherit this var and
+		// the branch delivery gate (missing/weak-contract fail-closed)
+		// behaves exactly as in production.
+		Vars: map[string]string{"MULTIGENT_DELIVERY_CONTRACT": `{"requireGitCommit":true,"requirePush":true}`},
 	}
 	if err := s.ts.AddTask("sample", "pm", task); err != nil {
 		t.Fatal(err)
@@ -272,7 +278,12 @@ func TestContractBatchReworkRepairsRequirementAnchors(t *testing.T) {
 func TestFormalEntryChainFreezesPlanAndDrivesPlannedWaves(t *testing.T) {
 	s, workspaceID := newBranchJoinHTTPServer(t)
 	s.worktreeMgr = gitworktreeManagerForTest()
-	_, baseCommit := buildFanoutGitWorkspace(t, s)
+	gitRoot, baseCommit := buildFanoutGitWorkspace(t, s)
+	// Branch children inherit the full delivery contract (mirroring the
+	// creation-side auto-seed), so their completions run the real git
+	// evidence gate: give them an origin to push to, and completePlannedBranch
+	// below commits+pushes like production branch delivery does.
+	seedFanoutGitRemote(t, s, gitRoot)
 	seedGreenfieldRunTask(t, s, workspaceID, "task-slice4", baseCommit)
 	driveToContractReview(t, s, workspaceID, "task-slice4", samplePlanJSON())
 
@@ -365,6 +376,12 @@ func completePlannedBranch(t *testing.T, s *Server, workspaceID, childTaskID, fi
 	if err := os.WriteFile(filepath.Join(task.WorktreeDir, filename), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Branch children carry the full delivery contract: the completion gate
+	// validates commit+push evidence, so deliver like production — commit
+	// the change and push the branch to origin.
+	gitRun(t, task.WorktreeDir, "add", ".")
+	gitRun(t, task.WorktreeDir, "commit", "-m", filename+" delivered")
+	gitRun(t, task.WorktreeDir, "push", "origin", "HEAD")
 	rec := postBranchStepComplete(t, s, workspaceID, childTaskID, map[string]string{
 		"branch_summary": filename + " delivered",
 		"touched_paths":  filename,

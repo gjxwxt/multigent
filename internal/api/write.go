@@ -12,11 +12,246 @@ import (
 
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/gitworktree"
+	"github.com/multigent/multigent/internal/runner"
 	"github.com/multigent/multigent/internal/taskstore"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
 
 const maxJSONBody = 1 << 20 // 1 MiB
+
+// workflowRequiresDeliverySHA reports whether any step in the definition
+// requires the machine-verified delivery anchor (delivery_sha) as a
+// non-optional input. It is the structural signal used in two places: (1)
+// auto-seeding the delivery contract at task creation (a template that
+// promises the anchor must also mandate the commit+push proof that
+// produces it) and (2) the linear completion gate's fail-closed promise
+// check. Matching is by required INPUT, not by step-ID literal, so user
+// definitions whose QA step uses a different ID are still covered.
+func workflowRequiresDeliverySHA(def entity.WorkflowDefinition) bool {
+	for _, step := range def.Steps {
+		for _, f := range step.InputFields {
+			if strings.TrimSpace(f.Name) == "delivery_sha" && !f.Optional {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// workflowAnchorProducible reports whether an anchor-requiring definition
+// is structurally capable of DELIVERING the anchor along the same data path
+// the transition engine actually uses. buildNextInputValues only forwards
+// values that an edge's InputMapping (or its same-name fallback) writes
+// into the target's input slots, so node connectivity alone proves nothing
+// ("graph path, no data path"). The walk tracks WHERE the anchor value
+// verifiably lives: a pr-declaring producer's OUTPUT is gate-stamped on
+// completion (the gate's opt-in), an INPUT slot only holds the value once
+// a carrying edge landed it there. Trust rules per hop:
+//   - mapping KEY must be delivery_sha (values written elsewhere starve
+//     the anchor input);
+//   - "$output.delivery_sha" is trusted only from a pr-declaring producer
+//     (a pr-less relay's output delivery_sha is agent-forgeable — "relay
+//     forgery");
+//   - "$input.delivery_sha" is trusted only after the value verifiably
+//     ARRIVED in that step's input slot;
+//   - an edge with NO mapping auto-forwards same-name outputs
+//     (buildNextInputValues fallback) — trusted only from a producer for
+//     the same stamping reason.
+//
+// The walk seeds ONLY from producers the run can actually execute: the
+// transition engine starts at def.StartStepID, so a pr-declaring step that
+// is not start-reachable never completes and can never stamp anything.
+// Success is ARRIVAL-based: a carrying edge landing on a step whose
+// REQUIRED input is delivery_sha. Definitions that promise the anchor
+// without such a data path would start runs that can never satisfy the
+// required input — reject at creation. Bounded BFS over the definition's
+// own edges; no general state analysis.
+func workflowAnchorProducible(def entity.WorkflowDefinition) bool {
+	type anchorSlot struct {
+		stampedOutput bool // pr-declaring: completion gate stamps OUTPUT delivery_sha
+		requiresInput bool // REQUIRES delivery_sha input: the promise binds here
+		holdsInput    bool // EVERY start-reachable incoming edge verifiably lands the anchor in the INPUT slot
+		hasIncoming   bool // at least one start-reachable incoming edge exists
+	}
+	slots := map[string]*anchorSlot{}
+	for _, step := range def.Steps {
+		id := strings.TrimSpace(step.ID)
+		if id == "" {
+			continue
+		}
+		slot, ok := slots[id]
+		if !ok {
+			slot = &anchorSlot{}
+			slots[id] = slot
+		}
+		for _, f := range step.OutputFields {
+			if strings.TrimSpace(f.Name) == "pr" {
+				slot.stampedOutput = true
+				break
+			}
+		}
+		for _, f := range step.InputFields {
+			if strings.TrimSpace(f.Name) == "delivery_sha" {
+				if !f.Optional {
+					slot.requiresInput = true
+				}
+				break
+			}
+		}
+	}
+	// Bounded start-reachability over From/To (no state-machine solving):
+	// the transition engine starts at def.StartStepID, so edges/steps off
+	// this set never execute.
+	startReachable := map[string]bool{}
+	if start := strings.TrimSpace(def.StartStepID); start != "" {
+		reachQueue := []string{start}
+		for len(reachQueue) > 0 {
+			cur := reachQueue[0]
+			reachQueue = reachQueue[1:]
+			if startReachable[cur] {
+				continue
+			}
+			startReachable[cur] = true
+			for _, e := range def.Edges {
+				if strings.TrimSpace(e.From) == cur {
+					reachQueue = append(reachQueue, strings.TrimSpace(e.To))
+				}
+			}
+		}
+	}
+	for _, e := range def.Edges {
+		to := strings.TrimSpace(e.To)
+		if slot, ok := slots[to]; ok && startReachable[strings.TrimSpace(e.From)] {
+			slot.hasIncoming = true
+		}
+	}
+	// edgeCarriesTrustedAnchor reports whether the edge lands the anchor in
+	// the target's delivery_sha input slot AND reads it from a source slot
+	// that verifiably holds it:
+	//   - mapping KEY must be delivery_sha (buildNextInputValues writes the
+	//     resolved value into the KEY's slot; a value that merely textually
+	//     names delivery_sha elsewhere starves the anchor input);
+	//   - "$output.delivery_sha" reads the SOURCE's output: trusted only
+	//     from a pr-declaring producer whose gated completion stamps it (a
+	//     pr-less relay's output delivery_sha is agent-forgeable — "relay
+	//     forgery");
+	//   - "$input.delivery_sha" reads the SOURCE's InputValues: trusted
+	//     only when the source verifiably holds the anchor there;
+	//   - an edge with NO mapping falls back to same-name auto-forwarding
+	//     (buildNextInputValues copies next.InputFields names from the
+	//     current OutputValues): trusted only from a stamped producer.
+	edgeCarriesTrustedAnchor := func(e entity.WorkflowEdge, source *anchorSlot) bool {
+		if source == nil {
+			return false
+		}
+		if len(e.InputMapping) == 0 {
+			return source.stampedOutput
+		}
+		for key, expr := range e.InputMapping {
+			if strings.TrimSpace(key) != "delivery_sha" {
+				continue
+			}
+			switch strings.TrimSpace(expr) {
+			case "$output.delivery_sha":
+				if source.stampedOutput {
+					return true
+				}
+			case "$input.delivery_sha":
+				if source.holdsInput {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	// holdsInput fixpoint: a step verifiably holds the anchor in its INPUT
+	// slot when EVERY start-reachable incoming edge lands it there from a
+	// trustworthy source slot ($output edges trust the source's stamped
+	// output; $input edges trust the source's own verified input hold).
+	// The universal (every-edge) rule is what defeats selectable unverified
+	// routes: a step fed by both a stamped edge and a forgeable relay edge
+	// never reaches verified hold, so nothing downstream of it may claim
+	// the anchor either. Bounded relaxation over a finite graph — no path
+	// enumeration, no general state analysis.
+	changed := true
+	for changed {
+		changed = false
+		for id, slot := range slots {
+			if slot.holdsInput || !startReachable[id] {
+				continue
+			}
+			if !slot.hasIncoming {
+				continue
+			}
+			allTrusted := true
+			for _, e := range def.Edges {
+				if strings.TrimSpace(e.To) != id {
+					continue
+				}
+				if !startReachable[strings.TrimSpace(e.From)] {
+					continue
+				}
+				source := slots[strings.TrimSpace(e.From)]
+				if !edgeCarriesTrustedAnchor(e, source) {
+					allTrusted = false
+					break
+				}
+			}
+			if allTrusted {
+				slot.holdsInput = true
+				changed = true
+			}
+		}
+	}
+	// The anchor promise binds on every start-reachable step that REQUIRES
+	// delivery_sha: each must be universally fed. A single selectable
+	// unverified route into a required input (or a required input with no
+	// trusted feed at all) voids the promise — reject at creation.
+	for id, slot := range slots {
+		if slot.requiresInput && startReachable[id] && !slot.holdsInput {
+			return false
+		}
+	}
+	// At least one required input must exist within the reachable graph for
+	// the promise to be structural; anchor-requiring callers check the
+	// definition-wide requirement separately (workflowRequiresDeliverySHA),
+	// so reachability of a universally fed required input is what remains
+	// to assert here.
+	for id, slot := range slots {
+		if slot.requiresInput && startReachable[id] && slot.holdsInput {
+			return true
+		}
+	}
+	return false
+}
+
+// targetRequiresOrOptionalInput reports whether the step with the given ID
+// declares a delivery_sha INPUT field (required or optional): only such a
+// step can hold the anchor value in its input slot and pass it on.
+func targetRequiresOrOptionalInput(def entity.WorkflowDefinition, stepID string) bool {
+	for _, step := range def.Steps {
+		if strings.TrimSpace(step.ID) != stepID {
+			continue
+		}
+		for _, f := range step.InputFields {
+			if strings.TrimSpace(f.Name) == "delivery_sha" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// deliveryContractProducesAnchor reports whether a caller-supplied delivery
+// contract can actually produce the machine-verified anchor: BOTH git
+// dimensions must be required. A contract that waives commit or push would
+// validate with no violation and no proven evidence at the completion gate,
+// so for anchor-requiring definitions it is rejected at creation (clear
+// 400, no task/run written) rather than silently strengthened.
+func deliveryContractProducesAnchor(raw string) bool {
+	contract, err := runner.ParseDeliveryContract(raw)
+	return err == nil && contract.RequireGitCommit && contract.RequirePush
+}
 
 func (s *Server) readJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
@@ -344,6 +579,38 @@ func (s *Server) createProjectTaskFromBody(w http.ResponseWriter, r *http.Reques
 				}
 				assignee = reviewer
 				t.Assignee = assignee
+			}
+		}
+		// Delivery SHA hand-off (Route A): a definition whose qa step
+		// REQUIRES delivery_sha promises QA a machine-verified anchor. That
+		// promise is only producible by the delivery gate, so the root task
+		// must carry the delivery contract (commit + push proof). Seed it
+		// automatically here — the console creation entry point — unless the
+		// caller already set an explicit contract. An explicit contract is
+		// only accepted when it can actually produce the anchor (BOTH
+		// requireGitCommit and requirePush): a weak or unparseable one is
+		// rejected with a clear 400 and NO task/run written, never silently
+		// strengthened or waived. The completion gates fail-closed either
+		// way.
+		if workflowRequiresDeliverySHA(workflowDef) {
+			// Structural soundness first: an anchor promise with NO
+			// pr-declaring producer feeding the required input can never be
+			// satisfied — reject the definition at creation instead of
+			// starting a run that fails at QA (or silently loses the
+			// promise).
+			if !workflowAnchorProducible(workflowDef) {
+				s.jsonError(w, http.StatusBadRequest, "this workflow requires the machine-verified delivery anchor (delivery_sha) but no step declaring a pr output can reach the required input through the edge graph — the anchor is structurally unproducible; add a pr output to the delivering step and thread delivery_sha through the edges, or drop the required delivery_sha input")
+				return
+			}
+			raw := strings.TrimSpace(t.Vars[runner.DeliveryContractVar])
+			if raw == "" {
+				if t.Vars == nil {
+					t.Vars = map[string]string{}
+				}
+				t.Vars[runner.DeliveryContractVar] = `{"requireGitCommit":true,"requirePush":true}`
+			} else if !deliveryContractProducesAnchor(raw) {
+				s.jsonError(w, http.StatusBadRequest, "this workflow requires the machine-verified delivery anchor (delivery_sha), so the explicit MULTIGENT_DELIVERY_CONTRACT must set BOTH requireGitCommit and requirePush to true; the provided contract cannot produce the anchor — drop it to receive the default full contract, or provide a complete one")
+				return
 			}
 		}
 	}

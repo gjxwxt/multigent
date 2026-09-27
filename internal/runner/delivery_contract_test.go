@@ -416,22 +416,34 @@ func TestMergeDeliveryEvidenceOnlyInjectsProvenPair(t *testing.T) {
 	if out["delivery_branch"] != "task/x" {
 		t.Fatalf("branch must ride the proven evidence, got %q", out["delivery_branch"])
 	}
-	// Short SHA (the run6 failure mode): never injected.
-	out = map[string]string{}
+	// Short SHA (the run6 failure mode): never injected AND any agent-forged
+	// residue is deleted — unproven evidence must leave the key ABSENT, not
+	// leave the agent's value in place (blind-review blocker).
+	out = map[string]string{"delivery_sha": "b2388d6", "delivery_branch": "agent/lie"}
 	MergeDeliveryEvidence(out, "task/x", PushEvidence{RemoteHasBranch: true, RemoteSHA: "b2388d6", LocalSHA: "b2388d6"})
 	if _, ok := out["delivery_sha"]; ok {
-		t.Fatal("a short SHA must never be handed to QA as the anchor")
+		t.Fatal("a short SHA must never be handed to QA as the anchor; forged residue must be deleted")
 	}
-	// Mismatched pair: never injected.
-	out = map[string]string{}
+	if _, ok := out["delivery_branch"]; ok {
+		t.Fatal("unproven evidence must also delete the forged branch key")
+	}
+	// Mismatched pair: never injected, forged residue deleted.
+	out = map[string]string{"delivery_sha": full, "pr": "branch:x"}
 	MergeDeliveryEvidence(out, "task/x", PushEvidence{RemoteHasBranch: true, RemoteSHA: full, LocalSHA: strings.Repeat("b", 40)})
 	if _, ok := out["delivery_sha"]; ok {
 		t.Fatal("a remote!=local pair must never be handed to QA as the anchor")
 	}
-	// Empty evidence: never injected.
-	out = map[string]string{}
+	if out["pr"] != "branch:x" {
+		t.Fatalf("merge must not touch unrelated outputs, got pr=%q", out["pr"])
+	}
+	// Empty evidence (RequireGitCommit-only contract or no contract at all):
+	// never injected, forged residue deleted.
+	out = map[string]string{"delivery_sha": "agent-forged", "delivery_branch": "agent/branch"}
 	MergeDeliveryEvidence(out, "task/x", PushEvidence{})
 	if _, ok := out["delivery_sha"]; ok {
 		t.Fatal("empty evidence must never be handed to QA as the anchor")
+	}
+	if _, ok := out["delivery_branch"]; ok {
+		t.Fatal("empty evidence must delete the forged branch key")
 	}
 }

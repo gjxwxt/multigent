@@ -150,11 +150,14 @@ const (
 	DeliveryEvidenceFieldBranch = "delivery_branch"
 )
 
-// MergeDeliveryEvidence overwrites the delivery-evidence output keys with
-// the gate-proven values. It only injects when the evidence is actually
-// proven: RemoteSHA present, exactly 40 hex chars (full SHA, never short),
-// and equal to LocalSHA. Anything else leaves the outputs untouched so a
-// downstream consumer can treat "key absent" as "evidence not proven".
+// MergeDeliveryEvidence enforces the machine-anchor contract on the
+// completing step's outputs: the ONLY value that may survive under
+// delivery_sha/delivery_branch is the gate-proven pair (full 40-hex,
+// remote == local). When the evidence is not proven, any agent-provided
+// values for those keys are DELETED, not preserved — "key absent" must
+// reliably mean "evidence not proven" downstream, never "the agent's free
+// text slipped through as the anchor" (run6 shipped a 7-hex summary as
+// the QA anchor; that failure mode is closed here).
 func MergeDeliveryEvidence(outputs map[string]string, branchName string, push PushEvidence) {
 	if outputs == nil {
 		return
@@ -162,11 +165,15 @@ func MergeDeliveryEvidence(outputs map[string]string, branchName string, push Pu
 	sha := strings.TrimSpace(push.RemoteSHA)
 	local := strings.TrimSpace(push.LocalSHA)
 	if sha == "" || sha != local || len(sha) != 40 || !isHex(sha) {
+		delete(outputs, DeliveryEvidenceFieldSHA)
+		delete(outputs, DeliveryEvidenceFieldBranch)
 		return
 	}
 	outputs[DeliveryEvidenceFieldSHA] = sha
 	if bn := strings.TrimSpace(branchName); bn != "" {
 		outputs[DeliveryEvidenceFieldBranch] = bn
+	} else {
+		delete(outputs, DeliveryEvidenceFieldBranch)
 	}
 }
 

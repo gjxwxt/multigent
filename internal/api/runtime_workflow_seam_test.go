@@ -101,6 +101,27 @@ func TestRuntimeWorkflowSeam_GreenfieldVNextPromptAndStepDone(t *testing.T) {
 	}
 	runGit("add", ".")
 	runGit("commit", "-m", "init")
+	baseCommit := runGit("rev-parse", "HEAD")
+
+	// Bare remote + pushed main: the delivery gate needs push evidence to
+	// prove the anchor, so the fixture repo gets a real origin to push to.
+	remoteDir := filepath.Join(t.TempDir(), "origin.git")
+	remoteGit := func(args ...string) string {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = remoteDir
+		cmd.Env = gitEnv
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %v (%s)", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if err := os.MkdirAll(remoteDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	remoteGit("init", "--bare", "-b", "main")
+	runGit("remote", "add", "origin", remoteDir)
+	runGit("push", "origin", "main")
 
 	if err := s.st.SaveProject("resproj", &entity.Project{Name: "resproj", Repo: repoDir}); err != nil {
 		t.Fatalf("save project: %v", err)
@@ -108,14 +129,23 @@ func TestRuntimeWorkflowSeam_GreenfieldVNextPromptAndStepDone(t *testing.T) {
 
 	now := time.Now().UTC()
 	task := &entity.Task{
-		ID:          "t-seam-1",
-		Title:       "Token Revocation Endpoint",
-		Assignee:    "resproj/pm-agent",
-		Status:      entity.TaskStatusInProgress,
-		Prompt:      "Implement Token Revocation Endpoint with test spec",
+		ID:        "t-seam-1",
+		Title:     "Token Revocation Endpoint",
+		Assignee:  "resproj/pm-agent",
+		Status:    entity.TaskStatusInProgress,
+		Prompt:    "Implement Token Revocation Endpoint with test spec",
+		CreatedAt: now,
+		UpdatedAt: now,
+		// The greenfield template promises QA the machine anchor, so the
+		// delivery contract must be seeded on the root task (task creation
+		// does this automatically; this test starts the run directly).
+		Vars: map[string]string{runner.DeliveryContractVar: `{"requireGitCommit":true,"requirePush":true}`},
+		// Delivery identity for the linear completion gate: the impl step
+		// must prove a commit beyond this base on this branch, pushed.
+		BaseCommit:  baseCommit,
+		BaseBranch:  "main",
+		BranchName:  "task/token-revocation",
 		WorktreeDir: repoDir,
-		CreatedAt:   now,
-		UpdatedAt:   now,
 	}
 
 	// Register workers and project memberships for all agent roles in the pipeline
@@ -312,6 +342,15 @@ func TestRuntimeWorkflowSeam_GreenfieldVNextPromptAndStepDone(t *testing.T) {
 	}
 
 	evidenceJSON := `{"AUTH-001":{"test":"TestRevokedTokenRejection","file":"auth_test.go","result":"pass"},"AUTH-002":{"test":"TestTTLExpiration","file":"auth_test.go","result":"pass"}}`
+	// The impl completion now rides the delivery gate: actually deliver a
+	// commit beyond the frozen base on the declared branch and push it.
+	runGit("checkout", "-b", "task/token-revocation")
+	if err := os.WriteFile(filepath.Join(repoDir, "auth.go"), []byte("package main\n\nfunc Revoke() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", ".")
+	runGit("commit", "-m", "feat(auth): token revocation")
+	runGit("push", "origin", "task/token-revocation")
 	recImpl := postRuntimeStepComplete("developer-agent", map[string]string{
 		"pr":                           "feat(auth): token revocation endpoint and middleware check",
 		"tests_run":                    "go test ./... 2/2 PASS",

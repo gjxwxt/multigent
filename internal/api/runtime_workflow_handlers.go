@@ -781,6 +781,31 @@ func (s *Server) createRuntimeTaskFromBody(w http.ResponseWriter, r *http.Reques
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
+	// Delivery SHA hand-off (Route A): same auto-seed as the console task
+	// creation path (write.go) — a definition whose qa REQUIRES delivery_sha
+	// needs the delivery contract on the root task. An explicit caller
+	// contract is only accepted when it can actually produce the anchor
+	// (BOTH requireGitCommit and requirePush): weak or unparseable ones are
+	// rejected with a clear 400 and no task written, never silently
+	// strengthened or waived.
+	if workflowRequiresDeliverySHA(workflowDef) {
+		// Structural soundness (mirror of write.go): reject definitions
+		// whose anchor promise no pr-declaring producer can satisfy.
+		if !workflowAnchorProducible(workflowDef) {
+			s.jsonError(w, http.StatusBadRequest, "this workflow requires the machine-verified delivery anchor (delivery_sha) but no step declaring a pr output can reach the required input through the edge graph — the anchor is structurally unproducible; add a pr output to the delivering step and thread delivery_sha through the edges, or drop the required delivery_sha input")
+			return
+		}
+		raw := strings.TrimSpace(t.Vars[runner.DeliveryContractVar])
+		if raw == "" {
+			if t.Vars == nil {
+				t.Vars = map[string]string{}
+			}
+			t.Vars[runner.DeliveryContractVar] = `{"requireGitCommit":true,"requirePush":true}`
+		} else if !deliveryContractProducesAnchor(raw) {
+			s.jsonError(w, http.StatusBadRequest, "this workflow requires the machine-verified delivery anchor (delivery_sha), so the explicit MULTIGENT_DELIVERY_CONTRACT must set BOTH requireGitCommit and requirePush to true; the provided contract cannot produce the anchor — drop it to receive the default full contract, or provide a complete one")
+			return
+		}
+	}
 	if est, err := entity.NormalizeEstimateDuration(body.EstimateDuration); err != nil {
 		s.jsonError(w, http.StatusBadRequest, err.Error())
 		return
@@ -1248,27 +1273,67 @@ func (s *Server) handleRuntimeWorkflowStepComplete(w http.ResponseWriter, r *htt
 	// even after rework re-entered implementation. Steps that do not declare
 	// `pr` (spec design, reviews, QA itself) never run this gate, so legacy
 	// linear flows without the contract var are byte-for-byte unchanged.
+	// Fail-closed anchor promise (blind-review blocker): when the
+	// definition's qa step REQUIRES delivery_sha but the task carries no
+	// delivery contract, a pr-declaring step cannot honestly promise the
+	// machine anchor the template promised — reject instead of letting an
+	// agent-forged SHA ride to QA. In-flight pre-seeding runs hit this on
+	// their next pr-declaring completion and get an actionable message.
 	if stepStatus == "completed" && strings.TrimSpace(t.Vars[workflowBranchIDVar]) == "" {
-		if raw := strings.TrimSpace(t.Vars[runner.DeliveryContractVar]); raw != "" {
-			declaresPR, stepErr := s.workflowStepDeclaresOutput(principal.WorkspaceID, principal.Project, t, "pr")
-			if stepErr != nil {
+		declaresPR, requiresAnchor, stepErr := s.workflowDeliveryGateShape(principal.WorkspaceID, principal.Project, t)
+		if stepErr != nil {
+			// A task that is simply not attached to a workflow keeps the
+			// legacy path below (its original 400); only genuine inspection
+			// failures fail closed here.
+			if strings.Contains(stepErr.Error(), "not attached to a workflow") {
+				declaresPR, requiresAnchor = false, false
+			} else {
 				s.jsonError(w, http.StatusInternalServerError, "could not inspect the workflow step for the delivery gate: "+stepErr.Error())
 				return
 			}
-			if declaresPR {
-				contract, pErr := runner.ParseDeliveryContract(raw)
-				if pErr != nil {
-					s.jsonError(w, http.StatusBadRequest, fmt.Sprintf("delivery contract invalid: %v", pErr))
-					return
-				}
-				deliveryDir := s.resolveTaskWorktreeDir(principal.Project, t.ID)
-				violation, push := runner.ValidateGitDeliveryEvidence(contract, deliveryDir, t.BaseCommit, t.BaseBranch, t.BranchName, s.deliveryEvidenceEnv(principal.Project, deliveryDir))
-				if violation != "" {
-					s.jsonError(w, http.StatusBadRequest, violation)
-					return
-				}
-				runner.MergeDeliveryEvidence(body.Outputs, t.BranchName, push)
+		}
+		raw := strings.TrimSpace(t.Vars[runner.DeliveryContractVar])
+		if declaresPR && requiresAnchor && raw == "" {
+			// The definition promises QA the machine anchor, but nothing can
+			// produce it: reject instead of letting an agent-forged SHA ride
+			// to the required qa input. Vars cannot be added to an in-flight
+			// task — the recovery is to cancel and recreate the task (task
+			// creation auto-seeds the contract for anchor-requiring
+			// definitions).
+			s.jsonError(w, http.StatusBadRequest, "this workflow's qa step requires the machine-verified delivery anchor (delivery_sha), but the task has no MULTIGENT_DELIVERY_CONTRACT and vars cannot be added to an in-flight task; cancel and recreate the task (creation auto-seeds the contract for anchor-requiring definitions), or remove the required delivery_sha input from the definition's qa step")
+			return
+		}
+		if declaresPR && requiresAnchor && raw != "" {
+			// The anchor promise can only be PRODUCED by a full commit+push
+			// gate: a contract that waives either git dimension (explicit
+			// weak contract, e.g. {"requireGitCommit":false}) would validate
+			// with no violation and no proven evidence, then advance to the
+			// anchor-requiring qa with nothing to hand it. Reject the weak
+			// contract here — the authoritative choke point — instead of
+			// silently strengthening it.
+			contract, pErr := runner.ParseDeliveryContract(raw)
+			if pErr != nil {
+				s.jsonError(w, http.StatusBadRequest, fmt.Sprintf("delivery contract invalid: %v", pErr))
+				return
 			}
+			if !contract.RequireGitCommit || !contract.RequirePush {
+				s.jsonError(w, http.StatusBadRequest, "this workflow's qa step requires the machine-verified delivery anchor (delivery_sha), so the task's MULTIGENT_DELIVERY_CONTRACT must set BOTH requireGitCommit and requirePush to true; the current contract waives one of them and cannot produce the anchor — recreate the task with a full contract or remove the required delivery_sha input from the definition's qa step")
+				return
+			}
+		}
+		if declaresPR && raw != "" {
+			contract, pErr := runner.ParseDeliveryContract(raw)
+			if pErr != nil {
+				s.jsonError(w, http.StatusBadRequest, fmt.Sprintf("delivery contract invalid: %v", pErr))
+				return
+			}
+			deliveryDir := s.resolveTaskWorktreeDir(principal.Project, t.ID)
+			violation, push := runner.ValidateGitDeliveryEvidence(contract, deliveryDir, t.BaseCommit, t.BaseBranch, t.BranchName, s.deliveryEvidenceEnv(principal.Project, deliveryDir))
+			if violation != "" {
+				s.jsonError(w, http.StatusBadRequest, violation)
+				return
+			}
+			runner.MergeDeliveryEvidence(body.Outputs, t.BranchName, push)
 		}
 	}
 	transition, transitioned, err := s.completeRuntimeWorkflowStep(principal.WorkspaceID, principal.Project, t, body.Outputs, stepStatus)
@@ -1555,41 +1620,44 @@ func branchHasEmbeddedWorkflow(def entity.WorkflowDefinition) bool {
 	return strings.TrimSpace(def.Steps[0].ID) != "start"
 }
 
-// workflowStepDeclaresOutput reports whether the task's CURRENT workflow
-// step declares the named output field. It is the declaration-as-opt-in
-// signal for the linear delivery-contract gate: only steps whose contract
-// explicitly includes a delivery artifact (e.g. `pr` on implementation)
-// get git-gated, so spec/review/QA steps on the same contracted task are
-// never measured against a delivery they do not own.
-func (s *Server) workflowStepDeclaresOutput(workspaceID, project string, t *entity.Task, name string) (bool, error) {
+// workflowDeliveryGateShape reports, for the task's CURRENT workflow step,
+// (a) whether it declares a `pr` output (the delivery gate's opt-in) and
+// (b) whether the DEFINITION promises the machine anchor to QA (a qa step
+// requiring delivery_sha). (b) is what makes the anchor promise structural:
+// a definition whose qa requires delivery_sha may not complete a pr-declaring
+// step without either a delivery contract or an explicit rejection — an
+// agent-forged SHA must never reach the qa input.
+func (s *Server) workflowDeliveryGateShape(workspaceID, project string, t *entity.Task) (declaresPR bool, qaRequiresAnchor bool, err error) {
 	if s == nil || s.controlDB == nil || t == nil {
-		return false, fmt.Errorf("workflow store is not available")
+		return false, false, fmt.Errorf("workflow store is not available")
 	}
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
 	run, ok, err := wfStore.RunForTask(project, t.ID)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if !ok {
-		return false, fmt.Errorf("task is not attached to a workflow")
+		return false, false, fmt.Errorf("task is not attached to a workflow")
 	}
 	def, ok, err := wfStore.RunDefinition(run)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if !ok {
-		return false, fmt.Errorf("workflow definition %q not found", run.DefinitionID)
+		return false, false, fmt.Errorf("workflow definition %q not found", run.DefinitionID)
 	}
+	qaRequiresAnchor = workflowRequiresDeliverySHA(def)
 	step, ok := workflowStepByID(def.Steps, run.ActiveStepID)
 	if !ok {
-		return false, fmt.Errorf("workflow step %q not found", run.ActiveStepID)
+		return false, qaRequiresAnchor, fmt.Errorf("workflow step %q not found", run.ActiveStepID)
 	}
 	for _, f := range step.OutputFields {
-		if strings.TrimSpace(f.Name) == name {
-			return true, nil
+		if strings.TrimSpace(f.Name) == "pr" {
+			declaresPR = true
+			break
 		}
 	}
-	return false, nil
+	return declaresPR, qaRequiresAnchor, nil
 }
 
 func (s *Server) completeRuntimeWorkflowStep(workspaceID, project string, t *entity.Task, outputs map[string]string, stepStatus string) (workflowstore.TransitionResult, bool, error) {
@@ -1666,10 +1734,53 @@ func (s *Server) completeRuntimeWorkflowBranch(workspaceID, project string, t *e
 	// already failing). Failure converts the completion into a branch
 	// failure so the join sees an honest state.
 	if stepStatus == "completed" {
-		if raw := strings.TrimSpace(t.Vars[runner.DeliveryContractVar]); raw != "" {
+		raw := strings.TrimSpace(t.Vars[runner.DeliveryContractVar])
+		// Anchor-promise resolution (parent run/definition): branch children
+		// get their own single-step child run whose definition never
+		// promises the anchor, so resolve via the parent run ID from the
+		// task Vars — the same handle the join itself consumes. FAIL CLOSED
+		// when the parent run/definition cannot be read (same trust stance
+		// as precheckBranchJoinGate: predicting nothing is safer than
+		// predicting a contract that is not the one the join enforces).
+		// Resolved only when a contract check needs it — but also when
+		// there is NO contract at all, because the normalize whitelist
+		// would otherwise persist an agent-forged delivery_sha into the
+		// branch instance unchecked.
+		parentRun, parentFound, runErr := wfStore.RunByID(project, runID)
+		if runErr != nil {
+			return result, fmt.Errorf("branch delivery gate: read parent run %s: %w", runID, runErr)
+		}
+		if !parentFound {
+			return result, fmt.Errorf("branch delivery gate: parent run %s not found; refusing to evaluate the delivery gate against an unknown workflow", runID)
+		}
+		parentDef, defOK, defErr := wfStore.RunDefinition(parentRun)
+		if defErr != nil {
+			return result, fmt.Errorf("branch delivery gate: read parent definition %s: %w", parentRun.DefinitionID, defErr)
+		}
+		if !defOK {
+			return result, fmt.Errorf("branch delivery gate: parent definition %s not found; refusing to evaluate the delivery gate against an unknown workflow", parentRun.DefinitionID)
+		}
+		anchorPromise := workflowRequiresDeliverySHA(parentDef)
+		if anchorPromise && raw == "" {
+			// The definition promises QA the machine anchor, but this branch
+			// carries no contract that could produce it: letting the
+			// completion through would persist an agent-forged delivery_sha
+			// into the branch instance (the normalize whitelist admits the
+			// key). Fail closed BEFORE any write — the linear gate applies
+			// the same rule.
+			return result, fmt.Errorf("this workflow's qa step requires the machine-verified delivery anchor (delivery_sha), but this branch task has no MULTIGENT_DELIVERY_CONTRACT; recreate the parent task so the branch inherits a full contract (requireGitCommit+requirePush), or remove the required delivery_sha input from the definition's qa step")
+		}
+		if raw != "" {
 			contract, pErr := runner.ParseDeliveryContract(raw)
 			if pErr != nil {
 				return result, fmt.Errorf("delivery contract invalid: %w", pErr)
+			}
+			// Weak-contract guard (mirror of the linear completion gate):
+			// a contract that waives either git dimension would validate
+			// with no violation and no proven evidence — it cannot produce
+			// the promised anchor.
+			if anchorPromise && (!contract.RequireGitCommit || !contract.RequirePush) {
+				return result, fmt.Errorf("this workflow requires the machine-verified delivery anchor (delivery_sha), so the task's MULTIGENT_DELIVERY_CONTRACT must set BOTH requireGitCommit and requirePush to true; the current contract waives one of them and cannot produce the anchor")
 			}
 			deliveryDir := s.resolveTaskWorktreeDir(project, t.ID)
 			// Delivery SHA hand-off: when the gate PROVES remote SHA == local
