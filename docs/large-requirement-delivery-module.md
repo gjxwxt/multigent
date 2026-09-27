@@ -174,8 +174,8 @@ parallel_stage (joinPolicy: all)
     ↓ 回到原流水线 qa → qa_signoff → pr/release → go_live（零改动）
 ```
 
-> 注：以上 branch 划分是 ias-auth-center SRS 的映射示例，batch_plan 按每个需求
-> 实际产出；DM6 的内聚原则不变。
+> 注：以上 branch 划分是既有需求规格的映射示例，batch_plan 按每个需求实际产出；
+> DM6 的内聚原则不变。
 
 ### 4.4 OD 原型输入链（复用现有机制，无代码改动）
 
@@ -205,7 +205,7 @@ OD 容器（单次 16,384 token 硬封顶，默认 glm-5.3-flash）→ 产出原
 | 阶段 | 内容 | 验收标准 | 预估 |
 |---|---|---|---|
 | S1 模板机制 | greenfield 模板加 scale_gate + 两条条件边 + contract_batch/parallel_stage 变体 + 测试 | linear 路径回归零变化；batched 路径单测覆盖扇出/汇聚/契约注入；`make test` 绿 | 1 天 |
-| S2 Dogfood 机制验证 | 在 ias-auth-center（已有 baseline + 批0 产物）上发起真实 run 走 batched 路径 | 真实扇出 ≥2 branch 并汇聚；契约产物进公共基线；问题清单回灌模板 | 0.5 天 |
+| S2 Dogfood 机制验证 | 在已有代码基线与批 0 产物的项目上发起真实 run，走 batched 路径 | 真实扇出 ≥2 branch 并汇聚；契约产物进公共基线；问题清单回灌模板 | 0.5 天 |
 | S3 需求包资产层 | §4.5 的端点 + 入库 commit + 前端两处 UI | 上传→commit→任务引用选择全链路可用；未鉴权访问被拒 | 1-2 天 |
 | S4 全新 0→1 验证 | 全新空项目完整走 §2 旅程（react_spring_fullstack 模板） | DM10 退出标准：零手工救场；todo 清单产出 | 0.5-1 天 |
 | S5 固化收编 | 问题修复 + 模板版本号 + 本文档状态更新为"已实施" | 全部阶段证据入 `work/evidence/large-requirement-module/`；文档随 commit 入库 | 依发现 |
@@ -228,8 +228,8 @@ S1→S2 先行的理由：机制层不动 UI/API，改完立即可验；S3 动 A
 
 - 本模块自身的追溯单元 = 阶段（S1-S5）；每阶段在本文"执行日志"追加记录 + 证据
   路径，commit message 引用本文（`docs/large-requirement-delivery-module.md`）。
-- 被交付项目（如 ias-auth-center）的追溯单元 = batch_plan 的 branch/批次 + 现有
-  工作流门的审阅记录，不在本文重复。
+- 被交付项目的追溯单元 = batch_plan 的 branch/批次 + 现有工作流门的审阅记录，
+  不在本文重复。
 - 模块完成的定义：S1-S5 全部关闭，且"下一个新需求"能够由非设计者按 §2 旅程走通。
 
 ---
@@ -379,12 +379,10 @@ S1→S2 先行的理由：机制层不动 UI/API，改完立即可验；S3 动 A
   确定性匹配）；不以完成时状态补造基线（会漂白闸门本要捕获的变更）；历史脏文件
   不自动认定为合法交付内容。
 
-  **S2 验收状态：未通过**（评审决定）。wfr-07249bes 两个 workstream 产物已确认
-  完整（WS-A: `feat/ws-a-client-lifecycle-63b32fc` @ 67c379d；WS-B:
-  `feat/ias-auth-center-ws-b` @ ca7981c96dd；契约基线 63b32fc6b610），且两个
-  agent 工作区 git 状态与完成申报一致（worktree 仍可观测），但汇聚未发生，且
-  "两个分支进入同一集成候选 SHA"（§6 提高的验收目标）尚未发生。历史 run 恢复
-  方案见 `docs/s2-wfr-07249bes-recovery.md`；恢复操作不计入验收证据。
+  **S2 验收状态：未通过**（评审决定）。当时的工作包产物已确认完整，但汇聚未发生，
+  "所有分支进入同一集成候选"（§6 提高的验收目标）尚未得到验证。具体运行快照与
+  恢复操作属于私有运维记录，不在公开文档中保留；通用恢复经验见
+  `docs/workflow-recovery-lessons.md`。手工恢复不计入自动交付验收证据。
 
   **架构方向修订（评审意见，指导后续 S 阶段）**：大需求编排从 "scale_gate 选择
   线性/并行" 提升为 "批准的交付计划驱动分批执行"（规划与审批 → 冻结计划 →
