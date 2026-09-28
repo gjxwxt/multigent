@@ -550,6 +550,12 @@ func (s *Server) submitWorkflowReviewFromTrigger(workspaceID string, record work
 				}
 			}
 		}
+		// C1: the trigger/ChatOps callback is a full review entry — the qa_signoff
+		// risk-coverage matrix gate must reject here BEFORE any transition write,
+		// exactly like the console review (shared choke point).
+		if err := enforceQASignoffMatrixGate(wfStore, record.Project, record.TaskID, currentStep, outputs); err != nil {
+			return result, err
+		}
 		// A plan-freezing review reached through a trigger/ChatOps callback
 		// must freeze through the SAME entry as the in-console review: the
 		// approval and the frozen plan ride one guarded transition, and a
