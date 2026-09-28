@@ -45,29 +45,37 @@ type workflowTriggerEvent struct {
 }
 
 type workflowNotificationRecord struct {
-	ID                string    `json:"id"`
-	WorkspaceID       string    `json:"workspaceId"`
-	Project           string    `json:"project"`
-	TaskID            string    `json:"taskId"`
-	TaskTitle         string    `json:"taskTitle"`
-	WorkflowRunID     string    `json:"workflowRunId"`
-	WorkflowID        string    `json:"workflowId"`
-	WorkflowName      string    `json:"workflowName"`
-	StepID            string    `json:"stepId"`
-	StepTitle         string    `json:"stepTitle"`
-	RecipientUserID   string    `json:"recipientUserId"`
-	Provider          string    `json:"provider"`
-	ConnectionID      string    `json:"connectionId,omitempty"`
-	ExternalUserID    string    `json:"externalUserId,omitempty"`
-	Status            string    `json:"status"`
-	Error             string    `json:"error,omitempty"`
-	CallbackTokenHash string    `json:"callbackTokenHash,omitempty"`
-	ExternalMessageID string    `json:"externalMessageId,omitempty"`
-	OpenURL           string    `json:"openUrl,omitempty"`
-	CallbackURL       string    `json:"callbackUrl,omitempty"`
-	CreatedAt         time.Time `json:"createdAt"`
-	UpdatedAt         time.Time `json:"updatedAt"`
-	ActedAt           time.Time `json:"actedAt,omitempty"`
+	ID            string `json:"id"`
+	WorkspaceID   string `json:"workspaceId"`
+	Project       string `json:"project"`
+	TaskID        string `json:"taskId"`
+	TaskTitle     string `json:"taskTitle"`
+	WorkflowRunID string `json:"workflowRunId"`
+	// WorkflowRunUpdatedAt pins the run's decision-point generation at mint
+	// time (run.UpdatedAt changes only when a transition changes the decision
+	// point: advance, rework reset, reactivation, failure, terminal). A card
+	// whose generation no longer matches the run cannot act — the same
+	// (run, step) pair is REUSED across rework rounds, so run+step alone
+	// cannot tell a round-N card from the round-N+1 decision point it would
+	// otherwise drive.
+	WorkflowRunUpdatedAt time.Time `json:"workflowRunUpdatedAt,omitempty"`
+	WorkflowID           string    `json:"workflowId"`
+	WorkflowName         string    `json:"workflowName"`
+	StepID               string    `json:"stepId"`
+	StepTitle            string    `json:"stepTitle"`
+	RecipientUserID      string    `json:"recipientUserId"`
+	Provider             string    `json:"provider"`
+	ConnectionID         string    `json:"connectionId,omitempty"`
+	ExternalUserID       string    `json:"externalUserId,omitempty"`
+	Status               string    `json:"status"`
+	Error                string    `json:"error,omitempty"`
+	CallbackTokenHash    string    `json:"callbackTokenHash,omitempty"`
+	ExternalMessageID    string    `json:"externalMessageId,omitempty"`
+	OpenURL              string    `json:"openUrl,omitempty"`
+	CallbackURL          string    `json:"callbackUrl,omitempty"`
+	CreatedAt            time.Time `json:"createdAt"`
+	UpdatedAt            time.Time `json:"updatedAt"`
+	ActedAt              time.Time `json:"actedAt,omitempty"`
 }
 
 type workflowTriggerCallbackBody struct {
@@ -286,26 +294,27 @@ func (s *Server) createWorkflowNotificationRecord(event workflowTriggerEvent, pr
 	openURL := workflowTaskOpenURL(r, event.Project, event.TaskID)
 	callbackURL := workflowTriggerCallbackURL(r, event.WorkspaceID, id, token)
 	record := workflowNotificationRecord{
-		ID:                id,
-		WorkspaceID:       event.WorkspaceID,
-		Project:           event.Project,
-		TaskID:            event.TaskID,
-		TaskTitle:         event.TaskTitle,
-		WorkflowRunID:     event.Run.ID,
-		WorkflowID:        event.Definition.ID,
-		WorkflowName:      event.Definition.Name,
-		StepID:            event.Step.ID,
-		StepTitle:         event.Step.Title,
-		RecipientUserID:   reviewer,
-		Provider:          provider,
-		ConnectionID:      connectionID,
-		ExternalUserID:    externalUserID,
-		Status:            "pending",
-		CallbackTokenHash: hashWorkflowCallbackToken(token),
-		OpenURL:           openURL,
-		CallbackURL:       callbackURL,
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		ID:                   id,
+		WorkspaceID:          event.WorkspaceID,
+		Project:              event.Project,
+		TaskID:               event.TaskID,
+		TaskTitle:            event.TaskTitle,
+		WorkflowRunID:        event.Run.ID,
+		WorkflowRunUpdatedAt: event.Run.UpdatedAt,
+		WorkflowID:           event.Definition.ID,
+		WorkflowName:         event.Definition.Name,
+		StepID:               event.Step.ID,
+		StepTitle:            event.Step.Title,
+		RecipientUserID:      reviewer,
+		Provider:             provider,
+		ConnectionID:         connectionID,
+		ExternalUserID:       externalUserID,
+		Status:               "pending",
+		CallbackTokenHash:    hashWorkflowCallbackToken(token),
+		OpenURL:              openURL,
+		CallbackURL:          callbackURL,
+		CreatedAt:            now,
+		UpdatedAt:            now,
 	}
 	if err := s.saveWorkflowNotification(record); err != nil {
 		return workflowNotificationRecord{}, err
@@ -531,6 +540,16 @@ func (s *Server) submitWorkflowReviewFromTrigger(workspaceID string, record work
 		if record.WorkflowRunID != run.ID || record.StepID != run.ActiveStepID {
 			return result, fmt.Errorf("stale workflow review card: notification %s was issued for run %s step %s, but the task is now on run %s step %s; use the current review card", record.ID, record.WorkflowRunID, record.StepID, run.ID, run.ActiveStepID)
 		}
+		if !record.WorkflowRunUpdatedAt.IsZero() && !record.WorkflowRunUpdatedAt.Equal(run.UpdatedAt) {
+			return result, fmt.Errorf("stale workflow review card: notification %s was issued for an earlier decision round of run %s step %s; use the current review card", record.ID, run.ID, run.ActiveStepID)
+		}
+		// A1 round-level: (run, step) is REUSED across rework rounds — the
+		// engine resets the same step instance in place, so a round-N card
+		// matches run+step at round N+1 and would approve the reworked round
+		// without the reworked input ever reaching the reviewer through it.
+		// run.UpdatedAt changes exactly when the decision point changes, so a
+		// mint-time pin rejects any card from an earlier round. Legacy records
+		// (zero pin) keep the run+step check only.
 		def, defFound, err := wfStore.RunDefinition(run)
 		if err != nil {
 			return result, err
