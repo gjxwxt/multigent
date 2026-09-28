@@ -32,7 +32,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"requirementItemsField": "JSON array of the requirement anchors this delivery traces to: [{id, text, source}]. The ids are frozen by the requirement review and referenced by every non-infrastructure work package's acceptanceCriteria.",
 
 		"contractBatchTitle":     "Shared Contract Batch",
-		"contractBatchDesc":      "BATCHED PATH ONLY. Build the shared foundation every workstream depends on: database schema and migrations, error-code enumeration, API skeleton (paths/auth/error semantics), and the tech-stack skeleton (per batch_plan). Commit to the integration baseline BEFORE parallel work starts — parallel branches cannot see each other's code, so this contract is their only shared surface. Follow the batch_plan contract list; do not implement workstream business logic here. When entering this step through a rework loop (or whenever the upstream requirement snapshot was malformed), you MUST re-emit requirement_items as a structured output: a JSON array of {\"id\",\"text\",\"source\"} objects covering every requirement anchor — the human contract review and the plan freeze both consume this output.",
+		"contractBatchDesc":      "BATCHED PATH ONLY. Build the shared foundation every workstream depends on: database schema and migrations, error-code enumeration, API skeleton (paths/auth/error semantics), and the tech-stack skeleton (per batch_plan). Commit to the integration baseline BEFORE parallel work starts — parallel branches cannot see each other's code, so this contract is their only shared surface. Follow the batch_plan contract list; do not implement workstream business logic here. When entering this step through a rework loop (or whenever the upstream requirement snapshot was malformed), you MUST re-emit requirement_items as a structured output: a JSON array of {\"id\",\"text\",\"source\"} objects covering every requirement anchor — the human contract review and the plan freeze both consume this output. Likewise ALWAYS re-emit the plan you received: output delivery_plan (and batch_plan when present) either unchanged or with your refinements — the review and the freeze consume the OUTPUT copy, so a plan that stays input-only never reaches the human approval.",
 		"contractArtifactsField": "Committed shared-contract summary: schema objects, error codes, API paths, and the baseline commit SHA carrying them. The baseline commit SHA must be a full 40-hex commit SHA or be omitted entirely — a short SHA or branch name is refused at the freeze gate.",
 
 		"contractReviewTitle":      "Shared Contract Review",
@@ -115,7 +115,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"requirementItemsField": "本次交付追溯的需求锚点 JSON 数组：[{id, text, source}]。id 由需求评审冻结，所有非基础设施工作包的 acceptanceCriteria 都必须引用它们。",
 
 		"contractBatchTitle":     "共享契约批",
-		"contractBatchDesc":      "仅 batched 路径。构建所有工作流共同依赖的共享地基：数据库 schema 与迁移、错误码枚举、API 骨架（路径/鉴权/错误语义）与技术栈骨架（按 batch_plan）。在并行工作开始前提交到集线基线——并行分支互相看不见对方代码，这份契约是它们唯一的共享面。按 batch_plan 的契约清单执行；不要在此实现工作流的业务逻辑。经返工环进入本步骤（或上游需求快照畸形）时，必须把 requirement_items 作为结构化输出重新提交：JSON 数组，每项含 {\"id\",\"text\",\"source\"}，覆盖全部需求锚点——人工契约评审与计划冻结都以这份输出为准。",
+		"contractBatchDesc":      "仅 batched 路径。构建所有工作流共同依赖的共享地基：数据库 schema 与迁移、错误码枚举、API 骨架（路径/鉴权/错误语义）与技术栈骨架（按 batch_plan）。在并行工作开始前提交到集线基线——并行分支互相看不见对方代码，这份契约是它们唯一的共享面。按 batch_plan 的契约清单执行；不要在此实现工作流的业务逻辑。经返工环进入本步骤（或上游需求快照畸形）时，必须把 requirement_items 作为结构化输出重新提交：JSON 数组，每项含 {\"id\",\"text\",\"source\"}，覆盖全部需求锚点——人工契约评审与计划冻结都以这份输出为准。同样，必须把收到的计划重新提交为输出：delivery_plan（以及存在的 batch_plan）原样或加入你的修订后输出——评审与冻结消费的都是输出副本，只停留在输入侧的计划永远不会到达人工评审。",
 		"contractArtifactsField": "已提交的共享契约摘要：schema 对象、错误码、API 路径，以及承载它们的基线 commit SHA。基线 commit SHA 必须是完整 40 位十六进制 SHA，否则整字段省略——短 SHA 或分支名会在冻结闸门被拒。",
 
 		"contractReviewTitle":      "共享契约评审",
@@ -244,6 +244,9 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		[]entity.WorkflowField{
 			field("contract_artifacts", "contractArtifactsField"),
 			optionalField("delivery_plan", "deliveryPlanField"),
+			// F1: batch_plan joins delivery_plan as a declared output so the
+			// review edge can forward the output side for both plan carriers.
+			optionalField("batch_plan", "batchPlanField"),
 			// S2 hardening batch 2 (run4 finding): requirement_items is an
 			// INPUT-only field on this step, yet the freeze anchor chain
 			// (plan_freeze.go) reads it from contract_batch OUTPUTS — the
@@ -556,20 +559,28 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"design_waived":                 "$input.design_waived",
 			}, true),
 			// Contract batch → human contract review → parallel fan-out.
+			// F1: the plan fields forward the OUTPUT side, same as the S2 P1-1
+			// fix for contract_artifacts/requirement_items — the review must
+			// see the same snapshot the freeze consumes. Forwarding the input
+			// side let a reworked contract_batch's refined plan be frozen
+			// although the reviewer approved the older scale_gate draft (or,
+			// after a rework, an EMPTY plan). contract_batch therefore declares
+			// both plan fields as outputs and re-emits the plan it received
+			// when it does not refine it.
 			edge("e-contract-batch-review", "contract_batch", "contract_review", "", nil, map[string]string{
 				"contract_artifacts": "$output.contract_artifacts",
-				"delivery_plan":      "$input.delivery_plan",
-				"batch_plan":         "$input.batch_plan",
-				// S2 hardening batch 2 (P1-1, review round): forward the OUTPUT
-				// side. The freeze anchor chain reads contract_batch outputs
-				// (newest-producer-first), so the human review must see the
-				// same snapshot the freeze will consume — forwarding the input
-				// side let a reviewer approve anchors the freeze would replace
-				// with the reworked output (or vice versa).
-				"requirement_items": "$output.requirement_items",
+				"delivery_plan":      "$output.delivery_plan",
+				"batch_plan":         "$output.batch_plan",
+				"requirement_items":  "$output.requirement_items",
 			}, true),
 			edge("e-contract-review-rework", "contract_review", "contract_batch", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{
 				"review_comments":               "$output.comments",
+				// F1: carry the plan through the rework loop. Without it the
+				// second contract_batch pass loses delivery_plan from its
+				// input, so the re-mapped review edge forwards an EMPTY plan
+				// and the reviewer approves without seeing one while the
+				// freeze consumes whatever the output chain offers.
+				"delivery_plan":                 "$input.delivery_plan",
 				"batch_plan":                    "$input.batch_plan",
 				"requirement_items":             "$input.requirement_items",
 				"approved_requirement":          "$input.approved_requirement",
