@@ -3976,6 +3976,11 @@ func (s *Store) ReactivateFailedRunForStep(project, taskID, runID, stepID, reaso
 	}
 	now := time.Now().UTC()
 	inst := instances[target]
+	// G2: capture the failed step summary BEFORE the reset wipes it - the
+	// reactivated audit event below must preserve WHY the step failed, not
+	// only that a retry happened. Reading inst.Summary after the reset made
+	// the previous-failure clause dead code and silently dropped the cause.
+	previousFailureSummary := strings.TrimSpace(inst.Summary)
 	inst.Status = "pending"
 	inst.StartedAt = time.Time{}
 	inst.FinishedAt = time.Time{}
@@ -3999,8 +4004,8 @@ func (s *Store) ReactivateFailedRunForStep(project, taskID, runID, stepID, reaso
 	// (review round 9, P1-2): the audit trail has to keep WHAT failed, not only
 	// that a retry happened.
 	eventSummary := strings.TrimSpace(reason)
-	if previous := strings.TrimSpace(inst.Summary); previous != "" {
-		eventSummary = strings.TrimSpace(eventSummary + " | previous failure: " + previous)
+	if previousFailureSummary != "" {
+		eventSummary = strings.TrimSpace(eventSummary + " | previous failure: " + previousFailureSummary)
 	}
 	_ = s.SaveStepEvent(&entity.WorkflowStepEvent{
 		ID:        "evt_" + strings.TrimSpace(runID) + "_reactivated_" + strconv.FormatInt(now.UnixNano(), 36),
