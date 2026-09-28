@@ -121,6 +121,9 @@ func driveToContractReview(t *testing.T, s *Server, workspaceID, taskID, planJSO
 	}
 	rec = postBranchStepComplete(t, s, workspaceID, taskID, map[string]string{
 		"contract_artifacts": "schema + error codes committed",
+		// F1 fail-closed: the agent must re-emit the plan it received (prompt
+		// mandate); an approve with no plan at the review is refused.
+		"delivery_plan":      planJSON,
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("contract_batch completion must be 200, got %d: %s", rec.Code, rec.Body.String())
@@ -199,6 +202,7 @@ func TestContractBatchReworkRepairsRequirementAnchors(t *testing.T) {
 	}
 	rec = postBranchStepComplete(t, s, workspaceID, "task-anchor-rework", map[string]string{
 		"contract_artifacts": "schema + error codes committed",
+		"delivery_plan":      samplePlanJSON(),
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("contract_batch completion must be 200, got %d: %s", rec.Code, rec.Body.String())
@@ -225,6 +229,8 @@ func TestContractBatchReworkRepairsRequirementAnchors(t *testing.T) {
 	rec = postBranchStepComplete(t, s, workspaceID, "task-anchor-rework", map[string]string{
 		"contract_artifacts": "schema + error codes committed (rework)",
 		"requirement_items":  requirementItemsJSON(),
+		// F1 fail-closed: the rework pass must also carry the plan forward.
+		"delivery_plan":      samplePlanJSON(),
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("reworked contract_batch completion must accept the requirement_items output, got %d: %s", rec.Code, rec.Body.String())
@@ -692,11 +698,12 @@ func TestPlanFreezeExtrasAreDeterministicForOneApproval(t *testing.T) {
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
 	run := runForTask(t, s, workspaceID, "task-slice4-determinism")
 
-	planA, err := s.buildDeliveryPlanForFreeze(wfStore, run)
+	step := planFreezeStepForTest(t, wfStore, run)
+	planA, err := s.buildDeliveryPlanForFreeze(wfStore, run, step)
 	if err != nil {
 		t.Fatal(err)
 	}
-	planB, err := s.buildDeliveryPlanForFreeze(wfStore, run)
+	planB, err := s.buildDeliveryPlanForFreeze(wfStore, run, step)
 	if err != nil {
 		t.Fatal(err)
 	}

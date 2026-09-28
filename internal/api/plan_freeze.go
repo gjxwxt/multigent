@@ -39,7 +39,7 @@ func isPlanFreezeStep(step entity.WorkflowStep) bool {
 // buildDeliveryPlanForFreeze assembles the plan from the run's own step
 // outputs: the structured plan produced by scale_gate (falling back to
 // contract_batch) and the requirement anchor snapshot from requirement_draft.
-func (s *Server) buildDeliveryPlanForFreeze(wfStore *workflowstore.Store, run entity.WorkflowRun) (workflowstore.DeliveryPlan, error) {
+func (s *Server) buildDeliveryPlanForFreeze(wfStore *workflowstore.Store, run entity.WorkflowRun, freezeStep entity.WorkflowStep) (workflowstore.DeliveryPlan, error) {
 	instances, err := wfStore.ListStepInstances(run.ID)
 	if err != nil {
 		return workflowstore.DeliveryPlan{}, err
@@ -54,6 +54,42 @@ func (s *Server) buildDeliveryPlanForFreeze(wfStore *workflowstore.Store, run en
 	planJSONs := stepOutputCandidates(outputs, ordered,
 		[]string{"scale_gate", "contract_batch"},
 		[]string{"delivery_plan", "batch_plan"})
+	// F1 fail-closed: when the freezing review step DECLARES a plan input
+	// field (the template promises the reviewer a plan to look at) but the
+	// review instance's input carries none of them, the human is approving a
+	// plan they were never shown while the recency chain below freezes
+	// whichever older candidate it finds. Refuse the approval instead: the
+	// rework loop must deliver the plan to the review (agent re-emit or edge
+	// repair) before it can be frozen. Steps that do not declare plan inputs
+	// keep the fallback chain unchanged.
+	freezeInstanceInputs := map[string]string{}
+	for _, inst := range instances {
+		if inst.StepID == run.ActiveStepID {
+			freezeInstanceInputs = inst.InputValues
+			break
+		}
+	}
+	declaresPlanInput := false
+	for _, f := range freezeStep.InputFields {
+		name := strings.TrimSpace(f.Name)
+		if name == "delivery_plan" || name == "batch_plan" {
+			declaresPlanInput = true
+			break
+		}
+	}
+	if declaresPlanInput &&
+		strings.TrimSpace(freezeInstanceInputs["delivery_plan"]) == "" &&
+		strings.TrimSpace(freezeInstanceInputs["batch_plan"]) == "" {
+		return workflowstore.DeliveryPlan{}, fmt.Errorf("no delivery plan reached the review step: the reviewer cannot approve a plan they were not shown; re-run the producing step so a delivery_plan (or batch_plan) output reaches this review before approving")
+	}
+	// F1 fail-closed: when the freezing review step DECLARES a plan input
+	// field (the template promises the reviewer a plan to look at) but the
+	// review instance's input carries none of them, the human is approving a
+	// plan they were never shown while the recency chain below freezes
+	// whichever older candidate it finds. Refuse the approval instead: the
+	// rework loop must deliver the plan to the review (agent re-emit or edge
+	// repair) before it can be frozen. Steps that do not declare plan inputs
+	// keep the fallback chain unchanged.
 	anchorJSONs := stepOutputCandidates(outputs, ordered,
 		[]string{"requirement_draft", "requirement_review", "scale_gate", "contract_batch"},
 		[]string{"requirement_items"})
@@ -186,7 +222,7 @@ func (s *Server) preparePlanFreezeForReview(wfStore *workflowstore.Store, projec
 // for everything else). A malformed plan or a missing anchor returns a 400; a
 // record-level conflict returns 409 — both BEFORE any run mutation.
 func (s *Server) preparePlanFreezeTransition(wfStore *workflowstore.Store, project string, run entity.WorkflowRun, step entity.WorkflowStep, reviewer, comments string, instances []entity.WorkflowStepInstance) (workflowstore.TransitionExtraWrites, int, error) {
-	plan, err := s.buildDeliveryPlanForFreeze(wfStore, run)
+	plan, err := s.buildDeliveryPlanForFreeze(wfStore, run, step)
 	if err != nil {
 		return nil, http.StatusBadRequest, err
 	}

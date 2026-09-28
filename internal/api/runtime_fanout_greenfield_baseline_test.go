@@ -304,6 +304,8 @@ func driveToContractReviewWithContractArtifacts(t *testing.T, s *Server, workspa
 	}
 	rec = postBranchStepComplete(t, s, workspaceID, taskID, map[string]string{
 		"contract_artifacts": fmt.Sprintf(`{"baseline_commit":%q,"repo":"root/sample","branch":"main"}`, baselineCommit),
+		// F1 fail-closed: the plan must reach the review (re-emitted output).
+		"delivery_plan":      planJSON,
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("contract_batch completion: %d %s", rec.Code, rec.Body.String())
