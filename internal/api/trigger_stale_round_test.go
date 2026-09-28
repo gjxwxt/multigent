@@ -166,3 +166,96 @@ func TestTriggerCallbackCurrentRoundCardStillActs(t *testing.T) {
 		t.Fatalf("a refused approval must leave the run parked, got %s@%s", after.Status, after.ActiveStepID)
 	}
 }
+
+// A1 migration residue (re-verification round): production mint always pins
+// WorkflowRunUpdatedAt, but records persisted by OLDER builds carry no such
+// field — they unmarshal with a ZERO pin and, under the legacy exemption,
+// skip the generation check entirely. Callback tokens have no expiry, so a
+// pre-upgrade card is still a live bearer credential: after a rework
+// round-trip back to the same step it would drive the NEW round.
+//
+// This counterexample walks the REAL HTTP callback entry (not the internal
+// helper) with an unpinned card, reworks the run back into the same step,
+// and asserts the legacy card is refused with an actionable re-fetch path.
+func TestTriggerCallbackLegacyUnpinnedCardRefusedAfterRework(t *testing.T) {
+	s, workspaceID := newBranchJoinHTTPServer(t)
+	s.worktreeMgr = gitworktreeManagerForTest()
+	_, baseCommit := buildFanoutGitWorkspace(t, s)
+	seedGreenfieldRunTask(t, s, workspaceID, "task-a1-legacy", baseCommit)
+	driveToContractReview(t, s, workspaceID, "task-a1-legacy", samplePlanJSON())
+	run := runForTask(t, s, workspaceID, "task-a1-legacy")
+
+	// A pre-upgrade card: (run, step) pinned, generation pin ABSENT (zero).
+	legacyCard := workflowNotificationRecord{
+		ID:                "wn-a1-legacy-unpinned",
+		WorkspaceID:       workspaceID,
+		Project:           "sample",
+		TaskID:            "task-a1-legacy",
+		TaskTitle:         "GF delivery task-a1-legacy",
+		WorkflowRunID:     run.ID,
+		WorkflowID:        run.DefinitionID,
+		StepID:            "contract_review",
+		StepTitle:         "Shared Contract Review",
+		RecipientUserID:   "admin",
+		Provider:          "feishu",
+		Status:            "sent",
+		CallbackTokenHash: hashWorkflowCallbackToken("a1-legacy-token"),
+		// WorkflowRunUpdatedAt deliberately ZERO: the pre-upgrade shape.
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := s.saveWorkflowNotification(legacyCard); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rework round-trip: request_changes, contract_batch re-emits (F1
+	// fail-closed shape), the run re-enters contract_review at round 2.
+	if _, status, err := s.submitTaskWorkflowReview(httptest.NewRequest(http.MethodPost, "/", nil), workspaceID, "sample", "task-a1-legacy", workflowReviewBody{
+		Decision: "request_changes", Comments: "refine the plan",
+	}); err != nil {
+		t.Fatalf("request_changes failed (%d): %v", status, err)
+	}
+	rec := postBranchStepComplete(t, s, workspaceID, "task-a1-legacy", map[string]string{
+		"contract_artifacts": "schema + error codes committed (rework)",
+		"delivery_plan":      refinedPlanJSON(),
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rework completion must be 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	afterRework := runForTask(t, s, workspaceID, "task-a1-legacy")
+	if afterRework.ActiveStepID != "contract_review" || afterRework.Status != "active" {
+		t.Fatalf("run must be re-parked on contract_review (round 2), got %s@%s", afterRework.Status, afterRework.ActiveStepID)
+	}
+
+	// The unpinned legacy card's approve arrives through the REAL HTTP
+	// callback entry. It must be refused with an actionable message.
+	cb := postC1TriggerCallback(t, s, workspaceID, legacyCard.ID, "a1-legacy-token",
+		`{"decision":"approve","comments":"legacy round-1 approve"}`)
+	if cb.Code != http.StatusBadRequest {
+		t.Fatalf("an unpinned legacy card must be refused after a rework round-trip, got %d: %s", cb.Code, cb.Body.String())
+	}
+	if !strings.Contains(cb.Body.String(), "stale workflow review card") {
+		t.Fatalf("refusal must name the stale-card cause, got: %s", cb.Body.String())
+	}
+	if !strings.Contains(cb.Body.String(), "open the task in the console") {
+		t.Fatalf("refusal must give an actionable re-fetch path, got: %s", cb.Body.String())
+	}
+	// The rejection leaves zero writes: the run stays parked on the current
+	// decision point and the current round's instance carries no decision.
+	after := runForTask(t, s, workspaceID, "task-a1-legacy")
+	if after.ActiveStepID != "contract_review" || after.Status != "active" {
+		t.Fatalf("a refused legacy card must leave the run parked on contract_review, got %s@%s", after.Status, after.ActiveStepID)
+	}
+	instances, err := wfStoreInstancesForRun(t, s, workspaceID, after.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, inst := range instances {
+		if inst.StepID != "contract_review" {
+			continue
+		}
+		if strings.TrimSpace(inst.OutputValues["decision"]) != "" {
+			t.Fatalf("a refused legacy card must not record a decision: %+v", inst.OutputValues)
+		}
+	}
+}

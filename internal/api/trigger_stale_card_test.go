@@ -19,7 +19,7 @@ import (
 func TestTriggerCallbackRejectsStaleCardForOtherStep(t *testing.T) {
 	s, workspaceID, task, wfStore, run := c1SeedQASignoffRun(t, true)
 
-	record := c1NotificationRecord(t, s, workspaceID, "wn-a1-stale-step", "a1-callback-token", task, run.ID, run.DefinitionID)
+	record := c1NotificationRecord(t, s, workspaceID, "wn-a1-stale-step", "a1-callback-token", task, run.ID, run.DefinitionID, run.UpdatedAt)
 	// Forge the stale shape: the card claims it was issued for contract_review,
 	// a step the run has already left.
 	record.StepID = "contract_review"
@@ -68,7 +68,7 @@ func TestTriggerCallbackRejectsStaleCardForOtherRun(t *testing.T) {
 func TestTriggerCallbackAcceptsCurrentCard(t *testing.T) {
 	s, workspaceID, task, wfStore, run := c1SeedQASignoffRun(t, false)
 
-	record := c1NotificationRecord(t, s, workspaceID, "wn-a1-current", "a1-callback-token-3", task, run.ID, run.DefinitionID)
+	record := c1NotificationRecord(t, s, workspaceID, "wn-a1-current", "a1-callback-token-3", task, run.ID, run.DefinitionID, run.UpdatedAt)
 	rec := postC1TriggerCallback(t, s, workspaceID, record.ID, "a1-callback-token-3", c1ApproveBody(t, false))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("current card must reach the matrix gate, got %d: %s", rec.Code, rec.Body.String())

@@ -123,7 +123,7 @@ func driveToContractReview(t *testing.T, s *Server, workspaceID, taskID, planJSO
 		"contract_artifacts": "schema + error codes committed",
 		// F1 fail-closed: the agent must re-emit the plan it received (prompt
 		// mandate); an approve with no plan at the review is refused.
-		"delivery_plan":      planJSON,
+		"delivery_plan": planJSON,
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("contract_batch completion must be 200, got %d: %s", rec.Code, rec.Body.String())
@@ -230,7 +230,7 @@ func TestContractBatchReworkRepairsRequirementAnchors(t *testing.T) {
 		"contract_artifacts": "schema + error codes committed (rework)",
 		"requirement_items":  requirementItemsJSON(),
 		// F1 fail-closed: the rework pass must also carry the plan forward.
-		"delivery_plan":      samplePlanJSON(),
+		"delivery_plan": samplePlanJSON(),
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("reworked contract_batch completion must accept the requirement_items output, got %d: %s", rec.Code, rec.Body.String())
@@ -625,6 +625,8 @@ func TestTriggerReviewPathFreezesThroughTheSameEntry(t *testing.T) {
 		// pinned to the run and step it was issued for, and the A1 guard in
 		// submitWorkflowReviewFromTrigger checks both.
 		WorkflowRunID: run.ID, StepID: "contract_review", RecipientUserID: "admin",
+		// Mirror the production mint: pin the decision-point generation.
+		WorkflowRunUpdatedAt: run.UpdatedAt,
 	}
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 
@@ -652,6 +654,16 @@ func TestTriggerReviewPathFreezesThroughTheSameEntry(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("reworked contract_batch must complete: %d %s", rec.Code, rec.Body.String())
 	}
+	// The reworked round re-mints its own card (production fireWorkflowStepTriggers
+	// re-fires on the re-entered step); the round-1 card must not drive it.
+	reworkedRun := runForTask(t, s, workspaceID, "task-slice4-trigger")
+	if _, err := s.submitWorkflowReviewFromTrigger(workspaceID, record, workflowTriggerCallbackBody{Decision: "approve", Comments: "stale round-1 card", Outputs: map[string]string{}}, req); err == nil {
+		t.Fatal("the round-1 card must not drive the reworked round after re-mint")
+	}
+	if after := runForTask(t, s, workspaceID, "task-slice4-trigger"); after.ActiveStepID != "contract_review" {
+		t.Fatalf("a refused stale card must leave the run parked, got %s", after.ActiveStepID)
+	}
+	record.WorkflowRunUpdatedAt = reworkedRun.UpdatedAt
 	if _, err := s.submitWorkflowReviewFromTrigger(workspaceID, record, workflowTriggerCallbackBody{Decision: "approve", Comments: "ok via chatops", Outputs: map[string]string{}}, req); err != nil {
 		t.Fatalf("trigger-path approval failed: %v", err)
 	}

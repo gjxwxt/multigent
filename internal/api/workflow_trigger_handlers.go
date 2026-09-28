@@ -540,16 +540,27 @@ func (s *Server) submitWorkflowReviewFromTrigger(workspaceID string, record work
 		if record.WorkflowRunID != run.ID || record.StepID != run.ActiveStepID {
 			return result, fmt.Errorf("stale workflow review card: notification %s was issued for run %s step %s, but the task is now on run %s step %s; use the current review card", record.ID, record.WorkflowRunID, record.StepID, run.ID, run.ActiveStepID)
 		}
-		if !record.WorkflowRunUpdatedAt.IsZero() && !record.WorkflowRunUpdatedAt.Equal(run.UpdatedAt) {
-			return result, fmt.Errorf("stale workflow review card: notification %s was issued for an earlier decision round of run %s step %s; use the current review card", record.ID, run.ID, run.ActiveStepID)
-		}
 		// A1 round-level: (run, step) is REUSED across rework rounds — the
 		// engine resets the same step instance in place, so a round-N card
 		// matches run+step at round N+1 and would approve the reworked round
 		// without the reworked input ever reaching the reviewer through it.
 		// run.UpdatedAt changes exactly when the decision point changes, so a
-		// mint-time pin rejects any card from an earlier round. Legacy records
-		// (zero pin) keep the run+step check only.
+		// mint-time pin rejects any card from an earlier round.
+		//
+		// Migration fail-closed: records persisted by pre-upgrade builds carry
+		// no generation pin at all (zero WorkflowRunUpdatedAt), and callback
+		// tokens never expire, so such a card is still a live bearer
+		// credential for a decision point that has moved on. It cannot be
+		// assumed fresh: when the active run resolves and the pin is missing,
+		// refuse and point the reviewer at the re-fetch path. Records whose
+		// run no longer resolves (the no-run path above) keep the current
+		// behavior.
+		if record.WorkflowRunUpdatedAt.IsZero() {
+			return result, fmt.Errorf("stale workflow review card: notification %s predates decision-round pinning and cannot be matched to the current round of run %s step %s; open the task in the console to review from the current card", record.ID, run.ID, run.ActiveStepID)
+		}
+		if !record.WorkflowRunUpdatedAt.Equal(run.UpdatedAt) {
+			return result, fmt.Errorf("stale workflow review card: notification %s was issued for an earlier decision round of run %s step %s; open the task in the console to review from the current card", record.ID, run.ID, run.ActiveStepID)
+		}
 		def, defFound, err := wfStore.RunDefinition(run)
 		if err != nil {
 			return result, err

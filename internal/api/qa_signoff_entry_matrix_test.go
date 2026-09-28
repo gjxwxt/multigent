@@ -131,7 +131,7 @@ func runParkedOnQASignoff(t *testing.T, wfStore *workflowstore.Store, project, t
 	}
 }
 
-func c1NotificationRecord(t *testing.T, s *Server, workspaceID, id, token string, task *entity.Task, runID, definitionID string) workflowNotificationRecord {
+func c1NotificationRecord(t *testing.T, s *Server, workspaceID, id, token string, task *entity.Task, runID, definitionID string, runUpdatedAt ...time.Time) workflowNotificationRecord {
 	t.Helper()
 	record := workflowNotificationRecord{
 		ID:                id,
@@ -149,6 +149,13 @@ func c1NotificationRecord(t *testing.T, s *Server, workspaceID, id, token string
 		CallbackTokenHash: hashWorkflowCallbackToken(token),
 		CreatedAt:         time.Now().UTC(),
 		UpdatedAt:         time.Now().UTC(),
+	}
+	// Mirror the production mint: when the caller supplies the run's
+	// decision-point generation, the card pins it (the A1 guard requires the
+	// pin on any card whose run resolves). Callers that deliberately test the
+	// pre-upgrade zero-pin shape omit it.
+	if len(runUpdatedAt) > 0 {
+		record.WorkflowRunUpdatedAt = runUpdatedAt[0]
 	}
 	if err := s.saveWorkflowNotification(record); err != nil {
 		t.Fatal(err)
@@ -171,7 +178,7 @@ func TestC1TriggerCallbackQASignoffMatrixGate(t *testing.T) {
 	t.Run("rejects matrixless approval before any write", func(t *testing.T) {
 		s, workspaceID, task, wfStore, run := c1SeedQASignoffRun(t, false)
 
-		record := c1NotificationRecord(t, s, workspaceID, "wn-c1-reject", "c1-callback-token", task, run.ID, run.DefinitionID)
+		record := c1NotificationRecord(t, s, workspaceID, "wn-c1-reject", "c1-callback-token", task, run.ID, run.DefinitionID, run.UpdatedAt)
 		rec := postC1TriggerCallback(t, s, workspaceID, record.ID, "c1-callback-token", c1ApproveBody(t, false))
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("trigger callback must reject a matrixless qa_signoff approval with 400, got %d: %s", rec.Code, rec.Body.String())
@@ -192,7 +199,7 @@ func TestC1TriggerCallbackQASignoffMatrixGate(t *testing.T) {
 	t.Run("advances with a valid matrix", func(t *testing.T) {
 		s, workspaceID, task, wfStore, run := c1SeedQASignoffRun(t, false)
 
-		record := c1NotificationRecord(t, s, workspaceID, "wn-c1-approve", "c1-callback-token-ok", task, run.ID, run.DefinitionID)
+		record := c1NotificationRecord(t, s, workspaceID, "wn-c1-approve", "c1-callback-token-ok", task, run.ID, run.DefinitionID, run.UpdatedAt)
 		rec := postC1TriggerCallback(t, s, workspaceID, record.ID, "c1-callback-token-ok", c1ApproveBody(t, true))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("trigger callback with a valid matrix must advance, got %d: %s", rec.Code, rec.Body.String())
