@@ -74,6 +74,9 @@ const (
 	ErrCodeSchedulerConflict     = "scheduler_conflict"
 	ErrCodeSchedulerNotFound     = "scheduler_not_found"
 	ErrCodeSchedulerWakeupFailed = "scheduler_wakeup_failed"
+
+	ErrCodeAssetNotFound      = "asset_not_found"
+	ErrCodeAssetNotAccessible = "asset_not_accessible"
 )
 
 type apiErrorResponse struct {

@@ -1,13 +1,18 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Check, ChevronDown, GitBranch, RefreshCw } from 'lucide-react'
-import { apiPost } from '../../lib/api'
+import { Check, ChevronDown, GitBranch, Paperclip, RefreshCw, X } from 'lucide-react'
+import { apiPost, apiPostForm } from '../../lib/api'
 import { cn } from '../../lib/cn'
 import { useApiJson } from '../../lib/use-api'
 import type { TaskOption } from '../task/TaskModals'
 import { overlayDismissProps } from '../ui/overlay'
+import { showToast } from '../ui/Toast'
 import { DeliveryModeNotice } from './DeliveryModeNotice'
 import type { ProjectRemoteState } from '../../lib/delivery-mode'
+
+type UploadedAsset = { id: string; displayName: string; currentSha: string; size?: number }
+
+const MAX_TASK_ASSETS = 8
 
 const TASK_TYPES = ['chore', 'feature', 'bug', 'review', 'triage', 'test', 'research'] as const
 const TEMPLATE_VAR_RE = /\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}/g
@@ -76,6 +81,12 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
+  // Project assets staged for binding to the task about to be created. Files
+  // upload into the project library immediately; the binding happens right
+  // after task creation so the pinned version is the one the user sees here.
+  const [taskAssets, setTaskAssets] = useState<UploadedAsset[]>([])
+  const [assetsBusy, setAssetsBusy] = useState(false)
+  const assetInputRef = useRef<HTMLInputElement>(null)
 
   const multiProject = Boolean(allProjectsAgents && allProjectsAgents.length > 1)
   const workflowPath = open ? '/api/v1/workflows' : null
@@ -173,6 +184,7 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
     setTemplateInputs({})
     setFieldErrors({})
     setErr(null)
+    setTaskAssets([])
   }
 
   function openDialog() {
@@ -194,6 +206,51 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
     setTaskTemplateId('')
     setTemplateInputs({})
     setFieldErrors({})
+    // Uploaded files live in the project they were uploaded to; switching
+    // projects leaves them behind (still in that project's library).
+    setTaskAssets([])
+  }
+
+  async function onAssetsSelected(files: FileList | null) {
+    if (!files || files.length === 0 || !selectedProject) return
+    const room = MAX_TASK_ASSETS - taskAssets.length
+    if (room <= 0) {
+      setErr(t('tasks.assets.maxReached'))
+      return
+    }
+    const chosen = Array.from(files).slice(0, room)
+    setAssetsBusy(true)
+    setErr(null)
+    try {
+      const form = new FormData()
+      for (const f of chosen) form.append('file', f)
+      const uploaded = await apiPostForm<UploadedAsset[]>(
+        `/api/v1/projects/${encodeURIComponent(selectedProject)}/assets`,
+        form,
+      )
+      setTaskAssets((prev) => [...prev, ...uploaded])
+      if (chosen.length < files.length) setErr(t('tasks.assets.maxReached'))
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setAssetsBusy(false)
+      if (assetInputRef.current) assetInputRef.current.value = ''
+    }
+  }
+
+  async function bindTaskAssets(taskId: string) {
+    for (const asset of taskAssets) {
+      try {
+        await apiPost(
+          `/api/v1/projects/${encodeURIComponent(selectedProject)}/tasks/${encodeURIComponent(taskId)}/assets`,
+          { fileId: asset.id, role: 'requirement_input', required: true },
+        )
+      } catch (e) {
+        // The task already exists; surface the failure without blocking the
+        // flow — the file stays in the project library and can be re-bound.
+        showToast(t('tasks.assets.bindFailed', { name: asset.displayName, message: e instanceof Error ? e.message : String(e) }), 'error')
+      }
+    }
   }
 
   function onCreateModeChange(mode: 'blank' | 'template') {
@@ -316,13 +373,37 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
     setBusy(true)
     try {
       const labels = labelsStr.split(',').map(l => l.trim()).filter(Boolean)
+      let createdTaskId: string | null = null
       if (createMode === 'template' && selectedTemplate) {
-        await apiPost<{ id: string }>(
-          `/api/v1/projects/${encodeURIComponent(selectedProject)}/tasks/from-template`,
-          {
-            templateId: selectedTemplate.id,
-            inputs: templateInputs,
+        createdTaskId = (
+          await apiPost<{ id: string }>(
+            `/api/v1/projects/${encodeURIComponent(selectedProject)}/tasks/from-template`,
+            {
+              templateId: selectedTemplate.id,
+              inputs: templateInputs,
+              agent: agent.trim(),
+              ...(assignee ? { assignee } : {}),
+              ...(labels.length > 0 ? { labels } : {}),
+              ...(dueDate ? { dueDate } : {}),
+              ...(parentId ? { parentId } : {}),
+              ...(estimateDuration.trim() ? { estimateDuration: estimateDuration.trim() } : {}),
+              ...(baseBranch.trim() ? { baseBranch: baseBranch.trim() } : {}),
+              ...(branchName.trim() ? { branchName: branchName.trim() } : {}),
+              workflowActorBindings: actorBindings,
+            },
+          )
+        ).id
+      } else {
+        createdTaskId = (
+          await apiPost<{ id: string }>(
+            `/api/v1/projects/${encodeURIComponent(selectedProject)}/tasks`,
+            {
             agent: agent.trim(),
+            title: title.trim(),
+            description: description.trim(),
+            prompt: prompt.trim(),
+            type: taskType,
+            priority,
             ...(assignee ? { assignee } : {}),
             ...(labels.length > 0 ? { labels } : {}),
             ...(dueDate ? { dueDate } : {}),
@@ -330,30 +411,14 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
             ...(estimateDuration.trim() ? { estimateDuration: estimateDuration.trim() } : {}),
             ...(baseBranch.trim() ? { baseBranch: baseBranch.trim() } : {}),
             ...(branchName.trim() ? { branchName: branchName.trim() } : {}),
-            workflowActorBindings: actorBindings,
-          },
-        )
-      } else {
-        await apiPost<{ id: string }>(
-          `/api/v1/projects/${encodeURIComponent(selectedProject)}/tasks`,
-          {
-          agent: agent.trim(),
-          title: title.trim(),
-          description: description.trim(),
-          prompt: prompt.trim(),
-          type: taskType,
-          priority,
-          ...(assignee ? { assignee } : {}),
-          ...(labels.length > 0 ? { labels } : {}),
-          ...(dueDate ? { dueDate } : {}),
-          ...(parentId ? { parentId } : {}),
-          ...(estimateDuration.trim() ? { estimateDuration: estimateDuration.trim() } : {}),
-          ...(baseBranch.trim() ? { baseBranch: baseBranch.trim() } : {}),
-          ...(branchName.trim() ? { branchName: branchName.trim() } : {}),
-          ...(workflowDefinitionId ? { workflowDefinitionId } : {}),
-          ...(workflowDefinitionId ? { workflowActorBindings: actorBindings } : {}),
-          },
-        )
+            ...(workflowDefinitionId ? { workflowDefinitionId } : {}),
+            ...(workflowDefinitionId ? { workflowActorBindings: actorBindings } : {}),
+            },
+          )
+        ).id
+      }
+      if (createdTaskId && taskAssets.length > 0) {
+        await bindTaskAssets(createdTaskId)
       }
       setOpen(false)
       onCreated()
@@ -620,6 +685,50 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
                   </label>
                 </>
               )}
+
+              <div className="block text-sm">
+                <span className="text-neutral-600 dark:text-zinc-400">{t('tasks.assets.label')}</span>
+                {taskAssets.length > 0 && (
+                  <div className="mt-1.5 flex flex-wrap gap-1.5">
+                    {taskAssets.map((a) => (
+                      <span
+                        key={a.id}
+                        className="inline-flex items-center gap-1 rounded-md border border-neutral-200 bg-white px-2 py-1 text-xs text-neutral-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                      >
+                        <Paperclip className="h-3 w-3 text-neutral-400" />
+                        {a.displayName}
+                        <button
+                          type="button"
+                          aria-label={t('tasks.assets.remove')}
+                          onClick={() => setTaskAssets((prev) => prev.filter((x) => x.id !== a.id))}
+                          className="text-neutral-400 hover:text-neutral-700 dark:hover:text-zinc-200"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <div className="mt-1.5 flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => assetInputRef.current?.click()}
+                    disabled={assetsBusy}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm font-medium text-neutral-700 shadow-sm hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                  >
+                    <Paperclip className="h-4 w-4" />
+                    {assetsBusy ? t('tasks.assets.uploading') : t('tasks.assets.upload')}
+                  </button>
+                  <span className="text-xs text-neutral-400 dark:text-zinc-500">{t('tasks.assets.hint')}</span>
+                </div>
+                <input
+                  ref={assetInputRef}
+                  type="file"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => void onAssetsSelected(e.target.files)}
+                />
+              </div>
 
               {createMode === 'blank' ? (
                 <div className="grid grid-cols-2 gap-3">

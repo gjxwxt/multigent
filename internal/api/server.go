@@ -898,6 +898,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/files/content/{path...}", s.handleFileContent)
 	mux.HandleFunc("DELETE /api/v1/files/{path...}", s.handleDeleteFile)
 
+	// ── Project assets (content-addressed attachments) ──
+	// All handlers enforce checkProjectAccess (AGENTS.md red line #1); blobs
+	// are never directly addressable — reads go through file rows only.
+	mux.HandleFunc("POST /api/v1/projects/{name}/assets", s.handleProjectAssetUpload)
+	mux.HandleFunc("GET /api/v1/projects/{name}/assets", s.handleListProjectAssets)
+	mux.HandleFunc("GET /api/v1/projects/{name}/assets/{fileId}", s.handleProjectAssetDetail)
+	mux.HandleFunc("GET /api/v1/projects/{name}/assets/{fileId}/download", s.handleProjectAssetDownload)
+	mux.HandleFunc("PATCH /api/v1/projects/{name}/assets/{fileId}", s.handleProjectAssetRename)
+	mux.HandleFunc("DELETE /api/v1/projects/{name}/assets/{fileId}", s.handleProjectAssetArchive)
+	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/assets", s.handleListTaskAssets)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/assets", s.handleBindTaskAsset)
+	mux.HandleFunc("DELETE /api/v1/projects/{name}/tasks/{taskId}/assets/{attachmentId}", s.handleUnbindTaskAsset)
+
 	mux.HandleFunc("GET /api/v1/check-update", s.handleCheckUpdate)
 	mux.HandleFunc("GET /api/v1/daemon/status", s.handleDaemonStatus)
 	mux.HandleFunc("GET /api/v1/auth/settings", s.handleAuthSettings)
@@ -1017,6 +1030,7 @@ func (s *Server) Handler() http.Handler {
 	runtimeNodeMux.HandleFunc("POST /api/v1/runtime-node/capabilities", s.handleRuntimeNodeHeartbeat)
 	runtimeNodeMux.HandleFunc("POST /api/v1/runtime-node/runs/claim", s.handleRuntimeNodeClaimRun)
 	runtimeNodeMux.HandleFunc("GET /api/v1/runtime-node/runs/{runId}/spec", s.handleRuntimeNodeRunSpec)
+	runtimeNodeMux.HandleFunc("GET /api/v1/runtime-node/assets/{sha256}", s.handleRuntimeNodeAssetDownload)
 	runtimeNodeMux.HandleFunc("POST /api/v1/runtime-node/runs/{runId}/events", s.handleRuntimeNodeRunEvent)
 	runtimeNodeMux.HandleFunc("POST /api/v1/runtime-node/runs/{runId}/lease", s.handleRuntimeNodeRunLease)
 	runtimeNodeMux.HandleFunc("POST /api/v1/runtime-node/runs/{runId}/complete", s.handleRuntimeNodeRunComplete)

@@ -33,6 +33,7 @@ import ProjectSettingsPage from './pages/projects/ProjectSettingsPage'
 import ProjectTasksPage from './pages/projects/ProjectTasksPage'
 import ProjectTaskFollowPage from './pages/projects/ProjectTaskFollowPage'
 import ProjectTaskTemplatesPage from './pages/projects/ProjectTaskTemplatesPage'
+import ProjectAssetsPage from './pages/projects/ProjectAssetsPage'
 import TeamDetailPage from './pages/teams/TeamDetailPage'
 import TeamsPage from './pages/teams/TeamsPage'
 import DocsPage from './pages/docs/DocsPage'
@@ -157,6 +158,7 @@ function AuthenticatedRoutes() {
           <Route path="tasks/:taskId" element={<Navigate to="follow" replace />} />
           <Route path="tasks/:taskId/follow" element={<ProjectTaskFollowPage />} />
           {canAdmin && <Route path="task-templates" element={<ProjectTaskTemplatesPage />} />}
+          <Route path="assets" element={<ProjectAssetsPage />} />
           <Route path="goals" element={<ProjectOKRPage />} />
           <Route path="milestones" element={<ProjectMilestonePage />} />
           <Route path="messages" element={<ProjectMessagesPage />} />

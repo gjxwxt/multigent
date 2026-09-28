@@ -547,7 +547,8 @@
     "members": "成員",
     "schedule": "計畫",
     "runs": "執行",
-    "settings": "設定"
+    "settings": "設定",
+    "assets": "資料"
   },
   "playbooks": {
     "subtitle": "把角色、技能、流程和任務模板打包成可重用的 Agent 協作結構。",
@@ -1205,7 +1206,16 @@
     "availableBranches": "可用分支 (Git Branches)",
     "noBranchMatch": "未找到符合分支，將使用 \"{{value}}\"",
     "agentAlreadyRunning": "智慧體已在背景執行該任務中，重複啟動會併入目前佇列。",
-    "taskQueued": "任務已入隊，將在智慧體目前工作完成後執行。"
+    "taskQueued": "任務已入隊，將在智慧體目前工作完成後執行。",
+    "assets": {
+      "label": "任務資料",
+      "upload": "上傳檔案",
+      "uploading": "上傳中…",
+      "remove": "移除",
+      "maxReached": "每個任務最多綁定 8 份資料",
+      "bindFailed": "資料 \"{{name}}\" 綁定任務失敗：{{message}}",
+      "hint": "檔案存入專案資料庫，Agent 經唯讀掛載按需讀取。"
+    }
   },
   "projects": {
     "listEyebrow": "交付",
@@ -2846,5 +2856,25 @@
     "signalsHint": "信號用於提醒 Agent 關注變化，不直接取代資產內容。後續會支援來源、優先級、已讀與處理狀態。",
     "noSignals": "還沒有信號",
     "noSignalsHint": "後續這裡會展示 IM、文件、任務和外部系統產生的注意力信號。"
+  },
+  "projectAssets": {
+    "subtitle": "專案資料庫——上傳一次，任意任務複用；Agent 按需讀取，檔案不進 Git。",
+    "upload": "上傳",
+    "uploading": "上傳中…",
+    "uploadDone": "已存入專案資料",
+    "empty": "尚無專案資料。可在此處或建立任務對話框上傳。",
+    "showArchived": "顯示已封存",
+    "name": "名稱",
+    "size": "大小",
+    "sha": "SHA-256",
+    "usage": "被任務引用",
+    "uploader": "上傳者",
+    "actions": "操作",
+    "download": "下載",
+    "archive": "封存",
+    "archiveDone": "已封存",
+    "archived": "已封存",
+    "archiveConfirmTitle": "封存 \"{{name}}\"？既有任務綁定不受影響，檔案將從預設列表隱藏。",
+    "archiveConfirmDescription": "既有任務綁定不受影響，檔案僅從預設列表隱藏。"
   }
 }

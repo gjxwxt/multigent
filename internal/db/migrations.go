@@ -726,6 +726,38 @@ func (db *SQLiteStore) migrate() error {
 )`,
 		`CREATE INDEX IF NOT EXISTS idx_project_channel_links_project ON project_channel_links(workspace_id, project_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_project_channel_links_channel ON project_channel_links(workspace_id, provider, channel_id)`,
+		`CREATE TABLE IF NOT EXISTS asset_blobs (
+	sha256 TEXT PRIMARY KEY,
+	size INTEGER NOT NULL,
+	mime TEXT NOT NULL DEFAULT '',
+	storage_path TEXT NOT NULL,
+	created_by TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL
+)`,
+		`CREATE TABLE IF NOT EXISTS asset_files (
+	id TEXT PRIMARY KEY,
+	workspace_id TEXT NOT NULL,
+	project_id TEXT NOT NULL,
+	display_name TEXT NOT NULL,
+	current_sha TEXT NOT NULL REFERENCES asset_blobs(sha256),
+	created_by TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	archived_at TEXT NOT NULL DEFAULT ''
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_asset_files_project ON asset_files(workspace_id, project_id)`,
+		`CREATE TABLE IF NOT EXISTS asset_attachments (
+	id TEXT PRIMARY KEY,
+	file_id TEXT NOT NULL REFERENCES asset_files(id),
+	sha256 TEXT NOT NULL REFERENCES asset_blobs(sha256),
+	project_id TEXT NOT NULL,
+	task_id TEXT NOT NULL,
+	role TEXT NOT NULL,
+	required INTEGER NOT NULL,
+	added_by TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_asset_attachments_task ON asset_attachments(task_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_asset_attachments_file ON asset_attachments(file_id)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.sql.Exec(stmt); err != nil {

@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/multigent/multigent/internal/assets"
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/runner"
 	"github.com/multigent/multigent/internal/runtimeexec"
@@ -655,6 +658,32 @@ func runtimeNodeExecuteRun(cfg runtimeNodeConfig, run runtimeNodeRun, workerID i
 		return wrapRuntimeNodeReportedError(err)
 	}
 	st := store.NewFS(root)
+	// Task assets: the spec declares what the task binds; the node downloads
+	// the bytes by SHA, verifies every one, and signals the staged cache dir
+	// to the runner via RuntimeTaskAssetsDirEnv (read-only container mount).
+	// Fail-closed: staging problems fail the run with assets_stage_failed —
+	// never a prompt whose manifest points at nothing.
+	if len(spec.Assets) > 0 {
+		if spec.Agent.Sandbox == nil || spec.Agent.Sandbox.Provider != entity.SandboxDocker {
+			msg := "task has bound project assets; only the Docker sandbox runtime can mount them"
+			if reportErr := runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "assets_unsupported_runtime", msg); reportErr != nil {
+				return reportErr
+			}
+			return wrapRuntimeNodeReportedError(fmt.Errorf("%s", msg))
+		}
+		cacheDir, stageErr := runtimeNodeStageTaskAssets(cfg, root, run.ID, spec.Assets)
+		if stageErr != nil {
+			if reportErr := runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "assets_stage_failed", stageErr.Error()); reportErr != nil {
+				return reportErr
+			}
+			return wrapRuntimeNodeReportedError(stageErr)
+		}
+		defer os.RemoveAll(cacheDir)
+		if spec.RuntimeControlEnv == nil {
+			spec.RuntimeControlEnv = map[string]string{}
+		}
+		spec.RuntimeControlEnv[runtimeexec.RuntimeTaskAssetsDirEnv] = cacheDir
+	}
 	agentDir := filepath.Join(root, "projects", spec.ProjectID, "agents", spec.AgentID)
 	if err := os.MkdirAll(agentDir, 0o755); err != nil {
 		if reportErr := runtimeNodeFailRun(cfg, run.ID, run.LeaseGeneration, "agent_prepare_failed", err.Error()); reportErr != nil {
@@ -855,6 +884,62 @@ func runtimeNodeGet(cfg runtimeNodeConfig, path string) ([]byte, error) {
 		return nil, fmt.Errorf("runtime node API %s returned HTTP %d: %s", path, resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 	return respBody, nil
+}
+
+// runtimeNodeStageTaskAssets downloads the spec's declared assets into a
+// per-run cache dir under the node workspace, verifying every byte against
+// its SHA before it is written. The staged layout matches the control-plane
+// stager exactly (<sha[0:2]>/<displayName>), so the prompt manifest is valid
+// on either topology.
+func runtimeNodeStageTaskAssets(cfg runtimeNodeConfig, workspaceRoot, runID string, assetList []runtimeexec.SpecAsset) (string, error) {
+	cacheDir := filepath.Join(workspaceRoot, ".multigent", "assets-cache", runID)
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return "", fmt.Errorf("create assets cache dir: %w", err)
+	}
+	for _, a := range assetList {
+		sha := strings.ToLower(strings.TrimSpace(a.Sha256))
+		if len(sha) != 64 {
+			return "", fmt.Errorf("asset %q: invalid sha256", a.DisplayName)
+		}
+		body, err := runtimeNodeFetchAsset(cfg, sha)
+		if err != nil {
+			return "", fmt.Errorf("asset %q: %w", a.DisplayName, err)
+		}
+		sum := sha256.Sum256(body)
+		if got := hex.EncodeToString(sum[:]); got != sha {
+			return "", fmt.Errorf("asset %q: downloaded bytes hash mismatch (expected %s…, got %s…)", a.DisplayName, sha[:12], got[:12])
+		}
+		dst := filepath.Join(cacheDir, assets.RelPathFor(sha, a.DisplayName))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return "", fmt.Errorf("asset %q: create staged dir: %w", a.DisplayName, err)
+		}
+		if err := os.WriteFile(dst, body, 0o644); err != nil {
+			return "", fmt.Errorf("asset %q: write staged file: %w", a.DisplayName, err)
+		}
+	}
+	return cacheDir, nil
+}
+
+func runtimeNodeFetchAsset(cfg runtimeNodeConfig, sha string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(cfg.ServerURL, "/")+"/api/v1/runtime-node/assets/"+sha, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	client := http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 200<<20))
+	if err != nil {
+		return nil, fmt.Errorf("download: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("asset download returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return body, nil
 }
 
 func detectRuntimeNodeCapabilities() map[string]any {

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/multigent/multigent/internal/assets"
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/ciready"
 	"github.com/multigent/multigent/internal/entity"
@@ -575,6 +577,15 @@ func (s *Server) enqueueRuntimeTaskRun(workspaceID, project, agent string, task 
 	for k, v := range runtimeTaskControlEnv(task) {
 		runtimeControlEnv[k] = v
 	}
+	// Resolve the task's bound project assets at spec-build time: the control
+	// DB is authoritative here and the node has no task access. preparedPrompt
+	// already carries the manifest rendered from the same rows; if the task
+	// declares assets the node MUST stage them (or fail the run) — never a
+	// silently asset-less run.
+	specAssets, err := s.taskSpecAssets(task.ID)
+	if err != nil {
+		return controldb.RuntimeRun{}, err
+	}
 	spec := runtimeexec.Spec{
 		Kind:              runtimeexec.KindTask,
 		WorkspaceID:       workspaceID,
@@ -587,6 +598,7 @@ func (s *Server) enqueueRuntimeTaskRun(workspaceID, project, agent string, task 
 		Agent:             *meta,
 		ProviderEnv:       s.runtimeProviderEnvForAgent(workspaceID, project, agent, meta),
 		RuntimeControlEnv: runtimeControlEnv,
+		Assets:            specAssets,
 	}
 	specBody, err := json.Marshal(spec)
 	if err != nil {
@@ -1260,6 +1272,61 @@ func (s *Server) finishClaimedRunIfTaskAlreadyTerminal(workspaceID, nodeID strin
 		return false
 	}
 	return true
+}
+
+// taskSpecAssets resolves the task's bound assets into spec entries.
+// Fail-closed: a DB read failure or a manifest-budget overflow fails the
+// enqueue — the node cannot discover assets by itself, so a silently
+// asset-less dispatch is not an option.
+func (s *Server) taskSpecAssets(taskID string) ([]runtimeexec.SpecAsset, error) {
+	atts, err := s.controlDB.ListAssetAttachmentsForTask(taskID)
+	if err != nil {
+		return nil, fmt.Errorf("task assets: list attachments for %s: %w", taskID, err)
+	}
+	if len(atts) > assets.MaxTaskAttachments {
+		return nil, fmt.Errorf("task %s has %d bound assets, over the %d-attachment manifest budget", taskID, len(atts), assets.MaxTaskAttachments)
+	}
+	out := make([]runtimeexec.SpecAsset, 0, len(atts))
+	for _, a := range atts {
+		out = append(out, runtimeexec.SpecAsset{
+			Sha256:      a.Sha256,
+			DisplayName: a.DisplayName,
+			Role:        a.Role,
+			Required:    a.Required,
+		})
+	}
+	return out, nil
+}
+
+// GET /api/v1/runtime-node/assets/{sha256} — node-controlled fetch of a task
+// asset blob. Authorization is the runtime node token (same boundary as spec
+// fetch); the blob is re-verified against its address before the bytes leave
+// the store, so a corrupted file fails loudly instead of reaching a run.
+func (s *Server) handleRuntimeNodeAssetDownload(w http.ResponseWriter, r *http.Request) {
+	sha := strings.ToLower(strings.TrimSpace(r.PathValue("sha256")))
+	if len(sha) != 64 {
+		s.jsonError(w, http.StatusBadRequest, "invalid asset sha256")
+		return
+	}
+	if _, ok, err := s.controlDB.AssetBlob(sha); err != nil {
+		s.serverError(w, err)
+		return
+	} else if !ok {
+		s.jsonErrorCode(w, http.StatusNotFound, ErrCodeAssetNotFound, "asset blob not found")
+		return
+	}
+	bs, err := assets.NewBlobStore()
+	if err != nil {
+		s.serverError(w, err)
+		return
+	}
+	if err := bs.Verify(sha); err != nil {
+		log.Printf("[assets] node download verify failed for %s: %v", sha[:12], err)
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	http.ServeFile(w, r, bs.Path(sha))
 }
 
 func (s *Server) handleRuntimeNodeRunSpec(w http.ResponseWriter, r *http.Request) {

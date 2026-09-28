@@ -40,6 +40,7 @@ import (
 	"github.com/multigent/multigent/internal/deliverymode"
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/runenv"
+	"github.com/multigent/multigent/internal/runtimeexec"
 	"github.com/multigent/multigent/internal/runtimeauth"
 	"github.com/multigent/multigent/internal/runtimecli"
 	"github.com/multigent/multigent/internal/runtimeguide"
@@ -351,6 +352,7 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 			r.applyProjectRuntimeProfile(project, runtimeCfg)
 			mounts = append([]entity.RuntimeMount(nil), runtimeCfg.Mounts...)
 			mounts = r.appendWorkspaceFilesMount(mounts, meta.Sandbox.Provider, runtimeCfg)
+			mounts = appendTaskAssetsMount(mounts, runtimeEnv, meta.Sandbox.Provider)
 			r.addRuntimeDockerSystemMounts(runtimeCfg)
 		}
 		agentCLI := agentcli.Effective(model, runtimeCfg.AgentCLI)
@@ -383,6 +385,11 @@ func (r *Runner) ExecPromptWithRuntimeControlEnvContext(ctx context.Context, pro
 	} else {
 		if isolatedPreviewRun {
 			return nil, errors.New("preview copilot requires an isolated container sandbox; host execution is forbidden")
+		}
+		// Fail-closed: a staged assets dir without a container sandbox would
+		// leave the manifest's /mnt/multigent/assets contract unresolved.
+		if strings.TrimSpace(runtimeEnv[runtimeexec.RuntimeTaskAssetsDirEnv]) != "" {
+			return nil, fmt.Errorf("task assets require the Docker sandbox runtime; refusing direct host execution with bound assets")
 		}
 		effectiveEnv = mergeEnv(effectiveEnv, directHostRuntimeEnv(model))
 		effectiveEnv = mergeEnv(effectiveEnv, directHostRuntimeHomeEnv(execAgentDir, model))
@@ -645,6 +652,17 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 		}
 	}
 
+	// Stage the task's bound project assets BEFORE the prompt is rendered:
+	// fail-closed — a task that declares assets must never start a run whose
+	// manifest points at nothing.
+	stagedAssets, err := r.stageLocalTaskAssets(task)
+	if err != nil {
+		return nil, err
+	}
+	if stagedAssets != nil {
+		defer stagedAssets.Cleanup()
+	}
+
 	// BuildTaskPrompt carries the workflow context, the agent-worker contract
 	// (upstream v2.0.12), and the meta footer; the worktree boundary stays
 	// CLI-path-only, prepended here.
@@ -663,6 +681,9 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 		return nil, fmt.Errorf("materialize provider credentials: %w", err)
 	}
 	runtimeEnv := r.resolveRuntimeControlEnv(project, agentName, task.ID)
+	if stagedAssets != nil {
+		runtimeEnv[runtimeexec.RuntimeTaskAssetsDirEnv] = stagedAssets.CacheDir
+	}
 	if cleanup := r.materializeRuntimeFiles(execAgentDir, runtimeEnv); cleanup != nil {
 		defer cleanup()
 	}
@@ -705,6 +726,7 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 		injectRuntimeControlEnvIntoRuntime(runtimeCfg, processRuntimeEnv)
 		mounts := append([]entity.RuntimeMount(nil), runtimeCfg.Mounts...)
 		mounts = r.appendWorkspaceFilesMount(mounts, meta.Sandbox.Provider, runtimeCfg)
+		mounts = appendTaskAssetsMount(mounts, runtimeEnv, meta.Sandbox.Provider)
 
 		r.addRuntimeDockerSystemMounts(runtimeCfg)
 
@@ -734,6 +756,9 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 		execDir = ""
 	} else {
 		// Direct host execution.
+		if stagedAssets != nil {
+			return nil, fmt.Errorf("task assets require the Docker sandbox runtime: task %s has bound assets but agent %s/%s runs directly on the host", task.ID, project, agentName)
+		}
 		effectiveEnv = mergeEnv(effectiveEnv, directHostRuntimeEnv(model))
 		effectiveEnv = mergeEnv(effectiveEnv, directHostRuntimeHomeEnv(execAgentDir, model))
 		effectiveEnv = ensureDirectHostCLIPath(effectiveEnv)
@@ -884,6 +909,19 @@ func (r *Runner) taskPromptWithWorkflowContext(project, agentName string, task *
 			ctx = contract
 		} else {
 			ctx = contract + "\n\n" + ctx
+		}
+	}
+	// Task assets manifest: budget-capped list of the task's bound project
+	// assets (read on demand inside the read-only sandbox mount). Rendered
+	// from the same attachment rows the spec builder and the stager consume —
+	// one source of truth, no drift between what the agent sees and what is
+	// mounted. Works with or without a workflow context, so plain tasks can
+	// carry inputs too.
+	if assetsSection := r.taskAssetsPromptSection(task.ID); assetsSection != "" {
+		if ctx == "" {
+			ctx = assetsSection
+		} else {
+			ctx = ctx + "\n\n" + assetsSection
 		}
 	}
 	if ctx == "" {

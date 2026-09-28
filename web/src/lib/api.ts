@@ -109,6 +109,14 @@ export async function apiPost<T>(path: string, body: unknown, options?: Pick<API
   return handleResponse<T>(res, options)
 }
 
+/** Multipart upload (project assets). `form` must NOT have Content-Type set manually. */
+export async function apiPostForm<T>(path: string, form: FormData, options?: Pick<APIRequestInit, 'suppressToast' | 'silentStatuses'>): Promise<T> {
+  const headers = authHeaders()
+  headers.set('Accept', 'application/json')
+  const res = await fetch(apiUrl(path), { method: 'POST', headers, body: form })
+  return handleResponse<T>(res, options)
+}
+
 export async function apiPatch<T>(path: string, body: unknown, options?: Pick<APIRequestInit, 'suppressToast' | 'silentStatuses'>): Promise<T> {
   const headers = authHeaders()
   headers.set('Content-Type', 'application/json')

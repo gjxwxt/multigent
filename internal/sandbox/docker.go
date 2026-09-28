@@ -68,6 +68,12 @@ const (
 	// managed by Multigent (host: <workspace>/.multigent/files).
 	WorkspaceFilesMount = "/mnt/multigent/files"
 
+	// AssetsMount is the stable read-only location for a run's staged project
+	// assets (host: a per-run cache dir under <workspace>/.multigent/assets-
+	// cache). Only the task's own bound files are staged into it — the mount
+	// boundary IS the permission boundary for agent asset reads.
+	AssetsMount = "/mnt/multigent/assets"
+
 	// ContainerDefaultPATH mirrors the tool locations provided by the sandbox
 	// images. Keep Go paths here because Docker -e PATH=... replaces the image
 	// ENV PATH instead of expanding it.

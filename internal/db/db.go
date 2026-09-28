@@ -92,6 +92,24 @@ type Store interface {
 	UpsertVerifiedRemoteBinding(b VerifiedRemoteBinding) error
 	VerifiedRemoteBindingFor(workspaceID, projectID string) (*VerifiedRemoteBinding, bool, error)
 	DeleteVerifiedRemoteBinding(workspaceID, projectID string) error
+
+	// Project assets: content-addressed attachment model. Blobs are never
+	// directly addressable — every read goes through a file/attachment row.
+	UpsertAssetBlob(b AssetBlob) error
+	AssetBlob(sha256 string) (*AssetBlob, bool, error)
+	InsertAssetFile(f *AssetFile) error
+	AssetFile(id string) (*AssetFile, bool, error)
+	ListAssetFilesForProject(workspaceID, projectID string, includeArchived bool) ([]AssetFile, error)
+	RenameAssetFile(id, displayName string) error
+	MoveAssetFilePointer(id, newSha string) error
+	ArchiveAssetFile(id string) error
+	InsertAssetAttachment(a *AssetAttachment) error
+	AssetAttachment(id string) (*AssetAttachment, bool, error)
+	ListAssetAttachmentsForFile(fileID string) ([]AssetAttachment, error)
+	ListAssetAttachmentsForTask(taskID string) ([]AssetAttachmentWithFile, error)
+	DeleteAssetAttachment(id string) error
+	AssetFileUsage(projectID string) (map[string]int, error)
+	CountAssetBlobReferences(sha256 string) (fileRefs int, attachmentRefs int, err error)
 	CreateConnectionGrant(grant ConnectionGrant) error
 	DeleteConnectionGrant(id string) error
 	ListConnectionGrants(connectionID string) ([]ConnectionGrant, error)
