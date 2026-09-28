@@ -615,7 +615,10 @@ func TestTriggerReviewPathFreezesThroughTheSameEntry(t *testing.T) {
 	run := runForTask(t, s, workspaceID, "task-slice4-trigger")
 	record := workflowNotificationRecord{
 		ID: "n-1", WorkspaceID: workspaceID, Project: "sample", TaskID: "task-slice4-trigger",
-		StepID: "contract_review", RecipientUserID: "admin",
+		// Mirror the production mint (fireWorkflowStepTriggers): the card is
+		// pinned to the run and step it was issued for, and the A1 guard in
+		// submitWorkflowReviewFromTrigger checks both.
+		WorkflowRunID: run.ID, StepID: "contract_review", RecipientUserID: "admin",
 	}
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 

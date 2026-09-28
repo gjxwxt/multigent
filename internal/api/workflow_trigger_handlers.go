@@ -520,6 +520,17 @@ func (s *Server) submitWorkflowReviewFromTrigger(workspaceID string, record work
 		return result, err
 	}
 	if found {
+		// A1: the callback token proves the card was issued for THIS task, but
+		// it does not prove the card is CURRENT. A card minted for an earlier
+		// review step (or an earlier round of the same step) must not steer the
+		// run's present decision point: the token is only a bearer credential
+		// for the notification, and the transition below acts on whatever step
+		// is active when the callback lands. Pin the card to the run and step
+		// it was minted for, exactly like the console review acts on the
+		// run's ActiveStepID.
+		if record.WorkflowRunID != run.ID || record.StepID != run.ActiveStepID {
+			return result, fmt.Errorf("stale workflow review card: notification %s was issued for run %s step %s, but the task is now on run %s step %s; use the current review card", record.ID, record.WorkflowRunID, record.StepID, run.ID, run.ActiveStepID)
+		}
 		def, defFound, err := wfStore.RunDefinition(run)
 		if err != nil {
 			return result, err
