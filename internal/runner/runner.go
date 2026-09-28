@@ -1131,8 +1131,8 @@ func deliveryModeSection(mode deliverymode.Mode, remoteRef string) string {
 		b.WriteString("- Therefore: do not attempt to create a merge request, do not wait for a CI pipeline, and where a step asks for `pr_url`, report `branch:<branch_name>` and state plainly that it is not a real merge request.\n")
 	case deliverymode.ModeRequiredUnbound:
 		fmt.Fprintf(&b, "- Mode: `%s` — this project requires remote pipeline evidence but has no verified remote binding.\n", mode)
-		b.WriteString("- The platform will hold any remote-dependent step with cause=environment and escalate it to a human.\n")
-		b.WriteString("- Do not retry to work around it and do not substitute placeholder values: report the environment blocker and escalate.\n")
+		b.WriteString("- Cause to report: environment (cause=environment). Do not retry to work around it and do not substitute placeholder values: report the environment blocker and escalate.\n")
+		b.WriteString("- Be precise about the mechanism: the platform does NOT block the step automatically. The remote-dependent actions you attempt (merge request, pipeline evidence) will fail with connection or permission errors; the escalation is yours to make.\n")
 	default:
 		b.WriteString("- Mode: `unknown` — the platform could not determine whether this project has a verified remote binding.\n")
 		b.WriteString("- Do not assume either way. Attempt the remote action once; if it fails for a binding or credential reason, report it as an environment blocker instead of retrying or inventing a placeholder value.\n")
