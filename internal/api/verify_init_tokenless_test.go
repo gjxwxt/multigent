@@ -9,6 +9,7 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -100,5 +101,59 @@ func TestProjectInitRemoteVerifyStillAcceptsCredentialedConnection(t *testing.T)
 	}
 	if _, ok, _ := s.controlDB.VerifiedRemoteBindingFor(workspaceID, "proj"); !ok {
 		t.Fatal("credentialed verify must write the binding")
+	}
+}
+
+// fakeGitLabAuthenticatingServer answers /api/v4/projects/:path with 200 only
+// for the expected PRIVATE-TOKEN; anything else gets 401 — mirroring real
+// GitLab semantics (token validated before authorization).
+func fakeGitLabAuthenticatingServer(t *testing.T, projectPath, validToken string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v4/projects/", func(w http.ResponseWriter, r *http.Request) {
+		raw := strings.TrimPrefix(r.URL.Path, "/api/v4/projects/")
+		decoded, err := url.PathUnescape(raw)
+		if err != nil || !strings.EqualFold(decoded, projectPath) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("PRIVATE-TOKEN") != validToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"401 Unauthorized"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":58,"name":"v2","path_with_namespace":"` + projectPath + `","http_url_to_repo":"http://gitlab.internal/` + projectPath + `.git","default_branch":"main"}`))
+	})
+	return httptest.NewServer(mux)
+}
+
+// TestProjectInitRemoteVerifyRejectsInvalidToken: an INVALID (non-empty)
+// credential gets 401 from the forge — the lookup itself refuses, so no
+// binding is written. This pins the E1 boundary: tokenless = our guard;
+// invalid = the provider's 401; both fail closed. A VALID low-privilege
+// token on a public repo is a deliberate boundary: verify proves READ
+// visibility through the connection; push capability is enforced later at
+// delivery time (prepareTaskDelivery fails closed) — see the batch evidence.
+func TestProjectInitRemoteVerifyRejectsInvalidToken(t *testing.T) {
+	s, workspaceID := newConnectionGrantPolicyServer(t)
+
+	gitlab := fakeGitLabAuthenticatingServer(t, "gao/react-components-ci", "correct-token")
+	defer gitlab.Close()
+	seedGitLabConnection(t, s, workspaceID, "conn-gitlab-bad", gitlab.URL)
+	if err := s.st.SaveProject("proj", &entity.Project{Name: "proj"}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+
+	req := providerTestRequest(http.MethodPost, "/api/v1/projects/proj/remote/verify-init", "admin",
+		map[string]any{"connectionId": "conn-gitlab-bad", "cloneUrl": gitlab.URL + "/gao/react-components-ci.git"})
+	req.SetPathValue("name", "proj")
+	rec := httptest.NewRecorder()
+	s.handleProjectInitRemoteVerify(rec, req)
+	if rec.Code == http.StatusOK {
+		t.Fatalf("an invalid credential must not verify (forge 401), got 200: %s", rec.Body.String())
+	}
+	if _, ok, _ := s.controlDB.VerifiedRemoteBindingFor(workspaceID, "proj"); ok {
+		t.Fatal("an invalid credential must not write a verified binding")
 	}
 }
