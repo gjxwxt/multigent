@@ -29,6 +29,13 @@ type GitLabHost struct {
 	client  *http.Client
 }
 
+// HasToken reports whether this host carries a credential. A tokenless host
+// can still reach PUBLIC repositories anonymously, which is exactly why call
+// sites that verify access on behalf of a stored connection must check it:
+// a 200 from an anonymous lookup proves nothing about the connection's
+// ability to clone, push, or read pipeline evidence later.
+func (g *GitLabHost) HasToken() bool { return strings.TrimSpace(g.token) != "" }
+
 // NewGitLabHost creates a new GitLab CodeHost adapter.
 func NewGitLabHost(cfg GitLabConfig) *GitLabHost {
 	baseURL := strings.TrimSpace(cfg.BaseURL)

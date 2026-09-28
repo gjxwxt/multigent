@@ -45,29 +45,37 @@ type workflowTriggerEvent struct {
 }
 
 type workflowNotificationRecord struct {
-	ID                string    `json:"id"`
-	WorkspaceID       string    `json:"workspaceId"`
-	Project           string    `json:"project"`
-	TaskID            string    `json:"taskId"`
-	TaskTitle         string    `json:"taskTitle"`
-	WorkflowRunID     string    `json:"workflowRunId"`
-	WorkflowID        string    `json:"workflowId"`
-	WorkflowName      string    `json:"workflowName"`
-	StepID            string    `json:"stepId"`
-	StepTitle         string    `json:"stepTitle"`
-	RecipientUserID   string    `json:"recipientUserId"`
-	Provider          string    `json:"provider"`
-	ConnectionID      string    `json:"connectionId,omitempty"`
-	ExternalUserID    string    `json:"externalUserId,omitempty"`
-	Status            string    `json:"status"`
-	Error             string    `json:"error,omitempty"`
-	CallbackTokenHash string    `json:"callbackTokenHash,omitempty"`
-	ExternalMessageID string    `json:"externalMessageId,omitempty"`
-	OpenURL           string    `json:"openUrl,omitempty"`
-	CallbackURL       string    `json:"callbackUrl,omitempty"`
-	CreatedAt         time.Time `json:"createdAt"`
-	UpdatedAt         time.Time `json:"updatedAt"`
-	ActedAt           time.Time `json:"actedAt,omitempty"`
+	ID            string `json:"id"`
+	WorkspaceID   string `json:"workspaceId"`
+	Project       string `json:"project"`
+	TaskID        string `json:"taskId"`
+	TaskTitle     string `json:"taskTitle"`
+	WorkflowRunID string `json:"workflowRunId"`
+	// WorkflowRunUpdatedAt pins the run's decision-point generation at mint
+	// time (run.UpdatedAt changes only when a transition changes the decision
+	// point: advance, rework reset, reactivation, failure, terminal). A card
+	// whose generation no longer matches the run cannot act — the same
+	// (run, step) pair is REUSED across rework rounds, so run+step alone
+	// cannot tell a round-N card from the round-N+1 decision point it would
+	// otherwise drive.
+	WorkflowRunUpdatedAt time.Time `json:"workflowRunUpdatedAt,omitempty"`
+	WorkflowID           string    `json:"workflowId"`
+	WorkflowName         string    `json:"workflowName"`
+	StepID               string    `json:"stepId"`
+	StepTitle            string    `json:"stepTitle"`
+	RecipientUserID      string    `json:"recipientUserId"`
+	Provider             string    `json:"provider"`
+	ConnectionID         string    `json:"connectionId,omitempty"`
+	ExternalUserID       string    `json:"externalUserId,omitempty"`
+	Status               string    `json:"status"`
+	Error                string    `json:"error,omitempty"`
+	CallbackTokenHash    string    `json:"callbackTokenHash,omitempty"`
+	ExternalMessageID    string    `json:"externalMessageId,omitempty"`
+	OpenURL              string    `json:"openUrl,omitempty"`
+	CallbackURL          string    `json:"callbackUrl,omitempty"`
+	CreatedAt            time.Time `json:"createdAt"`
+	UpdatedAt            time.Time `json:"updatedAt"`
+	ActedAt              time.Time `json:"actedAt,omitempty"`
 }
 
 type workflowTriggerCallbackBody struct {
@@ -286,26 +294,27 @@ func (s *Server) createWorkflowNotificationRecord(event workflowTriggerEvent, pr
 	openURL := workflowTaskOpenURL(r, event.Project, event.TaskID)
 	callbackURL := workflowTriggerCallbackURL(r, event.WorkspaceID, id, token)
 	record := workflowNotificationRecord{
-		ID:                id,
-		WorkspaceID:       event.WorkspaceID,
-		Project:           event.Project,
-		TaskID:            event.TaskID,
-		TaskTitle:         event.TaskTitle,
-		WorkflowRunID:     event.Run.ID,
-		WorkflowID:        event.Definition.ID,
-		WorkflowName:      event.Definition.Name,
-		StepID:            event.Step.ID,
-		StepTitle:         event.Step.Title,
-		RecipientUserID:   reviewer,
-		Provider:          provider,
-		ConnectionID:      connectionID,
-		ExternalUserID:    externalUserID,
-		Status:            "pending",
-		CallbackTokenHash: hashWorkflowCallbackToken(token),
-		OpenURL:           openURL,
-		CallbackURL:       callbackURL,
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		ID:                   id,
+		WorkspaceID:          event.WorkspaceID,
+		Project:              event.Project,
+		TaskID:               event.TaskID,
+		TaskTitle:            event.TaskTitle,
+		WorkflowRunID:        event.Run.ID,
+		WorkflowRunUpdatedAt: event.Run.UpdatedAt,
+		WorkflowID:           event.Definition.ID,
+		WorkflowName:         event.Definition.Name,
+		StepID:               event.Step.ID,
+		StepTitle:            event.Step.Title,
+		RecipientUserID:      reviewer,
+		Provider:             provider,
+		ConnectionID:         connectionID,
+		ExternalUserID:       externalUserID,
+		Status:               "pending",
+		CallbackTokenHash:    hashWorkflowCallbackToken(token),
+		OpenURL:              openURL,
+		CallbackURL:          callbackURL,
+		CreatedAt:            now,
+		UpdatedAt:            now,
 	}
 	if err := s.saveWorkflowNotification(record); err != nil {
 		return workflowNotificationRecord{}, err
@@ -520,6 +529,38 @@ func (s *Server) submitWorkflowReviewFromTrigger(workspaceID string, record work
 		return result, err
 	}
 	if found {
+		// A1: the callback token proves the card was issued for THIS task, but
+		// it does not prove the card is CURRENT. A card minted for an earlier
+		// review step (or an earlier round of the same step) must not steer the
+		// run's present decision point: the token is only a bearer credential
+		// for the notification, and the transition below acts on whatever step
+		// is active when the callback lands. Pin the card to the run and step
+		// it was minted for, exactly like the console review acts on the
+		// run's ActiveStepID.
+		if record.WorkflowRunID != run.ID || record.StepID != run.ActiveStepID {
+			return result, fmt.Errorf("stale workflow review card: notification %s was issued for run %s step %s, but the task is now on run %s step %s; use the current review card", record.ID, record.WorkflowRunID, record.StepID, run.ID, run.ActiveStepID)
+		}
+		// A1 round-level: (run, step) is REUSED across rework rounds — the
+		// engine resets the same step instance in place, so a round-N card
+		// matches run+step at round N+1 and would approve the reworked round
+		// without the reworked input ever reaching the reviewer through it.
+		// run.UpdatedAt changes exactly when the decision point changes, so a
+		// mint-time pin rejects any card from an earlier round.
+		//
+		// Migration fail-closed: records persisted by pre-upgrade builds carry
+		// no generation pin at all (zero WorkflowRunUpdatedAt), and callback
+		// tokens never expire, so such a card is still a live bearer
+		// credential for a decision point that has moved on. It cannot be
+		// assumed fresh: when the active run resolves and the pin is missing,
+		// refuse and point the reviewer at the re-fetch path. Records whose
+		// run no longer resolves (the no-run path above) keep the current
+		// behavior.
+		if record.WorkflowRunUpdatedAt.IsZero() {
+			return result, fmt.Errorf("stale workflow review card: notification %s predates decision-round pinning and cannot be matched to the current round of run %s step %s; open the task in the console to review from the current card", record.ID, run.ID, run.ActiveStepID)
+		}
+		if !record.WorkflowRunUpdatedAt.Equal(run.UpdatedAt) {
+			return result, fmt.Errorf("stale workflow review card: notification %s was issued for an earlier decision round of run %s step %s; open the task in the console to review from the current card", record.ID, run.ID, run.ActiveStepID)
+		}
 		def, defFound, err := wfStore.RunDefinition(run)
 		if err != nil {
 			return result, err
@@ -549,6 +590,12 @@ func (s *Server) submitWorkflowReviewFromTrigger(workspaceID string, record work
 					deliveryPrepared = true
 				}
 			}
+		}
+		// C1: the trigger/ChatOps callback is a full review entry — the qa_signoff
+		// risk-coverage matrix gate must reject here BEFORE any transition write,
+		// exactly like the console review (shared choke point).
+		if err := enforceQASignoffMatrixGate(wfStore, record.Project, record.TaskID, currentStep, outputs); err != nil {
+			return result, err
 		}
 		// A plan-freezing review reached through a trigger/ChatOps callback
 		// must freeze through the SAME entry as the in-console review: the

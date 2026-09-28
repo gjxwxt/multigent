@@ -713,13 +713,17 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 		}
 	}
 
-	// Enforce QA Sign-off risk-coverage gate before allowing transition toward merge.
-	if runFound && isQASignoffStep(currentStep) && isApprovalDecision(outputs["decision"]) {
-		if err := validateQASignoffGate(outputs, currentStep, run, wfStore); err != nil {
+	// Enforce QA Sign-off risk-coverage gate before allowing transition toward merge
+	// (C1: shared choke point — the same gate guards the IM trigger callback and
+	// the runtime step report, so the matrix cannot be bypassed by switching entries).
+	if runFound {
+		if err := enforceQASignoffMatrixGate(wfStore, project, taskID, currentStep, outputs); err != nil {
 			return taskWorkflowResponse{}, http.StatusBadRequest, err
 		}
-		if rawWaivers := strings.TrimSpace(outputs["manual_waivers"]); rawWaivers != "" {
-			s.addComment(t, project, agent, fmt.Sprintf("qa signoff approved with manual waivers: %s", rawWaivers))
+		if isQASignoffStep(currentStep) && isApprovalDecision(outputs["decision"]) {
+			if rawWaivers := strings.TrimSpace(outputs["manual_waivers"]); rawWaivers != "" {
+				s.addComment(t, project, agent, fmt.Sprintf("qa signoff approved with manual waivers: %s", rawWaivers))
+			}
 		}
 	}
 
@@ -930,6 +934,27 @@ func (q *qaRiskItem) UnmarshalJSON(data []byte) error {
 	}
 	q.UncoveredReason = strings.TrimSpace(r.UncoveredReason)
 	return nil
+}
+
+// enforceQASignoffMatrixGate is the shared C1 choke point for the qa_signoff
+// risk-coverage matrix checkpoint across ALL completion entries: the console
+// review, the IM trigger callback, and the runtime step report. The gate
+// must reject BEFORE any state, audit, or transition write — every caller
+// invokes it prior to CompleteAndAdvance — so a matrix-less approval can
+// never advance a run from one entry while being blocked from another. It
+// is a no-op for anything except an approval decision on a qa_signoff step.
+func enforceQASignoffMatrixGate(wfStore *workflowstore.Store, project, taskID string, currentStep entity.WorkflowStep, outputs map[string]string) error {
+	if wfStore == nil || !isQASignoffStep(currentStep) || !isApprovalDecision(outputs["decision"]) {
+		return nil
+	}
+	run, found, err := wfStore.RunForTask(project, taskID)
+	if err != nil {
+		return fmt.Errorf("qa_signoff gate could not inspect the run: %w", err)
+	}
+	if !found {
+		return nil
+	}
+	return validateQASignoffGate(outputs, currentStep, run, wfStore)
 }
 
 func validateQASignoffGate(outputs map[string]string, currentStep entity.WorkflowStep, run entity.WorkflowRun, wfStore *workflowstore.Store) error {

@@ -52,8 +52,12 @@ func TestDeliveryModeSectionWording(t *testing.T) {
 
 	required := deliveryModeSection(deliverymode.ModeRequiredUnbound, "")
 	assertSection(t, "required-unbound", required,
-		[]string{"Mode: `required_unbound`", "cause=environment", "do not substitute placeholder values"},
-		append([]string{"branch:<branch_name>", "Report the real merge request URL"}, pushDenials...))
+		[]string{"Mode: `required_unbound`", "cause=environment", "do not substitute placeholder values",
+			// B1: the wording must not promise a platform hold that does not
+			// exist — an agent told "the platform will hold" waits for a gate
+			// that never fires. Pin the honest mechanism description.
+			"does NOT block the step automatically", "the escalation is yours to make"},
+		append([]string{"branch:<branch_name>", "Report the real merge request URL", "The platform will hold"}, pushDenials...))
 
 	unknown := deliveryModeSection(deliverymode.ModeUnknown, "")
 	assertSection(t, "unknown", unknown,

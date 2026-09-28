@@ -102,6 +102,13 @@ func (s *Server) verifyProjectRemoteBinding(ctx context.Context, workspaceID, pr
 	if err != nil {
 		return nil, fmt.Errorf("resolve gitlab connection: %w", err)
 	}
+	// E1: the lookup below is the authorization, but an unauthenticated GET
+	// still returns 200 for a PUBLIC repository — a tokenless connection would
+	// "verify" while being unable to clone privately, push, or read pipeline
+	// evidence. The verify step must never bless a credentialless connection.
+	if !host.HasToken() {
+		return nil, fmt.Errorf("gitlab connection %s has no stored credential and cannot verify remote access", connID)
+	}
 	path := strings.TrimSpace(p.RemoteAdoptPath)
 	if path == "" {
 		path = gitlabProjectPathFromURL(p.CloneURL, nil)

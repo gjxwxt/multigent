@@ -30,6 +30,14 @@ func TestShouldRecoverStaleInteraction(t *testing.T) {
 			return s
 		}(), "scheduler", "running_task", true},
 		{"non-scheduler acquirer never recovers", stale(30), "feishu", "running_task", false},
+		// H1 closeout (2026-09-27): a manual_run requester is a legitimate
+		// same-ladder acquirer — the API's manual-start precheck admits the
+		// stale scheduler session, so the spawned `multigent run` must recover
+		// it identically or the ok+pid response lies again (the spawned
+		// process exited "agent is busy in scheduler session").
+		{"manual_run acquirer recovers stale scheduler session", stale(3), "manual_run", "running_task", true},
+		{"manual_run acquirer still blocked on live session", stale(0), "manual_run", "running_task", false},
+		{"manual_run acquirer with non-task reason never recovers", stale(30), "manual_run", "chat", false},
 		{"different lock reason never recovers", stale(30), "scheduler", "chat", false},
 		{"active session of different shape never recovers", func() InteractionSession {
 			s := stale(30)

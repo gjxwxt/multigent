@@ -1660,6 +1660,40 @@ func (s *Server) workflowDeliveryGateShape(workspaceID, project string, t *entit
 	return declaresPR, qaRequiresAnchor, nil
 }
 
+// runtimeActiveWorkflowStep resolves the task's current workflow step for
+// entry-point gate checks (C1). Three outcomes, deliberately distinct:
+//   - no run at all: (nil, nil) — the legacy no-workflow shape, the caller
+//     legitimately skips the gate;
+//   - a run exists but the definition or active step cannot be resolved
+//     (missing/corrupt definition, dangling ActiveStepID, storage error):
+//     a diagnosable error — the caller must refuse BEFORE any transition;
+//     a found run with unresolvable state is corrupted data, not a reason
+//     to silently skip the gate ("store-level validation" does NOT cover
+//     the matrix check — CompleteAndAdvance has none);
+//   - otherwise: the resolved step.
+func (s *Server) runtimeActiveWorkflowStep(wfStore *workflowstore.Store, project, taskID string) (*entity.WorkflowStep, error) {
+	run, found, err := wfStore.RunForTask(project, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("qa_signoff gate could not read the workflow run: %w", err)
+	}
+	if !found {
+		return nil, nil
+	}
+	def, defFound, err := wfStore.RunDefinition(run)
+	if err != nil {
+		return nil, fmt.Errorf("qa_signoff gate could not read workflow definition %q: %w", run.DefinitionID, err)
+	}
+	if !defFound {
+		return nil, fmt.Errorf("qa_signoff gate could not resolve workflow definition %q for an active run", run.DefinitionID)
+	}
+	for i := range def.Steps {
+		if strings.TrimSpace(def.Steps[i].ID) == strings.TrimSpace(run.ActiveStepID) {
+			return &def.Steps[i], nil
+		}
+	}
+	return nil, fmt.Errorf("qa_signoff gate could not resolve the run's active step %q in workflow definition %q", run.ActiveStepID, run.DefinitionID)
+}
+
 func (s *Server) completeRuntimeWorkflowStep(workspaceID, project string, t *entity.Task, outputs map[string]string, stepStatus string) (workflowstore.TransitionResult, bool, error) {
 	var result workflowstore.TransitionResult
 	if s == nil || s.controlDB == nil || t == nil || strings.TrimSpace(workspaceID) == "" {
@@ -1684,6 +1718,26 @@ func (s *Server) completeRuntimeWorkflowStep(workspaceID, project string, t *ent
 		output = strings.TrimSpace(t.LastError)
 	}
 	updateTaskRemoteMR(t, outputs)
+	// C1: the runtime step report is a full completion entry — a qa_signoff
+	// approval reported by the agent side must clear the risk-coverage matrix
+	// gate BEFORE the transition write, exactly like the console review and
+	// the IM trigger callback (shared choke point). The step instance lookup
+	// inside the gate also honors the input-side matrix (edge-carried), so a
+	// runtime report on a sign-off whose inputs already carry a validated
+	// matrix still passes.
+	if stepStatus == "completed" {
+		currentStep, stepErr := s.runtimeActiveWorkflowStep(wfStore, project, t.ID)
+		if stepErr != nil {
+			// Found-run-but-unresolvable state (or a storage error) must refuse
+			// BEFORE any transition attempt — never silently skip the gate.
+			return result, false, stepErr
+		}
+		if currentStep != nil {
+			if err := enforceQASignoffMatrixGate(wfStore, project, t.ID, *currentStep, outputs); err != nil {
+				return result, false, err
+			}
+		}
+	}
 	result, err := wfStore.CompleteAndAdvance(project, t.ID, t.Summary, output, outputs, stepStatus)
 	if err != nil {
 		return result, false, err
