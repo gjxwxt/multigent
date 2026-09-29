@@ -179,6 +179,18 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
       setLibraryAssets(libraryState.data.filter((f) => !f.archivedAt))
     }
   }, [libraryState])
+  // Refetch the library every time the @ picker opens: files uploaded via the
+  // paperclip (or added elsewhere) while the dialog is open must be pickable
+  // immediately — a stale list breaks the upload-then-@ flow.
+  const mentionWasOpenRef = useRef(false)
+  useEffect(() => {
+    if (mention && !mentionWasOpenRef.current) {
+      mentionWasOpenRef.current = true
+      setLibraryRefreshKey((k) => k + 1)
+    } else if (!mention) {
+      mentionWasOpenRef.current = false
+    }
+  }, [mention])
   // Only the derived fields are read here. remoteProvider / remoteConnection on
   // the same payload are client-writable and must never drive this decision.
   const projectRemoteState = useApiJson<ProjectRemoteState>(
