@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -1224,6 +1225,34 @@ func (s *Server) saveManualAgentIMChannel(r *http.Request, workspaceID, project,
 	}
 	if err := s.controlDB.UpsertConnection(connection); err != nil {
 		return controldb.AgentChannelBinding{}, err
+	}
+	// Auto-attach to the workspace's single admin-attested IM instance when
+	// the operator did not pick one. The UI flow attaches after connect; the
+	// raw API path had no equivalent, leaving connections invisible to
+	// instance-scoped provisioning (project-channel creation) with no error
+	// pointing at the cause. Multi-instance workspaces still require an
+	// explicit choice (fail closed rather than guess).
+	if strings.TrimSpace(connection.IMInstanceID) == "" {
+		instances, instErr := s.controlDB.ListIMInstances(controldb.IMInstanceFilter{
+			WorkspaceID: workspaceID,
+			Provider:    provider,
+		})
+		if instErr == nil {
+			var attested []controldb.IMInstance
+			for _, inst := range instances {
+				if inst.Attestation == imInstanceAttestationAdmin {
+					attested = append(attested, inst)
+				}
+			}
+			if len(attested) == 1 {
+				connection.IMInstanceID = attested[0].ID
+				connection.UpdatedAt = now
+				if err := s.controlDB.UpsertConnection(connection); err != nil {
+					return controldb.AgentChannelBinding{}, err
+				}
+				log.Printf("[agent-channel] auto-attached connection %s to the single attested %s IM instance %s", connectionID, provider, attested[0].ID)
+			}
+		}
 	}
 	values := map[string]string{"baseUrl": openBaseURL}
 	for k, v := range result.SecretValues {
