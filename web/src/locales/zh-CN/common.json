@@ -391,12 +391,14 @@
     "baseUrl": "Base URL",
     "openId": "Open ID",
     "healthOkHttp": "可用 · HTTP {{status}}",
+    "gitlabRepositoryPathHelp": "默认测试会调用 GitLab 用户 API，只有 read_repository 权限的令牌无法通过。填写 namespace/project 后改为验证只读 Git 访问；测试不会写入仓库。仅当连接确实需要用户资料 API 时才扩大相应权限。",
     "healthFailedHttp": "{{message}} · HTTP {{status}}",
     "fieldLabels": {
       "apiKey": "API Key",
       "appId": "App ID",
       "appSecret": "App Secret",
       "baseUrl": "GitLab 实例地址 (Base URL)",
+      "repositoryPath": "只读 Git 测试的仓库路径（命名空间/项目）",
       "privateKey": "私钥",
       "gitUserName": "Git 用户名",
       "gitUserEmail": "Git 邮箱",
@@ -546,6 +548,7 @@
   },
   "projectNav": {
     "tasks": "任务",
+    "assets": "资料",
     "taskTemplates": "任务模板",
     "workflows": "流程",
     "goals": "OKR",
@@ -554,8 +557,7 @@
     "members": "成员",
     "schedule": "计划",
     "runs": "运行",
-    "settings": "设置",
-    "assets": "资料"
+    "settings": "设置"
   },
   "playbooks": {
     "subtitle": "把角色、技能、流程和任务模板打包成可复用的 Agent 协作结构。",
@@ -1303,7 +1305,49 @@
     "emptyTitle": "空状态",
     "emptyBody": "尚未连接 API。后续与 CLI inbox 对齐，并按本项目过滤。"
   },
+  "projectAssets": {
+    "subtitle": "项目资料库——上传一次，任意任务复用；Agent 按需读取，文件不进 Git。",
+    "upload": "上传",
+    "uploading": "上传中…",
+    "uploadDone": "已存入项目资料",
+    "empty": "暂无项目资料。可在此处或创建任务弹窗上传。",
+    "showArchived": "显示已归档",
+    "name": "名称",
+    "size": "大小",
+    "sha": "SHA-256",
+    "usage": "被任务引用",
+    "uploader": "上传者",
+    "actions": "操作",
+    "download": "下载",
+    "archive": "归档",
+    "archiveDone": "已归档",
+    "archived": "已归档",
+    "archiveConfirmTitle": "归档 \"{{name}}\"？已有任务绑定不受影响，文件将从默认列表隐藏。",
+    "archiveConfirmDescription": "已有任务绑定不受影响，文件仅从默认列表隐藏。"
+  },
   "tasks": {
+    "assets": {
+      "label": "任务资料",
+      "upload": "上传文件",
+      "uploading": "上传中…",
+      "remove": "移除",
+      "maxReached": "每个任务最多绑定 8 份资料",
+      "bindFailed": "资料 \"{{name}}\" 绑定任务失败：{{message}}",
+      "hint": "文件存入项目资料库，Agent 经只读挂载按需读取。",
+      "role": {
+        "requirement_input": "需求输入",
+        "reference": "参考"
+      },
+      "requiredToggle": "必读（Agent 必须完整阅读该文件）",
+      "requiredBadge": "必读",
+      "attach": "附加",
+      "back": "返回",
+      "remaining": "还可绑定 {{count}} 份资料",
+      "emptyLibrary": "资料库为空：去资料页上传，或点下方回形针直接上传",
+      "mentionHint": "输入 @ 可引用项目资料库中的文件并声明用途（需求输入 / 参考）。",
+      "promptPlaceholder": "描述任务…输入 @ 引用资料",
+      "roleToggleHint": "切换角色（需求输入 / 参考）"
+    },
     "subtitle": "本项目的任务队列与筛选；可平等指派给人或 Agent。",
     "emptyTitle": "暂无任务",
     "emptyBody": "连接工作区 API 后可列出该项目的 multigent 任务。",
@@ -1491,16 +1535,7 @@
     "availableBranches": "可用分支 (Git Branches)",
     "noBranchMatch": "未找到匹配分支，将使用 \"{{value}}\"",
     "agentAlreadyRunning": "智能体已在后台执行该任务中，重复启动会并入当前队列。",
-    "taskQueued": "任务已入队，将在智能体当前工作完成后执行。",
-    "assets": {
-      "label": "任务资料",
-      "upload": "上传文件",
-      "uploading": "上传中…",
-      "remove": "移除",
-      "maxReached": "每个任务最多绑定 8 份资料",
-      "bindFailed": "资料 \"{{name}}\" 绑定任务失败：{{message}}",
-      "hint": "文件存入项目资料库，Agent 经只读挂载按需读取。"
-    }
+    "taskQueued": "任务已入队，将在智能体当前工作完成后执行。"
   },
   "projects": {
     "listEyebrow": "交付",
@@ -3228,25 +3263,5 @@
     "rollback": "回滚",
     "rollingBack": "回滚中…",
     "rollbackConfirm": "回滚将把本次提案触及的全部文件恢复到应用前状态；若应用后文件被人工改动，回滚会被拒绝。确认回滚？"
-  },
-  "projectAssets": {
-    "subtitle": "项目资料库——上传一次，任意任务复用；Agent 按需读取，文件不进 Git。",
-    "upload": "上传",
-    "uploading": "上传中…",
-    "uploadDone": "已存入项目资料",
-    "empty": "暂无项目资料。可在此处或创建任务弹窗上传。",
-    "showArchived": "显示已归档",
-    "name": "名称",
-    "size": "大小",
-    "sha": "SHA-256",
-    "usage": "被任务引用",
-    "uploader": "上传者",
-    "actions": "操作",
-    "download": "下载",
-    "archive": "归档",
-    "archiveDone": "已归档",
-    "archived": "已归档",
-    "archiveConfirmTitle": "归档 \"{{name}}\"？已有任务绑定不受影响，文件将从默认列表隐藏。",
-    "archiveConfirmDescription": "已有任务绑定不受影响，文件仅从默认列表隐藏。"
   }
 }

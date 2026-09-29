@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Check, ChevronDown, GitBranch, Paperclip, RefreshCw, X } from 'lucide-react'
+import { Check, ChevronDown, FileText, GitBranch, Paperclip, RefreshCw, X } from 'lucide-react'
 import { apiPost, apiPostForm } from '../../lib/api'
 import { cn } from '../../lib/cn'
 import { useApiJson } from '../../lib/use-api'
@@ -8,9 +8,21 @@ import type { TaskOption } from '../task/TaskModals'
 import { overlayDismissProps } from '../ui/overlay'
 import { showToast } from '../ui/Toast'
 import { DeliveryModeNotice } from './DeliveryModeNotice'
+import { AssetMentionPopover, type AssetCandidate, type AssetPick, type AssetRole } from './AssetMentionPopover'
 import type { ProjectRemoteState } from '../../lib/delivery-mode'
 
 type UploadedAsset = { id: string; displayName: string; currentSha: string; size?: number }
+
+// One asset staged for binding to the task about to be created. role/required
+// ride the creation request itself (body.assets) — a post-create bind loop
+// races the workflow's synchronous start and the attention wakeup.
+type PendingBinding = {
+  fileId: string
+  displayName: string
+  role: AssetRole
+  required: boolean
+  source: 'upload' | 'library'
+}
 
 const MAX_TASK_ASSETS = 8
 
@@ -82,11 +94,17 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
   const [err, setErr] = useState<string | null>(null)
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   // Project assets staged for binding to the task about to be created. Files
-  // upload into the project library immediately; the binding happens right
-  // after task creation so the pinned version is the one the user sees here.
-  const [taskAssets, setTaskAssets] = useState<UploadedAsset[]>([])
+  // upload into the project library immediately; the bindings are sent with
+  // the creation request (body.assets) so the task never starts without them.
+  const [taskAssets, setTaskAssets] = useState<PendingBinding[]>([])
   const [assetsBusy, setAssetsBusy] = useState(false)
   const assetInputRef = useRef<HTMLInputElement>(null)
+  const promptInputRef = useRef<HTMLTextAreaElement>(null)
+  // @-mention state: the caret offset where "@" was typed, and the query
+  // string tracked after it. Null popover = closed.
+  const [mention, setMention] = useState<{ at: number; query: string } | null>(null)
+  const [libraryAssets, setLibraryAssets] = useState<AssetCandidate[]>([])
+  const composingRef = useRef(false)
 
   const multiProject = Boolean(allProjectsAgents && allProjectsAgents.length > 1)
   const workflowPath = open ? '/api/v1/workflows' : null
@@ -102,6 +120,18 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
     branchRefreshKey,
   )
   const usersState = useApiJson<UserListResponse>(open ? '/api/v1/users' : null, 0)
+  // Project asset library for the @-mention picker. Non-archived files only:
+  // archived files cannot be bound (the bind endpoint refuses them).
+  const [libraryRefreshKey, setLibraryRefreshKey] = useState(0)
+  const libraryState = useApiJson<{ id: string; displayName: string; currentSha: string; size?: number; archivedAt?: string }[]>(
+    open && selectedProject ? `/api/v1/projects/${encodeURIComponent(selectedProject)}/assets` : null,
+    libraryRefreshKey,
+  )
+  useEffect(() => {
+    if (libraryState.status === 'ok') {
+      setLibraryAssets(libraryState.data.filter((f) => !f.archivedAt))
+    }
+  }, [libraryState])
   // Only the derived fields are read here. remoteProvider / remoteConnection on
   // the same payload are client-writable and must never drive this decision.
   const projectRemoteState = useApiJson<ProjectRemoteState>(
@@ -185,6 +215,7 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
     setFieldErrors({})
     setErr(null)
     setTaskAssets([])
+    setMention(null)
   }
 
   function openDialog() {
@@ -209,10 +240,11 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
     // Uploaded files live in the project they were uploaded to; switching
     // projects leaves them behind (still in that project's library).
     setTaskAssets([])
+    setMention(null)
   }
 
   async function onAssetsSelected(files: FileList | null) {
-    if (!files || files.length === 0 || !selectedProject) return
+    if (!files || !files.length || !selectedProject) return
     const room = MAX_TASK_ASSETS - taskAssets.length
     if (room <= 0) {
       setErr(t('tasks.assets.maxReached'))
@@ -228,9 +260,14 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
         `/api/v1/projects/${encodeURIComponent(selectedProject)}/assets`,
         form,
       )
-      setTaskAssets((prev) => [...prev, ...uploaded])
+      setTaskAssets((prev) => [
+        ...prev,
+        ...uploaded.map((a) => ({ fileId: a.id, displayName: a.displayName, role: 'reference' as AssetRole, required: false, source: 'upload' as const })),
+      ])
       if (chosen.length < files.length) setErr(t('tasks.assets.maxReached'))
     } catch (e) {
+      // The file never reached the library, so there is nothing to bind —
+      // block the submit with the error instead of continuing without it.
       setErr(e instanceof Error ? e.message : String(e))
     } finally {
       setAssetsBusy(false)
@@ -238,19 +275,87 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
     }
   }
 
-  async function bindTaskAssets(taskId: string) {
-    for (const asset of taskAssets) {
-      try {
-        await apiPost(
-          `/api/v1/projects/${encodeURIComponent(selectedProject)}/tasks/${encodeURIComponent(taskId)}/assets`,
-          { fileId: asset.id, role: 'requirement_input', required: true },
-        )
-      } catch (e) {
-        // The task already exists; surface the failure without blocking the
-        // flow — the file stays in the project library and can be re-bound.
-        showToast(t('tasks.assets.bindFailed', { name: asset.displayName, message: e instanceof Error ? e.message : String(e) }), 'error')
+  function stageBinding(pick: AssetPick) {
+    if (!mention) return
+    const candidate = libraryAssets.find((a) => a.id === pick.fileId)
+    const displayName = candidate?.displayName ?? ''
+    setTaskAssets((prev) => {
+      const existing = prev.find((b) => b.fileId === pick.fileId)
+      const next = existing
+        ? prev.map((b) => (b.fileId === pick.fileId ? { ...b, role: pick.role, required: pick.required } : b))
+        : [...prev, { fileId: pick.fileId, displayName, role: pick.role, required: pick.required, source: 'library' as const }]
+      return next.slice(0, MAX_TASK_ASSETS)
+    })
+    closeMentionAndInsert(displayName)
+  }
+
+  function removeBinding(fileId: string) {
+    // Remove the chip AND the marker this picker inserted (3.4 sync rule):
+    // a stale "@name" in the text with no binding behind it reads as a live
+    // reference. Hand-written text is never touched — only markers we
+    // recorded.
+    const binding = taskAssets.find((b) => b.fileId === fileId)
+    setTaskAssets((prev) => prev.filter((b) => b.fileId !== fileId))
+    if (!binding) return
+    setPrompt((prev) => {
+      const marker = `@${binding.displayName}`
+      const idx = prev.indexOf(marker)
+      if (idx === -1) return prev
+      const before = prev.slice(0, idx)
+      const after = prev.slice(idx + marker.length)
+      return (before + after).replace(/ {2,}/g, ' ').trimEnd()
+    })
+  }
+
+  function openMention(textarea: HTMLTextAreaElement) {
+    const caret = textarea.selectionStart ?? textarea.value.length
+    setMention({ at: caret, query: '' })
+    setLibraryRefreshKey((k) => k + 1)
+  }
+
+  function closeMentionAndInsert(displayName: string) {
+    if (!mention) return
+    const { at, query } = mention
+    setPrompt((prev) => {
+      // Replace "@query" (the chars typed since the "@") with the full name.
+      const before = prev.slice(0, at)
+      const typedQuery = prev.slice(at, at + 1 + query.length)
+      const keptQuery = typedQuery.startsWith('@') ? typedQuery.slice(1) : query
+      const after = prev.slice(at + 1 + keptQuery.length)
+      const needsSpaceBefore = before.length > 0 && !/\s$/.test(before)
+      const insert = `${needsSpaceBefore ? ' ' : ''}@${displayName} `
+      return before + insert + after
+    })
+    setMention(null)
+    requestAnimationFrame(() => {
+      const el = promptInputRef.current
+      if (!el) return
+      const pos = at + displayName.length + 2
+      el.focus()
+      el.setSelectionRange(pos, pos)
+    })
+  }
+
+  function onPromptChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
+    clearFieldError('prompt')
+    const value = e.target.value
+    const caret = e.target.selectionStart ?? value.length
+    setPrompt(value)
+    if (composingRef.current) return
+    setMention((prev) => {
+      if (prev) {
+        // Keep tracking while the "@anchor" is still in the text.
+        if (value[prev.at] !== '@') return null
+        const between = value.slice(prev.at + 1, caret)
+        if (/\s/.test(between)) return null
+        return { at: prev.at, query: between }
       }
-    }
+      // Trigger: "@" right after start/whitespace with a preceding space
+      // boundary, typed at the caret (not an old "@" elsewhere in the text).
+      if (value[caret - 1] !== '@') return null
+      if (caret >= 2 && !/\s/.test(value[caret - 2])) return null
+      return { at: caret - 1, query: '' }
+    })
   }
 
   function onCreateModeChange(mode: 'blank' | 'template') {
@@ -370,15 +475,21 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
       }
     }
     setFieldErrors({})
+    if (taskAssets.length > MAX_TASK_ASSETS) {
+      setErr(t('tasks.assets.maxReached'))
+      return
+    }
     setBusy(true)
     try {
       const labels = labelsStr.split(',').map(l => l.trim()).filter(Boolean)
-      let createdTaskId: string | null = null
+      // Bindings ride the creation request itself: the workflow start,
+      // attention wakeup, and autoStart all fire before the 201 response —
+      // a post-create bind loop would race them (empty manifest).
+      const assetBindings = taskAssets.map((a) => ({ fileId: a.fileId, role: a.role, required: a.required }))
       if (createMode === 'template' && selectedTemplate) {
-        createdTaskId = (
-          await apiPost<{ id: string }>(
-            `/api/v1/projects/${encodeURIComponent(selectedProject)}/tasks/from-template`,
-            {
+        await apiPost<{ id: string }>(
+          `/api/v1/projects/${encodeURIComponent(selectedProject)}/tasks/from-template`,
+          {
               templateId: selectedTemplate.id,
               inputs: templateInputs,
               agent: agent.trim(),
@@ -390,14 +501,13 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
               ...(baseBranch.trim() ? { baseBranch: baseBranch.trim() } : {}),
               ...(branchName.trim() ? { branchName: branchName.trim() } : {}),
               workflowActorBindings: actorBindings,
-            },
-          )
-        ).id
+              ...(assetBindings.length > 0 ? { assets: assetBindings } : {}),
+          },
+        )
       } else {
-        createdTaskId = (
-          await apiPost<{ id: string }>(
-            `/api/v1/projects/${encodeURIComponent(selectedProject)}/tasks`,
-            {
+        await apiPost<{ id: string }>(
+          `/api/v1/projects/${encodeURIComponent(selectedProject)}/tasks`,
+          {
             agent: agent.trim(),
             title: title.trim(),
             description: description.trim(),
@@ -413,12 +523,9 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
             ...(branchName.trim() ? { branchName: branchName.trim() } : {}),
             ...(workflowDefinitionId ? { workflowDefinitionId } : {}),
             ...(workflowDefinitionId ? { workflowActorBindings: actorBindings } : {}),
-            },
-          )
-        ).id
-      }
-      if (createdTaskId && taskAssets.length > 0) {
-        await bindTaskAssets(createdTaskId)
+            ...(assetBindings.length > 0 ? { assets: assetBindings } : {}),
+          },
+        )
       }
       setOpen(false)
       onCreated()
@@ -680,7 +787,33 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
 
                   <label className="block text-sm">
                     <span className="text-neutral-600 dark:text-zinc-400">{t('forms.prompt')}</span>
-                    <textarea value={prompt} onChange={(e) => { clearFieldError('prompt'); setPrompt(e.target.value) }} rows={8} className={cn(controlClass('prompt'), 'resize-y')} />
+                    <div className="relative">
+                      <textarea
+                        ref={promptInputRef}
+                        value={prompt}
+                        onChange={onPromptChange}
+                        onCompositionStart={() => { composingRef.current = true }}
+                        onCompositionEnd={(e) => {
+                          composingRef.current = false
+                          // An IME commit can land text right after the "@";
+                          // re-run the same trigger logic on the final value.
+                          onPromptChange({ target: e.currentTarget } as React.ChangeEvent<HTMLTextAreaElement>)
+                        }}
+                        rows={8}
+                        className={cn(controlClass('prompt'), 'resize-y')}
+                        placeholder={t('tasks.assets.promptPlaceholder')}
+                      />
+                      {mention && (
+                        <AssetMentionPopover
+                          candidates={libraryAssets}
+                          query={mention.query}
+                          remaining={MAX_TASK_ASSETS - taskAssets.length}
+                          onPick={stageBinding}
+                          onClose={() => setMention(null)}
+                        />
+                      )}
+                    </div>
+                    <p className="mt-0.5 text-xs text-neutral-400 dark:text-zinc-500">{t('tasks.assets.mentionHint')}</p>
                     {fieldError('prompt')}
                   </label>
                 </>
@@ -692,15 +825,49 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
                   <div className="mt-1.5 flex flex-wrap gap-1.5">
                     {taskAssets.map((a) => (
                       <span
-                        key={a.id}
+                        key={a.fileId}
                         className="inline-flex items-center gap-1 rounded-md border border-neutral-200 bg-white px-2 py-1 text-xs text-neutral-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
                       >
-                        <Paperclip className="h-3 w-3 text-neutral-400" />
-                        {a.displayName}
+                        {a.source === 'library' ? (
+                          <FileText className="h-3 w-3 text-sky-500 dark:text-sky-400" />
+                        ) : (
+                          <Paperclip className="h-3 w-3 text-neutral-400" />
+                        )}
+                        <span className="max-w-48 truncate">{a.displayName}</span>
+                        <button
+                          type="button"
+                          title={t('tasks.assets.roleToggleHint')}
+                          onClick={() =>
+                            setTaskAssets((prev) =>
+                              prev.map((b) =>
+                                b.fileId === a.fileId
+                                  ? {
+                                      ...b,
+                                      role: b.role === 'requirement_input' ? 'reference' : 'requirement_input',
+                                      required: b.role === 'requirement_input' ? b.required : true,
+                                    }
+                                  : b,
+                              ),
+                            )
+                          }
+                          className={cn(
+                            'rounded px-1 text-[10px] font-medium',
+                            a.role === 'requirement_input'
+                              ? 'bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-300'
+                              : 'bg-neutral-100 text-neutral-500 dark:bg-zinc-700 dark:text-zinc-400',
+                          )}
+                        >
+                          {t(`tasks.assets.role.${a.role}`)}
+                        </button>
+                        {a.required && (
+                          <span className="rounded bg-amber-100 px-1 text-[10px] font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                            {t('tasks.assets.requiredBadge')}
+                          </span>
+                        )}
                         <button
                           type="button"
                           aria-label={t('tasks.assets.remove')}
-                          onClick={() => setTaskAssets((prev) => prev.filter((x) => x.id !== a.id))}
+                          onClick={() => removeBinding(a.fileId)}
                           className="text-neutral-400 hover:text-neutral-700 dark:hover:text-zinc-200"
                         >
                           <X className="h-3 w-3" />

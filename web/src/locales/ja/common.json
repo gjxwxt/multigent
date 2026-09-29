@@ -162,6 +162,7 @@
     "archived": "エージェントをアーカイブしました",
     "archiveHint": "アーカイブすると、このエージェントは既定の一覧から非表示になり、通常利用の対象から外れます。履歴と設定は保持されます。",
     "archiveConfirmTitle": "エージェントをアーカイブ",
+    "archiveConfirmDescription": "既存のタスクバインディングはそのまま有効で、ファイルは一覧から隠れるだけです。",
     "archiveConfirm": "{{name}} と入力してアーカイブを確認してください。",
     "restore": "エージェントを復元",
     "restored": "エージェントを復元しました",
@@ -384,9 +385,11 @@
     "baseUrl": "Base URL",
     "openId": "Open ID",
     "healthOkHttp": "利用可能 · HTTP {{status}}",
+    "gitlabRepositoryPathHelp": "既定の接続テストは GitLab ユーザー API を呼び出すため、read_repository のみのトークンでは通りません。namespace/project を指定すると、書き込みを行わず読み取り専用 Git アクセスを検証します。ユーザープロフィール API が本当に必要な場合だけ、対応する権限を付与してください。",
     "healthFailedHttp": "{{message}} · HTTP {{status}}",
     "fieldLabels": {
       "apiKey": "API Key",
+      "repositoryPath": "読み取り専用 Git テスト用リポジトリパス（namespace/project）",
       "appId": "App ID",
       "appSecret": "App Secret",
       "baseUrl": "OpenAPI Base URL",
@@ -539,6 +542,7 @@
   },
   "projectNav": {
     "tasks": "タスク",
+    "assets": "資料",
     "taskTemplates": "タスクテンプレート",
     "workflows": "ワークフロー",
     "goals": "OKR",
@@ -547,8 +551,7 @@
     "members": "メンバー",
     "schedule": "スケジュール",
     "runs": "実行",
-    "settings": "設定",
-    "assets": "資料"
+    "settings": "設定"
   },
   "playbooks": {
     "subtitle": "ロール、スキル、ワークフロー、タスクテンプレートを再利用可能な Agent 協業構造としてまとめます。",
@@ -1102,7 +1105,49 @@
     "emptyTitle": "空の状態",
     "emptyBody": "まだ API に接続していません。今後 CLI の inbox と揃え、このプロジェクトで絞り込みます。"
   },
+  "projectAssets": {
+    "subtitle": "プロジェクト資料ライブラリ。1 回のアップロードで全タスクから再利用。エージェントは必要時に読み取り、ファイルは Git に入りません。",
+    "upload": "アップロード",
+    "uploading": "アップロード中…",
+    "uploadDone": "プロジェクト資料に保存しました",
+    "empty": "プロジェクト資料はまだありません。ここまたはタスク作成ダイアログからアップロードできます。",
+    "showArchived": "アーカイブ済みを表示",
+    "name": "名前",
+    "size": "サイズ",
+    "sha": "SHA-256",
+    "usage": "参照タスク数",
+    "uploader": "アップロード者",
+    "actions": "操作",
+    "download": "ダウンロード",
+    "archive": "アーカイブ",
+    "archiveDone": "アーカイブしました",
+    "archived": "アーカイブ済み",
+    "archiveConfirmTitle": "\"{{name}}\" をアーカイブしますか？既存のタスクバインディングはそのまま有効です。",
+    "archiveConfirmDescription": "既存のタスクバインディングはそのまま有効で、ファイルは一覧から隠れるだけです。"
+  },
   "tasks": {
+    "assets": {
+      "label": "タスク資料",
+      "upload": "ファイルをアップロード",
+      "uploading": "アップロード中…",
+      "remove": "解除",
+      "maxReached": "1 タスクにバインドできる資料は最大 8 件です",
+      "bindFailed": "資料 \"{{name}}\" のタスクへのバインドに失敗：{{message}}",
+      "hint": "ファイルはプロジェクト資料に保存され、エージェントは読み取り専用マウントから必要時に読み取ります。",
+      "role": {
+        "requirement_input": "要件入力",
+        "reference": "参照"
+      },
+      "requiredToggle": "必読（エージェントがこのファイルを必ず読む）",
+      "requiredBadge": "必読",
+      "attach": "添付",
+      "back": "戻る",
+      "remaining": "あと {{count}} 件バインドできます",
+      "emptyLibrary": "ライブラリが空です：資料ページでアップロードするか、下のクリップからどうぞ",
+      "mentionHint": "@ を入力するとプロジェクト資料のファイルを参照し、用途（要件入力 / 参照）を宣言できます。",
+      "promptPlaceholder": "タスクを説明…@ で資料を参照",
+      "roleToggleHint": "ロール切替（要件入力 / 参照）"
+    },
     "subtitle": "このプロジェクトのタスクキューと絞り込み。人とエージェントに同様に割り当てできます。",
     "emptyTitle": "タスクはありません",
     "emptyBody": "ワークスペース API に接続すると、このプロジェクトの multigent タスクを一覧できます。",
@@ -1197,16 +1242,7 @@
     "availableBranches": "利用可能なブランチ (Git Branches)",
     "noBranchMatch": "一致するブランチがなく \"{{value}}\" を使用します",
     "agentAlreadyRunning": "エージェントはすでにこのタスクをバックグラウンドで実行中です。再実行すると既存のキューに統合されます。",
-    "taskQueued": "タスクをキューに追加しました。エージェントの現在の作業が完了次第実行されます。",
-    "assets": {
-      "label": "タスク資料",
-      "upload": "ファイルをアップロード",
-      "uploading": "アップロード中…",
-      "remove": "解除",
-      "maxReached": "1 タスクにバインドできる資料は最大 8 件です",
-      "bindFailed": "資料 \"{{name}}\" のタスクへのバインドに失敗：{{message}}",
-      "hint": "ファイルはプロジェクト資料に保存され、エージェントは読み取り専用マウントから必要時に読み取ります。"
-    }
+    "taskQueued": "タスクをキューに追加しました。エージェントの現在の作業が完了次第実行されます。"
   },
   "projects": {
     "listEyebrow": "デリバリー",
@@ -2818,25 +2854,5 @@
     "signalsHint": "シグナルは Agent に変化への注意を促すためのものです。資産本文の代替ではありません。後でソース、優先度、既読、処理状態を追加します。",
     "noSignals": "まだシグナルはありません",
     "noSignalsHint": "IM、ドキュメント、タスク、外部システム由来の注意シグナルが今後ここに表示されます。"
-  },
-  "projectAssets": {
-    "subtitle": "プロジェクト資料ライブラリ。1 回のアップロードで全タスクから再利用。エージェントは必要時に読み取り、ファイルは Git に入りません。",
-    "upload": "アップロード",
-    "uploading": "アップロード中…",
-    "uploadDone": "プロジェクト資料に保存しました",
-    "empty": "プロジェクト資料はまだありません。ここまたはタスク作成ダイアログからアップロードできます。",
-    "showArchived": "アーカイブ済みを表示",
-    "name": "名前",
-    "size": "サイズ",
-    "sha": "SHA-256",
-    "usage": "参照タスク数",
-    "uploader": "アップロード者",
-    "actions": "操作",
-    "download": "ダウンロード",
-    "archive": "アーカイブ",
-    "archiveDone": "アーカイブしました",
-    "archived": "アーカイブ済み",
-    "archiveConfirmTitle": "\"{{name}}\" をアーカイブしますか？既存のタスクバインディングはそのまま有効です。",
-    "archiveConfirmDescription": "既存のタスクバインディングはそのまま有効で、ファイルは一覧から隠れるだけです。"
   }
 }

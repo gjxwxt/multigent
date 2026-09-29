@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/multigent/multigent/internal/assets"
+	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/gitworktree"
 	"github.com/multigent/multigent/internal/runner"
@@ -303,6 +305,19 @@ func sanitizeTaskVars(vars map[string]string) map[string]string {
 	return out
 }
 
+// taskCreateAssetBinding is one project-library file bound to the task at
+// creation time. Bindings ride the creation request itself (not a follow-up
+// call) because all three startup sources fire before the 201 response is
+// written: workflow StartRunWithInput runs synchronously in-request, the
+// attention wakeup is requested in-request, and autoStart dispatches
+// directly. A post-create bind loop races all three — the run would start
+// with an empty asset manifest.
+type taskCreateAssetBinding struct {
+	FileID   string `json:"fileId"`
+	Role     string `json:"role"`
+	Required bool   `json:"required"`
+}
+
 type postTaskBody struct {
 	Agent                 string                                 `json:"agent"`
 	Title                 string                                 `json:"title"`
@@ -324,6 +339,7 @@ type postTaskBody struct {
 	BaseBranch            string                                 `json:"baseBranch"`
 	BaseTaskID            string                                 `json:"baseTaskId"`
 	BranchName            string                                 `json:"branchName"`
+	Assets                []taskCreateAssetBinding               `json:"assets,omitempty"`
 }
 
 func (s *Server) handlePostProjectTask(w http.ResponseWriter, r *http.Request) {
@@ -616,6 +632,18 @@ func (s *Server) createProjectTaskFromBody(w http.ResponseWriter, r *http.Reques
 	}
 	s.annotateTaskAssignee(workspaceID, name, t)
 
+	// Asset bindings must exist before ANY startup source fires (see
+	// taskCreateAssetBinding). Validate everything read-only first so the
+	// common failure paths leave zero state behind; the insert loop runs
+	// after AddTask but before the workflow/autoStart/attention block, with
+	// a compensating delete on failure (no shared transaction exists between
+	// the task store's kv path and the asset_attachments table).
+	bindings, bindErr := s.validateTaskCreateAssetBindings(name, workspaceID, body.Assets)
+	if bindErr != "" {
+		s.jsonError(w, http.StatusBadRequest, bindErr)
+		return
+	}
+
 	if assignee == "human" || !strings.Contains(assignee, "/") {
 		if err := s.ts.AddTask(name, agentName, t); err != nil {
 			s.serverError(w, err)
@@ -641,6 +669,14 @@ func (s *Server) createProjectTaskFromBody(w http.ResponseWriter, r *http.Reques
 		s.annotateTaskAssignee(workspaceID, name, t)
 		if err := s.ts.AddTask(name, agentName, t); err != nil {
 			s.serverError(w, err)
+			return
+		}
+	}
+
+	if len(bindings) > 0 {
+		if bindErr := s.applyTaskCreateAssetBindings(t, bindings); bindErr != "" {
+			s.rollbackTaskCreate(name, agentName, t, assignee)
+			s.jsonError(w, http.StatusBadRequest, bindErr)
 			return
 		}
 	}
@@ -706,6 +742,104 @@ func workflowStartActor(def entity.WorkflowDefinition, bindings map[string]entit
 		return &def.Steps[i], inst, true
 	}
 	return nil, nil, false
+}
+
+// validateTaskCreateAssetBindings resolves every requested asset binding
+// read-only before the task is written: the file must exist in THIS project
+// and workspace, not be archived, and the role must be a valid attachment
+// role. Duplicate fileIds collapse to their last declaration. Returns the
+// resolved bindings in request order, or a user-facing error message.
+func (s *Server) validateTaskCreateAssetBindings(project, workspaceID string, requested []taskCreateAssetBinding) ([]*controldb.AssetAttachment, string) {
+	if len(requested) == 0 {
+		return nil, ""
+	}
+	if len(requested) > assets.MaxTaskAttachments {
+		return nil, fmt.Sprintf("too many asset bindings (%d, max %d)", len(requested), assets.MaxTaskAttachments)
+	}
+	seen := make(map[string]bool, len(requested))
+	bindings := make([]*controldb.AssetAttachment, 0, len(requested))
+	for _, req := range requested {
+		fileID := strings.TrimSpace(req.FileID)
+		if fileID == "" {
+			return nil, "asset binding is missing fileId"
+		}
+		if seen[fileID] {
+			continue
+		}
+		seen[fileID] = true
+		f, ok, err := s.controlDB.AssetFile(fileID)
+		if err != nil {
+			return nil, "asset binding lookup failed: " + fileID
+		}
+		if !ok {
+			return nil, "asset file not found: " + fileID
+		}
+		if f.WorkspaceID != workspaceID || f.ProjectID != project {
+			return nil, "asset file belongs to another project or workspace: " + f.DisplayName
+		}
+		if f.ArchivedAt != "" {
+			return nil, "asset file is archived: " + f.DisplayName
+		}
+		role := strings.TrimSpace(req.Role)
+		if role == "" {
+			role = controldb.AssetRoleReference
+		}
+		if !controldb.ValidAssetRole(role) {
+			return nil, "invalid asset role for " + f.DisplayName + ": " + role
+		}
+		bindings = append(bindings, &controldb.AssetAttachment{
+			FileID:    f.ID,
+			Sha256:    f.CurrentSha,
+			ProjectID: project,
+			Role:      role,
+			Required:  req.Required,
+		})
+	}
+	return bindings, ""
+}
+
+// applyTaskCreateAssetBindings inserts the validated bindings for the newly
+// created task. Any failure returns an error message; the caller compensates
+// by rolling the task creation back (there is no shared transaction between
+// the task store and the asset attachment table). TaskID is set here because
+// the entity ID does not exist at validation time.
+func (s *Server) applyTaskCreateAssetBindings(t *entity.Task, bindings []*controldb.AssetAttachment) string {
+	for _, b := range bindings {
+		b.TaskID = t.ID
+		b.AddedBy = t.CreatedBy
+		if err := s.controlDB.InsertAssetAttachment(b); err != nil {
+			return "asset binding failed for task " + t.ID + ": " + err.Error()
+		}
+	}
+	return ""
+}
+
+// rollbackTaskCreate removes a half-created task after a binding failure:
+// attachment rows inserted so far, the inbox item (human assignee path), and
+// the task record itself. Best-effort with explicit logging — a residual
+// orphan here means the caller saw a 400 but the task exists; the error log
+// is the breadcrumb for manual cleanup.
+func (s *Server) rollbackTaskCreate(project, agentName string, t *entity.Task, assignee string) {
+	if t == nil || strings.TrimSpace(t.ID) == "" {
+		return
+	}
+	if atts, err := s.controlDB.ListAssetAttachmentsForTask(t.ID); err == nil {
+		for _, att := range atts {
+			if err := s.controlDB.DeleteAssetAttachment(att.ID); err != nil {
+				log.Printf("[task-create-rollback] delete attachment %s failed for task %s: %v", att.ID, t.ID, err)
+			}
+		}
+	} else {
+		log.Printf("[task-create-rollback] list attachments failed for task %s: %v", t.ID, err)
+	}
+	if !strings.Contains(assignee, "/") {
+		if err := s.ts.RemoveFromInbox(t.ID); err != nil {
+			log.Printf("[task-create-rollback] remove inbox item failed for task %s: %v", t.ID, err)
+		}
+	}
+	if err := s.ts.DeleteTask(project, agentName, t.ID); err != nil {
+		log.Printf("[task-create-rollback] delete task %s/%s/%s failed: %v — orphan task may remain", project, agentName, t.ID, err)
+	}
 }
 
 // defaultWorkflowActorBindings mirrors the UI's workflowDefaultBindings

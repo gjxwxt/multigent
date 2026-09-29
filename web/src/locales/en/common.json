@@ -391,12 +391,14 @@
     "baseUrl": "Base URL",
     "openId": "Open ID",
     "healthOkHttp": "Available · HTTP {{status}}",
+    "gitlabRepositoryPathHelp": "The default test calls the GitLab user API. A read_repository-only token cannot use it. Set a namespace/project here to test read-only Git access instead; this never writes to the repository. Use broader user-profile API access only if this connection actually needs that API.",
     "healthFailedHttp": "{{message}} · HTTP {{status}}",
     "fieldLabels": {
       "apiKey": "API Key",
       "appId": "App ID",
       "appSecret": "App Secret",
       "baseUrl": "GitLab Instance URL (Base URL)",
+      "repositoryPath": "Repository path for read-only Git test (namespace/project)",
       "privateKey": "Private key",
       "gitUserName": "Git user name",
       "gitUserEmail": "Git user email",
@@ -546,6 +548,7 @@
   },
   "projectNav": {
     "tasks": "Tasks",
+    "assets": "Assets",
     "taskTemplates": "Task templates",
     "workflows": "Workflows",
     "goals": "OKR",
@@ -554,8 +557,7 @@
     "members": "Members",
     "schedule": "Schedule",
     "runs": "Runs",
-    "settings": "Settings",
-    "assets": "Assets"
+    "settings": "Settings"
   },
   "playbooks": {
     "subtitle": "Package roles, skills, workflows, and task templates into reusable agent collaboration structures.",
@@ -1303,7 +1305,49 @@
     "emptyTitle": "Empty state",
     "emptyBody": "API not connected yet. Actions will align with CLI inbox, filtered by this project."
   },
+  "projectAssets": {
+    "subtitle": "Project file library — upload once, reuse in any task; agents read on demand, files never enter Git.",
+    "upload": "Upload",
+    "uploading": "Uploading…",
+    "uploadDone": "Uploaded to project assets",
+    "empty": "No project assets yet. Upload files here or from the create-task dialog.",
+    "showArchived": "Show archived",
+    "name": "Name",
+    "size": "Size",
+    "sha": "SHA-256",
+    "usage": "Used by tasks",
+    "uploader": "Uploaded by",
+    "actions": "Actions",
+    "download": "Download",
+    "archive": "Archive",
+    "archiveDone": "Archived",
+    "archived": "Archived",
+    "archiveConfirmTitle": "Archive \"{{name}}\"? Existing task bindings keep working; the file leaves the default list.",
+    "archiveConfirmDescription": "Existing task bindings keep working; the file is only hidden from the default list."
+  },
   "tasks": {
+    "assets": {
+      "label": "Task materials",
+      "upload": "Upload files",
+      "uploading": "Uploading…",
+      "remove": "Remove",
+      "maxReached": "A task can bind at most 8 materials",
+      "bindFailed": "Failed to bind \"{{name}}\" to the task: {{message}}",
+      "hint": "Stored to project assets; the agent reads them on demand via a read-only mount.",
+      "role": {
+        "requirement_input": "Requirement",
+        "reference": "Reference"
+      },
+      "requiredToggle": "Must read (the agent must read this file in full)",
+      "requiredBadge": "must-read",
+      "attach": "Attach",
+      "back": "Back",
+      "remaining": "{{count}} more binding(s) available",
+      "emptyLibrary": "Library is empty: upload on the assets page, or use the paperclip below",
+      "mentionHint": "Type @ to reference a file from the project library and declare its purpose (requirement / reference).",
+      "promptPlaceholder": "Describe the task… type @ to reference materials",
+      "roleToggleHint": "Toggle role (requirement / reference)"
+    },
     "subtitle": "Task queue for this project—status, filters, assign to people or agents equally.",
     "emptyTitle": "No tasks yet",
     "emptyBody": "Connect the workspace API to list multigent tasks for this project.",
@@ -1491,16 +1535,7 @@
     "availableBranches": "Available branches (Git Branches)",
     "noBranchMatch": "No matching branch; will use \"{{value}}\"",
     "agentAlreadyRunning": "The agent is already executing this task in the background. Starting again joins the existing queue entry.",
-    "taskQueued": "Task queued. It will run as soon as the agent's current work finishes.",
-    "assets": {
-      "label": "Task materials",
-      "upload": "Upload files",
-      "uploading": "Uploading…",
-      "remove": "Remove",
-      "maxReached": "A task can bind at most 8 materials",
-      "bindFailed": "Failed to bind \"{{name}}\" to the task: {{message}}",
-      "hint": "Stored to project assets; the agent reads them on demand via a read-only mount."
-    }
+    "taskQueued": "Task queued. It will run as soon as the agent's current work finishes."
   },
   "projects": {
     "listEyebrow": "Delivery",
@@ -3229,25 +3264,5 @@
     "rollback": "Roll back",
     "rollingBack": "Rolling back…",
     "rollbackConfirm": "Rollback restores every file this proposal touched to its pre-apply state; it is refused if the files were modified after the apply. Confirm rollback?"
-  },
-  "projectAssets": {
-    "subtitle": "Project file library — upload once, reuse in any task; agents read on demand, files never enter Git.",
-    "upload": "Upload",
-    "uploading": "Uploading…",
-    "uploadDone": "Uploaded to project assets",
-    "empty": "No project assets yet. Upload files here or from the create-task dialog.",
-    "showArchived": "Show archived",
-    "name": "Name",
-    "size": "Size",
-    "sha": "SHA-256",
-    "usage": "Used by tasks",
-    "uploader": "Uploaded by",
-    "actions": "Actions",
-    "download": "Download",
-    "archive": "Archive",
-    "archiveDone": "Archived",
-    "archived": "Archived",
-    "archiveConfirmTitle": "Archive \"{{name}}\"? Existing task bindings keep working; the file leaves the default list.",
-    "archiveConfirmDescription": "Existing task bindings keep working; the file is only hidden from the default list."
   }
 }
