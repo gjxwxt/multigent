@@ -114,7 +114,7 @@ type SetupState =
   | { step: 'idle' }
   | { step: 'beginning'; provider: ChannelProvider }
   | { step: 'scanning'; provider: ChannelProvider; deviceCode: string; qrUrl: string; baseUrl: string; interval: number }
-  | { step: 'manual'; provider: ChannelProvider; values: Record<string, string>; submitting?: boolean }
+  | { step: 'manual'; provider: ChannelProvider; values: Record<string, string>; submitting?: boolean; error?: string }
   | { step: 'connected'; provider: ChannelProvider }
   | { step: 'error'; provider?: ChannelProvider; message: string }
 
@@ -228,7 +228,11 @@ export function AgentChannelPanel({ project, agentName, agentWorkerId }: { proje
         }
       }
     } catch (e) {
-      setSetup({ step: 'error', provider: setup.provider, message: e instanceof Error ? e.message : String(e) })
+      // Validation failures must keep the form visible with the values the
+      // user typed: swap the footer into the error state instead of replacing
+      // the whole setup state (which unmounted the form and wiped every
+      // field — the user had to re-type the bot token from scratch).
+      setSetup({ ...setup, submitting: false, error: e instanceof Error ? e.message : String(e) })
     }
   }
 
@@ -509,12 +513,17 @@ export function AgentChannelPanel({ project, agentName, agentWorkerId }: { proje
                       type={field.type === 'password' ? 'password' : 'text'}
                       value={setup.values[field.name] ?? ''}
                       placeholder={field.placeholder}
-                      onChange={(e) => setSetup({ ...setup, values: { ...setup.values, [field.name]: e.target.value } })}
+                      onChange={(e) => setSetup({ ...setup, values: { ...setup.values, [field.name]: e.target.value }, error: undefined })}
                       className="mt-1 w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm outline-none focus:border-sky-400 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
                     />
                     {field.help ? <span className="mt-1 block text-xs text-neutral-400 dark:text-zinc-500">{field.help}</span> : null}
                   </label>
                 ))}
+                {setup.error ? (
+                  <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600 dark:bg-red-950/30 dark:text-red-300">
+                    {setup.error}
+                  </div>
+                ) : null}
                 <div className="flex justify-end gap-2 pt-2">
                   <button type="button" onClick={closeSetup} className="rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-medium text-neutral-600 hover:bg-neutral-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800">
                     {t('common.cancel')}

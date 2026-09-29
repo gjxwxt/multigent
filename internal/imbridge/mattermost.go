@@ -30,7 +30,7 @@ func (mattermostProvider) Info() ProviderInfo {
 			{Name: "baseUrl", Label: "Mattermost Server URL", Type: "text", Required: true, Placeholder: "http://127.0.0.1:8065", Help: "URL of your Mattermost instance."},
 			{Name: "botToken", Label: "Bot Access Token", Type: "password", Required: true, Placeholder: "...", Help: "Access token for the Multigent Bot user."},
 			{Name: "commandToken", Label: "Slash Command Token", Type: "password", Required: false, Placeholder: "...", Help: "Token of the /bind slash command from Mattermost integrations."},
-			{Name: "bridgeHmacSecret", Label: "Bridge HMAC Secret", Type: "password", Required: true, Placeholder: "...", Help: "HMAC shared secret between mattermost-bridge and Multigent (required for loopback verification)."},
+			{Name: "bridgeHmacSecret", Label: "Bridge HMAC Secret", Type: "password", Required: true, Placeholder: "any long random string, e.g. openssl rand -hex 32", Help: "A shared secret YOU choose: generate a long random string, paste the SAME value here and into the mattermost-bridge config on this machine. Multigent uses it to verify that forwarded Mattermost events are genuinely from your local bridge (HMAC-SHA256 over body+timestamp). It is not a Mattermost credential — nothing to copy from the Mattermost admin console."},
 		},
 	}
 }
