@@ -50,6 +50,7 @@ type MattermostBridge struct {
 	store            controldb.Store
 	httpClient       *http.Client
 	supervisors      map[string]*botSupervisor // keyed by binding.ID
+	supervisorConfFP map[string]string         // binding.ID -> config fingerprint (connection secret + bot identity)
 	unconfiguredBots map[string]string         // binding.ID -> reason (e.g. missing_hmac_secret)
 	mu               sync.Mutex
 
@@ -84,6 +85,7 @@ func NewMattermostBridge(cfg MattermostBridgeConfig, store controldb.Store) *Mat
 		store:            store,
 		httpClient:       &http.Client{Timeout: 15 * time.Second},
 		supervisors:      make(map[string]*botSupervisor),
+		supervisorConfFP: make(map[string]string),
 		unconfiguredBots: make(map[string]string),
 		startTime:        time.Now(),
 	}
@@ -199,6 +201,15 @@ func (b *MattermostBridge) runStatusServer(ctx context.Context) {
 	}
 }
 
+// supervisorFingerprint captures the connection-level inputs a botSupervisor
+// runs with. The bridge poll previously rebuilt supervisors only when the
+// binding SET changed, so a re-setup of the same binding (new bot token, new
+// HMAC secret, re-bound bot) silently kept the stale credentials running.
+func supervisorFingerprint(baseURL, botToken, hmacSecret, botID, connectionID string) string {
+	sum := sha256.Sum256([]byte(baseURL + "\x00" + botToken + "\x00" + hmacSecret + "\x00" + botID + "\x00" + connectionID))
+	return hex.EncodeToString(sum[:8])
+}
+
 func (b *MattermostBridge) refreshSupervisors(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -264,9 +275,19 @@ func (b *MattermostBridge) refreshSupervisors(ctx context.Context) {
 		}
 		delete(b.unconfiguredBots, binding.ID)
 
+		fp := supervisorFingerprint(baseURL, botToken, hmacSecret, botID, binding.ConnectionID)
+		if prevFP, exists := b.supervisorConfFP[binding.ID]; exists && prevFP != fp {
+			log.Printf("[mattermost-bridge] credentials changed for binding %s (%s/%s); restarting supervisor", binding.ID, binding.ProjectID, binding.AgentID)
+			if old := b.supervisors[binding.ID]; old != nil {
+				old.stop()
+				delete(b.supervisors, binding.ID)
+			}
+		}
+
 		subCtx, cancel := context.WithCancel(ctx)
 		sup := newBotSupervisor(b, binding, baseURL, botToken, hmacSecret, botID, subCtx, cancel)
 		b.supervisors[binding.ID] = sup
+		b.supervisorConfFP[binding.ID] = fp
 		go sup.run()
 		log.Printf("[mattermost-bridge] started supervisor for %s/%s (botId=%s, binding=%s)", binding.ProjectID, binding.AgentID, botID, binding.ID)
 	}
@@ -277,6 +298,7 @@ func (b *MattermostBridge) refreshSupervisors(ctx context.Context) {
 			log.Printf("[mattermost-bridge] stopping supervisor for removed binding %s", id)
 			sup.stop()
 			delete(b.supervisors, id)
+			delete(b.supervisorConfFP, id)
 		}
 	}
 	for id := range b.unconfiguredBots {

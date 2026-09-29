@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -30,7 +31,7 @@ func (mattermostProvider) Info() ProviderInfo {
 			{Name: "baseUrl", Label: "Mattermost Server URL", Type: "text", Required: true, Placeholder: "http://127.0.0.1:8065", Help: "URL of your Mattermost instance."},
 			{Name: "botToken", Label: "Bot Access Token", Type: "password", Required: true, Placeholder: "...", Help: "Access token for the Multigent Bot user."},
 			{Name: "commandToken", Label: "Slash Command Token", Type: "password", Required: false, Placeholder: "...", Help: "Token of the /bind slash command from Mattermost integrations."},
-			{Name: "bridgeHmacSecret", Label: "Bridge HMAC Secret", Type: "password", Required: true, Placeholder: "...", Help: "HMAC shared secret between mattermost-bridge and Multigent (required for loopback verification)."},
+			{Name: "bridgeHmacSecret", Label: "Bridge HMAC Secret", Type: "password", Required: false, Placeholder: "leave empty to auto-generate", Help: "Shared secret used to verify that forwarded Mattermost events come from your local mattermost-bridge (HMAC-SHA256 over timestamp+body; loopback-only endpoint). Leave empty and Multigent generates a random 256-bit secret automatically — the console and the bridge both read it from the encrypted connection store, so there is nothing to copy anywhere. An explicit value you type is respected (use openssl rand -hex 32 if you manage rotation yourself)."},
 		},
 	}
 }
@@ -57,7 +58,15 @@ func (mattermostProvider) ManualSetup(ctx context.Context, req ManualSetupReques
 	}
 	hmacSecret := strings.TrimSpace(values["bridgeHmacSecret"])
 	if hmacSecret == "" {
-		return ManualSetupResult{}, fmt.Errorf("bridge HMAC secret is required")
+		// Auto-generate the bridge HMAC secret: the console and the
+		// mattermost-bridge both read it from the encrypted connection
+		// secret store, so the operator never needs to transport the
+		// value anywhere. A caller-provided value is respected.
+		generated, err := generateBridgeHmacSecret()
+		if err != nil {
+			return ManualSetupResult{}, fmt.Errorf("generate bridge HMAC secret: %w", err)
+		}
+		hmacSecret = generated
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/v4/users/me", nil)
@@ -101,7 +110,7 @@ func (mattermostProvider) ManualSetup(ctx context.Context, req ManualSetupReques
 			"baseUrl":          baseURL,
 			"botToken":         token,
 			"commandToken":     strings.TrimSpace(values["commandToken"]),
-			"bridgeHmacSecret": strings.TrimSpace(values["bridgeHmacSecret"]),
+			"bridgeHmacSecret": hmacSecret,
 			"appId":            appID,
 		},
 		Profile: map[string]any{
@@ -652,4 +661,14 @@ func (c *MattermostClient) AddUserToChannel(ctx context.Context, channelID, user
 		return nil
 	}
 	return fmt.Errorf("mattermost add user to channel failed (%d): %s", resp.StatusCode, bodyStr)
+}
+
+// generateBridgeHmacSecret returns a fresh 256-bit hex-encoded random secret
+// for the mattermost-bridge forwarded-event HMAC.
+func generateBridgeHmacSecret() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
