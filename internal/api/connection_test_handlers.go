@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -346,13 +347,123 @@ func (s *Server) testConnection(r *http.Request, connection controldb.Connection
 		return s.testCustomMCPConnection(r, connection)
 	case "opendesign":
 		return s.testOpenDesignConnection(r, connection)
+	case "gitlab":
+		if isDefaultConnectionTestRequest(body) {
+			if repositoryPath := strings.TrimSpace(stringValue(connectionProfileMap(connection)["repositoryPath"])); repositoryPath != "" {
+				return s.testGitLabRepositoryReadConnection(r, connection, repositoryPath)
+			}
+			result, err := s.testHTTPConnection(r, connection, body)
+			if err == nil && result.Status == http.StatusForbidden {
+				result.Message = "GitLab /user API test returned HTTP 403. A read_repository-only token can read repositories but cannot access /user; set repositoryPath to test Git read access. Use a token with user-profile API access only if this connection actually needs that API."
+			}
+			return result, err
+		}
+		return s.testHTTPConnection(r, connection, body)
 	case "ssh_key", "git_ssh", "npm_registry", "docker_registry", "aws", "gcloud", "runtime_secret":
 		return s.testStaticRuntimeCredentialConnection(connection)
-	case "custom-http", "github", "gitlab", "gitee", "linear", "notion", "figma", "airtable", "asana", "clickup", "sentry", "vercel", "cloudflare", "exa", "brave_search", "feishu", "lark", "dingtalk_bot":
+	case "custom-http", "github", "gitee", "linear", "notion", "figma", "airtable", "asana", "clickup", "sentry", "vercel", "cloudflare", "exa", "brave_search", "feishu", "lark", "dingtalk_bot":
 		return s.testHTTPConnection(r, connection, body)
 	default:
 		return testConnectionResult{}, fmt.Errorf("connection test is not supported for provider %q", connection.Provider)
 	}
+}
+
+func isDefaultConnectionTestRequest(body testConnectionRequest) bool {
+	return strings.TrimSpace(body.Endpoint) == "" && strings.TrimSpace(body.Method) == "" && len(body.Query) == 0 && len(body.Headers) == 0 && len(body.Body) == 0
+}
+
+func (s *Server) testGitLabRepositoryReadConnection(r *http.Request, connection controldb.Connection, repositoryPath string) (testConnectionResult, error) {
+	secret, ok, err := s.controlDB.ConnectionSecret(connection.ID)
+	if err != nil {
+		return testConnectionResult{}, err
+	}
+	if !ok {
+		return testConnectionResult{}, fmt.Errorf("connection secret not found")
+	}
+	values, err := openConnectionSecret(secret)
+	if err != nil {
+		return testConnectionResult{}, err
+	}
+	token := strings.TrimSpace(firstNonEmpty(values["apiKey"], values["accessToken"], values["token"]))
+	if token == "" {
+		return testConnectionResult{}, fmt.Errorf("GitLab token is required")
+	}
+	profile := connectionProfileMap(connection)
+	baseURLValue := strings.TrimSpace(firstNonEmpty(values["baseUrl"], stringValue(profile["baseUrl"]), "https://gitlab.com"))
+	baseURL, err := url.Parse(baseURLValue)
+	if err != nil || (baseURL.Scheme != "http" && baseURL.Scheme != "https") || baseURL.Host == "" || baseURL.User != nil || baseURL.RawQuery != "" || baseURL.Fragment != "" {
+		return testConnectionResult{}, fmt.Errorf("GitLab baseUrl must be an http(s) origin or relative-root URL")
+	}
+	baseURL.Path = strings.TrimRight(baseURL.Path, "/")
+	if strings.HasSuffix(baseURL.Path, "/api/v4") {
+		baseURL.Path = strings.TrimSuffix(baseURL.Path, "/api/v4")
+	}
+	projectPath, err := normalizeGitLabRepositoryPath(repositoryPath)
+	if err != nil {
+		return testConnectionResult{}, err
+	}
+	baseURL.Path = strings.TrimRight(baseURL.Path, "/") + "/" + projectPath + ".git/info/refs"
+	baseURL.RawPath = ""
+	query := baseURL.Query()
+	query.Set("service", "git-upload-pack")
+	baseURL.RawQuery = query.Encode()
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, baseURL.String(), nil)
+	if err != nil {
+		return testConnectionResult{}, fmt.Errorf("build GitLab repository test request: %w", err)
+	}
+	request.Header.Set("Accept", "application/x-git-upload-pack-advertisement")
+	request.SetBasicAuth("oauth2", token)
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return testConnectionResult{}, fmt.Errorf("call GitLab repository read endpoint: %w", err)
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 8192))
+	if err != nil {
+		return testConnectionResult{}, fmt.Errorf("read GitLab repository test response: %w", err)
+	}
+	result := testConnectionResult{
+		OK:      response.StatusCode >= 200 && response.StatusCode < 300,
+		Status:  response.StatusCode,
+		Message: "GitLab repository read check succeeded",
+	}
+	if !result.OK {
+		result.Message = fmt.Sprintf("GitLab repository read check returned HTTP %d", response.StatusCode)
+		return result, nil
+	}
+	if !bytes.Contains(responseBody, []byte("# service=git-upload-pack")) {
+		return testConnectionResult{
+			Status:  http.StatusBadGateway,
+			Message: "GitLab repository endpoint did not return a Git upload-pack advertisement",
+		}, nil
+	}
+	return result, nil
+}
+
+func normalizeGitLabRepositoryPath(repositoryPath string) (string, error) {
+	repositoryPath = strings.Trim(strings.TrimSpace(repositoryPath), "/")
+	parts := strings.Split(repositoryPath, "/")
+	if len(parts) < 2 {
+		return "", runtimeActionInputError{message: "repositoryPath must be a namespace/project path"}
+	}
+	for i, part := range parts {
+		if part == "" || part == "." || part == ".." || strings.ContainsAny(part, "\\?#") {
+			return "", runtimeActionInputError{message: "repositoryPath contains an invalid path segment"}
+		}
+		if i == len(parts)-1 {
+			parts[i] = strings.TrimSuffix(part, ".git")
+			if parts[i] == "" {
+				return "", runtimeActionInputError{message: "repositoryPath must include a project name"}
+			}
+		}
+	}
+	return strings.Join(parts, "/"), nil
 }
 
 func (s *Server) testStaticRuntimeCredentialConnection(connection controldb.Connection) (testConnectionResult, error) {

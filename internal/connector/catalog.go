@@ -184,10 +184,11 @@ func Defaults() []Provider {
 			AuthTypes:   []string{AuthAPIKey},
 			Fields: []ProviderField{
 				{Key: "baseUrl", Label: "GitLab instance URL (e.g. https://gitlab.com or http://gitlab.internal:8080)", InputType: "url", Required: false, Secret: false},
+				{Key: "repositoryPath", Label: "Repository path for read-only Git access test (namespace/project)", InputType: "text", Required: false, Secret: false},
 				{Key: "apiKey", Label: "Personal access token", InputType: "password", Required: true, Secret: true},
 			},
 			Guides: []ProviderGuide{
-				credentialGuide("Personal access token", "Create a personal access token from GitLab preferences. Prefer project-scoped tokens for production workspaces.", "GitLab access tokens", "https://docs.gitlab.com/user/profile/personal_access_tokens/"),
+				credentialGuide("Personal access token", "Use a token with only the scopes needed. For read_repository-only tokens, set Repository path so the connection test checks Git read access instead of the /user API.", "GitLab access tokens", "https://docs.gitlab.com/user/profile/personal_access_tokens/"),
 			},
 			Actions: gitLabActions(),
 			Enabled: true,

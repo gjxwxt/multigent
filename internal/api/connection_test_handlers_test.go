@@ -455,3 +455,216 @@ func TestCloudflareConnectionTestUsesTokenVerifyEndpoint(t *testing.T) {
 		t.Fatalf("default Cloudflare test request=%#v", actionReq)
 	}
 }
+
+func TestGitLabReadOnlyConnectionTestChecksRepositoryOverGitHTTP(t *testing.T) {
+	s, workspaceID := newConnectionTestServer(t)
+	const secretToken = "test-project-token-do-not-return"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method=%q, want GET", r.Method)
+		}
+		if r.URL.Path != "/root/smoke-s2d4-mirror.git/info/refs" {
+			t.Errorf("path=%q", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("service"); got != "git-upload-pack" {
+			t.Errorf("service=%q", got)
+		}
+		username, password, ok := r.BasicAuth()
+		if !ok || username != "oauth2" || password != secretToken {
+			t.Errorf("unexpected basic auth username=%q present=%v", username, ok)
+		}
+		w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")
+		_, _ = w.Write([]byte("# service=git-upload-pack\n0000"))
+	}))
+	defer upstream.Close()
+
+	connection := controldb.Connection{
+		ID:             "conn-gitlab-readonly",
+		WorkspaceID:    workspaceID,
+		Provider:       "gitlab",
+		ConnectionName: "smoke-qa-readonly",
+		OwnerType:      ConnectionOwnerUser,
+		OwnerID:        "owner",
+		AuthType:       ConnectionAuthAPIKey,
+		Status:         "active",
+		ProfileJSON:    `{"repositoryPath":"root/smoke-s2d4-mirror"}`,
+		CreatedBy:      "owner",
+		CreatedAt:      "2026-07-15T00:00:00Z",
+		UpdatedAt:      "2026-07-15T00:00:00Z",
+	}
+	if err := s.controlDB.UpsertConnection(connection); err != nil {
+		t.Fatalf("connection: %v", err)
+	}
+	secret, err := sealConnectionSecret(map[string]string{"baseUrl": upstream.URL, "apiKey": secretToken})
+	if err != nil {
+		t.Fatalf("seal secret: %v", err)
+	}
+	secret.ConnectionID = connection.ID
+	if err := s.controlDB.UpsertConnectionSecret(secret); err != nil {
+		t.Fatalf("secret: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/connections/conn-gitlab-readonly/test", nil)
+	req.SetPathValue("id", connection.ID)
+	req = req.WithContext(context.WithValue(req.Context(), ctxUserKey, "owner"))
+	rec := httptest.NewRecorder()
+	s.handleTestConnection(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var result testConnectionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("result json: %v", err)
+	}
+	if !result.OK || result.Status != http.StatusOK {
+		t.Fatalf("result=%#v", result)
+	}
+	if strings.Contains(rec.Body.String(), secretToken) {
+		t.Fatalf("test response leaked credential: %s", rec.Body.String())
+	}
+}
+
+func TestGitLabReadOnlyConnectionTestExplainsUserAPI403(t *testing.T) {
+	s, workspaceID := newConnectionTestServer(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v4/user" {
+			t.Errorf("path=%q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":"insufficient_scope"}`))
+	}))
+	defer upstream.Close()
+
+	connection := controldb.Connection{
+		ID:             "conn-gitlab-no-path",
+		WorkspaceID:    workspaceID,
+		Provider:       "gitlab",
+		ConnectionName: "smoke-qa-readonly",
+		OwnerType:      ConnectionOwnerWorkspace,
+		OwnerID:        workspaceID,
+		AuthType:       ConnectionAuthAPIKey,
+		Status:         "active",
+		ProfileJSON:    `{}`,
+		CreatedBy:      "owner",
+		CreatedAt:      "2026-07-15T00:00:00Z",
+		UpdatedAt:      "2026-07-15T00:00:00Z",
+	}
+	if err := s.controlDB.UpsertConnection(connection); err != nil {
+		t.Fatalf("connection: %v", err)
+	}
+	secret, err := sealConnectionSecret(map[string]string{"baseUrl": upstream.URL, "apiKey": "test-token"})
+	if err != nil {
+		t.Fatalf("seal secret: %v", err)
+	}
+	secret.ConnectionID = connection.ID
+	if err := s.controlDB.UpsertConnectionSecret(secret); err != nil {
+		t.Fatalf("secret: %v", err)
+	}
+
+	result, err := s.testConnection(httptest.NewRequest(http.MethodPost, "/test", nil), connection, testConnectionRequest{})
+	if err != nil {
+		t.Fatalf("test connection: %v", err)
+	}
+	if result.Status != http.StatusForbidden || !strings.Contains(result.Message, "read_repository-only token can read repositories but cannot access /user") || !strings.Contains(result.Message, "repositoryPath") {
+		t.Fatalf("unexpected diagnostic: %#v", result)
+	}
+}
+
+func TestGitLabRepositoryPathProfileUpdatePreservesCredential(t *testing.T) {
+	s, workspaceID := newConnectionTestServer(t)
+	connection := controldb.Connection{
+		ID:             "conn-gitlab-readonly-profile",
+		WorkspaceID:    workspaceID,
+		Provider:       "gitlab",
+		ConnectionName: "smoke-qa-readonly",
+		OwnerType:      ConnectionOwnerUser,
+		OwnerID:        "owner",
+		AuthType:       ConnectionAuthAPIKey,
+		Status:         "active",
+		ProfileJSON:    `{"baseUrl":"http://gitlab.example.test"}`,
+		CreatedBy:      "owner",
+		CreatedAt:      "2026-07-15T00:00:00Z",
+		UpdatedAt:      "2026-07-15T00:00:00Z",
+	}
+	if err := s.controlDB.UpsertConnection(connection); err != nil {
+		t.Fatalf("connection: %v", err)
+	}
+	secret, err := sealConnectionSecret(map[string]string{
+		"baseUrl": "http://gitlab.example.test",
+		"apiKey":  "credential-must-stay-server-side",
+	})
+	if err != nil {
+		t.Fatalf("seal secret: %v", err)
+	}
+	secret.ConnectionID = connection.ID
+	if err := s.controlDB.UpsertConnectionSecret(secret); err != nil {
+		t.Fatalf("secret: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/connections/conn-gitlab-readonly-profile", strings.NewReader(`{"profile":{"repositoryPath":"root/smoke-s2d4-mirror"}}`))
+	req.SetPathValue("id", connection.ID)
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(context.WithValue(req.Context(), ctxUserKey, "owner"))
+	rec := httptest.NewRecorder()
+	s.handleUpdateConnection(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "credential-must-stay-server-side") {
+		t.Fatalf("update response leaked credential: %s", rec.Body.String())
+	}
+	updated, found, err := s.controlDB.ConnectionByID(connection.ID)
+	if err != nil || !found {
+		t.Fatalf("updated connection found=%v err=%v", found, err)
+	}
+	profile := connectionProfileMap(updated)
+	if profile["repositoryPath"] != "root/smoke-s2d4-mirror" {
+		t.Fatalf("repositoryPath=%#v", profile["repositoryPath"])
+	}
+	updatedSecret, found, err := s.controlDB.ConnectionSecret(connection.ID)
+	if err != nil || !found {
+		t.Fatalf("updated secret found=%v err=%v", found, err)
+	}
+	values, err := openConnectionSecret(updatedSecret)
+	if err != nil {
+		t.Fatalf("open secret: %v", err)
+	}
+	if values["apiKey"] != "credential-must-stay-server-side" || values["baseUrl"] != "http://gitlab.example.test" {
+		t.Fatalf("profile-only update changed stored credential values")
+	}
+}
+
+func TestNormalizeGitLabRepositoryPath(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{name: "nested group", input: "/root/subgroup/project/", want: "root/subgroup/project"},
+		{name: "git suffix", input: "root/project.git", want: "root/project"},
+		{name: "missing project", input: "root", wantErr: true},
+		{name: "path traversal", input: "root/../project", wantErr: true},
+		{name: "query injection", input: "root/project?service=bad", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeGitLabRepositoryPath(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("normalize path: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("path=%q, want %q", got, tt.want)
+			}
+		})
+	}
+}

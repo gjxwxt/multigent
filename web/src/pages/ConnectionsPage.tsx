@@ -3,7 +3,7 @@ import { QRCodeSVG } from 'qrcode.react'
 import { X } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { apiDelete, apiFetch, apiPost } from '../lib/api'
+import { apiDelete, apiFetch, apiPost, apiPut } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { cn } from '../lib/cn'
 import { confirmDialog } from '../components/ui/ConfirmDialog'
@@ -1047,7 +1047,22 @@ function ConnectionDialog({
   const [connectionName, setConnectionName] = useState(connection?.connectionName ?? 'default')
   const [customMCPToolName, setCustomMCPToolName] = useState(initialCustomMCPTool?.toolName ?? '')
   const [values, setValues] = useState<Record<string, string>>(initialCustomMCPTool?.serverUrl ? { serverUrl: initialCustomMCPTool.serverUrl } : {})
+  const [repositoryPath, setRepositoryPath] = useState(typeof connection?.profile?.repositoryPath === 'string' ? connection.profile.repositoryPath : '')
   const [saving, setSaving] = useState(false)
+
+  async function saveGitLabRepositoryPath() {
+    if (!connection || connection.provider !== 'gitlab') return
+    setSaving(true)
+    try {
+      await apiPut(`/api/v1/connections/${encodeURIComponent(connection.id)}`, {
+        profile: { repositoryPath: repositoryPath.trim() },
+      })
+      onCreated()
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const [deviceSetup, setDeviceSetup] = useState<
     | { step: 'idle' }
     | { step: 'beginning' }
@@ -1073,6 +1088,7 @@ function ConnectionDialog({
     const nextAuthTypes = (p?.authTypes ?? []).filter(type => type !== 'oauth2' || oauthConfigs.find(config => config.provider === p?.provider)?.configured)
     setAuthType(nextAuthTypes[0] ?? 'api_key')
     setValues(p?.provider === customMCPProviderID && initialCustomMCPTool?.serverUrl ? { serverUrl: initialCustomMCPTool.serverUrl } : {})
+    setRepositoryPath('')
     setConnectionName('default')
     setCustomMCPToolName(p?.provider === customMCPProviderID ? initialCustomMCPTool?.toolName ?? '' : '')
     stopDevicePoll()
@@ -1099,6 +1115,7 @@ function ConnectionDialog({
         displayName: provider.provider === customMCPProviderID ? (customToolName || provider.displayName) : provider.displayName,
         ...(provider.provider === customMCPProviderID && customToolName ? { toolName: customToolName } : {}),
         ...(provider.provider === customMCPProviderID && cleanValues.serverUrl ? { serverUrl: cleanValues.serverUrl } : {}),
+        ...(provider.provider === 'gitlab' && cleanValues.repositoryPath ? { repositoryPath: cleanValues.repositoryPath.trim() } : {}),
         ...(provider.provider === 'runtime_secret' && cleanValues.envName ? { envName: cleanValues.envName } : {}),
       }
       if (!connection && authType === 'oauth2') {
@@ -1116,7 +1133,9 @@ function ConnectionDialog({
         ownerType,
         authType,
         connectionName: connectionName.trim() || 'default',
-        values: cleanValues,
+        values: provider.provider === 'gitlab'
+          ? Object.fromEntries(Object.entries(cleanValues).filter(([key]) => key !== 'repositoryPath'))
+          : cleanValues,
         profile,
       }
       if (connection) return
@@ -1276,6 +1295,27 @@ function ConnectionDialog({
         )}
         {isEditing && connection && (
           <SavedConnectionSummary connection={connection} provider={provider} />
+        )}
+        {readonlyConnection && connection?.provider === 'gitlab' && isWorkspaceAdmin && (
+          <div className="rounded-lg border border-neutral-200 bg-white p-3 dark:border-zinc-700 dark:bg-zinc-900/40">
+            <label className="block">
+              <span className="text-xs font-medium text-neutral-600 dark:text-zinc-300">{t('connections.fieldLabels.repositoryPath')}</span>
+              <input
+                className={inputCls}
+                value={repositoryPath}
+                onChange={e => setRepositoryPath(e.target.value)}
+                placeholder="group/project"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </label>
+            <p className="mt-2 text-xs leading-5 text-neutral-500 dark:text-zinc-400">{t('connections.gitlabRepositoryPathHelp')}</p>
+            <div className="mt-3 flex justify-end">
+              <button type="button" onClick={() => void saveGitLabRepositoryPath()} disabled={saving || repositoryPath === String(connection.profile?.repositoryPath ?? '')} className="rounded-lg bg-sky-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50">
+                {saving ? t('common.saving') : t('common.save')}
+              </button>
+            </div>
+          </div>
         )}
         {readonlyConnection && connection ? (
           <>
