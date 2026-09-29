@@ -291,7 +291,11 @@ func TestProvisionProjectChannel_SameAgentTwoProjects_NoOverwrite(t *testing.T) 
 		t.Fatalf("projA provision failed: %d %s", rrA.Code, rrA.Body.String())
 	}
 
-	// 2. Provision Project B with Lina
+	// 2. Provision Project B with Lina. The bot (bot-shared) is already bound
+	// to projA/Lina; the 1:1 bot constraint (DEFECT-C3 guard, same invariant
+	// setup/manual enforces) must make provision SKIP projB's binding instead
+	// of silently reusing the bot — two bindings sharing a bot would make
+	// event verification ambiguous and fail closed on every routed event.
 	reqB := providerTestRequest(http.MethodPost, "/api/v1/projects/"+projB+"/channels/provision", "admin", projectChannelProvisionRequest{
 		Provider:     "mattermost",
 		ConnectionID: connID,
@@ -303,6 +307,19 @@ func TestProvisionProjectChannel_SameAgentTwoProjects_NoOverwrite(t *testing.T) 
 	s.handleProvisionProjectChannel(rrB, reqB)
 	if rrB.Code != http.StatusOK {
 		t.Fatalf("projB provision failed: %d %s", rrB.Code, rrB.Body.String())
+	}
+	var respB projectChannelProvisionResponse
+	if err := json.NewDecoder(rrB.Body).Decode(&respB); err != nil {
+		t.Fatalf("decode projB response: %v", err)
+	}
+	skipped := false
+	for _, name := range respB.SkippedAgents {
+		if name == "Lina" {
+			skipped = true
+		}
+	}
+	if !skipped {
+		t.Fatalf("expected Lina in projB skippedAgents, got %v (failed=%v)", respB.SkippedAgents, respB.FailedAgents)
 	}
 
 	// 3. Verify Project A's binding was NOT overwritten
@@ -319,22 +336,17 @@ func TestProvisionProjectChannel_SameAgentTwoProjects_NoOverwrite(t *testing.T) 
 		t.Fatalf("CRITICAL: ProjA binding overwritten! expected chan-proj-alpha-chan, got %q", bindingsA[0].ExternalChatID)
 	}
 
-	// 4. Verify Project B's binding is separate
+	// 4. Verify Project B has NO connected binding for Lina (bot is taken).
 	bindingsB, _ := s.controlDB.ListAgentChannelBindings(controldb.AgentChannelBindingFilter{
 		WorkspaceID: workspaceID,
 		ProjectID:   projB,
 		AgentID:     "Lina",
 		Provider:    "mattermost",
 	})
-	if len(bindingsB) != 1 {
-		t.Fatalf("expected 1 binding for ProjB/Lina, got %d", len(bindingsB))
-	}
-	if bindingsB[0].ExternalChatID != "chan-proj-beta-chan" {
-		t.Fatalf("expected chan-proj-beta-chan for ProjB, got %q", bindingsB[0].ExternalChatID)
-	}
-
-	if bindingsA[0].ID == bindingsB[0].ID {
-		t.Fatalf("CRITICAL: ProjA and ProjB share the exact same binding ID %q", bindingsA[0].ID)
+	for _, b := range bindingsB {
+		if b.Status == "connected" {
+			t.Fatalf("projB/Lina must not hold a connected binding when the bot is already bound to projA: %+v", b)
+		}
 	}
 }
 
@@ -1089,4 +1101,3 @@ func TestListProjectChannels(t *testing.T) {
 		t.Fatalf("expected 2 bindings, got %d", len(ch.Bindings))
 	}
 }
-

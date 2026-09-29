@@ -125,20 +125,37 @@ func (e *channelProvisionError) Error() string {
 	return e.Message
 }
 
+// normalizeAgentToken folds the characters that vary between agent display
+// names ("FP Dev A") and connection names ("agent-fp-dedupe-FP-Dev-A"):
+// lowercase, strip spaces/hyphens/underscores. Without this, Contains() misses
+// every connection auto-named "agent-<project>-<Agent Name>" and multi-bot
+// workspaces fall into pass-2 allocation which cross-assigns bots to agents.
+func normalizeAgentToken(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(s)) {
+		switch r {
+		case ' ', '-', '_', '.':
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 func connectionMatchesAgent(ic controldb.Connection, agentName string) bool {
-	lowerAgent := strings.ToLower(strings.TrimSpace(agentName))
-	if lowerAgent == "" {
+	normAgent := normalizeAgentToken(agentName)
+	if normAgent == "" {
 		return false
 	}
-	connName := strings.ToLower(strings.TrimSpace(ic.ConnectionName))
-	if connName == lowerAgent || strings.Contains(connName, lowerAgent) {
+	connName := normalizeAgentToken(ic.ConnectionName)
+	if connName == normAgent || strings.Contains(connName, normAgent) {
 		return true
 	}
 	if ic.ProfileJSON != "" {
 		var prof map[string]any
 		if err := json.Unmarshal([]byte(ic.ProfileJSON), &prof); err == nil {
 			for _, k := range []string{"botName", "displayName", "username", "agentId"} {
-				if v, ok := prof[k].(string); ok && strings.EqualFold(strings.TrimSpace(v), lowerAgent) {
+				if v, ok := prof[k].(string); ok && normalizeAgentToken(v) == normAgent {
 					return true
 				}
 			}
@@ -591,6 +608,37 @@ func (s *Server) provisionProjectChannelCore(ctx context.Context, workspaceID, p
 			}
 		}
 
+		// DEFECT-C3 guard (same invariant setup/manual enforces): one bot may
+		// serve at most one (project, agent) binding per workspace. Provision
+		// previously bypassed this check, so crossed pass-2 allocations could
+		// silently wire two agents to the same bot or steal a bot already
+		// bound elsewhere. If the bot is taken by a different (project,
+		// agent), skip this agent instead of persisting a conflicting
+		// binding; ambiguous event routing fails closed at verification time,
+		// so prevention here is the only safe place.
+		if strings.TrimSpace(agentBotID) != "" {
+			existingBotBindings, _ := s.controlDB.ListAgentChannelBindings(controldb.AgentChannelBindingFilter{
+				WorkspaceID: workspaceID,
+				Provider:    provider,
+				Status:      "connected",
+			})
+			botTaken := false
+			for _, ob := range existingBotBindings {
+				if strings.TrimSpace(ob.ExternalBotID) != strings.TrimSpace(agentBotID) {
+					continue
+				}
+				if ob.ProjectID != projectName || ob.AgentID != agentName {
+					botTaken = true
+					break
+				}
+			}
+			if botTaken {
+				log.Printf("[project-channel] skipping binding for %s/%s: bot %s is already bound to another project/agent in this workspace (1:1 bot constraint)", projectName, agentName, agentBotID)
+				skippedAgents = append(skippedAgents, agentName)
+				continue
+			}
+		}
+
 		// Strictly find existing binding FOR THIS PROJECT ONLY (no cross-project worker ID collision!)
 		existingBindings, _ := s.controlDB.ListAgentChannelBindings(controldb.AgentChannelBindingFilter{
 			WorkspaceID: workspaceID,
@@ -808,4 +856,3 @@ func (s *Server) handleListProjectChannels(w http.ResponseWriter, r *http.Reques
 		Channels: items,
 	})
 }
-
