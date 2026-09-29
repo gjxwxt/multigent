@@ -49,16 +49,23 @@ func TestMattermostManualSetup(t *testing.T) {
 
 	p := mattermostProvider{}
 
-	// 1. Missing bridgeHmacSecret must fail
-	_, err := p.ManualSetup(context.Background(), ManualSetupRequest{
+	// 1. Missing bridgeHmacSecret is auto-generated (256-bit random hex)
+	resAuto, err := p.ManualSetup(context.Background(), ManualSetupRequest{
 		Values: map[string]string{
 			"baseUrl":      ts.URL,
 			"botToken":     "test-bot-token",
 			"commandToken": "cmd-tok-123",
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "bridge HMAC secret is required") {
-		t.Fatalf("expected error for missing bridgeHmacSecret, got: %v", err)
+	if err != nil {
+		t.Fatalf("manual setup with empty hmac failed: %v", err)
+	}
+	autoSecret := resAuto.SecretValues["bridgeHmacSecret"]
+	if len(autoSecret) != 64 {
+		t.Fatalf("expected auto-generated 32-byte hex secret (64 chars), got %q", autoSecret)
+	}
+	if _, err := hex.DecodeString(autoSecret); err != nil {
+		t.Fatalf("auto-generated secret not hex: %v", err)
 	}
 
 	// 2. Valid setup with bridgeHmacSecret succeeds
