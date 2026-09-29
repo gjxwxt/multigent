@@ -1146,15 +1146,15 @@
         "requirement_input": "需求輸入",
         "reference": "參考"
       },
-      "requiredToggle": "必讀（Agent 必須完整閱讀該檔案）",
       "requiredBadge": "必讀",
-      "attach": "附加",
-      "back": "返回",
       "remaining": "還可綁定 {{count}} 份資料",
       "emptyLibrary": "資料庫為空：去資料頁上傳，或點下方回形針直接上傳",
       "mentionHint": "輸入 @ 可引用專案資料庫中的檔案並聲明用途（需求輸入 / 參考）。",
       "promptPlaceholder": "描述任務…輸入 @ 引用資料",
-      "roleToggleHint": "切換角色（需求輸入 / 參考）"
+      "roleToggleHint": "切換角色（需求輸入 / 參考）",
+      "uploadsGroup": "上傳檔案",
+      "referencesGroup": "引用資料",
+      "requiredToggleHint": "切換必讀"
     },
     "subtitle": "本專案的任務佇列與篩選；可平等指派給人或 Agent。",
     "emptyTitle": "暫無任務",

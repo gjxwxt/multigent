@@ -8,7 +8,7 @@ import type { TaskOption } from '../task/TaskModals'
 import { overlayDismissProps } from '../ui/overlay'
 import { showToast } from '../ui/Toast'
 import { DeliveryModeNotice } from './DeliveryModeNotice'
-import { AssetMentionPopover, type AssetCandidate, type AssetPick, type AssetRole } from './AssetMentionPopover'
+import { AssetMentionPopover, type AssetCandidate, type AssetMentionPopoverHandle, type AssetRole } from './AssetMentionPopover'
 import type { ProjectRemoteState } from '../../lib/delivery-mode'
 
 type UploadedAsset = { id: string; displayName: string; currentSha: string; size?: number }
@@ -68,6 +68,51 @@ type Props = {
 const fieldCls =
   'mt-1 w-full rounded-lg border border-neutral-300 bg-white px-2.5 py-1.5 text-sm text-neutral-900 outline-none transition-colors focus:border-sky-400 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-100'
 
+const MENTION_POPOVER_W = 320
+const MENTION_POPOVER_H = 240
+
+// Caret pixel coordinates inside a textarea: mirror the text into an offscreen
+// div with identical typography and measure a sentinel span at the caret.
+// offsetTop/Left include the copied padding, so the result is relative to the
+// textarea's border box — which is what the absolutely-positioned popover
+// (anchored to the textarea's wrapper) needs, minus scroll.
+function computeMentionPos(el: HTMLTextAreaElement, caret: number): { left: number; top: number } {
+  const div = document.createElement('div')
+  const style = getComputedStyle(el)
+  for (const prop of [
+    'fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'tabSize',
+    'textIndent', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+    'borderWidth', 'boxSizing', 'width', 'whiteSpace', 'overflowWrap', 'wordWrap',
+  ] as const) {
+    div.style[prop] = style[prop]
+  }
+  div.style.position = 'absolute'
+  div.style.visibility = 'hidden'
+  div.style.height = 'auto'
+  div.textContent = el.value.slice(0, caret)
+  const sentinel = document.createElement('span')
+  sentinel.textContent = el.value.slice(caret) || '.'
+  div.appendChild(sentinel)
+  el.parentElement?.appendChild(div)
+  const caretLeft = sentinel.offsetLeft
+  const caretTop = sentinel.offsetTop
+  el.parentElement?.removeChild(div)
+
+  const lineHeight = parseFloat(style.lineHeight) || 20
+  let left = caretLeft - el.scrollLeft
+  let top = caretTop - el.scrollTop + lineHeight + 2
+  if (el.parentElement) {
+    if (left + MENTION_POPOVER_W > el.parentElement.clientWidth) {
+      left = Math.max(0, el.parentElement.clientWidth - MENTION_POPOVER_W)
+    }
+    // Not enough room below the caret → open above it.
+    if (top + MENTION_POPOVER_H > el.parentElement.clientHeight && caretTop - el.scrollTop - MENTION_POPOVER_H >= 0) {
+      top = caretTop - el.scrollTop - MENTION_POPOVER_H - 4
+    }
+  }
+  return { left: Math.max(0, left), top: Math.max(0, top) }
+}
+
 export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultAgents, allProjectsAgents, taskOptions = [], onCreated }: Props) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
@@ -103,8 +148,10 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
   // @-mention state: the caret offset where "@" was typed, and the query
   // string tracked after it. Null popover = closed.
   const [mention, setMention] = useState<{ at: number; query: string } | null>(null)
+  const [mentionPos, setMentionPos] = useState<{ left: number; top: number }>({ left: 0, top: 0 })
   const [libraryAssets, setLibraryAssets] = useState<AssetCandidate[]>([])
   const composingRef = useRef(false)
+  const mentionPopRef = useRef<AssetMentionPopoverHandle>(null)
 
   const multiProject = Boolean(allProjectsAgents && allProjectsAgents.length > 1)
   const workflowPath = open ? '/api/v1/workflows' : null
@@ -275,16 +322,19 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
     }
   }
 
-  function stageBinding(pick: AssetPick) {
+  function stageBinding(fileId: string) {
     if (!mention) return
-    const candidate = libraryAssets.find((a) => a.id === pick.fileId)
+    const candidate = libraryAssets.find((a) => a.id === fileId)
     const displayName = candidate?.displayName ?? ''
     setTaskAssets((prev) => {
-      const existing = prev.find((b) => b.fileId === pick.fileId)
-      const next = existing
-        ? prev.map((b) => (b.fileId === pick.fileId ? { ...b, role: pick.role, required: pick.required } : b))
-        : [...prev, { fileId: pick.fileId, displayName, role: pick.role, required: pick.required, source: 'library' as const }]
-      return next.slice(0, MAX_TASK_ASSETS)
+      // Already staged (e.g. uploaded this session): keep the chip exactly as
+      // it is — no duplicate, role untouched (user feedback: @-picking a
+      // session upload must not read as a second upload).
+      if (prev.some((b) => b.fileId === fileId)) return prev
+      return [
+        ...prev,
+        { fileId, displayName, role: 'reference' as AssetRole, required: false, source: 'library' as const },
+      ].slice(0, MAX_TASK_ASSETS)
     })
     closeMentionAndInsert(displayName)
   }
@@ -310,12 +360,14 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
   function openMention(textarea: HTMLTextAreaElement) {
     const caret = textarea.selectionStart ?? textarea.value.length
     setMention({ at: caret, query: '' })
+    setMentionPos(computeMentionPos(textarea, caret))
     setLibraryRefreshKey((k) => k + 1)
   }
 
   function closeMentionAndInsert(displayName: string) {
     if (!mention) return
     const { at, query } = mention
+    let insertLen = 0
     setPrompt((prev) => {
       // Replace "@query" (the chars typed since the "@") with the full name.
       const before = prev.slice(0, at)
@@ -323,14 +375,19 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
       const keptQuery = typedQuery.startsWith('@') ? typedQuery.slice(1) : query
       const after = prev.slice(at + 1 + keptQuery.length)
       const needsSpaceBefore = before.length > 0 && !/\s$/.test(before)
-      const insert = `${needsSpaceBefore ? ' ' : ''}@${displayName} `
+      // The marker may already exist (file @-picked earlier); a second
+      // occurrence would desync chip removal.
+      const marker = `@${displayName}`
+      const markerText = (before + after).includes(marker) ? '' : `${marker} `
+      const insert = `${needsSpaceBefore && markerText ? ' ' : ''}${markerText}`
+      insertLen = insert.length
       return before + insert + after
     })
     setMention(null)
     requestAnimationFrame(() => {
       const el = promptInputRef.current
       if (!el) return
-      const pos = at + displayName.length + 2
+      const pos = at + insertLen
       el.focus()
       el.setSelectionRange(pos, pos)
     })
@@ -355,6 +412,15 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
       if (value[caret - 1] !== '@') return null
       if (caret >= 2 && !/\s/.test(value[caret - 2])) return null
       return { at: caret - 1, query: '' }
+    })
+    // The caret (and thus the popover anchor) moves while the query grows.
+    if (mention) setMentionPos(computeMentionPos(e.target, caret))
+    // Library bindings live in the text as "@name" markers: deleting the
+    // marker from the text un-binds (ZCode-style). Upload chips persist —
+    // the paperclip flow owns those, the mention is optional prose.
+    setTaskAssets((prev) => {
+      const stale = prev.filter((b) => b.source === 'library' && !value.includes(`@${b.displayName}`))
+      return stale.length === 0 ? prev : prev.filter((b) => !stale.includes(b))
     })
   }
 
@@ -792,6 +858,13 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
                         ref={promptInputRef}
                         value={prompt}
                         onChange={onPromptChange}
+                        onKeyDown={(e) => {
+                          if (!mention) return
+                          if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === 'Escape') {
+                            e.preventDefault()
+                            mentionPopRef.current?.handleKey(e)
+                          }
+                        }}
                         onCompositionStart={() => { composingRef.current = true }}
                         onCompositionEnd={(e) => {
                           composingRef.current = false
@@ -805,9 +878,11 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
                       />
                       {mention && (
                         <AssetMentionPopover
+                          ref={mentionPopRef}
                           candidates={libraryAssets}
                           query={mention.query}
                           remaining={MAX_TASK_ASSETS - taskAssets.length}
+                          style={{ left: mentionPos.left, top: mentionPos.top }}
                           onPick={stageBinding}
                           onClose={() => setMention(null)}
                         />
@@ -822,58 +897,81 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
               <div className="block text-sm">
                 <span className="text-neutral-600 dark:text-zinc-400">{t('tasks.assets.label')}</span>
                 {taskAssets.length > 0 && (
-                  <div className="mt-1.5 flex flex-wrap gap-1.5">
-                    {taskAssets.map((a) => (
-                      <span
-                        key={a.fileId}
-                        className="inline-flex items-center gap-1 rounded-md border border-neutral-200 bg-white px-2 py-1 text-xs text-neutral-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-                      >
-                        {a.source === 'library' ? (
-                          <FileText className="h-3 w-3 text-sky-500 dark:text-sky-400" />
-                        ) : (
-                          <Paperclip className="h-3 w-3 text-neutral-400" />
-                        )}
-                        <span className="max-w-48 truncate">{a.displayName}</span>
-                        <button
-                          type="button"
-                          title={t('tasks.assets.roleToggleHint')}
-                          onClick={() =>
-                            setTaskAssets((prev) =>
-                              prev.map((b) =>
-                                b.fileId === a.fileId
-                                  ? {
-                                      ...b,
-                                      role: b.role === 'requirement_input' ? 'reference' : 'requirement_input',
-                                      required: b.role === 'requirement_input' ? b.required : true,
-                                    }
-                                  : b,
-                              ),
-                            )
-                          }
-                          className={cn(
-                            'rounded px-1 text-[10px] font-medium',
-                            a.role === 'requirement_input'
-                              ? 'bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-300'
-                              : 'bg-neutral-100 text-neutral-500 dark:bg-zinc-700 dark:text-zinc-400',
-                          )}
-                        >
-                          {t(`tasks.assets.role.${a.role}`)}
-                        </button>
-                        {a.required && (
-                          <span className="rounded bg-amber-100 px-1 text-[10px] font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-300">
-                            {t('tasks.assets.requiredBadge')}
-                          </span>
-                        )}
-                        <button
-                          type="button"
-                          aria-label={t('tasks.assets.remove')}
-                          onClick={() => removeBinding(a.fileId)}
-                          className="text-neutral-400 hover:text-neutral-700 dark:hover:text-zinc-200"
-                        >
-                          <X className="h-3 w-3" />
-                        </button>
-                      </span>
-                    ))}
+                  <div className="mt-1.5 space-y-2">
+                    {([
+                      ['upload', 'tasks.assets.uploadsGroup'],
+                      ['library', 'tasks.assets.referencesGroup'],
+                    ] as const).map(([source, labelKey]) => {
+                      const group = taskAssets.filter((b) => b.source === source)
+                      if (group.length === 0) return null
+                      return (
+                        <div key={source}>
+                          <div className="text-xs text-neutral-400 dark:text-zinc-500">{t(labelKey)}</div>
+                          <div className="mt-1 flex flex-wrap gap-1.5">
+                            {group.map((a) => (
+                              <span
+                                key={a.fileId}
+                                className="inline-flex items-center gap-1 rounded-md border border-neutral-200 bg-white px-2 py-1 text-xs text-neutral-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                              >
+                                {a.source === 'library' ? (
+                                  <FileText className="h-3 w-3 text-sky-500 dark:text-sky-400" />
+                                ) : (
+                                  <Paperclip className="h-3 w-3 text-neutral-400" />
+                                )}
+                                <span className="max-w-48 truncate">{a.displayName}</span>
+                                <button
+                                  type="button"
+                                  title={t('tasks.assets.roleToggleHint')}
+                                  onClick={() =>
+                                    setTaskAssets((prev) =>
+                                      prev.map((b) =>
+                                        b.fileId === a.fileId
+                                          ? { ...b, role: b.role === 'requirement_input' ? 'reference' : 'requirement_input' }
+                                          : b,
+                                      ),
+                                    )
+                                  }
+                                  className={cn(
+                                    'rounded px-1 text-[10px] font-medium',
+                                    a.role === 'requirement_input'
+                                      ? 'bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-300'
+                                      : 'bg-neutral-100 text-neutral-500 dark:bg-zinc-700 dark:text-zinc-400',
+                                  )}
+                                >
+                                  {t(`tasks.assets.role.${a.role}`)}
+                                </button>
+                                <button
+                                  type="button"
+                                  title={t('tasks.assets.requiredToggleHint')}
+                                  aria-pressed={a.required}
+                                  onClick={() =>
+                                    setTaskAssets((prev) =>
+                                      prev.map((b) => (b.fileId === a.fileId ? { ...b, required: !b.required } : b)),
+                                    )
+                                  }
+                                  className={cn(
+                                    'rounded px-1 text-[10px] font-medium',
+                                    a.required
+                                      ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300'
+                                      : 'bg-neutral-100 text-neutral-400 line-through dark:bg-zinc-700 dark:text-zinc-500',
+                                  )}
+                                >
+                                  {t('tasks.assets.requiredBadge')}
+                                </button>
+                                <button
+                                  type="button"
+                                  aria-label={t('tasks.assets.remove')}
+                                  onClick={() => removeBinding(a.fileId)}
+                                  className="text-neutral-400 hover:text-neutral-700 dark:hover:text-zinc-200"
+                                >
+                                  <X className="h-3 w-3" />
+                                </button>
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )
+                    })}
                   </div>
                 )}
                 <div className="mt-1.5 flex items-center gap-3">

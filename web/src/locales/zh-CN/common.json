@@ -1338,15 +1338,15 @@
         "requirement_input": "需求输入",
         "reference": "参考"
       },
-      "requiredToggle": "必读（Agent 必须完整阅读该文件）",
       "requiredBadge": "必读",
-      "attach": "附加",
-      "back": "返回",
       "remaining": "还可绑定 {{count}} 份资料",
       "emptyLibrary": "资料库为空：去资料页上传，或点下方回形针直接上传",
       "mentionHint": "输入 @ 可引用项目资料库中的文件并声明用途（需求输入 / 参考）。",
       "promptPlaceholder": "描述任务…输入 @ 引用资料",
-      "roleToggleHint": "切换角色（需求输入 / 参考）"
+      "roleToggleHint": "切换角色（需求输入 / 参考）",
+      "uploadsGroup": "上传文件",
+      "referencesGroup": "引用资料",
+      "requiredToggleHint": "切换必读"
     },
     "subtitle": "本项目的任务队列与筛选；可平等指派给人或 Agent。",
     "emptyTitle": "暂无任务",

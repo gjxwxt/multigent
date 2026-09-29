@@ -1138,15 +1138,15 @@
         "requirement_input": "要件入力",
         "reference": "参照"
       },
-      "requiredToggle": "必読（エージェントがこのファイルを必ず読む）",
       "requiredBadge": "必読",
-      "attach": "添付",
-      "back": "戻る",
       "remaining": "あと {{count}} 件バインドできます",
       "emptyLibrary": "ライブラリが空です：資料ページでアップロードするか、下のクリップからどうぞ",
       "mentionHint": "@ を入力するとプロジェクト資料のファイルを参照し、用途（要件入力 / 参照）を宣言できます。",
       "promptPlaceholder": "タスクを説明…@ で資料を参照",
-      "roleToggleHint": "ロール切替（要件入力 / 参照）"
+      "roleToggleHint": "ロール切替（要件入力 / 参照）",
+      "uploadsGroup": "アップロード済みファイル",
+      "referencesGroup": "参照資料",
+      "requiredToggleHint": "必読を切替"
     },
     "subtitle": "このプロジェクトのタスクキューと絞り込み。人とエージェントに同様に割り当てできます。",
     "emptyTitle": "タスクはありません",

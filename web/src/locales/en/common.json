@@ -1338,15 +1338,15 @@
         "requirement_input": "Requirement",
         "reference": "Reference"
       },
-      "requiredToggle": "Must read (the agent must read this file in full)",
       "requiredBadge": "must-read",
-      "attach": "Attach",
-      "back": "Back",
       "remaining": "{{count}} more binding(s) available",
       "emptyLibrary": "Library is empty: upload on the assets page, or use the paperclip below",
       "mentionHint": "Type @ to reference a file from the project library and declare its purpose (requirement / reference).",
       "promptPlaceholder": "Describe the task… type @ to reference materials",
-      "roleToggleHint": "Toggle role (requirement / reference)"
+      "roleToggleHint": "Toggle role (requirement / reference)",
+      "uploadsGroup": "Uploaded files",
+      "referencesGroup": "Referenced",
+      "requiredToggleHint": "Toggle must-read"
     },
     "subtitle": "Task queue for this project—status, filters, assign to people or agents equally.",
     "emptyTitle": "No tasks yet",
