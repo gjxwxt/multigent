@@ -1050,6 +1050,12 @@ type HeartbeatConfig struct {
 	PID              int        `yaml:"pid,omitempty"`
 	LastWakeup       *time.Time `yaml:"last_wakeup,omitempty"`
 	LastWakeupStatus string     `yaml:"last_wakeup_status,omitempty"` // running | done | failed
+	// RunStartedAt records when the cycle that most recently set
+	// LastWakeupStatus to "running" began. A long-lived scheduler process owns
+	// PID for its whole lifetime, so PID alone says "the scheduler loop
+	// exists", never "a task is executing"; the timestamp is the in-flight
+	// evidence the busy check needs.
+	RunStartedAt     *time.Time `yaml:"run_started_at,omitempty"`
 	SessionID        string     `yaml:"session_id,omitempty"`
 	SessionStartedAt *time.Time `yaml:"session_started_at,omitempty"`
 

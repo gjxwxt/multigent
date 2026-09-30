@@ -820,9 +820,7 @@ func runHeartbeatLoop(ctx context.Context, root, project, agentName string,
 
 		// Mark as running.
 		now := time.Now().UTC()
-		hb.LastWakeup = &now
-		hb.LastWakeupStatus = "running"
-		hb.PID = os.Getpid()
+		markHeartbeatCycleRunning(hb, now)
 		_ = saveSchedulerHeartbeat(root, project, agentName, ts, hb)
 
 		// Increment wake count (resets each day).
@@ -867,6 +865,7 @@ func runHeartbeatLoop(ctx context.Context, root, project, agentName string,
 			if hb != nil {
 				hb.LastWakeupStatus = "failed"
 				hb.PID = 0
+				hb.RunStartedAt = nil
 				hb.LastCycleDuration = dur.String()
 			}
 		} else {
@@ -875,6 +874,7 @@ func runHeartbeatLoop(ctx context.Context, root, project, agentName string,
 			if hb != nil {
 				hb.LastWakeupStatus = "done"
 				hb.PID = 0
+				hb.RunStartedAt = nil
 				hb.LastCycleDuration = dur.String()
 			}
 		}
@@ -2228,9 +2228,27 @@ func runCronOnlyLoop(ctx context.Context, root, project, agentName string,
 	}
 }
 
-// isAlreadyRunning checks whether the PID recorded in heartbeat is still alive.
+// schedulerCycleLivenessGrace extends the busy window past the configured
+// cycle cap. A cycle that just exceeded max_cycle_duration is still finishing
+// its final task; the grace period keeps the heuristic busy for that tail
+// while the interaction lease remains the authoritative mutual exclusion.
+const schedulerCycleLivenessGrace = 15 * time.Minute
+
+// isAlreadyRunning reports whether a scheduler cycle has recent evidence of
+// actually being in flight. hb.PID names the scheduler-loop process, which on
+// a resident systemd scheduler is alive for the daemon's entire uptime — PID
+// liveness alone would permanently refuse every manual/autostart wakeup. The
+// in-flight evidence is the run start timestamp (RunStartedAt, falling back
+// to LastWakeup for heartbeats written before the field existed): a "running"
+// status with a live PID but no fresh start timestamp is a stale flag from a
+// crashed predecessor, and must not block. Concurrent exclusion itself is
+// owned by the interaction lease acquired inside runAllPendingTasks.
 func isAlreadyRunning(hb *entity.HeartbeatConfig) bool {
-	if hb.PID <= 0 || hb.LastWakeupStatus != "running" {
+	return isAlreadyRunningAt(time.Now(), hb)
+}
+
+func isAlreadyRunningAt(now time.Time, hb *entity.HeartbeatConfig) bool {
+	if hb == nil || hb.PID <= 0 || hb.LastWakeupStatus != "running" {
 		return false
 	}
 	proc, err := os.FindProcess(hb.PID)
@@ -2238,8 +2256,51 @@ func isAlreadyRunning(hb *entity.HeartbeatConfig) bool {
 		return false
 	}
 	// On Unix, FindProcess always succeeds; signal 0 checks liveness.
-	err = proc.Signal(syscall.Signal(0))
-	return err == nil
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		return false
+	}
+	started := hb.RunStartedAt
+	if started == nil || started.IsZero() {
+		started = hb.LastWakeup
+	}
+	if started == nil || started.IsZero() {
+		// No in-flight evidence at all: a stale "running" flag. Treat the
+		// cycle as dead instead of blocking wakeups forever.
+		return false
+	}
+	window := schedulerCycleLivenessGrace
+	if hb.MaxCycleDuration != "" {
+		if parsed, err := time.ParseDuration(hb.MaxCycleDuration); err == nil && parsed > 0 {
+			window = parsed + schedulerCycleLivenessGrace
+		}
+	}
+	return now.Sub(started.Local()) <= window
+}
+
+// markHeartbeatCycleRunning stamps the heartbeat with in-flight evidence for
+// the busy check. Every writer that flips LastWakeupStatus to "running" must
+// set RunStartedAt in the same save, or a resident scheduler's eternal PID
+// resurrects the permanent-wakeup-refusal bug.
+func markHeartbeatCycleRunning(hb *entity.HeartbeatConfig, now time.Time) {
+	if hb == nil {
+		return
+	}
+	stamped := now.UTC()
+	hb.LastWakeup = &stamped
+	hb.RunStartedAt = &stamped
+	hb.LastWakeupStatus = "running"
+	hb.PID = os.Getpid()
+}
+
+// clearHeartbeatCycleRunning drops the in-flight evidence once the cycle
+// settles into a terminal status. RunStartedAt is cleared alongside so the
+// next "running" stamp always starts from a fresh window.
+func clearHeartbeatCycleRunning(hb *entity.HeartbeatConfig) {
+	if hb == nil {
+		return
+	}
+	hb.PID = 0
+	hb.RunStartedAt = nil
 }
 
 // ── active-window helpers ─────────────────────────────────────────────────────
@@ -2657,16 +2718,16 @@ useful for testing and for agent-to-agent wakeup from inside a task.`,
 			}
 
 			// Mark running so the scheduler loop (if active) skips this cycle.
-			now := time.Now().UTC()
-			hb.LastWakeup = &now
-			hb.LastWakeupStatus = "running"
-			hb.PID = os.Getpid()
+			// RunStartedAt carries the in-flight evidence the busy check needs:
+			// a resident scheduler's PID is alive whenever the daemon runs, so
+			// without a fresh start timestamp no wakeup could ever pass.
+			markHeartbeatCycleRunning(hb, time.Now().UTC())
 			_ = saveSchedulerHeartbeat(root, project, agentName, ts, hb)
 
 			// Ensure cleanup even on panic so status doesn't stay "running" forever.
 			defer func() {
 				if latest, err := loadSchedulerHeartbeat(root, project, agentName, ts); err == nil && latest.LastWakeupStatus == "running" {
-					latest.PID = 0
+					clearHeartbeatCycleRunning(latest)
 					if runCtx.Err() != nil {
 						latest.LastWakeupStatus = "interrupted"
 					} else {
@@ -2690,7 +2751,7 @@ useful for testing and for agent-to-agent wakeup from inside a task.`,
 			if err == nil && reloaded != nil {
 				hb = reloaded
 			}
-			hb.PID = 0
+			clearHeartbeatCycleRunning(hb)
 			if runCtx.Err() != nil {
 				hb.LastWakeupStatus = "interrupted"
 				_ = saveSchedulerHeartbeat(root, project, agentName, ts, hb)
