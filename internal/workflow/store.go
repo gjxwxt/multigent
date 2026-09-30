@@ -3096,12 +3096,25 @@ func (s *Store) completeAndAdvanceWithExtras(project, taskID, summary, output st
 			// worktreeDir == "": genuine no-code-worktree — the allowlist
 			// validation above is the whole contract; nothing to measure.
 			// S2-2 ⑤: a linear QA step remains a WHITELIST checkpoint — the
-			// QA agent may only write test artifacts, so the strict legacy
-			// surface (absolute status + test-artifact whitelist) applies.
-			// The baseline delta is deliberately NOT used here: QA edits a
-			// business file to "write a regression test" must keep failing.
+			// QA agent may only write test artifacts, so Direction 3 (the
+			// test-artifact rule inside verifyDeclared) stays active. The
+			// MEASUREMENT surface, however, follows the platform trust model:
+			// when the control plane holds the capture-time baseline the gate
+			// diffs the task's delivery delta against it, so platform
+			// scaffolding that predates the task (.cursor/, .mcp.json,
+			// node_modules/) can no longer misattribute an honest QA
+			// completion as "undeclared changes" (2026-09 VM acceptance — the
+			// old code hard-coded the absolute status surface here and spun
+			// QA for ~25 minutes on exactly that noise). Legacy worktrees
+			// without a baseline keep the strict absolute surface; a lost or
+			// tampered baseline fails closed (resolveQABaselineSurface).
 			if worktreeDir != "" {
-				if err := verifyQATouchedPathsAgainstWorktree(values["touched_paths"], worktreeDir); err != nil {
+				surf, surfErr := resolveQABaselineSurface(worktreeDir, s.QABaselineLookup, run.Project, run.TaskID)
+				if surfErr != nil {
+					s.releaseWorkflowTransitionClaim(&run, claimID)
+					return result, fmt.Errorf("workflow step %q output rejected: touched_paths checkpoint baseline unavailable for task %s: %w", currentStep.Title, run.TaskID, surfErr)
+				}
+				if err := verifyWorktreeDeltaAgainstDeclaration(values["touched_paths"], worktreeDir, surf); err != nil {
 					s.releaseWorkflowTransitionClaim(&run, claimID)
 					return result, fmt.Errorf("workflow step %q output rejected: touched_paths does not match the worktree: %w", currentStep.Title, err)
 				}
