@@ -558,6 +558,7 @@
     "members": "Members",
     "schedule": "Schedule",
     "runs": "Runs",
+    "deploy": "Deploy",
     "settings": "Settings"
   },
   "playbooks": {

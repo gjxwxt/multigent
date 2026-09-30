@@ -558,6 +558,7 @@
     "members": "成员",
     "schedule": "计划",
     "runs": "运行",
+    "deploy": "部署",
     "settings": "设置"
   },
   "playbooks": {

@@ -16,6 +16,7 @@ import {
   Radar,
   MessageSquare,
   Puzzle,
+  Rocket,
   Settings,
   ShieldCheck,
   Target,
@@ -46,7 +47,7 @@ export type NavKey =
   | 'settings'
 
 /** 项目内执行面：`projectNav.*` */
-export type ProjectNavKey = 'tasks' | 'taskTemplates' | 'assets' | 'goals' | 'milestones' | 'messages' | 'members' | 'schedule' | 'runs' | 'settings'
+export type ProjectNavKey = 'tasks' | 'taskTemplates' | 'assets' | 'goals' | 'milestones' | 'messages' | 'members' | 'schedule' | 'runs' | 'deploy' | 'settings'
 
 export type NavItem = {
   to: string
@@ -99,6 +100,7 @@ export const projectSubNav: ProjectNavItem[] = [
   { segment: 'messages', icon: MessageSquare },
   { segment: 'members', icon: Users },
   { segment: 'runs', icon: BarChart3 },
+  { segment: 'deploy', icon: Rocket },
   { segment: 'settings', icon: Settings, adminOnly: true },
 ]
 
@@ -136,7 +138,7 @@ export function projectIdFromPath(pathname: string): string | null {
 
 export function projectNavKeyFromPath(pathname: string): ProjectNavKey | null {
   const m =
-    /^\/projects\/[^/]+\/(tasks|task-templates|assets|goals|milestones|messages|members|schedule|runs|settings)(?:\/|$)/.exec(pathname)
+    /^\/projects\/[^/]+\/(tasks|task-templates|assets|goals|milestones|messages|members|schedule|runs|deploy|settings)(?:\/|$)/.exec(pathname)
   if (m?.[1] === 'task-templates') return 'taskTemplates'
   return (m?.[1] as ProjectNavKey) ?? null
 }
