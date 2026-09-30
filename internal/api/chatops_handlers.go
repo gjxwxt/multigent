@@ -82,7 +82,7 @@ func writeMattermostActionSuccess(w http.ResponseWriter, ephemeralText, statusTe
 func logMattermostActionCallback(stage string, payload mattermostActionPayload) {
 	action := strings.TrimSpace(payload.Context.Action)
 	switch action {
-	case "approve", "edit", "reject", "review_approve":
+	case "approve", "edit", "reject", "review_approve", "deploy_approve", "deploy_reject":
 	default:
 		action = "unknown"
 	}
@@ -308,16 +308,22 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	active, found, err := s.controlDB.ActiveTaskThreadProjection(tokenData.WorkspaceID, tokenData.TaskID, "mattermost")
-	if err != nil || !found || active.RootPostID == "" {
-		stage = "projection_missing"
-		writeMattermostActionError(w, "未找到活跃的任务 Thread 投影或任务已归档。")
-		return
-	}
-	if payload.ChannelID != "" && active.ChannelID != payload.ChannelID {
-		stage = "projection_channel_mismatch"
-		writeMattermostActionError(w, "安全拦截：请求频道与任务活跃投影不匹配。")
-		return
+	// 3. Security Boundary: Channel & Projection validation.
+	// Deploy approval cards are standalone posts (no task-thread projection
+	// exists — the card is created directly in the bound channel), so the
+	// active-projection check only applies to workflow review cards.
+	if !isDeployChatopsAction(tokenData.Action) {
+		active, found, err := s.controlDB.ActiveTaskThreadProjection(tokenData.WorkspaceID, tokenData.TaskID, "mattermost")
+		if err != nil || !found || active.RootPostID == "" {
+			stage = "projection_missing"
+			writeMattermostActionError(w, "未找到活跃的任务 Thread 投影或任务已归档。")
+			return
+		}
+		if payload.ChannelID != "" && active.ChannelID != payload.ChannelID {
+			stage = "projection_channel_mismatch"
+			writeMattermostActionError(w, "安全拦截：请求频道与任务活跃投影不匹配。")
+			return
+		}
 	}
 
 	// 4. Server Verification: Ensure User exists on target Mattermost instance
@@ -369,6 +375,14 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 	if platformUserID == "" {
 		stage = "identity_unbound"
 		writeMattermostActionError(w, "您的 Mattermost 账号未与 Multigent 平台关联。请先在控制台或私聊中使用 /bind 命令完成绑定。")
+		return
+	}
+
+	// Deploy approval cards skip the workflow machinery (reviewer validation,
+	// task lookup, review preview, dual CAS): they carry their own deploy
+	// dispatch with Status-based CAS and deploy-side operator RBAC.
+	if isDeployChatopsAction(tokenData.Action) {
+		s.handleDeployApprovalChatopsAction(w, r, &payload, *tokenData, platformUserID, actionToken, &stage)
 		return
 	}
 
@@ -680,7 +694,129 @@ func (s *Server) handleMattermostActionCallback(w http.ResponseWriter, r *http.R
 	stage = "dialog_opened"
 }
 
-// reissueExpiredActionTokenCard repairs the UX after a click on a long-stale
+// isDeployChatopsAction reports whether the action verb belongs to the
+// deploy-center approval cards (deploy_approve | deploy_reject). Deploy
+// actions never open dialogs — they advance the deploy request directly.
+func isDeployChatopsAction(action string) bool {
+	return action == "deploy_approve" || action == "deploy_reject"
+}
+
+// handleDeployApprovalChatopsAction advances a deploy request after a
+// verified Mattermost button click on a deploy approval card. Split from
+// handleMattermostActionCallback to keep the workflow branch untouched; the
+// shared verification chain (token HMAC/expiry, channel match, user
+// verification, nonce anti-replay, platform identity binding) has already
+// run by the time this is invoked.
+//
+// CAS semantics: the deploy request has no state version, so the Status
+// column is the witness — UpdateDeployRequestStatus(from='pending_approval').
+// A lost race (card clicked twice, or decided on the console first) replies
+// with the 409-flavoured "already processed" message. The card archival and
+// the pipeline trigger are best-effort and never flip the reply.
+func (s *Server) handleDeployApprovalChatopsAction(w http.ResponseWriter, r *http.Request, payload *mattermostActionPayload, tokenData imbridge.ActionTokenPayload, platformUserID, actionToken string, stage *string) {
+	deployRequestID := strings.TrimSpace(tokenData.TaskID)
+	if deployRequestID == "" {
+		*stage = "deploy_request_id_missing"
+		writeMattermostActionError(w, "安全拦截：部署审批令牌缺少部署单标识。")
+		return
+	}
+
+	req, found, err := s.controlDB.DeployRequestFor(tokenData.WorkspaceID, deployRequestID)
+	if err != nil {
+		*stage = "deploy_request_lookup_failed"
+		writeMattermostActionError(w, "读取部署单失败："+err.Error())
+		return
+	}
+	if !found || req == nil {
+		*stage = "deploy_request_missing"
+		writeMattermostActionError(w, "未找到对应部署单，可能已被清理。")
+		return
+	}
+
+	// RBAC: no workflow run exists for deploy requests, so the
+	// validateWorkflowDecisionReviewer path does not apply. Require the
+	// verified Mattermost user (done by the caller) plus a platform identity
+	// binding (resolved by the caller) and the deploy-side operator role.
+	if !s.chatopsDeployOperatorAllowed(tokenData.WorkspaceID, tokenData.ProjectID, platformUserID) {
+		*stage = "deploy_operator_forbidden"
+		writeMattermostActionError(w, fmt.Sprintf("权限不足：您没有项目 %s 的部署审批权限 (operator required)。", tokenData.ProjectID))
+		return
+	}
+
+	var statusText string
+	switch tokenData.Action {
+	case "deploy_approve":
+		*stage = "deploy_approve_started"
+		if err := s.approveDeployRequestFromChatops(r.Context(), req, platformUserID); err != nil {
+			if errors.Is(err, errDeployRequestAlreadyProcessed) {
+				*stage = "deploy_already_processed"
+				writeMattermostActionError(w, "⏳ 409 Conflict：该部署单已被处理，请勿重复操作。")
+				return
+			}
+			*stage = "deploy_approve_failed"
+			writeMattermostActionError(w, "批准部署单失败："+err.Error())
+			return
+		}
+		statusText = fmt.Sprintf("✅ 已批准 (approved)：由 %s 于 %s 批准，流水线已触发。", platformUserID, time.Now().Format("15:04"))
+	case "deploy_reject":
+		*stage = "deploy_reject_started"
+		if err := s.rejectDeployRequestFromChatops(r.Context(), req, platformUserID); err != nil {
+			if errors.Is(err, errDeployRequestAlreadyProcessed) {
+				*stage = "deploy_already_processed"
+				writeMattermostActionError(w, "⏳ 409 Conflict：该部署单已被处理，请勿重复操作。")
+				return
+			}
+			*stage = "deploy_reject_failed"
+			writeMattermostActionError(w, "驳回部署单失败："+err.Error())
+			return
+		}
+		statusText = fmt.Sprintf("⛔ 已驳回 (rejected)：由 %s 于 %s 驳回。", platformUserID, time.Now().Format("15:04"))
+	default:
+		*stage = "deploy_action_unrecognized"
+		writeMattermostActionError(w, "未知的部署审批动作。")
+		return
+	}
+
+	// Card archival is best-effort: a Mattermost hiccup here must not undo
+	// the CAS transition already recorded above.
+	if s.threadProjections != nil && strings.TrimSpace(payload.PostID) != "" {
+		archCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		if err := s.ArchiveDeployApprovalCard(archCtx, req, payload.PostID, statusText); err != nil {
+			log.Printf("[deploy-card] archive card for %s failed: %v", req.ID, err)
+		}
+	}
+
+	*stage = "deploy_action_completed"
+	writeMattermostActionSuccess(w, statusText, statusText)
+}
+
+// chatopsDeployOperatorAllowed checks the deploy-side RBAC for chatops
+// approvers: the platform identity is already bound (caller), so this is the
+// project-operator check on that identity — admin, workspace admin/owner, or
+// project role >= operator. Fails closed when the user record cannot be read.
+func (s *Server) chatopsDeployOperatorAllowed(workspaceID, project, platformUserID string) bool {
+	if s.users == nil {
+		return false
+	}
+	u := s.users.GetUser(platformUserID)
+	if u == nil || u.Disabled {
+		return false
+	}
+	if u.Role == RoleAdmin {
+		return true
+	}
+	if s.controlDB != nil {
+		if member, ok, err := s.controlDB.WorkspaceMember(workspaceID, platformUserID); err == nil && ok &&
+			(member.Role == WorkspaceRoleOwner || member.Role == WorkspaceRoleAdmin) {
+			return true
+		}
+	}
+	role, ok := s.users.HasProjectAccess(platformUserID, project)
+	return ok && projectRoleLevel(role) >= projectRoleLevel(ProjectRoleOperator)
+}
+
+
 // review card. Unlike reissueCurrentMattermostReviewCard (which runs inside the
 // fully-verified callback flow), the expired-token branch never reaches those
 // checks, so this function re-derives every security decision it needs before
