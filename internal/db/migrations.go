@@ -758,6 +758,26 @@ func (db *SQLiteStore) migrate() error {
 )`,
 		`CREATE INDEX IF NOT EXISTS idx_asset_attachments_task ON asset_attachments(task_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_asset_attachments_file ON asset_attachments(file_id)`,
+		`CREATE TABLE IF NOT EXISTS deploy_requests (
+	id TEXT PRIMARY KEY,
+	workspace_id TEXT NOT NULL,
+	project_id TEXT NOT NULL,
+	branch TEXT NOT NULL,
+	sha TEXT NOT NULL,
+	env TEXT NOT NULL DEFAULT 'production',
+	vars_json TEXT NOT NULL DEFAULT '{}',
+	commit_span_json TEXT NOT NULL DEFAULT '[]',
+	approval_json TEXT NOT NULL DEFAULT '{}',
+	status TEXT NOT NULL,
+	pipeline_id INTEGER NOT NULL DEFAULT 0,
+	health_json TEXT NOT NULL DEFAULT '{}',
+	created_by TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	started_at TEXT NOT NULL DEFAULT '',
+	finished_at TEXT NOT NULL DEFAULT ''
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_deploy_requests_project ON deploy_requests(workspace_id, project_id, created_at)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_deploy_requests_inflight ON deploy_requests(workspace_id, project_id) WHERE status IN ('pending_approval','approved','deploying')`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.sql.Exec(stmt); err != nil {
