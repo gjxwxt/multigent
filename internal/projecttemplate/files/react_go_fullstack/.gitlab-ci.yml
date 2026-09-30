@@ -160,7 +160,7 @@ deploy:
         echo "deploy gate: tag pipeline, gate skipped"
       else
         DEPLOY_URL="${MULTIGENT_CONSOLE_URL:-http://host.docker.internal:27892}/api/v1/deploy-verify"
-        wget -q --header "X-Multigent-Deploy-Token: ${MULTIGENT_DEPLOY_TOKEN}" -O /dev/null "${DEPLOY_URL}?project=${CI_PROJECT_NAME}&sha=${CI_COMMIT_SHA}" \
+        wget -q --header "X-Multigent-Deploy-Token: ${MULTIGENT_DEPLOY_TOKEN}" -O /dev/null "${DEPLOY_URL}?project=${MULTIGENT_PROJECT_NAME:-$CI_PROJECT_NAME}&sha=${CI_COMMIT_SHA}" \
           || { echo "deploy gate: platform approval check FAILED for $CI_COMMIT_SHA"; exit 1; }
         echo "deploy gate: approval verified for $CI_COMMIT_SHA"
       fi

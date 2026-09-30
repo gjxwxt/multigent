@@ -527,6 +527,11 @@ func (s *Server) triggerDeployPipelineNow(w http.ResponseWriter, r *http.Request
 		"MULTIGENT_DEPLOY":       "1",
 		"MULTIGENT_DEPLOY_TOKEN": token,
 		"MULTIGENT_CONSOLE_URL":  s.consoleReachableURL(r),
+		// The gate callback must identify the platform project. CI_PROJECT_NAME
+		// is the repo slug and only coincides with the platform name for
+		// platform-created repos; passing the name explicitly keeps brownfield
+		// bindings (platform project ≠ repo slug) working.
+		"MULTIGENT_PROJECT_NAME": project,
 	}
 
 	host, binding, err := s.deployGitLabHostFor(r.Context(), project)
