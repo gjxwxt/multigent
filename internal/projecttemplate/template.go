@@ -19,12 +19,14 @@ const (
 
 	// ReactGoFullstackVersion tracks template content: any change to
 	// files/react_go_fullstack bumps it (1.2.0 added the SQLite data layer +
-	// .multigent/fixtures.json contract). Existing projects seeded from an
+	// .multigent/fixtures.json contract; 1.3.0 added the platform API branch
+	// deploy chain: api-pipeline rules, SHA image tags, fail-closed deploy
+	// gate, image garbage collection). Existing projects seeded from an
 	// older version keep their files — Seed only fills missing files.
-	ReactGoFullstackVersion = "1.2.0"
+	ReactGoFullstackVersion = "1.3.0"
 
 	ReactSpringBootID      = "react_spring_boot"
-	ReactSpringBootVersion = "1.0.0"
+	ReactSpringBootVersion = "1.1.0"
 )
 
 // CI baseline assets shipped with the starter. They are exported separately

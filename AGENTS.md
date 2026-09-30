@@ -122,7 +122,7 @@ multigent/
 
 以下约定由真实事故沉淀而来，**任何修改不得绕过**；细节以源码、测试和公开架构文档为准：
 
-1. **端点鉴权边界**：`publicMux`（server.go）上的路由完全无认证。新增有副作用的端点一律注册到带 `withTokenAuth` 的主 mux 并做 `checkProjectAccess`；必须暴露给预览 iframe 的端点，handler 内必须校验预览签名 token（`internal/api/preview_token.go`），写端点再加频率限制。
+1. **端点鉴权边界**：`publicMux`（server.go）上的路由完全无认证。新增有副作用的端点一律注册到带 `withTokenAuth` 的主 mux 并做 `checkProjectAccess`；必须暴露给预览 iframe 的端点，handler 内必须校验预览签名 token（`internal/api/preview_token.go`），写端点再加频率限制。唯一豁免：GET /api/v1/deploy-verify（只读回查，publicMux 专用签名自证边界，handler 内 HMAC 校验 + 限流，依据 withContextIngestAuth 先例）。
 2. **凭据不落盘**：Git remote URL 持久化必须保持纯净（无 token）；凭据只在推送瞬时注入（credential-helper 或运行时注入）。Git 命令输出入库/返回前端前必须 redact（参考 `redactGitOutput`）。
 3. **并发写保护**：预览 Copilot 写入受工作流节点写锁约束——判定用 `isTaskAtHumanReviewStep`（human_review 放行，查询失败 fail-closed 保持加锁），不能只看 `task.Status`。
 4. **确定性基线**：任务派生必须基于不可变 `baseCommit`（SHA），继承前置任务的 `completionCommit`；禁止以 `origin/main` 的移动引用作为基线。
