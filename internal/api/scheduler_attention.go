@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/multigent/multigent/internal/attention"
+	"github.com/multigent/multigent/internal/assets"
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
@@ -56,6 +57,7 @@ func (s *Server) ensurePendingAttentionWakeupTask(workspaceID, project, agent st
 			}
 			task.Vars = mergeTaskVars(task.Vars, vars)
 			applyWakeupWorktreeVars(task)
+			s.rebindAttentionTargetAssets(workspaceID, task, vars)
 			task.UpdatedAt = time.Now().UTC()
 			_ = s.ts.UpdateTask(project, agent, task)
 			return task, ids, nil
@@ -78,7 +80,73 @@ func (s *Server) ensurePendingAttentionWakeupTask(workspaceID, project, agent st
 	if err := s.ts.AddTask(project, agent, task); err != nil {
 		return nil, nil, err
 	}
+	s.rebindAttentionTargetAssets(workspaceID, task, vars)
 	return task, ids, nil
+}
+
+// rebindAttentionTargetAssets copies the input asset attachments of the
+// attention's target task onto the synthetic wakeup task. Asset staging
+// resolves attachments by task ID, and the wakeup task carries a fresh
+// synthetic ID — without this copy a workflow step woken by an attention
+// signal starts with no /mnt/multigent/assets mount and cannot read the
+// requirement docs bound to the target task (t-20260929-lwi06q). Mirrors the
+// CLI scheduler path (schedulerAttentionTargetProjectDir): deliverable-role
+// rows are outputs, not run inputs; the copy is idempotent per (wakeup task,
+// file) because the wakeup task is reused across retries. Best-effort: a
+// binding failure degrades the run's context but must not cancel the wakeup.
+func (s *Server) rebindAttentionTargetAssets(workspaceID string, task *entity.Task, vars map[string]string) {
+	if s == nil || s.controlDB == nil || task == nil {
+		return
+	}
+	targetTaskID := strings.TrimSpace(vars["MULTIGENT_WAKEUP_TARGET_TASK_ID"])
+	if targetTaskID == "" {
+		return
+	}
+	atts, err := s.controlDB.ListAssetAttachmentsForTask(targetTaskID)
+	if err != nil {
+		log.Printf("[attention] wakeup assets: list attachments for %s: %v", targetTaskID, err)
+		return
+	}
+	existing, err := s.controlDB.ListAssetAttachmentsForTask(task.ID)
+	if err != nil {
+		log.Printf("[attention] wakeup assets: list attachments for %s: %v", task.ID, err)
+		return
+	}
+	boundFiles := make(map[string]bool, len(existing))
+	for _, att := range existing {
+		boundFiles[att.FileID] = true
+	}
+	inputs := make([]*controldb.AssetAttachment, 0, len(atts))
+	seenFiles := map[string]bool{}
+	for i := range atts {
+		att := atts[i]
+		if att.Role == controldb.AssetRoleDeliverable || seenFiles[att.FileID] || boundFiles[att.FileID] {
+			continue
+		}
+		seenFiles[att.FileID] = true
+		inputs = append(inputs, &controldb.AssetAttachment{
+			FileID:    att.FileID,
+			Sha256:    att.Sha256,
+			ProjectID: att.ProjectID,
+			TaskID:    task.ID,
+			Role:      att.Role,
+			Required:  att.Required,
+			AddedBy:   "api:attention-wakeup",
+		})
+	}
+	if len(inputs) == 0 {
+		return
+	}
+	if len(inputs) > assets.MaxTaskAttachments {
+		inputs = inputs[:assets.MaxTaskAttachments]
+		log.Printf("[attention] wakeup assets: target %s carries more than %d bindings; staging the first %d",
+			targetTaskID, assets.MaxTaskAttachments, len(inputs))
+	}
+	for _, input := range inputs {
+		if err := s.controlDB.InsertAssetAttachment(input); err != nil {
+			log.Printf("[attention] wakeup assets: bind %s (%s) onto %s: %v", input.FileID, input.Role, task.ID, err)
+		}
+	}
 }
 
 type apiWakeupI18n struct {
