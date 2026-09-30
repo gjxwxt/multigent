@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/multigent/multigent/internal/agentdir"
+	"github.com/multigent/multigent/internal/assets"
 	"github.com/multigent/multigent/internal/attention"
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
@@ -1082,6 +1083,11 @@ func runAllPendingTasks(ctx context.Context, root, project, agentName string,
 					if attentionTargetProj != "" {
 						wakeupTask.Vars["MULTIGENT_WAKEUP_PROJECT"] = attentionTargetProj
 					}
+					// Asset staging resolves bindings by task ID, so the target
+					// task's project documents must be re-bound onto this
+					// wakeup task's own ID or the run starts with no assets
+					// mount and the agent cannot read its requirement docs.
+					schedulerAttentionTargetProjectDir(root, attentionTargetProj, attentionTargetTaskID, wakeupTask.ID)
 				}
 				// Persist before running so `task confirm-request --id $TASK_ID` works.
 				if addErr := ts.AddTask(project, agentName, wakeupTask); addErr != nil {
@@ -1861,6 +1867,75 @@ func schedulerAttentionTrust(signal controldb.AttentionSignal) map[string]any {
 		trust["policy"] = "System-originated Multigent task signal."
 	}
 	return trust
+}
+
+// schedulerAttentionTargetProjectDir binds the attention target task's project
+// asset files onto a synthetic wakeup task. The wakeup task gets a fresh
+// synthetic ID, and asset staging resolves attachments by task ID — without
+// this copy the attention run starts with no /mnt/multigent/assets mount and
+// the agent cannot read the requirement docs the target task was created with
+// (t-20260929-lwi06q). Deliverable-role rows are skipped: they are outputs an
+// agent published back into the project library, not inputs for the next run.
+// Best-effort with a warning log: a binding copy failure degrades the run's
+// context but must not cancel the attention wakeup itself.
+func schedulerAttentionTargetProjectDir(root, targetProject, targetTaskID, wakeupTaskID string) {
+	if strings.TrimSpace(targetTaskID) == "" || strings.TrimSpace(wakeupTaskID) == "" {
+		return
+	}
+	db, err := openControlDBForRoot(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: attention wakeup assets: open control db: %v\n", err)
+		return
+	}
+	defer db.Close()
+	atts, err := db.ListAssetAttachmentsForTask(targetTaskID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: attention wakeup assets: list attachments for %s: %v\n", targetTaskID, err)
+		return
+	}
+	// The wakeup task is reused across scheduler retries, so the copy must be
+	// idempotent per (wakeup task, file): skip files already bound to it.
+	existing, err := db.ListAssetAttachmentsForTask(wakeupTaskID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: attention wakeup assets: list attachments for %s: %v\n", wakeupTaskID, err)
+		return
+	}
+	boundFiles := make(map[string]bool, len(existing))
+	for _, att := range existing {
+		boundFiles[att.FileID] = true
+	}
+	inputs := make([]*controldb.AssetAttachment, 0, len(atts))
+	seenFiles := map[string]bool{}
+	for i := range atts {
+		att := atts[i]
+		if att.Role == controldb.AssetRoleDeliverable || seenFiles[att.FileID] || boundFiles[att.FileID] {
+			continue
+		}
+		seenFiles[att.FileID] = true
+		inputs = append(inputs, &controldb.AssetAttachment{
+			FileID:    att.FileID,
+			Sha256:    att.Sha256,
+			ProjectID: att.ProjectID,
+			TaskID:    wakeupTaskID,
+			Role:      att.Role,
+			Required:  att.Required,
+			AddedBy:   "scheduler:wakeup",
+		})
+	}
+	if len(inputs) == 0 {
+		return
+	}
+	if len(inputs) > assets.MaxTaskAttachments {
+		inputs = inputs[:assets.MaxTaskAttachments]
+		fmt.Fprintf(os.Stderr, "warning: attention wakeup assets: target %s carries more than %d bindings; staging the first %d\n",
+			targetTaskID, assets.MaxTaskAttachments, len(inputs))
+	}
+	for _, input := range inputs {
+		if err := db.InsertAssetAttachment(input); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: attention wakeup assets: bind %s (%s) onto %s: %v\n",
+				input.FileID, input.Role, wakeupTaskID, err)
+		}
+	}
 }
 
 func markAttentionSignalsSeen(root string, ids []string) {
