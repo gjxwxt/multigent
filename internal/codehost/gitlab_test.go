@@ -3,6 +3,8 @@ package codehost
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -224,5 +226,209 @@ func TestGitLabHostNormalizesCloneURLWithBaseURLHost(t *testing.T) {
 	})
 	if repo.HTTPCloneURL != "http://192.168.139.3:8083/root/demo-repo.git" {
 		t.Fatalf("expected clone URL rewritten to baseURL host, got: %q", repo.HTTPCloneURL)
+	}
+}
+
+func TestGitLabHostListBranches(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// r.URL.Path is the decoded form: "root%2Fmy-app" arrives as "root/my-app".
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/root/my-app/repository/branches" {
+			gotQuery = r.URL.RawQuery
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[
+				{"name":"main","default":true,"commit":{"id":"aaa111","title":"init project"}},
+				{"name":"feature/deploy","default":false,"commit":{"id":"bbb222","title":"feat: deploy step"}}
+			]`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	host := NewGitLabHost(GitLabConfig{BaseURL: srv.URL, Token: "t"})
+	branches, err := host.ListBranches(context.Background(), "root/my-app")
+	if err != nil {
+		t.Fatalf("ListBranches failed: %v", err)
+	}
+	if gotQuery != "per_page=100" {
+		t.Errorf("expected per_page=100 query, got %q", gotQuery)
+	}
+	if len(branches) != 2 {
+		t.Fatalf("expected 2 branches, got %d", len(branches))
+	}
+	if branches[0].Name != "main" || !branches[0].Default || branches[0].CommitID != "aaa111" || branches[0].CommitTitle != "init project" {
+		t.Errorf("unexpected branch[0]: %+v", branches[0])
+	}
+	if branches[1].Name != "feature/deploy" || branches[1].Default || branches[1].CommitID != "bbb222" || branches[1].CommitTitle != "feat: deploy step" {
+		t.Errorf("unexpected branch[1]: %+v", branches[1])
+	}
+}
+
+func TestGitLabHostListBranchesNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	host := NewGitLabHost(GitLabConfig{BaseURL: srv.URL, Token: "t"})
+	if _, err := host.ListBranches(context.Background(), "99999"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestGitLabHostTriggerPipeline(t *testing.T) {
+	var gotMethod, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":777,"sha":"abc1234","ref":"main","status":"created","source":"api","web_url":"https://gitlab.example.com/team/my-app/-/pipelines/777"}`))
+	}))
+	defer srv.Close()
+
+	host := NewGitLabHost(GitLabConfig{BaseURL: srv.URL, Token: "t"})
+	pipe, err := host.TriggerPipeline(context.Background(), "42", "main", map[string]string{
+		"ZETA":    "last",
+		"APP_ENV": "staging",
+		"ALPHA":   "first",
+	})
+	if err != nil {
+		t.Fatalf("TriggerPipeline failed: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("expected POST, got %s", gotMethod)
+	}
+
+	var body struct {
+		Ref       string `json:"ref"`
+		Variables []struct {
+			Key   string `json:"key"`
+			Value string `json:"value"`
+		} `json:"variables"`
+	}
+	if err := json.Unmarshal([]byte(gotBody), &body); err != nil {
+		t.Fatalf("decode request body %q: %v", gotBody, err)
+	}
+	if body.Ref != "main" {
+		t.Errorf("expected ref main, got %q", body.Ref)
+	}
+	if len(body.Variables) != 3 {
+		t.Fatalf("expected 3 variables, got %d: %s", len(body.Variables), gotBody)
+	}
+	// Variables must be sorted by key for a deterministic request body.
+	if body.Variables[0].Key != "ALPHA" || body.Variables[0].Value != "first" {
+		t.Errorf("variables[0] not first sorted key: %+v", body.Variables[0])
+	}
+	if body.Variables[1].Key != "APP_ENV" || body.Variables[1].Value != "staging" {
+		t.Errorf("variables[1] not second sorted key: %+v", body.Variables[1])
+	}
+	if body.Variables[2].Key != "ZETA" || body.Variables[2].Value != "last" {
+		t.Errorf("variables[2] not third sorted key: %+v", body.Variables[2])
+	}
+	if pipe == nil || pipe.ID != 777 || pipe.SHA != "abc1234" || pipe.Ref != "main" || pipe.Status != "created" {
+		t.Errorf("unexpected pipeline: %+v", pipe)
+	}
+}
+
+func TestGitLabHostTriggerPipelinePropagatesErrorMessage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"message":"ref not found"}`))
+	}))
+	defer srv.Close()
+
+	host := NewGitLabHost(GitLabConfig{BaseURL: srv.URL, Token: "t"})
+	_, err := host.TriggerPipeline(context.Background(), "42", "missing-branch", nil)
+	if err == nil {
+		t.Fatalf("expected error for 400 response")
+	}
+	if !strings.Contains(err.Error(), "ref not found") || !strings.Contains(err.Error(), "400") {
+		t.Fatalf("expected error to carry status and GitLab message, got: %v", err)
+	}
+}
+
+func TestGitLabHostListRecentPipelines(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/42/pipelines" {
+			gotQuery = r.URL.RawQuery
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[
+				{"id":2,"sha":"def5678","ref":"main","status":"success","source":"push","web_url":"https://gitlab.example.com/p/2"},
+				{"id":1,"sha":"abc1234","ref":"feature/x","status":"failed","source":"web","web_url":"https://gitlab.example.com/p/1"}
+			]`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	host := NewGitLabHost(GitLabConfig{BaseURL: srv.URL, Token: "t"})
+	pipelines, err := host.ListRecentPipelines(context.Background(), "42", 0)
+	if err != nil {
+		t.Fatalf("ListRecentPipelines failed: %v", err)
+	}
+	if gotQuery != "per_page=20" {
+		t.Errorf("expected default per_page=20, got %q", gotQuery)
+	}
+	if len(pipelines) != 2 {
+		t.Fatalf("expected 2 pipelines, got %d", len(pipelines))
+	}
+	if pipelines[0].ID != 2 || pipelines[0].Status != "success" || pipelines[0].SHA != "def5678" || pipelines[0].Ref != "main" || pipelines[0].WebURL != "https://gitlab.example.com/p/2" {
+		t.Errorf("unexpected pipeline[0]: %+v", pipelines[0])
+	}
+	if pipelines[1].ID != 1 || pipelines[1].Status != "failed" || pipelines[1].Source != "web" {
+		t.Errorf("unexpected pipeline[1]: %+v", pipelines[1])
+	}
+}
+
+func TestGitLabHostListRecentPipelinesClampsPerPage(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	host := NewGitLabHost(GitLabConfig{BaseURL: srv.URL, Token: "t"})
+	if _, err := host.ListRecentPipelines(context.Background(), "42", 500); err != nil {
+		t.Fatalf("ListRecentPipelines failed: %v", err)
+	}
+	if gotQuery != "per_page=20" {
+		t.Errorf("expected perPage>100 to clamp to default 20, got %q", gotQuery)
+	}
+}
+
+func TestGitLabHostPipelineJobsMapsRunner(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/42/pipelines/777/jobs" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[
+				{"id":11,"name":"build","stage":"build","status":"success","runner":{"id":9,"description":"shared-runner-01"}},
+				{"id":12,"name":"deploy","stage":"deploy","status":"pending"}
+			]`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	host := NewGitLabHost(GitLabConfig{BaseURL: srv.URL, Token: "t"})
+	jobs, err := host.PipelineJobs(context.Background(), "42", 777)
+	if err != nil {
+		t.Fatalf("PipelineJobs failed: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("expected 2 jobs, got %d", len(jobs))
+	}
+	if jobs[0].RunnerDescription != "shared-runner-01" {
+		t.Errorf("expected runner description filled, got %q", jobs[0].RunnerDescription)
+	}
+	if jobs[1].RunnerDescription != "" {
+		t.Errorf("expected empty runner description when runner absent, got %q", jobs[1].RunnerDescription)
 	}
 }
