@@ -443,7 +443,12 @@ func worktreeListAllFiles(worktreeDir string) ([]string, error) {
 			continue
 		}
 		status, path := entry[:2], entry[3:]
-		if status == "??" && strings.HasPrefix(path, ".multigent") {
+		// Platform runtime dirs are never part of the task's delivery delta.
+		// The exclusion covers EVERY status, not just "??" (untracked): an
+		// agent that runs `git add -A` stages .multigent/ runtime files and
+		// the ??-only form would fingerprint them into every later baseline
+		// diff. Mirrors the worktreeChangedPaths exclusion in internal/workflow.
+		if strings.HasPrefix(path, ".multigent") {
 			continue
 		}
 		if strings.HasPrefix(path, `"`) && strings.HasSuffix(path, `"`) {
