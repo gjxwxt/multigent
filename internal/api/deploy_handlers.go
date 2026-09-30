@@ -559,6 +559,15 @@ func (s *Server) triggerDeployPipelineNow(w http.ResponseWriter, r *http.Request
 		// bindings (platform project ≠ repo slug) working.
 		"MULTIGENT_PROJECT_NAME": project,
 	}
+	// The deploy job's post-up probe must target the same host:port the
+	// platform's own health card uses (deployedAppHealthURL). host.docker.internal
+	// is only correct when the deploy host runs the job's docker daemon; on
+	// OrbStack-style split topologies the published port is reachable via the
+	// deploy-host IP instead, and a fake-IP DNS proxy can hijack that hostname
+	// outright. Configured host wins; unset keeps the template default.
+	if probeHost := strings.TrimSpace(os.Getenv(deployHostEnv)); probeHost != "" {
+		variables["MULTIGENT_DEPLOY_HOST"] = probeHost
+	}
 
 	host, binding, err := s.deployGitLabHostFor(r.Context(), project)
 	if err != nil {

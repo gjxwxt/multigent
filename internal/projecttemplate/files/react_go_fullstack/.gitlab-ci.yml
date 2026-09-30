@@ -167,11 +167,14 @@ deploy:
     - sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories && apk add --cache-dir /cache/apk docker-cli docker-cli-compose
     # 起容器：镜像名与 package 步一致，TAG/APP_PORT 注入本次 tag（或短 SHA）与发布端口
     - IMAGE_NAME="$CI_PROJECT_NAME" TAG="${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}" docker compose -f deploy/compose.yml up -d
-    # 探活：job 容器内 localhost 是它自己，必须走 host.docker.internal 打宿主端口
+    # 探活：job 容器内 localhost 是它自己，必须打宿主发布端口。平台触发时注入
+    # MULTIGENT_DEPLOY_HOST（与平台健康卡同口径，适配发布端口不在本机 daemon 的拓扑，
+    # 且绕开 fake-IP 代理对 host.docker.internal 的 DNS 劫持）；tag 流水线回退本机 daemon。
     - |
+      PROBE_HOST="${MULTIGENT_DEPLOY_HOST:-host.docker.internal}"
       ok=0
       for i in $(seq 1 30); do
-        if wget -q -O /dev/null "http://host.docker.internal:${APP_PORT}/api/health"; then ok=1; echo "health OK after ${i} attempts"; break; fi
+        if wget -q -O /dev/null "http://${PROBE_HOST}:${APP_PORT}/api/health"; then ok=1; echo "health OK after ${i} attempts"; break; fi
         sleep 2
       done
       [ "$ok" = "1" ] || { echo "health check timed out (~60s)"; docker compose -f deploy/compose.yml ps; exit 1; }
