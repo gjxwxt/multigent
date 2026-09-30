@@ -875,12 +875,14 @@ func (q *qaRiskItem) UnmarshalJSON(data []byte) error {
 	type rawItem struct {
 		ItemID             string `json:"item_id"`
 		ID                 string `json:"id"`
+		CaseID             string `json:"case_id"`
 		AcceptanceCriteria string `json:"acceptance_criteria"`
 		AcceptanceItem     string `json:"acceptance_item"`
 		AffectedAPIs       any    `json:"affected_apis"`
 		RiskLevel          string `json:"risk_level"`
 		ExecutionType      string `json:"execution_type"`
 		Status             string `json:"status"`
+		Result             string `json:"result"`
 		CoverageStatus     string `json:"coverage_status"`
 		Evidence           any    `json:"evidence"`
 		TestEvidence       any    `json:"test_evidence"`
@@ -894,6 +896,13 @@ func (q *qaRiskItem) UnmarshalJSON(data []byte) error {
 	if q.ItemID == "" {
 		q.ItemID = strings.TrimSpace(r.ID)
 	}
+	// QA agents habitually name matrix rows after the test-spec manifest's
+	// case_id (the 51-row VM rejection, 2026-09): accept it as a fallback so
+	// an otherwise-valid matrix is not bounced. Canonical item_id wins when
+	// both are present.
+	if q.ItemID == "" {
+		q.ItemID = strings.TrimSpace(r.CaseID)
+	}
 	q.AcceptanceCriteria = strings.TrimSpace(r.AcceptanceCriteria)
 	if q.AcceptanceCriteria == "" {
 		q.AcceptanceCriteria = strings.TrimSpace(r.AcceptanceItem)
@@ -902,6 +911,14 @@ func (q *qaRiskItem) UnmarshalJSON(data []byte) error {
 	q.RiskLevel = strings.TrimSpace(r.RiskLevel)
 	q.ExecutionType = strings.TrimSpace(r.ExecutionType)
 	q.Status = strings.ToLower(strings.TrimSpace(r.Status))
+	if q.Status == "" {
+		// result carries the raw execution outcome some QA agents emit
+		// instead of status; normalize the common verb forms onto the gate's
+		// canonical status vocabulary. Canonical status wins when both exist.
+		if res := strings.ToLower(strings.TrimSpace(r.Result)); res != "" {
+			q.Status = normalizeQAResultStatus(res)
+		}
+	}
 	if q.Status == "" {
 		cov := strings.ToLower(strings.TrimSpace(r.CoverageStatus))
 		if cov == "covered" || cov == "accepted_with_mitigation" {
@@ -934,6 +951,30 @@ func (q *qaRiskItem) UnmarshalJSON(data []byte) error {
 	}
 	q.UncoveredReason = strings.TrimSpace(r.UncoveredReason)
 	return nil
+}
+
+// normalizeQAResultStatus maps the outcome verbs QA agents write into the
+// `result` field onto the gate's canonical status vocabulary. Unknown values
+// pass through unchanged so the gate's strict status check still rejects
+// them (the mapping widens ACCEPTANCE of alternate spellings, never the
+// set of statuses the gate lets through).
+func normalizeQAResultStatus(res string) string {
+	switch res {
+	case "pass", "pass_with_discrepancy":
+		return "passed"
+	case "fail", "failed":
+		return "failed"
+	case "blocked", "block":
+		return "blocked"
+	case "waived", "waiver":
+		return "waived"
+	case "unexecuted", "not_verified", "not_run":
+		return "unexecuted"
+	case "skipped", "skip":
+		return "skipped"
+	default:
+		return res
+	}
 }
 
 // enforceQASignoffMatrixGate is the shared C1 choke point for the qa_signoff
