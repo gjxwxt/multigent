@@ -162,6 +162,11 @@ func (s *FSStore) PersistTask(project, agent string, t *entity.Task) error {
 		return fmt.Errorf("task %q not found", t.ID)
 	}
 	if !t.Status.IsTerminal() {
+		// Restoring an archived task back into the active queue must drop the
+		// stale ArchivedAt stamp, or ListTasks keeps hiding the task from the
+		// scheduler, CLI and UI even though it sits in tasks.yaml (ghost
+		// archive, 2026-09-29).
+		clearArchivedAtForRestore(t)
 		restored := append([]*entity.Task{}, archived[:foundIndex]...)
 		restored = append(restored, archived[foundIndex+1:]...)
 		if err := s.OverwriteArchive(project, agent, restored); err != nil {

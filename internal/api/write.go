@@ -1161,6 +1161,16 @@ func (s *Server) handlePutUpdateTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		status := entity.TaskStatus(st)
+		// Reopening a terminal task (done_success/done_failed/cancelled →
+		// pending/in_progress/...) must drop the archive stamp the terminal
+		// transition set: ListTasks hides every ArchivedAt record, so without
+		// this the "restored" task stayed invisible everywhere (ghost archive,
+		// 2026-09-29). The taskstore persistence paths clear it too; this
+		// guards any caller that persists the patched task through a narrower
+		// write.
+		if !status.IsTerminal() && t.Status.IsTerminal() {
+			t.ArchivedAt = nil
+		}
 		patch.Status = &status
 	}
 	if body.Priority != nil {
