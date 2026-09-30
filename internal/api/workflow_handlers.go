@@ -784,25 +784,48 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 		if !deliveryPrepared && workflowstore.PullRequestReviewStepMatches(currentStep, defVersion) {
 			return taskWorkflowResponse{}, http.StatusConflict, errors.New("terminal pull request review completed without delivery preparation")
 		}
+		// S2 v2 seam fix (parity with the runtime completion path): a BRANCH
+		// completion's join gate (completeRuntimeWorkflowBranch →
+		// checkBranchQAGate) measures this task's delivery worktree against
+		// its capture-time baseline ON DISK, so the worktree must survive
+		// until AFTER the join. Branch cleanup therefore runs once the join
+		// has accepted the delivery (below); linear tasks keep the immediate
+		// snapshot+cleanup ordering.
+		isBranchCompletion := strings.TrimSpace(t.Vars[workflowBranchIDVar]) != ""
 		snapshotErr := s.captureTaskCompletionSnapshot(t)
 		s.syncTaskCompletionRemote(project, t)
 		if snapshotErr != nil {
 			// Keep the worktree and preview alive: the snapshot holds the
 			// only copy of unpushed work, so cleanup must not run.
-		} else {
+		} else if !isBranchCompletion {
 			s.cleanupTaskDeliveryArtifacts(project, taskID)
 		}
 		if err := s.ts.PersistTask(project, agent, t); err != nil {
 			return taskWorkflowResponse{}, http.StatusInternalServerError, err
 		}
-		if strings.TrimSpace(t.Vars[workflowBranchIDVar]) != "" {
+		if isBranchCompletion {
 			branchResult, err := s.completeRuntimeWorkflowBranch(workspaceID, project, t, outputs, "completed")
 			if err != nil {
+				// Rejection-visibility contract (review round 4 P0-1, same
+				// as the runtime branch completion path): the task was
+				// already persisted as done_success, but the reason the
+				// stage did not advance must still land on the record — the
+				// manual-start redrive keys on the parked parent run, and
+				// the operator needs the deterministic gate message.
+				t.LastError = err.Error()
+				t.UpdatedAt = time.Now().UTC()
+				if pErr := s.ts.PersistTask(project, agent, t); pErr != nil {
+					log.Printf("[workflow] branch %s: persist rejection reason failed: %v", t.ID, pErr)
+				}
 				return taskWorkflowResponse{}, http.StatusBadRequest, err
 			}
 			if err := s.advanceParentAfterBranchCompletion(workspaceID, project, branchResult, r); err != nil {
 				return taskWorkflowResponse{}, workflowAdvanceStatus(err), err
 			}
+			// Join succeeded: the branch delivery is accepted, so the
+			// worktree can now be retired (same contract as the runtime
+			// path, just ordered after the gate that measures it).
+			s.cleanupTaskDeliveryArtifacts(project, taskID)
 		}
 	} else if err := s.activateNextWorkflowStep(workspaceID, project, agent, t, transition, r); err != nil {
 		return taskWorkflowResponse{}, workflowAdvanceStatus(err), err
