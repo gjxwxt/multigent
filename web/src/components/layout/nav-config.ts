@@ -13,6 +13,7 @@ import {
   LayoutDashboard,
   ListTodo,
   Milestone,
+  Radar,
   MessageSquare,
   Puzzle,
   Settings,
@@ -30,6 +31,7 @@ export type NavKey =
   | 'agents'
   | 'schedule'
   | 'runs'
+  | 'observability'
   | 'teams'
   | 'projects'
   | 'workflows'
@@ -75,6 +77,7 @@ export const workspaceNav: NavItem[] = [
   { to: '/agents', navKey: 'agents', icon: Bot, activePrefix: '/agents', adminOnly: true },
   { to: '/schedule', navKey: 'schedule', icon: Clock3, activePrefix: '/schedule', adminOnly: true },
   { to: '/runs', navKey: 'runs', icon: BarChart3, activePrefix: '/runs', adminOnly: true },
+  { to: '/observability', navKey: 'observability', icon: Radar, activePrefix: '/observability', adminOnly: true },
   { to: '/workflows', navKey: 'workflows', icon: GitBranch, activePrefix: '/workflows' },
   { to: '/playbooks', navKey: 'playbooks', icon: LibraryBig, activePrefix: '/playbooks', adminOnly: true },
   { to: '/goals', navKey: 'goals', icon: Target, activePrefix: '/goals' },
@@ -107,6 +110,7 @@ export function navKeyFromPath(pathname: string): NavKey {
     agents: 'agents',
     schedule: 'schedule',
     runs: 'runs',
+    observability: 'observability',
     teams: 'teams',
     projects: 'projects',
     workflows: 'workflows',
