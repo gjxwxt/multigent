@@ -979,9 +979,21 @@ func deliveryContractSection(task *entity.Task) string {
 		if branch == "" {
 			branch = "<your branch>"
 		}
-		fmt.Fprintf(&b, "- **Push**: branch `%s` must exist on `origin` with its REMOTE SHA EQUAL to your local HEAD SHA.\n", branch)
-		b.WriteString("  Committing without pushing fails the gate; so does a stale remote. Verify with\n")
-		fmt.Fprintf(&b, "  `git rev-parse HEAD` vs `git ls-remote origin %s` before reporting done.\n", branch)
+		if worktreeDir := strings.TrimSpace(task.WorktreeDir); worktreeDir != "" && originEvidenceForDir(worktreeDir) != originBound {
+			// No-remote mode (B1, 2026-09-29): the project has no usable
+			// origin. The old unconditional push instruction is what forced
+			// agents to `git init --bare` fake origins under .multigent/ to
+			// satisfy the evidence gate. Spell the honest contract instead:
+			// local commits satisfy it, fabricating a remote violates it.
+			fmt.Fprintf(&b, "- **Git delivery (no remote)**: this project has NO remote configured. Do **not** push, and do **not**\n")
+			b.WriteString("  create a remote (no `git init --bare`, no `git remote add/set-url`) — a self-created origin is\n")
+			fmt.Fprintf(&b, "  fabricated evidence and fails the gate. Commit your work on branch `%s`; the platform\n", branch)
+			b.WriteString("  verifies the local branch tip against the frozen base.\n")
+		} else {
+			fmt.Fprintf(&b, "- **Push**: branch `%s` must exist on `origin` with its REMOTE SHA EQUAL to your local HEAD SHA.\n", branch)
+			b.WriteString("  Committing without pushing fails the gate; so does a stale remote. Verify with\n")
+			fmt.Fprintf(&b, "  `git rev-parse HEAD` vs `git ls-remote origin %s` before reporting done.\n", branch)
+		}
 	}
 	return b.String()
 }

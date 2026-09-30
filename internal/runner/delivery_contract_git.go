@@ -3,6 +3,7 @@ package runner
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -20,6 +21,68 @@ type PushEvidence struct {
 	LocalSHA        string
 }
 
+// originEvidenceMode classifies the worktree's `origin` remote for the push
+// evidence check.
+//
+//	originBound       — a real (non-local) remote exists; the SHA-accurate
+//	                    ls-remote comparison applies unchanged.
+//	originLocalFabric — origin points INSIDE the workspace's .multigent/ tree
+//	                    (e.g. a bare repo the agent created at
+//	                    /workspace/.multigent/origin-<x>.git to satisfy the
+//	                    old push gate). A remote the run itself authored is
+//	                    not independent delivery evidence — treating it as
+//	                    one is exactly the fabrication the gate exists to
+//	                    prevent — so it is downgraded to no-remote mode.
+//	originAbsent      — no origin URL configured: the project has no remote,
+//	                    and push evidence is unprovable by definition.
+type originEvidenceMode int
+
+const (
+	originBound originEvidenceMode = iota
+	originLocalFabric
+	originAbsent
+)
+
+// originEvidenceForDir resolves the origin URL read-only from repo config
+// (no network, no fetch) and classifies it. Any read error means "cannot
+// prove an origin" — the caller then behaves as originAbsent, which for a
+// RequirePush contract surfaces a clear violation instead of a fabricated
+// remote check.
+func originEvidenceForDir(dir string) originEvidenceMode {
+	out, err := exec.Command("git", "-C", dir, "remote", "get-url", "origin").Output()
+	if err != nil {
+		return originAbsent
+	}
+	url := strings.TrimSpace(string(out))
+	if url == "" {
+		return originAbsent
+	}
+	return classifyOriginURL(url)
+}
+
+// classifyOriginURL reports originLocalFabric for any spelling of a path
+// inside a .multigent/ directory — the platform-managed runtime tree. Both
+// POSIX (file:///x/.multigent/origin.git, /x/.multigent/origin.git) and
+// scp-like (/x/.multigent:y.git cannot occur but the separator split keeps
+// the check path-separator agnostic) spellings are covered; http(s) URLs
+// never carry a .multigent path segment in legitimate deployments and fall
+// through to originBound.
+func classifyOriginURL(url string) originEvidenceMode {
+	candidate := url
+	// file:// URLs and plain paths share the filesystem namespace; scp-like
+	// (host:path) remotes are real network remotes in every deployment shape
+	// the platform provisions, so only strip an explicit file:// scheme.
+	candidate = strings.TrimPrefix(candidate, "file://")
+	for _, segment := range strings.FieldsFunc(candidate, func(r rune) bool {
+		return r == '/' || r == filepath.Separator
+	}) {
+		if segment == ".multigent" {
+			return originLocalFabric
+		}
+	}
+	return originBound
+}
+
 // gitDeliveryEvidence reports delivery evidence for the run workspace.
 // baseRef is the FROZEN base (task.BaseCommit when set, else the base
 // branch name — resolved by the caller); commit evidence counts commits on
@@ -33,6 +96,16 @@ type PushEvidence struct {
 // guarantee (unresolvable base = error, never a silent success). Read-only and local: every git invocation
 // is `git -C dir`, no fetch, no push; failures return an error for the
 // caller to surface (unprovable is not delivered).
+//
+// No-remote mode (B1, 2026-09-29): when the workspace has no usable origin
+// (none configured, or one pointing inside .multigent/ — a bare repo the
+// agent authored to fake the old push gate), the ls-remote comparison is
+// SKIPPED and the local branch tip is returned as the proven evidence pair
+// (RemoteSHA == LocalSHA == verified refs/heads/<branch>). The local tip is
+// machine-verified by rev-parse, so the delivery SHA hand-off still carries
+// a platform-proven anchor; what changes is only that a project without a
+// remote can deliver on local evidence instead of being forced to invent
+// one.
 func gitDeliveryEvidence(dir, baseRef, branchName string, env []string) (commitBeyondBase bool, push PushEvidence, err error) {
 	base := strings.TrimSpace(baseRef)
 	if base == "" {
@@ -62,6 +135,13 @@ func gitDeliveryEvidence(dir, baseRef, branchName string, env []string) (commitB
 		return commitBeyondBase, PushEvidence{}, fmt.Errorf("git rev-parse refs/heads/%s: %v: %s", branch, err, strings.TrimSpace(string(localOut)))
 	}
 	push.LocalSHA = strings.TrimSpace(string(localOut))
+	if originEvidenceForDir(dir) != originBound {
+		// No-remote mode: the local tip IS the evidence. Mark the remote side
+		// proven so callers that surface RemoteSHA see the verified pair; the
+		// RemoteHasBranch flag stays honest (there is no remote branch).
+		push.RemoteSHA = push.LocalSHA
+		return commitBeyondBase, push, nil
+	}
 	lsRemote := exec.Command("git", "-C", dir, "ls-remote", "--heads", "origin", branch)
 	// Round 6 (D-D): the API-side gate runs on the console host, where the
 	// credentials-not-on-disk invariant means no git credential helper is
