@@ -67,10 +67,24 @@ func (s *DBStore) GetTask(project, agent, id string) (*entity.Task, error) {
 	return nil, errs.NotFound("task", id)
 }
 
+// clearArchivedAtForRestore implements the reopen semantics shared by both
+// store backends: a task persisted with a non-terminal status is by definition
+// back in the active queue, so a leftover ArchivedAt stamp (set when the task
+// reached its previous terminal state) must be dropped. Leaving it in place
+// made ListTasks — which hides every t.ArchivedAt != nil record — keep the
+// restored task invisible from the scheduler, the CLI and the UI alike with no
+// error anywhere (ghost archive, 2026-09-29).
+func clearArchivedAtForRestore(t *entity.Task) {
+	if t != nil && !t.Status.IsTerminal() {
+		t.ArchivedAt = nil
+	}
+}
+
 func (s *DBStore) UpdateTask(project, agent string, t *entity.Task) error {
 	if _, err := s.GetTask(project, agent, t.ID); err != nil {
 		return err
 	}
+	clearArchivedAtForRestore(t)
 	t.UpdatedAt = time.Now().UTC()
 	key, err := s.taskStorageAgent(project, agent, t.ID)
 	if err != nil {
@@ -83,6 +97,7 @@ func (s *DBStore) PersistTask(project, agent string, t *entity.Task) error {
 	if _, err := s.GetTask(project, agent, t.ID); err != nil {
 		return err
 	}
+	clearArchivedAtForRestore(t)
 	key, err := s.taskStorageAgent(project, agent, t.ID)
 	if err != nil {
 		return err

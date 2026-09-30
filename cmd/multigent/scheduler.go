@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -18,10 +19,12 @@ import (
 	"time"
 
 	"github.com/multigent/multigent/internal/agentdir"
+	"github.com/multigent/multigent/internal/assets"
 	"github.com/multigent/multigent/internal/attention"
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/runner"
+	"github.com/multigent/multigent/internal/secretbox"
 	"github.com/multigent/multigent/internal/store"
 	"github.com/multigent/multigent/internal/taskstore"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
@@ -820,9 +823,7 @@ func runHeartbeatLoop(ctx context.Context, root, project, agentName string,
 
 		// Mark as running.
 		now := time.Now().UTC()
-		hb.LastWakeup = &now
-		hb.LastWakeupStatus = "running"
-		hb.PID = os.Getpid()
+		markHeartbeatCycleRunning(hb, now)
 		_ = saveSchedulerHeartbeat(root, project, agentName, ts, hb)
 
 		// Increment wake count (resets each day).
@@ -867,6 +868,7 @@ func runHeartbeatLoop(ctx context.Context, root, project, agentName string,
 			if hb != nil {
 				hb.LastWakeupStatus = "failed"
 				hb.PID = 0
+				hb.RunStartedAt = nil
 				hb.LastCycleDuration = dur.String()
 			}
 		} else {
@@ -875,6 +877,7 @@ func runHeartbeatLoop(ctx context.Context, root, project, agentName string,
 			if hb != nil {
 				hb.LastWakeupStatus = "done"
 				hb.PID = 0
+				hb.RunStartedAt = nil
 				hb.LastCycleDuration = dur.String()
 			}
 		}
@@ -1082,6 +1085,11 @@ func runAllPendingTasks(ctx context.Context, root, project, agentName string,
 					if attentionTargetProj != "" {
 						wakeupTask.Vars["MULTIGENT_WAKEUP_PROJECT"] = attentionTargetProj
 					}
+					// Asset staging resolves bindings by task ID, so the target
+					// task's project documents must be re-bound onto this
+					// wakeup task's own ID or the run starts with no assets
+					// mount and the agent cannot read its requirement docs.
+					schedulerAttentionTargetProjectDir(root, attentionTargetProj, attentionTargetTaskID, wakeupTask.ID)
 				}
 				// Persist before running so `task confirm-request --id $TASK_ID` works.
 				if addErr := ts.AddTask(project, agentName, wakeupTask); addErr != nil {
@@ -1863,6 +1871,75 @@ func schedulerAttentionTrust(signal controldb.AttentionSignal) map[string]any {
 	return trust
 }
 
+// schedulerAttentionTargetProjectDir binds the attention target task's project
+// asset files onto a synthetic wakeup task. The wakeup task gets a fresh
+// synthetic ID, and asset staging resolves attachments by task ID — without
+// this copy the attention run starts with no /mnt/multigent/assets mount and
+// the agent cannot read the requirement docs the target task was created with
+// (t-20260929-lwi06q). Deliverable-role rows are skipped: they are outputs an
+// agent published back into the project library, not inputs for the next run.
+// Best-effort with a warning log: a binding copy failure degrades the run's
+// context but must not cancel the attention wakeup itself.
+func schedulerAttentionTargetProjectDir(root, targetProject, targetTaskID, wakeupTaskID string) {
+	if strings.TrimSpace(targetTaskID) == "" || strings.TrimSpace(wakeupTaskID) == "" {
+		return
+	}
+	db, err := openControlDBForRoot(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: attention wakeup assets: open control db: %v\n", err)
+		return
+	}
+	defer db.Close()
+	atts, err := db.ListAssetAttachmentsForTask(targetTaskID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: attention wakeup assets: list attachments for %s: %v\n", targetTaskID, err)
+		return
+	}
+	// The wakeup task is reused across scheduler retries, so the copy must be
+	// idempotent per (wakeup task, file): skip files already bound to it.
+	existing, err := db.ListAssetAttachmentsForTask(wakeupTaskID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: attention wakeup assets: list attachments for %s: %v\n", wakeupTaskID, err)
+		return
+	}
+	boundFiles := make(map[string]bool, len(existing))
+	for _, att := range existing {
+		boundFiles[att.FileID] = true
+	}
+	inputs := make([]*controldb.AssetAttachment, 0, len(atts))
+	seenFiles := map[string]bool{}
+	for i := range atts {
+		att := atts[i]
+		if att.Role == controldb.AssetRoleDeliverable || seenFiles[att.FileID] || boundFiles[att.FileID] {
+			continue
+		}
+		seenFiles[att.FileID] = true
+		inputs = append(inputs, &controldb.AssetAttachment{
+			FileID:    att.FileID,
+			Sha256:    att.Sha256,
+			ProjectID: att.ProjectID,
+			TaskID:    wakeupTaskID,
+			Role:      att.Role,
+			Required:  att.Required,
+			AddedBy:   "scheduler:wakeup",
+		})
+	}
+	if len(inputs) == 0 {
+		return
+	}
+	if len(inputs) > assets.MaxTaskAttachments {
+		inputs = inputs[:assets.MaxTaskAttachments]
+		fmt.Fprintf(os.Stderr, "warning: attention wakeup assets: target %s carries more than %d bindings; staging the first %d\n",
+			targetTaskID, assets.MaxTaskAttachments, len(inputs))
+	}
+	for _, input := range inputs {
+		if err := db.InsertAssetAttachment(input); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: attention wakeup assets: bind %s (%s) onto %s: %v\n",
+				input.FileID, input.Role, wakeupTaskID, err)
+		}
+	}
+}
+
 func markAttentionSignalsSeen(root string, ids []string) {
 	if len(ids) == 0 {
 		return
@@ -2228,9 +2305,27 @@ func runCronOnlyLoop(ctx context.Context, root, project, agentName string,
 	}
 }
 
-// isAlreadyRunning checks whether the PID recorded in heartbeat is still alive.
+// schedulerCycleLivenessGrace extends the busy window past the configured
+// cycle cap. A cycle that just exceeded max_cycle_duration is still finishing
+// its final task; the grace period keeps the heuristic busy for that tail
+// while the interaction lease remains the authoritative mutual exclusion.
+const schedulerCycleLivenessGrace = 15 * time.Minute
+
+// isAlreadyRunning reports whether a scheduler cycle has recent evidence of
+// actually being in flight. hb.PID names the scheduler-loop process, which on
+// a resident systemd scheduler is alive for the daemon's entire uptime — PID
+// liveness alone would permanently refuse every manual/autostart wakeup. The
+// in-flight evidence is the run start timestamp (RunStartedAt, falling back
+// to LastWakeup for heartbeats written before the field existed): a "running"
+// status with a live PID but no fresh start timestamp is a stale flag from a
+// crashed predecessor, and must not block. Concurrent exclusion itself is
+// owned by the interaction lease acquired inside runAllPendingTasks.
 func isAlreadyRunning(hb *entity.HeartbeatConfig) bool {
-	if hb.PID <= 0 || hb.LastWakeupStatus != "running" {
+	return isAlreadyRunningAt(time.Now(), hb)
+}
+
+func isAlreadyRunningAt(now time.Time, hb *entity.HeartbeatConfig) bool {
+	if hb == nil || hb.PID <= 0 || hb.LastWakeupStatus != "running" {
 		return false
 	}
 	proc, err := os.FindProcess(hb.PID)
@@ -2238,8 +2333,51 @@ func isAlreadyRunning(hb *entity.HeartbeatConfig) bool {
 		return false
 	}
 	// On Unix, FindProcess always succeeds; signal 0 checks liveness.
-	err = proc.Signal(syscall.Signal(0))
-	return err == nil
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		return false
+	}
+	started := hb.RunStartedAt
+	if started == nil || started.IsZero() {
+		started = hb.LastWakeup
+	}
+	if started == nil || started.IsZero() {
+		// No in-flight evidence at all: a stale "running" flag. Treat the
+		// cycle as dead instead of blocking wakeups forever.
+		return false
+	}
+	window := schedulerCycleLivenessGrace
+	if hb.MaxCycleDuration != "" {
+		if parsed, err := time.ParseDuration(hb.MaxCycleDuration); err == nil && parsed > 0 {
+			window = parsed + schedulerCycleLivenessGrace
+		}
+	}
+	return now.Sub(started.Local()) <= window
+}
+
+// markHeartbeatCycleRunning stamps the heartbeat with in-flight evidence for
+// the busy check. Every writer that flips LastWakeupStatus to "running" must
+// set RunStartedAt in the same save, or a resident scheduler's eternal PID
+// resurrects the permanent-wakeup-refusal bug.
+func markHeartbeatCycleRunning(hb *entity.HeartbeatConfig, now time.Time) {
+	if hb == nil {
+		return
+	}
+	stamped := now.UTC()
+	hb.LastWakeup = &stamped
+	hb.RunStartedAt = &stamped
+	hb.LastWakeupStatus = "running"
+	hb.PID = os.Getpid()
+}
+
+// clearHeartbeatCycleRunning drops the in-flight evidence once the cycle
+// settles into a terminal status. RunStartedAt is cleared alongside so the
+// next "running" stamp always starts from a fresh window.
+func clearHeartbeatCycleRunning(hb *entity.HeartbeatConfig) {
+	if hb == nil {
+		return
+	}
+	hb.PID = 0
+	hb.RunStartedAt = nil
 }
 
 // ── active-window helpers ─────────────────────────────────────────────────────
@@ -2603,6 +2741,84 @@ func checkWakeupCondition(condition, agentWorkDir, agencyDir, project, agentName
 	return err == nil, output
 }
 
+// wakeupCredentialPreflightError reports why a local wakeup cycle would burn
+// every task it touches: the runner materialises provider credentials at run
+// start, and a sealed credential (env-v1 model-provider API key or env-v1
+// connection secret) cannot be opened without MULTIGENT_CONNECTION_ENCRYPTION_KEY.
+// When that key is missing from the environment (e.g. the manual shell of a
+// systemd deployment where only the unit file carries it), the first run fails
+// with "materialize provider credentials" and the scheduler marks the in-flight
+// task done_failed. Checking BEFORE any task state changes turns that into a
+// clean refusal. Scans every workspace: waking an agent only needs ONE
+// undecryptable credential to ruin the cycle.
+func wakeupCredentialPreflightError(root string, db controldb.Store) error {
+	if db == nil || strings.TrimSpace(os.Getenv(secretbox.EnvKey)) != "" {
+		return nil
+	}
+	needsKey := false
+	if workspaceID, err := schedulerWorkspaceID(root, db); err == nil && workspaceID != "" {
+		providers, err := db.ListModelProviders(workspaceID)
+		if err == nil {
+			for _, p := range providers {
+				if secretboxEnvelopeNeedsKey(p.APIKey) {
+					needsKey = true
+					break
+				}
+			}
+		}
+	}
+	if !needsKey {
+		connections, err := db.ListConnections(controldb.ConnectionFilter{})
+		if err == nil {
+			for _, c := range connections {
+				secret, ok, err := db.ConnectionSecret(c.ID)
+				if err != nil || !ok {
+					continue
+				}
+				if secret.KeyVersion == "env-v1" || secret.KeyVersion == "env-v1-strict" {
+					needsKey = true
+					break
+				}
+			}
+		}
+	}
+	if !needsKey {
+		return nil
+	}
+	return fmt.Errorf("%s is not set in this environment, but configured model providers or connections store encrypted credentials (env-v1) that the runner must decrypt to materialize provider credentials; every task run would fail and be marked done_failed. Run the wakeup from an environment carrying the key (e.g. the systemd unit environment) — no task state was modified",
+		secretbox.EnvKey)
+}
+
+// secretboxEnvelopeNeedsKey reports whether the stored model-provider API key
+// is a sealed envelope that requires MULTIGENT_CONNECTION_ENCRYPTION_KEY to
+// open (internal/secretbox versions env-v1 / env-v1-strict).
+func secretboxEnvelopeNeedsKey(sealed string) bool {
+	version := secretboxEnvelopeVersionLocal(sealed)
+	return version == "env-v1" || version == "env-v1-strict"
+}
+
+func secretboxEnvelopeVersionLocal(value string) string {
+	const prefix = "sealed:"
+	v := strings.TrimSpace(value)
+	if !strings.HasPrefix(v, prefix) {
+		return "raw"
+	}
+	rawBox, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(v, prefix))
+	if err != nil {
+		return "unknown"
+	}
+	var box struct {
+		KeyVersion string `json:"keyVersion"`
+	}
+	if err := json.Unmarshal(rawBox, &box); err != nil {
+		return "unknown"
+	}
+	if strings.TrimSpace(box.KeyVersion) == "" {
+		return "plain-dev"
+	}
+	return box.KeyVersion
+}
+
 // ── scheduler wakeup ──────────────────────────────────────────────────────────
 
 func newSchedulerWakeupCmd() *cobra.Command {
@@ -2656,17 +2872,32 @@ useful for testing and for agent-to-agent wakeup from inside a task.`,
 				)
 			}
 
+			// Preflight credential materializability BEFORE any state changes:
+			// without the connection encryption key the runner fails at
+			// "materialize provider credentials" and the cycle would mark the
+			// in-flight tasks done_failed (systemd deployments carry the key
+			// only inside the unit environment).
+			preflightDB, preflightErr := openControlDBForRoot(root)
+			if preflightErr != nil {
+				return fmt.Errorf("wakeup preflight: open control db: %w", preflightErr)
+			}
+			if err := wakeupCredentialPreflightError(root, preflightDB); err != nil {
+				preflightDB.Close()
+				return err
+			}
+			preflightDB.Close()
+
 			// Mark running so the scheduler loop (if active) skips this cycle.
-			now := time.Now().UTC()
-			hb.LastWakeup = &now
-			hb.LastWakeupStatus = "running"
-			hb.PID = os.Getpid()
+			// RunStartedAt carries the in-flight evidence the busy check needs:
+			// a resident scheduler's PID is alive whenever the daemon runs, so
+			// without a fresh start timestamp no wakeup could ever pass.
+			markHeartbeatCycleRunning(hb, time.Now().UTC())
 			_ = saveSchedulerHeartbeat(root, project, agentName, ts, hb)
 
 			// Ensure cleanup even on panic so status doesn't stay "running" forever.
 			defer func() {
 				if latest, err := loadSchedulerHeartbeat(root, project, agentName, ts); err == nil && latest.LastWakeupStatus == "running" {
-					latest.PID = 0
+					clearHeartbeatCycleRunning(latest)
 					if runCtx.Err() != nil {
 						latest.LastWakeupStatus = "interrupted"
 					} else {
@@ -2690,7 +2921,7 @@ useful for testing and for agent-to-agent wakeup from inside a task.`,
 			if err == nil && reloaded != nil {
 				hb = reloaded
 			}
-			hb.PID = 0
+			clearHeartbeatCycleRunning(hb)
 			if runCtx.Err() != nil {
 				hb.LastWakeupStatus = "interrupted"
 				_ = saveSchedulerHeartbeat(root, project, agentName, ts, hb)
