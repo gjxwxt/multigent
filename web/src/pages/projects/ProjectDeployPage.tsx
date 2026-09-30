@@ -169,11 +169,12 @@ export default function ProjectDeployPage() {
     setSelectedSha(b?.commitId ?? '')
   }
 
+  // Span 契约：commitSpan 是 [基线 SHA, 目标 SHA] 两元素（基线=上次成功部署），
+  // 不是逐 commit 清单；部署区间真正的 commit 明细后续从 GitLab compare 接口补。
   const pendingSpan = useMemo<CommitSpanEntry[]>(() => {
     if (inflight) return inflight.commitSpan ?? []
-    if (selectedSha && lastDeployed && selectedSha !== lastDeployed.sha) return []
     return []
-  }, [inflight, selectedSha, lastDeployed])
+  }, [inflight])
 
   async function createRequest(approvalRequired: boolean) {
     if (!projectId || !branch || !selectedSha) return
