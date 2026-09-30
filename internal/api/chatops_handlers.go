@@ -737,9 +737,16 @@ func (s *Server) handleDeployApprovalChatopsAction(w http.ResponseWriter, r *htt
 	// validateWorkflowDecisionReviewer path does not apply. Require the
 	// verified Mattermost user (done by the caller) plus a platform identity
 	// binding (resolved by the caller) and the deploy-side operator role.
-	if !s.chatopsDeployOperatorAllowed(tokenData.WorkspaceID, tokenData.ProjectID, platformUserID) {
+	// RBAC on the request's own project, with a cross-check against the
+	// signed token's project claim — the two must agree before any CAS.
+	if req.ProjectID != tokenData.ProjectID {
+		*stage = "deploy_project_mismatch"
+		writeMattermostActionError(w, "安全拦截：审批令牌与部署单项目不一致。")
+		return
+	}
+	if !s.chatopsDeployOperatorAllowed(tokenData.WorkspaceID, req.ProjectID, platformUserID) {
 		*stage = "deploy_operator_forbidden"
-		writeMattermostActionError(w, fmt.Sprintf("权限不足：您没有项目 %s 的部署审批权限 (operator required)。", tokenData.ProjectID))
+		writeMattermostActionError(w, fmt.Sprintf("权限不足：您没有项目 %s 的部署审批权限 (operator required)。", req.ProjectID))
 		return
 	}
 
@@ -752,6 +759,15 @@ func (s *Server) handleDeployApprovalChatopsAction(w http.ResponseWriter, r *htt
 				*stage = "deploy_already_processed"
 				writeMattermostActionError(w, "⏳ 409 Conflict：该部署单已被处理，请勿重复操作。")
 				return
+			}
+			// Approve CAS committed but the pipeline trigger failed: the
+			// approval stands; tell the approver the trigger failed so the
+			// card never claims success it does not know happened.
+			var tf *deployTriggerFailure
+			if errors.As(err, &tf) {
+				*stage = "deploy_trigger_failed"
+				statusText = fmt.Sprintf("⚠️ 已批准 (approved)：由 %s 于 %s 批准，但流水线触发失败：%v。请在部署页查看台账并重新触发。", platformUserID, time.Now().Format("15:04"), tf.err)
+				break
 			}
 			*stage = "deploy_approve_failed"
 			writeMattermostActionError(w, "批准部署单失败："+err.Error())

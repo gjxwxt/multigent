@@ -353,16 +353,25 @@ const deployHostEnv = "MULTIGENT_DEPLOY_HOST"
 // consoleURLEnv overrides the console address handed to the CI deploy gate.
 const consoleURLEnv = "MULTIGENT_CONSOLE_URL"
 
-// consoleReachableURL builds the console base URL the CI job calls back to.
-// MULTIGENT_CONSOLE_URL wins; otherwise scheme http + request Host (the
-// server is the console in local deployments).
+// consoleReachableURL builds the console base URL the CI deploy job calls
+// back to. MULTIGENT_CONSOLE_URL wins; next MULTIGENT_API_URL (set at startup
+// from the real listen address — reachable from CI containers on the same
+// host); last resort the request Host. The chatops path calls this with a
+// synthetic request whose Host is not resolvable by CI containers, so the
+// request Host is deliberately the last fallback, not the primary.
 func (s *Server) consoleReachableURL(r *http.Request) string {
 	if raw := strings.TrimSpace(os.Getenv(consoleURLEnv)); raw != "" {
 		return strings.TrimRight(raw, "/")
 	}
+	if raw := strings.TrimSpace(os.Getenv("MULTIGENT_API_URL")); raw != "" {
+		return strings.TrimRight(raw, "/")
+	}
 	scheme := "http"
-	if r.TLS != nil {
+	if r != nil && r.TLS != nil {
 		scheme = "https"
+	}
+	if r == nil {
+		return "http://127.0.0.1:27892"
 	}
 	return scheme + "://" + r.Host
 }
@@ -480,8 +489,15 @@ func (s *Server) handleApproveDeployRequest(w http.ResponseWriter, r *http.Reque
 		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "deploy request is not pending approval")
 		return
 	}
-	if _, err := s.controlDB.UpdateDeployRequestStatus(workspaceID, req.ID, "pending_approval", "approved"); err != nil {
+	moved, err := s.controlDB.UpdateDeployRequestStatus(workspaceID, req.ID, "pending_approval", "approved")
+	if err != nil {
 		s.serverError(w, fmt.Errorf("approve deploy request: %w", err))
+		return
+	}
+	if !moved {
+		// Lost a race with another approver (REST or chatops) or a cancel —
+		// never continue to the trigger on an unowned transition.
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "deploy request is not pending approval")
 		return
 	}
 	approved, _, err := s.controlDB.DeployRequestFor(workspaceID, req.ID)
@@ -508,8 +524,18 @@ func (s *Server) handleApproveDeployRequest(w http.ResponseWriter, r *http.Reque
 // bounded watcher. Written so both the explicit trigger endpoint (after its
 // own CAS) and the approve endpoint (after its CAS) share one code path.
 func (s *Server) triggerDeployPipelineNow(w http.ResponseWriter, r *http.Request, project, workspaceID string, req *controldb.DeployRequest) {
-	if _, err := s.controlDB.UpdateDeployRequestStatus(workspaceID, req.ID, "approved", "deploying"); err != nil {
+	moved, err := s.controlDB.UpdateDeployRequestStatus(workspaceID, req.ID, "approved", "deploying")
+	if err != nil {
 		s.serverError(w, fmt.Errorf("mark deploy request deploying: %w", err))
+		return
+	}
+	if !moved {
+		// Another approver/trigger got here first, or the request was
+		// cancelled between the precheck and this CAS. Refuse: firing a
+		// second pipeline (or deploying a cancelled request) is exactly the
+		// race the CAS exists to prevent.
+		log.Printf("[deploy] %s: trigger lost CAS approved→deploying (current status changed); refusing", req.ID)
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "deploy request is no longer approved")
 		return
 	}
 	req.Status = "deploying"

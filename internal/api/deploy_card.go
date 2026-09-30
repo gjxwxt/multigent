@@ -292,11 +292,23 @@ func (s *Server) approveDeployRequestFromChatops(ctx context.Context, req *contr
 	if s.deployTriggerHook != nil {
 		if err := s.deployTriggerHook(ctx, req, actorUsername); err != nil {
 			log.Printf("[deploy-card] trigger hook for %s failed: %v", req.ID, err)
-			return fmt.Errorf("trigger deploy pipeline: %w", err)
+			// Distinguish "approved but trigger failed" from "approve failed":
+			// the CAS already committed, so the caller must not report the
+			// approval itself as lost.
+			return &deployTriggerFailure{err: err}
 		}
 	}
 	return nil
 }
+
+// deployTriggerFailure marks a chatops approval whose CAS committed but whose
+// pipeline trigger failed — the approval stands, only the trigger failed.
+type deployTriggerFailure struct {
+	err error
+}
+
+func (e *deployTriggerFailure) Error() string { return "trigger deploy pipeline: " + e.err.Error() }
+func (e *deployTriggerFailure) Unwrap() error { return e.err }
 
 // rejectDeployRequestFromChatops moves a deploy request to rejected on a
 // verified Mattermost reject click. CAS-only; terminal state.
@@ -331,17 +343,23 @@ var errDeployRequestAlreadyProcessed = errors.New("该部署单已被处理 (dep
 // approve path and the REST endpoint stay on one code path. The Server field
 // deployTriggerHook is the seam: batch wiring assigns it after construction
 // (nil = no-op, best-effort), and tests inject a stub there.
+//
+// The trigger outcome is reported honestly: a non-2xx from the shared body
+// (binding missing, GitLab trigger failure, lost CAS) surfaces as an error so
+// the caller can say "trigger failed" instead of "pipeline triggered".
 func (s *Server) triggerApprovedDeployRequest(ctx context.Context, req *controldb.DeployRequest, actorUsername string) error {
 	if req == nil {
 		return errors.New("deploy request is nil")
 	}
-	// The shared trigger body needs a request for audit attribution and the
-	// reachable console URL; a minimal synthetic request is enough because the
-	// chatops path never reads its body or query.
-	r := &http.Request{Host: "chatops.internal", Header: make(http.Header)}
-	r = r.WithContext(ctx)
+	// The shared trigger body needs a request for audit attribution only —
+	// consoleReachableURL resolves from MULTIGENT_CONSOLE_URL / the startup
+	// listen address, not from this synthetic request's Host.
+	r, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/internal", nil)
 	rec := &nopResponseWriter{}
 	s.triggerDeployPipelineNow(rec, r, req.ProjectID, req.WorkspaceID, req)
+	if rec.code >= 300 {
+		return fmt.Errorf("trigger deploy pipeline failed (http %d)", rec.code)
+	}
 	return nil
 }
 

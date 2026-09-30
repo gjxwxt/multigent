@@ -774,3 +774,125 @@ func TestHandleGetDeployBranchesProxy(t *testing.T) {
 }
 
 var _ = context.Background
+
+// Regression for the adversarial review P1-1: the trigger chain used to
+// discard the CAS boolean, so a cancelled request (or a second concurrent
+// approver) could still fire a pipeline. The CAS must be authoritative: a
+// lost approved→deploying transition refuses with 409 and never touches
+// GitLab.
+func TestDeployTriggerRefusesWhenCASLostCancelRace(t *testing.T) {
+	s, workspaceID, fake := newDeployHandlerTestServer(t)
+
+	req := controldb.DeployRequest{
+		ID: "dep-race-cancel", WorkspaceID: workspaceID, ProjectID: "sample",
+		Branch: "main", SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Status: "approved", CreatedBy: "owner", CreatedAt: nowUTCAPI(),
+	}
+	if err := s.controlDB.InsertDeployRequest(req); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Simulate the cancel racing ahead: approved → cancelled wins before the
+	// trigger handler runs.
+	if moved, err := s.controlDB.UpdateDeployRequestStatus(workspaceID, req.ID, "approved", "cancelled"); err != nil || !moved {
+		t.Fatalf("pre-cancel: moved=%v err=%v", moved, err)
+	}
+
+	rec := httptest.NewRecorder()
+	hreq := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/deploy/requests/dep-race-cancel/trigger", "owner", nil)
+	hreq.SetPathValue("name", "sample")
+	hreq.SetPathValue("id", req.ID)
+	s.handleTriggerDeployRequest(rec, hreq)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("trigger after cancel status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	fake.mu.Lock()
+	triggered := fake.triggerCount
+	fake.mu.Unlock()
+	if triggered != 0 {
+		t.Fatalf("pipeline fired %d times for a cancelled request", triggered)
+	}
+}
+
+// Regression for the adversarial review P1-1 (double trigger): when the
+// approved→deploying CAS loses (another actor already moved the row), the
+// shared trigger body must 409 and not sign a token or fire a pipeline.
+func TestDeployTriggerRefusesWhenCASLostDoubleTrigger(t *testing.T) {
+	s, workspaceID, fake := newDeployHandlerTestServer(t)
+
+	req := controldb.DeployRequest{
+		ID: "dep-race-double", WorkspaceID: workspaceID, ProjectID: "sample",
+		Branch: "main", SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Status: "approved", CreatedBy: "owner", CreatedAt: nowUTCAPI(),
+	}
+	if err := s.controlDB.InsertDeployRequest(req); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// First approver wins the approved→deploying CAS.
+	if moved, err := s.controlDB.UpdateDeployRequestStatus(workspaceID, req.ID, "approved", "deploying"); err != nil || !moved {
+		t.Fatalf("first trigger CAS: moved=%v err=%v", moved, err)
+	}
+
+	rec := httptest.NewRecorder()
+	hreq := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/deploy/requests/dep-race-double/trigger", "owner", nil)
+	hreq.SetPathValue("name", "sample")
+	hreq.SetPathValue("id", req.ID)
+	s.handleTriggerDeployRequest(rec, hreq)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("second trigger status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	fake.mu.Lock()
+	triggered := fake.triggerCount
+	fake.mu.Unlock()
+	if triggered != 0 {
+		t.Fatalf("second trigger fired a pipeline (count=%d)", triggered)
+	}
+}
+
+// Regression for the adversarial review P1-2: the chatops trigger path builds
+// the console URL without a real request; it must fall back to
+// MULTIGENT_API_URL (set from the real listen address) instead of the
+// synthetic "chatops.internal" Host.
+func TestConsoleReachableURLPrefersEnvOverSyntheticHost(t *testing.T) {
+	t.Setenv("MULTIGENT_API_URL", "http://192.168.139.231:27892")
+	s := &Server{}
+	r, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "/internal", nil)
+	got := s.consoleReachableURL(r)
+	if got != "http://192.168.139.231:27892" {
+		t.Fatalf("console URL = %q, want MULTIGENT_API_URL value", got)
+	}
+
+	t.Setenv("MULTIGENT_API_URL", "")
+	got = s.consoleReachableURL(r)
+	if got != "http://"+r.Host {
+		t.Fatalf("console URL = %q, want request host fallback %q", got, r.Host)
+	}
+}
+
+// Regression for the adversarial review P1-3: DeployRequest JSON keys must be
+// camelCase end-to-end — the console types declare createdBy/createdAt/
+// pipelineId/finishedAt and there is no key-transform layer in the web client.
+func TestDeployRequestJSONKeysAreCamelCase(t *testing.T) {
+	req := controldb.DeployRequest{
+		ID: "dep-json", WorkspaceID: "ws", ProjectID: "sample", Branch: "main",
+		SHA: "abc", Status: "approved", PipelineID: 42, CreatedBy: "owner",
+		CreatedAt: "2026-10-01T00:00:00Z",
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{"\"createdBy\"", "\"createdAt\"", "\"pipelineId\"", "\"projectId\"", "\"commitSpan\""} {
+		if !strings.Contains(string(b), key) {
+			t.Fatalf("json missing %s: %s", key, b)
+		}
+	}
+	for _, stale := range []string{"\"created_by\"", "\"created_at\"", "\"pipeline_id\"", "\"project_id\""} {
+		if strings.Contains(string(b), stale) {
+			t.Fatalf("json still has snake_case %s: %s", stale, b)
+		}
+	}
+}

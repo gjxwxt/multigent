@@ -17,8 +17,8 @@ import (
 // index uq_deploy_requests_inflight.
 type DeployRequest struct {
 	ID          string            `json:"id"`
-	WorkspaceID string            `json:"workspace_id"`
-	ProjectID   string            `json:"project_id"`
+	WorkspaceID string            `json:"workspaceId"`
+	ProjectID   string            `json:"projectId"`
 	Branch      string            `json:"branch"`
 	SHA         string            `json:"sha"`
 	Env         string            `json:"env"`
@@ -26,12 +26,12 @@ type DeployRequest struct {
 	CommitSpan  []CommitSpanEntry `json:"commitSpan"`
 	Approval    map[string]any    `json:"approval"`
 	Status      string            `json:"status"`
-	PipelineID  int64             `json:"pipeline_id"`
+	PipelineID  int64             `json:"pipelineId"`
 	Health      map[string]any    `json:"health"`
-	CreatedBy   string            `json:"created_by"`
-	CreatedAt   string            `json:"created_at"`
-	StartedAt   string            `json:"started_at"`
-	FinishedAt  string            `json:"finished_at"`
+	CreatedBy   string            `json:"createdBy"`
+	CreatedAt   string            `json:"createdAt"`
+	StartedAt   string            `json:"startedAt"`
+	FinishedAt  string            `json:"finishedAt"`
 }
 
 // CommitSpanEntry describes one commit covered by a deploy request.
