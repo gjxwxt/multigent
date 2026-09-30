@@ -171,6 +171,11 @@ type Server struct {
 	previewSessions             map[string]*previewChatSession
 	previewChatMu               sync.Mutex
 	previewChatSeen             map[string]*previewChatBucket
+	// deployVerifyMu/deployVerifySeen rate-limit the public deploy gate
+	// callback (GET /api/v1/deploy-verify) per (project, sha) key — the one
+	// deliberate publicMux exemption (see deploy_verify_token.go).
+	deployVerifyMu              sync.Mutex
+	deployVerifySeen            map[string]*deployVerifyBucket
 	designClient                odClientAPI
 	designRateMu                sync.Mutex
 	designReadRateSeen          map[string]*previewChatBucket
@@ -178,6 +183,11 @@ type Server struct {
 	threadProjections           *imbridge.TaskThreadProjectionService
 	previewAgentRunnerFunc      func(workspaceID, project, agentName, runtimeURL string) previewreceipt.AgentRunner
 	previewTurnReceiptsProjects string
+	// deployTriggerHook, when non-nil, fires the CI pipeline for a chatops
+	// approved deploy request (see deploy_card.go). Nil = trigger skipped
+	// (best-effort: the approval CAS + audit still land). Tests inject a stub
+	// here; production wiring calls triggerApprovedDeployRequest.
+	deployTriggerHook func(ctx context.Context, req *controldb.DeployRequest, actorUsername string) error
 }
 
 // NewServer builds an API server for the given workspace root.
@@ -222,6 +232,9 @@ func NewServer(root, apiKey string) *Server {
 		enablePreviewTurnReceipts:   IsTruthyEnv(os.Getenv(PreviewTurnReceiptsEnv)),
 		previewTurnReceiptsProjects: os.Getenv(PreviewTurnReceiptsProjectsEnv),
 	}
+	// Deploy center (batches 3+4): chatops approvals fire the CI pipeline
+	// through the same shared trigger body the REST approve endpoint uses.
+	s.deployTriggerHook = s.triggerApprovedDeployRequest
 	// Runtime-node agents' task triggers join the node dispatch queue instead
 	// of the local wakeup cycle (hook wired after s exists; nil-safe before).
 	tm.nodeTaskDispatch = func(project, agent, reason string) bool {
@@ -421,6 +434,7 @@ func (s *Server) SetLocalRuntimeAPIURL(url string) {
 	s.localRuntimeAPIURL = strings.TrimRight(strings.TrimSpace(url), "/")
 	s.attentionRecoveryOnce.Do(func() {
 		go s.ensurePlatformWorkflowDefinitions()
+		go s.recoverActiveDeployRequests()
 		go func() {
 			// The REQUIRE secrets gate is NOT here anymore: cmd/multigent runs
 			// EnforceSecretsBaseline synchronously before the listener starts.
@@ -732,6 +746,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/workflow/review", s.handlePostTaskWorkflowReview)
 	mux.HandleFunc("GET /api/v1/projects/{name}/branches", s.handleListProjectBranches)
 	mux.HandleFunc("POST /api/v1/projects/{name}/branches/refresh", s.handlePostProjectBranchesRefresh)
+	// ── Deploy Center (batch 3): ledger + GitLab pipeline trigger. Main mux
+	// only (token auth); state-changing routes additionally require project
+	// operator inside the handlers. The CI gate callback is the single
+	// publicMux exemption (see deploy_verify_token.go).
+	mux.HandleFunc("GET /api/v1/projects/{name}/deploy", s.handleGetDeployAggregate)
+	mux.HandleFunc("GET /api/v1/projects/{name}/deploy/branches", s.handleGetDeployBranches)
+	mux.HandleFunc("GET /api/v1/projects/{name}/deploy/preview-state", s.handleGetDeployPreviewState)
+	mux.HandleFunc("POST /api/v1/projects/{name}/deploy/requests", s.handleCreateDeployRequest)
+	mux.HandleFunc("GET /api/v1/projects/{name}/deploy/requests", s.handleListDeployRequests)
+	mux.HandleFunc("POST /api/v1/projects/{name}/deploy/requests/{id}/approve", s.handleApproveDeployRequest)
+	mux.HandleFunc("POST /api/v1/projects/{name}/deploy/requests/{id}/reject", s.handleRejectDeployRequest)
+	mux.HandleFunc("POST /api/v1/projects/{name}/deploy/requests/{id}/trigger", s.handleTriggerDeployRequest)
+	mux.HandleFunc("POST /api/v1/projects/{name}/deploy/requests/{id}/cancel", s.handleCancelDeployRequest)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview", s.handleGetTaskPreview)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/resources", s.handleGetTaskResources)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/resources/worktree/cleanup", s.handlePostTaskWorktreeCleanup)
@@ -1040,6 +1067,11 @@ func (s *Server) Handler() http.Handler {
 	// Keep this outside the general Web/API auth mux so user sessions and
 	// trusted-proxy identities cannot accidentally access the ingest endpoint.
 	publicMux.Handle("/api/v1/context/ingest", s.withContextIngestAuth(http.HandlerFunc(s.handleContextIngest)))
+	// Deploy gate callback (the publicMux exemption per the security
+	// invariants): read-only, self-authenticating via the HMAC deploy verify
+	// token minted at trigger time, rate-limited inside the handler. CI
+	// runners hold no console credential, so Bearer auth cannot apply.
+	publicMux.HandleFunc("GET /api/v1/deploy-verify", s.handleDeployVerify)
 	// (the "/" catch-all at the top of the design block falls through to
 	// withTokenAuth(mux) for non-design traffic — no second registration.)
 
