@@ -631,20 +631,46 @@ func (s *Server) submitWorkflowReviewFromTrigger(workspaceID string, record work
 		t.Summary = summary
 		t.UpdatedAt = now
 		t.FinishedAt = &now
-		s.captureTaskCompletionSnapshot(t)
+		// S2 v2 seam fix (parity with the runtime completion path): a BRANCH
+		// completion's join gate measures the delivery worktree on disk, so
+		// the worktree must survive until AFTER the join. The old ordering
+		// cleaned it up BEFORE completeRuntimeWorkflowBranch, so every
+		// branch completion re-check degraded to "requires an observable
+		// worktree" and the real gate reason never surfaced. Branch cleanup
+		// now runs once the join has accepted the delivery (below); linear
+		// tasks keep the immediate cleanup.
+		isBranchCompletion := strings.TrimSpace(t.Vars[workflowBranchIDVar]) != ""
+		snapshotErr := s.captureTaskCompletionSnapshot(t)
 		s.syncTaskCompletionRemote(record.Project, t)
-		s.cleanupTaskDeliveryArtifacts(record.Project, record.TaskID)
+		if snapshotErr == nil && !isBranchCompletion {
+			s.cleanupTaskDeliveryArtifacts(record.Project, record.TaskID)
+		}
 		if err := s.ts.PersistTask(record.Project, agent, t); err != nil {
 			return result, err
 		}
-		if strings.TrimSpace(t.Vars[workflowBranchIDVar]) != "" {
+		if isBranchCompletion {
 			branchResult, err := s.completeRuntimeWorkflowBranch(workspaceID, record.Project, t, outputs, "completed")
 			if err != nil {
+				// Rejection-visibility contract (review round 4 P0-1, same
+				// as the runtime branch completion path): the task was
+				// already persisted as done_success, but the reason the
+				// stage did not advance must still land on the record — the
+				// manual-start redrive keys on the parked parent run, and
+				// the ChatOps reviewer never sees the console UI.
+				t.LastError = err.Error()
+				t.UpdatedAt = time.Now().UTC()
+				if pErr := s.ts.PersistTask(record.Project, agent, t); pErr != nil {
+					log.Printf("[workflow] branch %s: persist rejection reason failed: %v", t.ID, pErr)
+				}
 				return result, err
 			}
 			if err := s.advanceParentAfterBranchCompletion(workspaceID, record.Project, branchResult, r); err != nil {
 				return result, err
 			}
+			// Join succeeded: the branch delivery is accepted, so the
+			// worktree can now be retired (same contract as the runtime
+			// path, just ordered after the gate that measures it).
+			s.cleanupTaskDeliveryArtifacts(record.Project, record.TaskID)
 		}
 	} else if err := s.activateNextWorkflowStep(workspaceID, record.Project, agent, t, result, r); err != nil {
 		return result, err

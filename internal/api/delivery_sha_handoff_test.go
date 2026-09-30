@@ -250,7 +250,18 @@ func TestLinearStepDeliveryGateFailsClosed(t *testing.T) {
 	base := gitOut(t, wt, "rev-parse", "HEAD")
 	task := seedLinearDeliveryRun(t, s, workspaceID, "task-delivery-unpushed", base, true)
 
-	// Commit locally on task/x but DO NOT push (no origin configured).
+	// A real bound origin whose main branch is current, then a LOCAL commit
+	// on task/x that is never pushed: the push evidence must fail closed
+	// (remote SHA missing). B1 note: a workspace with NO origin at all now
+	// delivers on local evidence — this fixture deliberately keeps a bound
+	// remote so the unpushed-vs-remote guarantee stays tested.
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	if err := os.MkdirAll(remote, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, remote, "init", "--bare", "-b", "main")
+	gitRun(t, wt, "remote", "add", "origin", remote)
+	gitRun(t, wt, "push", "origin", "main")
 	gitRun(t, wt, "checkout", "-b", "task/x")
 	if err := os.WriteFile(filepath.Join(wt, "server.go"), []byte("package main\n\nfunc D() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
