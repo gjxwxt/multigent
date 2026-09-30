@@ -660,6 +660,70 @@ func TestConsoleReachableURLEnvOverride(t *testing.T) {
 	}
 }
 
+// Regression (pipeline 1213 live finding): lastDeployed must mean "the
+// version currently running" — only a success run qualifies. A failed or
+// cancelled run never changed the live version, so it must not take over the
+// live-version card while an older success still serves traffic.
+func TestGetDeployAggregateIgnoresFailedAsLastDeployed(t *testing.T) {
+	s, workspaceID, _ := newDeployHandlerTestServer(t)
+
+	success := controldb.DeployRequest{
+		ID: "dep-ok", WorkspaceID: workspaceID, ProjectID: "sample",
+		Branch: "main", SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Status: "success", CreatedBy: "owner",
+		CreatedAt: time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339),
+	}
+	if err := s.controlDB.InsertDeployRequest(success); err != nil {
+		t.Fatalf("seed success: %v", err)
+	}
+	// Newer failed run on a different SHA: newest ledger row, terminal, but
+	// never live.
+	failed := controldb.DeployRequest{
+		ID: "dep-bad", WorkspaceID: workspaceID, ProjectID: "sample",
+		Branch: "main", SHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Status: "failed", CreatedBy: "owner", CreatedAt: nowUTCAPI(),
+	}
+	if err := s.controlDB.InsertDeployRequest(failed); err != nil {
+		t.Fatalf("seed failed: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := providerTestRequest(http.MethodGet, "/api/v1/projects/sample/deploy", "owner", nil)
+	req.SetPathValue("name", "sample")
+	s.handleGetDeployAggregate(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("aggregate status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var agg struct {
+		LastDeployed *controldb.DeployRequest `json:"lastDeployed"`
+		Inflight     *controldb.DeployRequest `json:"inflight"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&agg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if agg.LastDeployed == nil || agg.LastDeployed.ID != "dep-ok" {
+		t.Fatalf("lastDeployed=%+v, want the success run dep-ok", agg.LastDeployed)
+	}
+	if agg.Inflight != nil {
+		t.Fatalf("inflight should be nil, got %+v", agg.Inflight)
+	}
+
+	// Same rule on the lightweight preview-state surface.
+	rec = httptest.NewRecorder()
+	req = providerTestRequest(http.MethodGet, "/api/v1/projects/sample/deploy/preview-state", "owner", nil)
+	req.SetPathValue("name", "sample")
+	s.handleGetDeployPreviewState(rec, req)
+	var out struct {
+		LastDeployed *controldb.DeployRequest `json:"lastDeployed"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode preview-state: %v", err)
+	}
+	if out.LastDeployed == nil || out.LastDeployed.ID != "dep-ok" {
+		t.Fatalf("preview-state lastDeployed=%+v, want dep-ok", out.LastDeployed)
+	}
+}
+
 func TestGetDeployAggregateReturnsLedgerWithoutForge(t *testing.T) {
 	s, workspaceID, _ := newDeployHandlerTestServer(t)
 

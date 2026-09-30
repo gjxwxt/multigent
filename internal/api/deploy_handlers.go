@@ -91,9 +91,9 @@ func (s *Server) handleGetDeployAggregate(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Ledger reads: newest request (regardless of status) is the display
-	// candidate; it is "lastDeployed" only when terminal, "inflight" when
-	// not.
+	// Ledger reads: newest request is the display candidate; it is
+	// "lastDeployed" only when success (a failed/cancelled/rejected run never
+	// changed the live version), "inflight" when not terminal.
 	requests, err := s.controlDB.ListDeployRequests(controldb.DeployRequestFilter{
 		WorkspaceID: workspaceID,
 		ProjectID:   project,
@@ -109,7 +109,7 @@ func (s *Server) handleGetDeployAggregate(w http.ResponseWriter, r *http.Request
 		if isInflightDeployStatus(status) && inflight == nil {
 			inflight = &requests[i]
 		}
-		if isTerminalDeployStatus(status) && lastDeployed == nil {
+		if status == "success" && lastDeployed == nil {
 			lastDeployed = &requests[i]
 		}
 	}
@@ -880,14 +880,6 @@ func isInflightDeployStatus(status string) bool {
 	return false
 }
 
-func isTerminalDeployStatus(status string) bool {
-	switch strings.TrimSpace(status) {
-	case "success", "failed", "cancelled", "rejected":
-		return true
-	}
-	return false
-}
-
 func shortDeploySHA(sha string) string {
 	sha = strings.TrimSpace(sha)
 	if len(sha) > 8 {
@@ -935,7 +927,7 @@ func (s *Server) handleGetDeployPreviewState(w http.ResponseWriter, r *http.Requ
 		if isInflightDeployStatus(status) && inflight == nil {
 			inflight = &requests[i]
 		}
-		if isTerminalDeployStatus(status) && lastDeployed == nil {
+		if status == "success" && lastDeployed == nil {
 			lastDeployed = &requests[i]
 		}
 	}
