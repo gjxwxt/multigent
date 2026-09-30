@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -23,6 +24,7 @@ import (
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/runner"
+	"github.com/multigent/multigent/internal/secretbox"
 	"github.com/multigent/multigent/internal/store"
 	"github.com/multigent/multigent/internal/taskstore"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
@@ -2739,6 +2741,84 @@ func checkWakeupCondition(condition, agentWorkDir, agencyDir, project, agentName
 	return err == nil, output
 }
 
+// wakeupCredentialPreflightError reports why a local wakeup cycle would burn
+// every task it touches: the runner materialises provider credentials at run
+// start, and a sealed credential (env-v1 model-provider API key or env-v1
+// connection secret) cannot be opened without MULTIGENT_CONNECTION_ENCRYPTION_KEY.
+// When that key is missing from the environment (e.g. the manual shell of a
+// systemd deployment where only the unit file carries it), the first run fails
+// with "materialize provider credentials" and the scheduler marks the in-flight
+// task done_failed. Checking BEFORE any task state changes turns that into a
+// clean refusal. Scans every workspace: waking an agent only needs ONE
+// undecryptable credential to ruin the cycle.
+func wakeupCredentialPreflightError(root string, db controldb.Store) error {
+	if db == nil || strings.TrimSpace(os.Getenv(secretbox.EnvKey)) != "" {
+		return nil
+	}
+	needsKey := false
+	if workspaceID, err := schedulerWorkspaceID(root, db); err == nil && workspaceID != "" {
+		providers, err := db.ListModelProviders(workspaceID)
+		if err == nil {
+			for _, p := range providers {
+				if secretboxEnvelopeNeedsKey(p.APIKey) {
+					needsKey = true
+					break
+				}
+			}
+		}
+	}
+	if !needsKey {
+		connections, err := db.ListConnections(controldb.ConnectionFilter{})
+		if err == nil {
+			for _, c := range connections {
+				secret, ok, err := db.ConnectionSecret(c.ID)
+				if err != nil || !ok {
+					continue
+				}
+				if secret.KeyVersion == "env-v1" || secret.KeyVersion == "env-v1-strict" {
+					needsKey = true
+					break
+				}
+			}
+		}
+	}
+	if !needsKey {
+		return nil
+	}
+	return fmt.Errorf("%s is not set in this environment, but configured model providers or connections store encrypted credentials (env-v1) that the runner must decrypt to materialize provider credentials; every task run would fail and be marked done_failed. Run the wakeup from an environment carrying the key (e.g. the systemd unit environment) — no task state was modified",
+		secretbox.EnvKey)
+}
+
+// secretboxEnvelopeNeedsKey reports whether the stored model-provider API key
+// is a sealed envelope that requires MULTIGENT_CONNECTION_ENCRYPTION_KEY to
+// open (internal/secretbox versions env-v1 / env-v1-strict).
+func secretboxEnvelopeNeedsKey(sealed string) bool {
+	version := secretboxEnvelopeVersionLocal(sealed)
+	return version == "env-v1" || version == "env-v1-strict"
+}
+
+func secretboxEnvelopeVersionLocal(value string) string {
+	const prefix = "sealed:"
+	v := strings.TrimSpace(value)
+	if !strings.HasPrefix(v, prefix) {
+		return "raw"
+	}
+	rawBox, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(v, prefix))
+	if err != nil {
+		return "unknown"
+	}
+	var box struct {
+		KeyVersion string `json:"keyVersion"`
+	}
+	if err := json.Unmarshal(rawBox, &box); err != nil {
+		return "unknown"
+	}
+	if strings.TrimSpace(box.KeyVersion) == "" {
+		return "plain-dev"
+	}
+	return box.KeyVersion
+}
+
 // ── scheduler wakeup ──────────────────────────────────────────────────────────
 
 func newSchedulerWakeupCmd() *cobra.Command {
@@ -2791,6 +2871,21 @@ useful for testing and for agent-to-agent wakeup from inside a task.`,
 					project, agentName, hb.PID,
 				)
 			}
+
+			// Preflight credential materializability BEFORE any state changes:
+			// without the connection encryption key the runner fails at
+			// "materialize provider credentials" and the cycle would mark the
+			// in-flight tasks done_failed (systemd deployments carry the key
+			// only inside the unit environment).
+			preflightDB, preflightErr := openControlDBForRoot(root)
+			if preflightErr != nil {
+				return fmt.Errorf("wakeup preflight: open control db: %w", preflightErr)
+			}
+			if err := wakeupCredentialPreflightError(root, preflightDB); err != nil {
+				preflightDB.Close()
+				return err
+			}
+			preflightDB.Close()
 
 			// Mark running so the scheduler loop (if active) skips this cycle.
 			// RunStartedAt carries the in-flight evidence the busy check needs:
