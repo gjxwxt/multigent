@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
+import { Sparkles } from 'lucide-react'
 import { useApiJson } from '../../lib/use-api'
 import { apiPost } from '../../lib/api'
 import { showToast } from '../../components/ui/Toast'
@@ -18,6 +19,7 @@ import { DeployConsole } from './deploy/DeployConsole'
 import { DeployLedgerTable } from './deploy/DeployLedgerTable'
 import { DeployRollbackModal } from './deploy/DeployRollbackModal'
 import { DeployEmptyHero } from './deploy/DeployEmptyHero'
+import { DeployAIDrawer } from './deploy/DeployAIDrawer'
 export default function ProjectDeployPage() {
   const { projectId = '' } = useParams()
   const { t } = useTranslation()
@@ -28,6 +30,7 @@ export default function ProjectDeployPage() {
   const [actionBusy, setActionBusy] = useState<string | null>(null)
   const [rollbackTarget, setRollbackTarget] = useState<DeployRequest | null>(null)
   const [showInitialConfig, setShowInitialConfig] = useState(false)
+  const [aiDrawerOpen, setAiDrawerOpen] = useState(false)
   const consoleRef = useRef<HTMLElement | null>(null)
 
   const aggState = useApiJson<DeployAggregate>(
@@ -214,6 +217,28 @@ export default function ProjectDeployPage() {
         onConfirm={rollbackConfirm}
         onClose={() => setRollbackTarget(null)}
       />
+
+      {/* 部署 AI 抽屉（二期 M4）：右下角浮动入口 + 纯对话排查抽屉 */}
+      {projectId && (
+        <>
+          {!aiDrawerOpen && (
+            <button
+              type="button"
+              onClick={() => setAiDrawerOpen(true)}
+              className="fixed bottom-6 right-6 z-40 inline-flex items-center gap-1.5 rounded-full bg-sky-600 px-4 py-2.5 text-sm font-medium text-white shadow-lg hover:bg-sky-700"
+            >
+              <Sparkles className="size-4" />
+              {t('projectDeploy.aiLaunch', { defaultValue: '部署助手' })}
+            </button>
+          )}
+          <DeployAIDrawer
+            project={projectId}
+            open={aiDrawerOpen}
+            onClose={() => setAiDrawerOpen(false)}
+            onTaskCreated={reload}
+          />
+        </>
+      )}
     </div>
   )
 }

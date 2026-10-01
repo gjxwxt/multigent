@@ -759,6 +759,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/projects/{name}/deploy/requests/{id}/reject", s.handleRejectDeployRequest)
 	mux.HandleFunc("POST /api/v1/projects/{name}/deploy/requests/{id}/trigger", s.handleTriggerDeployRequest)
 	mux.HandleFunc("POST /api/v1/projects/{name}/deploy/requests/{id}/cancel", s.handleCancelDeployRequest)
+	// ── Deploy AI drawer (deploy center phase 2, M4): tool-free triage chat
+	// over the project agent's model account + findings→task conversion.
+	// Main mux only (token auth) + checkProjectAccess inside; chat is
+	// rate-limited per project, task creation additionally requires operator.
+	mux.HandleFunc("GET /api/v1/projects/{name}/deploy/ai/context", s.handleDeployAIContext)
+	mux.HandleFunc("POST /api/v1/projects/{name}/deploy/ai/chat", s.handleDeployAIChat)
+	mux.HandleFunc("POST /api/v1/projects/{name}/deploy/ai/tasks", s.handleDeployAITasks)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview", s.handleGetTaskPreview)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/resources", s.handleGetTaskResources)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/resources/worktree/cleanup", s.handlePostTaskWorktreeCleanup)
