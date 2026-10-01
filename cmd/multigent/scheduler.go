@@ -56,6 +56,53 @@ type schedulerStartTarget struct {
 	memberships []schedulerAgentKey
 }
 
+// schedulerWorkerRegistry tracks which agent workers already have a running
+// heartbeat loop. The startup paths pre-register their workers; the discovery
+// loop claims unseen workers to spawn loops for, and each loop releases its
+// claim on exit (e.g. heartbeat disabled) so a later re-enable can be
+// rediscovered without restarting the scheduler.
+type schedulerWorkerRegistry struct {
+	mu      sync.Mutex
+	started map[string]bool // workerID -> heartbeat loop claimed
+}
+
+func newSchedulerWorkerRegistry(initialWorkerIDs []string) *schedulerWorkerRegistry {
+	reg := &schedulerWorkerRegistry{started: map[string]bool{}}
+	for _, id := range initialWorkerIDs {
+		if id = strings.TrimSpace(id); id != "" {
+			reg.started[id] = true
+		}
+	}
+	return reg
+}
+
+// registerIfNew claims workerID and reports whether the caller must spawn its
+// heartbeat loop (false when a loop already exists).
+func (r *schedulerWorkerRegistry) registerIfNew(workerID string) bool {
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.started[workerID] {
+		return false
+	}
+	r.started[workerID] = true
+	return true
+}
+
+// release drops the claim so the discovery loop can respawn the loop later.
+func (r *schedulerWorkerRegistry) release(workerID string) {
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.started, workerID)
+}
+
 // nowStr returns a compact HH:MM:SS timestamp for the current moment.
 func nowStr() string {
 	return time.Now().Format("15:04:05")
@@ -332,14 +379,33 @@ func newSchedulerStartCmd() *cobra.Command {
 				heartbeatSet[k.key] = true
 			}
 
+			// Track which workers already own a heartbeat loop so the discovery
+			// loop below can spawn loops for workers enabled after startup.
+			workerIDs := make([]string, 0, len(heartbeatAgents))
+			for _, k := range heartbeatAgents {
+				workerIDs = append(workerIDs, k.workerID)
+			}
+			registry := newSchedulerWorkerRegistry(workerIDs)
+
 			for _, k := range heartbeatAgents {
 				k := k
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					runHeartbeatLoop(ctx, root, k.key.project, k.key.agent, ts, s, k.memberships...)
+					runHeartbeatLoop(ctx, root, k.key.project, k.key.agent, ts, s, registry, k.memberships...)
 				}()
 			}
+
+			// Heartbeat configs can be enabled for an existing agent (or a new
+			// worker can gain its first heartbeat) after this process has
+			// started. The cron loop refreshes its targets every minute for the
+			// same reason; give heartbeats a discovery loop so a newly-enabled
+			// worker does not wait for a scheduler restart.
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				runWorkspaceHeartbeatDiscoveryLoop(ctx, root, ts, s, startAgent, registry)
+			}()
 
 			// Cron-only agents (no heartbeat): run cron loop that executes tasks directly.
 			for _, k := range cronAgents {
@@ -531,6 +597,141 @@ func selectSchedulerExecutionTarget(ts taskstore.Store, memberships []schedulerA
 	return best
 }
 
+// refreshHeartbeatMemberships re-reads the worker's project memberships from
+// the control DB so heartbeat scheduling picks up membership changes made
+// while the scheduler process is running. It preserves the existing anchors
+// when they are still valid and falls back to the first remaining membership
+// (or the original anchors when nothing valid remains, matching the legacy
+// fixed-membership behavior). The returned flag reports whether the set
+// changed, so callers only log on transitions.
+func refreshHeartbeatMemberships(root, project, agentName string, current []schedulerAgentKey) ([]schedulerAgentKey, bool) {
+	db, err := openControlDBForRoot(root)
+	if err != nil {
+		return current, false
+	}
+	defer db.Close()
+	workspaceID, err := workspaceIDForRoot(db, root)
+	if err != nil || strings.TrimSpace(workspaceID) == "" {
+		return current, false
+	}
+	worker, ok, _, _, err := resolveCLIProjectWorker(root, project, agentName)
+	if err != nil || !ok {
+		return current, false
+	}
+	memberships, err := db.ListProjectMemberships(controldb.ProjectMembershipFilter{
+		WorkspaceID: workspaceID,
+		MemberType:  agentdir.MemberTypeAgentWorker,
+		MemberID:    worker.ID,
+	})
+	if err != nil {
+		return current, false
+	}
+	fresh := make([]schedulerAgentKey, 0, len(memberships))
+	for _, membership := range memberships {
+		if !membership.AutoPickTasks {
+			continue
+		}
+		project := strings.TrimSpace(membership.ProjectID)
+		name := schedulerMembershipAgentName(membership, worker)
+		if project == "" || name == "" {
+			continue
+		}
+		fresh = append(fresh, schedulerAgentKey{project: project, agent: name})
+	}
+	if len(fresh) == 0 {
+		return current, false
+	}
+	same := len(fresh) == len(current)
+	if same {
+		seen := make(map[schedulerAgentKey]bool, len(current))
+		for _, key := range current {
+			seen[key] = true
+		}
+		for _, key := range fresh {
+			if !seen[key] {
+				same = false
+				break
+			}
+		}
+	}
+	if same {
+		return current, false
+	}
+	// Keep the loop's project/agent anchors first when they survive the
+	// refresh; otherwise pivot to the first remaining membership so the loop
+	// keeps executing against a membership that still exists.
+	anchor := schedulerAgentKey{project: project, agent: agentName}
+	ordered := make([]schedulerAgentKey, 0, len(fresh)+1)
+	for _, key := range fresh {
+		if key == anchor {
+			ordered = append(ordered, key)
+			break
+		}
+	}
+	for _, key := range fresh {
+		if len(ordered) == 0 || ordered[0] != key {
+			ordered = append(ordered, key)
+		}
+	}
+	return ordered, true
+}
+
+func schedulerAgentKeyListSummary(keys []schedulerAgentKey) string {
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key.project+"/"+key.agent)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// heartbeatWorkerIDForLoop resolves the agent worker ID backing the loop's
+// project/agent anchors. It is used to release the discovery registry claim
+// when the loop exits.
+func heartbeatWorkerIDForLoop(root, project, agentName string) string {
+	worker, ok, _, _, err := resolveCLIProjectWorker(root, project, agentName)
+	if err != nil || !ok {
+		return ""
+	}
+	return strings.TrimSpace(worker.ID)
+}
+
+// runWorkspaceHeartbeatDiscoveryLoop periodically re-scans the workspace for
+// workers whose heartbeat was enabled after the scheduler started and spawns
+// heartbeat loops for them. The per-agent loops own their cadence; this loop
+// only guarantees that a newly-enabled worker does not wait for a scheduler
+// restart. It mirrors runWorkspaceCronLoop's reconciliation role.
+func runWorkspaceHeartbeatDiscoveryLoop(ctx context.Context, root string,
+	ts taskstore.Store, s store.Store, startAgent string, registry *schedulerWorkerRegistry) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	discover := func() {
+		projects, err := ts.ListProjects()
+		if err != nil {
+			return
+		}
+		heartbeatTargets, _, _ := collectAgentWorkerSchedulerTargets(root, projects, startAgent, ts)
+		for _, target := range heartbeatTargets {
+			if !registry.registerIfNew(target.workerID) {
+				continue
+			}
+			fmt.Printf("%s heartbeat discovered for %s%s/%s%s — starting loop without restart\n",
+				colorCyan+"♥"+colorReset, colorBold, target.key.project, target.key.agent, colorReset)
+			go func(target schedulerStartTarget) {
+				runHeartbeatLoop(ctx, root, target.key.project, target.key.agent, ts, s, registry, target.memberships...)
+			}(target)
+		}
+	}
+	discover()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			discover()
+		}
+	}
+}
+
 func nextScheduledPendingTaskAtForMemberships(ts taskstore.Store, memberships []schedulerAgentKey, now time.Time) *time.Time {
 	var next *time.Time
 	for _, membership := range memberships {
@@ -564,8 +765,11 @@ func capWaitForScheduledTasks(ts taskstore.Store, memberships []schedulerAgentKe
 // runHeartbeatLoop runs the blocking heartbeat loop for a single agent.
 // It respects the non-overlapping constraint: the interval starts after
 // each run completes, not at fixed wall-clock intervals.
+// registry may be nil (tests, standalone use); when set, the loop releases
+// its worker claim on exit so the discovery loop can respawn it if the
+// heartbeat is re-enabled later.
 func runHeartbeatLoop(ctx context.Context, root, project, agentName string,
-	ts taskstore.Store, s store.Store, memberships ...schedulerAgentKey) {
+	ts taskstore.Store, s store.Store, registry *schedulerWorkerRegistry, memberships ...schedulerAgentKey) {
 	if len(memberships) == 0 {
 		memberships = []schedulerAgentKey{{project: project, agent: agentName}}
 	}
@@ -592,7 +796,24 @@ func runHeartbeatLoop(ctx context.Context, root, project, agentName string,
 	lastWakeDate := ""
 	firstCycle := true
 
+	defer func() {
+		workerID := heartbeatWorkerIDForLoop(root, project, agentName)
+		if workerID != "" {
+			registry.release(workerID)
+		}
+	}()
+
 	for {
+		// Re-scan this worker's project memberships every cycle. A worker can
+		// be added to a new project (or removed from one) while the scheduler
+		// is running; without this the loop would keep the startup snapshot
+		// forever and never schedule the new project's tasks.
+		if refreshed, changed := refreshHeartbeatMemberships(root, project, agentName, memberships); changed {
+			agentLog("%s memberships changed: now covering %s",
+				colorCyan+"↻", schedulerAgentKeyListSummary(refreshed))
+			memberships = refreshed
+		}
+
 		hb, err := loadSchedulerHeartbeat(root, project, agentName, ts)
 		if err != nil {
 			return
