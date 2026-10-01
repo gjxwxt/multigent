@@ -188,3 +188,34 @@ POST /api/v1/projects/:id/deploy/requests/:id/cancel    {}
    - [ ] 失败单行探针结果显示 `—`（不显示 200 OK）。
    - [ ] 空态垂直居中，点击平滑展开表单。
 6. **禁止事项**（审查 Agent 逐条核）：渲染 runner 节点名/IP/部署耗时/日期序号单号/语义四阶段进度条/日志按钮；对历史 vars 做明文切换；提交含 `APP_PORT` 的 vars。
+
+---
+
+## 5. 验收记录（2026-10-01 实弹收官）
+
+实现提交：multigent-integration `c54a5be6`（feature/deploy-center-phase1，基线 851307be）。构建链验证：`tsc --noEmit` 仅预存 CreateTaskDialog 3 错（干净 HEAD 复核豁免）、`vite build` 通过、`make build` 通过、交叉编译 ELF 魔数校验后部署 VM 生产（multigent + mattermost-bridge 双 active）。
+
+### 5.1 逐项核对（§4.5）
+
+- [x] Header 徽章随健康态切换（Production Live / 探针未配置 实测均出现）；`访问运行中应用` 指向 `:{deployPort}`。
+- [x] 4 卡（运行版本/健康探针/部署机&端口/最近流水线）数据全部来自 aggregate 实测：f435ed28 · UP 202-218ms · :28000 · #1215/#1216 success。
+- [x] 直触部署：dep-d882726a532b4260 → 驾驶舱"已批准 · 待触发"→ 行内触发 → 真实 8 job（lint/test/build/package 各 2）+ 秒表走秒 → success + 探针 200 OK (202ms) + 运行版本卡更新（#1215）。取消路径按钮在位（本验收未消耗）。
+- [x] 需审批全链：dep-239e0d9d5b74dbcd → pending_approval 驾驶舱（批准/驳回/取消）→ 批准后自动触发 → #1216 success + 探针 200 OK (210ms)。
+- [x] EnvVarsEditor：APP_PORT 预置锁定行（disabled + Lock 图标 + 剔除提示 title，端口值 28000）；敏感 key（API_TOKEN）password 态 + 眼睛切换（显示/隐藏实测）；**后端 sqlite 取证**：最新单 `vars = {"LOG_LEVEL":"debug"}`、需审批单 `vars = {"API_TOKEN":"***"}`——APP_PORT 不落库、敏感值只存掩码。
+- [x] 回滚两步走：对成功单点回滚 → modal 文案含"遵循不可变原则…不会改写 Git 历史"+ 目标/来源单 → 确认生成 dep-2d6c80c6ed290dbe 并自动触发 → success + 探针 200 OK (208ms)。
+- [x] 台账行展开：目标/流水线 #/审批（免审批 · approved）/部署区间（单元素 span）/vars 回显（非敏感明文 LOG_LEVEL=debug）。
+- [x] 失败行探针结果显示 `—`（历史失败单 dep-b373…/dep-0633… 均为 —）。
+- [x] 禁止事项终查（§4.6）：runner 名/IP/耗时列/日志按钮/四阶段进度条/日期单号/历史 vars 明文切换 —— DOM+innerText 断言全部 false。
+
+### 5.2 验收中发现并修复的缺陷（均已实弹复核）
+
+| # | 缺陷 | 修复 |
+|---|---|---|
+| 1 | APP_PORT 预置行用 `useState(() => …)` 播种，deployPort 异步晚到导致行永不渲染 | 改为 effect 补种（`rows.some(r => r.locked)` 守卫），修复后行实测渲染 |
+| 2 | confirmDialog 描述直接传 i18n key，`{{branch}}/{{sha}}/{{suffix}}` 占位符原样回显 | t() 调用补传插值参数，实测渲染 `main@f435ed28` 与"（需审批）"后缀 |
+
+### 5.3 已知边界（如实披露，非缺陷）
+
+- 免审批创建后状态为 `approved · 待触发`，不自动进 deploying——对齐 §2.3 后端现状（`approved` 不自动触发），驾驶舱保留行内触发按钮。
+- `startedAt`/`finishedAt` 恒空已取证（sqlite 两列均为空串）——秒表基准只能用 createdAt，耗时列待 B1。
+- commitSpan 单元素（单分支 tip），逐 commit 清单待 B4 compare API。
