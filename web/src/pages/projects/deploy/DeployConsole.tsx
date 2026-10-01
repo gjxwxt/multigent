@@ -62,14 +62,26 @@ export function DeployConsole({
             <select
               value={branch}
               onChange={(e) => onBranchChange(e.target.value)}
-              className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-800 outline-none focus:border-sky-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+              disabled={branches.length === 0}
+              className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-800 outline-none focus:border-sky-400 disabled:bg-neutral-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:disabled:bg-zinc-800/60"
             >
-              {branches.map((b) => (
-                <option key={b.name} value={b.name}>
-                  {b.name}{b.isDefault ? t('projectDeploy.defaultBranch', { defaultValue: '（默认）' }) : ''}
-                </option>
-              ))}
+              {branches.length === 0 ? (
+                <option value="">{t('projectDeploy.branchesUnavailable', { defaultValue: '当前项目尚未接入远端 Git 仓库' })}</option>
+              ) : (
+                branches.map((b) => (
+                  <option key={b.name} value={b.name}>
+                    {b.name}{b.isDefault ? t('projectDeploy.defaultBranch', { defaultValue: '（默认）' }) : ''}
+                  </option>
+                ))
+              )}
             </select>
+            {branches.length === 0 && (
+              <p className="mt-1 text-xs leading-relaxed text-neutral-400 dark:text-zinc-500">
+                {t('projectDeploy.branchesUnavailableHint', {
+                  defaultValue: '部署流水线由 GitLab CI 驱动：需先将仓库镜像推送到 GitLab，并在项目设置完成远端验证（remote verify）。',
+                })}
+              </p>
+            )}
           </label>
           <label className="block">
             <span className="mb-1 block text-xs font-medium text-neutral-500 dark:text-zinc-400">

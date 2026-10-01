@@ -659,7 +659,9 @@
       "failed": "Failed",
       "cancelled": "Cancelled",
       "rejected": "Rejected"
-    }
+    },
+    "branchesUnavailable": "This project is not connected to a remote Git repository yet",
+    "branchesUnavailableHint": "Deploy pipelines are driven by GitLab CI: mirror the repository to GitLab first, then complete remote verification in project settings."
   },
   "playbooks": {
     "subtitle": "Package roles, skills, workflows, and task templates into reusable agent collaboration structures.",

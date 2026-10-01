@@ -659,7 +659,9 @@
       "failed": "失败",
       "cancelled": "已取消",
       "rejected": "已驳回"
-    }
+    },
+    "branchesUnavailable": "当前项目尚未接入远端 Git 仓库",
+    "branchesUnavailableHint": "部署流水线由 GitLab CI 驱动：需先将仓库镜像推送到 GitLab，并在项目设置完成远端验证（remote verify）。"
   },
   "playbooks": {
     "subtitle": "把角色、技能、流程和任务模板打包成可复用的 Agent 协作结构。",
