@@ -69,16 +69,22 @@ export default function ProjectDeployPage() {
     setSelectedSha(b?.commitId ?? '')
   }
 
-  async function createRequest(approvalRequired: boolean, vars: Record<string, string>, opts?: { silent?: boolean }) {
+  async function createRequest(
+    approvalRequired: boolean,
+    vars: Record<string, string>,
+    approverId = '',
+    opts?: { silent?: boolean },
+  ) {
     if (!projectId || !branch || !selectedSha) return
     if (!opts?.silent) {
       const ok = await confirmDialog({
         title: t('projectDeploy.confirmTitle', { defaultValue: '发起部署？' }),
         description: t('projectDeploy.confirmBody', {
-          defaultValue: `将对 ${branch}@${shortSha(selectedSha)} 发起${approvalRequired ? '（需审批）' : ''}部署：构建镜像并在部署机 compose 上线。`,
+          defaultValue: `将对 ${branch}@${shortSha(selectedSha)} 发起${approvalRequired ? '（需审批）' : ''}部署：构建镜像并在部署机 compose 上线。${approvalRequired && approverId ? `（指定审批人：${approverId}）` : ''}`,
           branch,
           sha: shortSha(selectedSha),
           suffix: approvalRequired ? '（需审批）' : '',
+          approver: approvalRequired && approverId ? `（指定审批人：${approverId}）` : '',
         }),
         confirmLabel: t('projectDeploy.create', { defaultValue: '发起部署' }),
         cancelLabel: t('projectDeploy.cancelConfirm', { defaultValue: '取消' }),
@@ -89,8 +95,9 @@ export default function ProjectDeployPage() {
     try {
       const created = await apiPost<{ id: string }>(
         `/api/v1/projects/${encodeURIComponent(projectId)}/deploy/requests`,
-        // vars 已由 sanitizeVarRows 剔除 APP_PORT（端口镜像红线）。
-        { branch, sha: selectedSha, vars, approvalRequired },
+        // vars 已由 sanitizeVarRows 剔除 APP_PORT（端口镜像红线）；
+        // approverId 空串 = 不指定审批人（后端维持现状模型）。
+        { branch, sha: selectedSha, vars, approvalRequired, approverId },
       )
       showToast(t('projectDeploy.created', { defaultValue: '部署单已创建' }), 'success')
       reload()
@@ -181,7 +188,7 @@ export default function ProjectDeployPage() {
                 deployPort={agg?.deployPort}
                 creating={creating || Boolean(inflight)}
                 onBranchChange={onBranchChange}
-                onCreate={(approvalRequired, vars) => createRequest(approvalRequired, vars).then(() => undefined)}
+                onCreate={(approvalRequired, vars, approverId) => createRequest(approvalRequired, vars, approverId).then(() => undefined)}
               />
             )}
           </section>

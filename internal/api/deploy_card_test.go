@@ -359,3 +359,40 @@ func TestMattermostActionCallback_DeployApprove_ViewerForbidden(t *testing.T) {
 		t.Fatalf("status must stay pending_approval after RBAC refusal, got %q", got.Status)
 	}
 }
+
+// The designated-approver field only renders on pinned requests: absent on
+// legacy cards, username-only when no display label was stored, "Label
+// (username)" when the creation flow persisted one.
+func TestFormatDeployApprovalAttachment_ApproverField(t *testing.T) {
+	base := newDeployCardTestRequest("ws-card")
+
+	// Legacy request: no approverId → no approver field (6 fields).
+	att := FormatDeployApprovalAttachment(&base, deployCardActionApprove, "tok")
+	fields, _ := att["fields"].([]map[string]any)
+	if len(fields) != 6 {
+		t.Fatalf("legacy fields = %d, want 6", len(fields))
+	}
+
+	// Pinned with label.
+	withLabel := base
+	withLabel.Approval = map[string]any{"required": true, "state": "pending_approval", "approverId": "alex", "approverLabel": "Alex Chen"}
+	att = FormatDeployApprovalAttachment(&withLabel, deployCardActionApprove, "tok")
+	fields, _ = att["fields"].([]map[string]any)
+	if len(fields) != 7 {
+		t.Fatalf("pinned fields = %d, want 7", len(fields))
+	}
+	last := fields[len(fields)-1]
+	if last["title"] != "指定审批人 (Approver)" || last["value"] != "Alex Chen (alex)" {
+		t.Fatalf("approver field = %v/%v, want label + username", last["title"], last["value"])
+	}
+
+	// Pinned without label falls back to the bare username.
+	bare := base
+	bare.Approval = map[string]any{"required": true, "state": "pending_approval", "approverId": "alex"}
+	att = FormatDeployApprovalAttachment(&bare, deployCardActionApprove, "tok")
+	fields, _ = att["fields"].([]map[string]any)
+	last = fields[len(fields)-1]
+	if last["value"] != "alex" {
+		t.Fatalf("bare approver field = %v, want username fallback", last["value"])
+	}
+}

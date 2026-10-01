@@ -960,3 +960,211 @@ func TestDeployRequestJSONKeysAreCamelCase(t *testing.T) {
 		}
 	}
 }
+
+// ---- designated approver (B3) ----
+
+func TestHandleCreateDeployRequestWithApprover(t *testing.T) {
+	s, workspaceID, _ := newDeployHandlerTestServer(t)
+
+	yes := true
+	req := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/deploy/requests", "owner", createDeployRequest{
+		Branch: "main", SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ApprovalRequired: &yes, ApproverID: "owner",
+	})
+	req.SetPathValue("name", "sample")
+	rec := httptest.NewRecorder()
+	s.handleCreateDeployRequest(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var created controldb.DeployRequest
+	if err := json.NewDecoder(rec.Body).Decode(&created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := created.Approval["approverId"]; got != "owner" {
+		t.Fatalf("approverId=%v, want owner", got)
+	}
+
+	stored, found, err := s.controlDB.DeployRequestFor(workspaceID, created.ID)
+	if err != nil || !found {
+		t.Fatalf("ledger read: found=%v err=%v", found, err)
+	}
+	if got := approverIDFromApproval(stored.Approval); got != "owner" {
+		t.Fatalf("stored approverId=%q, want owner", got)
+	}
+}
+
+func TestHandleCreateDeployRequestApproverValidation(t *testing.T) {
+	s, _, _ := newDeployHandlerTestServer(t)
+	yes := true
+
+	// Unknown approver → 400, fail closed.
+	req := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/deploy/requests", "owner", createDeployRequest{
+		Branch: "main", SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ApprovalRequired: &yes, ApproverID: "ghost",
+	})
+	req.SetPathValue("name", "sample")
+	rec := httptest.NewRecorder()
+	s.handleCreateDeployRequest(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown approver status=%d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+
+	// approverId without approvalRequired → 400 (an approver on a free
+	// request is a contradiction; accepting it would silently drop the pin).
+	req = providerTestRequest(http.MethodPost, "/api/v1/projects/sample/deploy/requests", "owner", createDeployRequest{
+		Branch: "main", SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ApproverID: "owner",
+	})
+	req.SetPathValue("name", "sample")
+	rec = httptest.NewRecorder()
+	s.handleCreateDeployRequest(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("approver without required status=%d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleApproveDeployRequestApproverGate(t *testing.T) {
+	s, workspaceID, _ := newDeployHandlerTestServer(t)
+	yes := true
+
+	// dev2: a project operator who is neither the designated approver nor a
+	// UserStore admin — the actor the 403 branch exists for. ("admin" in this
+	// fixture IS a UserStore admin, so it exercises the fallback instead.)
+	if err := s.users.CreateUser("dev2", "pass123", RoleMember, "", "", "", "", ""); err != nil {
+		t.Fatalf("create dev2: %v", err)
+	}
+	if err := s.users.UpdateUser("dev2", nil, nil, nil, nil, nil, nil, nil, []projectAccess{
+		{Project: "sample", Role: ProjectRoleOperator},
+	}, nil, nil); err != nil {
+		t.Fatalf("grant dev2 operator: %v", err)
+	}
+
+	newPinned := func(t *testing.T) *controldb.DeployRequest {
+		t.Helper()
+		req := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/deploy/requests", "owner", createDeployRequest{
+			Branch: "main", SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			ApprovalRequired: &yes, ApproverID: "owner",
+		})
+		req.SetPathValue("name", "sample")
+		rec := httptest.NewRecorder()
+		s.handleCreateDeployRequest(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		var created controldb.DeployRequest
+		if err := json.NewDecoder(rec.Body).Decode(&created); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return &created
+	}
+
+	// Actor without the pin → 403; the CAS must not have moved.
+	pinned := newPinned(t)
+	req := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/deploy/requests/"+pinned.ID+"/approve", "dev2", nil)
+	req.SetPathValue("name", "sample")
+	req.SetPathValue("id", pinned.ID)
+	rec := httptest.NewRecorder()
+	s.handleApproveDeployRequest(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-approver operator approve status=%d body=%s, want 403", rec.Code, rec.Body.String())
+	}
+	if got, _, _ := s.controlDB.DeployRequestFor(workspaceID, pinned.ID); got.Status != "pending_approval" {
+		t.Fatalf("status after forbidden approve=%s, want unchanged", got.Status)
+	}
+	// Free the in-flight slot before creating the next request.
+	if _, err := s.controlDB.UpdateDeployRequestStatus(workspaceID, pinned.ID, "pending_approval", "cancelled"); err != nil {
+		t.Fatalf("cancel first pin: %v", err)
+	}
+
+	// The designated approver passes the gate and reaches the trigger path
+	// (which fails on the fake GitLab trigger or succeeds — either is fine;
+	// the assertion is the gate let a non-admin through).
+	pinned = newPinned(t)
+	req = providerTestRequest(http.MethodPost, "/api/v1/projects/sample/deploy/requests/"+pinned.ID+"/approve", "owner", nil)
+	req.SetPathValue("name", "sample")
+	req.SetPathValue("id", pinned.ID)
+	rec = httptest.NewRecorder()
+	s.handleApproveDeployRequest(rec, req)
+	if rec.Code == http.StatusForbidden {
+		t.Fatalf("designated approver approve status=%d body=%s, want not 403", rec.Code, rec.Body.String())
+	}
+
+	// Admin fallback: the admin user record exists and passes deployApproverAllowed.
+	if s.users.GetUser("admin") == nil {
+		t.Fatalf("test fixture: admin user record missing")
+	}
+	if !s.deployApproverAllowed(&controldb.DeployRequest{Approval: map[string]any{"approverId": "owner"}}, "admin") {
+		t.Fatalf("admin fallback blocked")
+	}
+	// Unknown actor on a pinned request fails closed.
+	if s.deployApproverAllowed(&controldb.DeployRequest{Approval: map[string]any{"approverId": "owner"}}, "ghost") {
+		t.Fatalf("unknown actor passed the pin gate")
+	}
+	// Empty approver keeps the legacy model: anyone passes.
+	if !s.deployApproverAllowed(&controldb.DeployRequest{Approval: map[string]any{}}, "ghost") {
+		t.Fatalf("legacy request (no approverId) should not be gated")
+	}
+}
+
+func TestHandleRejectDeployRequestApproverGate(t *testing.T) {
+	s, _, _ := newDeployHandlerTestServer(t)
+	yes := true
+
+	// dev2: an operator who is neither the approver nor a UserStore admin.
+	if err := s.users.CreateUser("dev2", "pass123", RoleMember, "", "", "", "", ""); err != nil {
+		t.Fatalf("create dev2: %v", err)
+	}
+	if err := s.users.UpdateUser("dev2", nil, nil, nil, nil, nil, nil, nil, []projectAccess{
+		{Project: "sample", Role: ProjectRoleOperator},
+	}, nil, nil); err != nil {
+		t.Fatalf("grant dev2 operator: %v", err)
+	}
+
+	req := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/deploy/requests", "owner", createDeployRequest{
+		Branch: "main", SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ApprovalRequired: &yes, ApproverID: "owner",
+	})
+	req.SetPathValue("name", "sample")
+	rec := httptest.NewRecorder()
+	s.handleCreateDeployRequest(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var created controldb.DeployRequest
+	if err := json.NewDecoder(rec.Body).Decode(&created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// A non-approver operator → 403 (the pin wins over project RBAC).
+	reject := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/deploy/requests/"+created.ID+"/reject", "dev2", nil)
+	reject.SetPathValue("name", "sample")
+	reject.SetPathValue("id", created.ID)
+	rec = httptest.NewRecorder()
+	s.handleRejectDeployRequest(rec, reject)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-approver reject status=%d body=%s, want 403", rec.Code, rec.Body.String())
+	}
+
+	// The designated approver may reject.
+	reject = providerTestRequest(http.MethodPost, "/api/v1/projects/sample/deploy/requests/"+created.ID+"/reject", "owner", nil)
+	reject.SetPathValue("name", "sample")
+	reject.SetPathValue("id", created.ID)
+	rec = httptest.NewRecorder()
+	s.handleRejectDeployRequest(rec, reject)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approver reject status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+}
+
+func TestApproverIDFromApprovalToleratesNonString(t *testing.T) {
+	if got := approverIDFromApproval(map[string]any{"approverId": 42}); got != "" {
+		t.Fatalf("numeric approverId = %q, want empty", got)
+	}
+	if got := approverIDFromApproval(map[string]any{"approverId": "  alex  "}); got != "alex" {
+		t.Fatalf("whitespace not trimmed: %q", got)
+	}
+	if got := approverIDFromApproval(nil); got != "" {
+		t.Fatalf("nil map = %q, want empty", got)
+	}
+}

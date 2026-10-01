@@ -609,6 +609,8 @@
     "approvalPolicy": "Approval policy",
     "approvalFreeOption": "No approval · deploy directly",
     "approvalRequiredOption": "Approval required · auto-trigger after approval",
+    "approverLabel": "Approver",
+    "approverAny": "Unassigned · any project approver",
     "varsTitle": "Deploy environment variables",
     "varKey": "Variable name (e.g. LOG_LEVEL)",
     "varValue": "Value",

@@ -63,6 +63,13 @@ func FormatDeployApprovalAttachment(req *controldb.DeployRequest, action, token 
 		{"title": "提交 (Commits)", "value": deployCommitSpanSummary(req.CommitSpan), "short": false},
 		{"title": "发起人 (Requested By)", "value": deployCardValue(req.CreatedBy), "short": true},
 	}
+	if approver := approverIDFromApproval(req.Approval); approver != "" {
+		label := approver
+		if v, ok := req.Approval["approverLabel"].(string); ok && strings.TrimSpace(v) != "" {
+			label = strings.TrimSpace(v) + " (" + approver + ")"
+		}
+		fields = append(fields, map[string]any{"title": "指定审批人 (Approver)", "value": deployCardValue(label), "short": true})
+	}
 
 	return map[string]any{
 		"color": "#f59e0b",
@@ -223,6 +230,12 @@ func (s *Server) PostDeployApprovalCard(ctx context.Context, req *controldb.Depl
 
 	props := map[string]any{"attachments": []any{attachment}}
 	message := fmt.Sprintf("#### 🚀 部署审批待处理: %s @ %s", req.Branch, deployCardShortSHA(req.SHA))
+	// Designated approver: highlight them in-channel (same resolution as the
+	// human-review card). The mention is a notification — the actual gate is
+	// deployApproverAllowed on both callback paths.
+	if approver := approverIDFromApproval(req.Approval); approver != "" {
+		message += "\n" + s.threadProjections.DeployApproverMentionLine(req.WorkspaceID, connectionID, approver)
+	}
 	postID, err := s.threadProjections.CreatePostWithProps(ctx, baseURL, botToken, channelID, "", message, props)
 	if err != nil {
 		return "", fmt.Errorf("post deploy approval card: %w", err)

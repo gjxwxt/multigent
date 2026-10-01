@@ -72,3 +72,15 @@ func (s *TaskThreadProjectionService) PatchPost(ctx context.Context, baseURL, bo
 	}
 	return nil
 }
+
+// DeployApproverMentionLine renders the designated-approver line for deploy
+// approval cards, reusing the human-review assignee resolution: a verified
+// Mattermost identity becomes "@username" (channel highlight), anything
+// else degrades to plain text with the platform username. Best-effort —
+// resolution failures are surfaced as text, never as errors.
+func (s *TaskThreadProjectionService) DeployApproverMentionLine(workspaceID, connectionID, platformUserID string) string {
+	if s == nil {
+		return fmt.Sprintf("指定审批人：%s", platformUserID)
+	}
+	return s.humanReviewAssigneeLine(workspaceID, connectionID, platformUserID)
+}

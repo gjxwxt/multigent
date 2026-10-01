@@ -749,6 +749,18 @@ func (s *Server) handleDeployApprovalChatopsAction(w http.ResponseWriter, r *htt
 		writeMattermostActionError(w, fmt.Sprintf("权限不足：您没有项目 %s 的部署审批权限 (operator required)。", req.ProjectID))
 		return
 	}
+	// Designated-approver gate (shared with the REST path): a request pinned
+	// to one approver only accepts that user (admin fallback). The @mention
+	// on the card is a notification; this check is the enforcement.
+	if !s.deployApproverAllowed(req, platformUserID) {
+		*stage = "deploy_approver_forbidden"
+		if approver := approverIDFromApproval(req.Approval); approver != "" {
+			writeMattermostActionError(w, fmt.Sprintf("未获授权：该部署单的指定审批人是 %s，请由其处理。", approver))
+		} else {
+			writeMattermostActionError(w, "未获授权：您不是该部署单的指定审批人。")
+		}
+		return
+	}
 
 	var statusText string
 	switch tokenData.Action {

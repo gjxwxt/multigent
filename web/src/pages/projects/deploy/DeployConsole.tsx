@@ -1,11 +1,16 @@
-// DeployConsole：发起部署控制台（分支/commit 选择 + 审批策略 + 环境变量）。
-// 规范 v2 §1.5：两按钮分裂合并为单一审批策略选择器；approverId 定向审批待 B3 后端前置，此处不做。
+// DeployConsole：发起部署控制台（分支/commit 选择 + 审批策略/审批人 + 环境变量）。
+// 规范 v2 §1.5：两按钮分裂合并为单一审批策略选择器。
+// B3：选"需审批"时出现审批人下拉（不指定=项目内可审批成员均可）；成员数据复用
+// CreateTaskDialog 的 /api/v1/users 过滤模式。强制力在服务端 approverGate，此处只是发起入口。
 import { useEffect, useMemo, useState } from 'react'
 import { Rocket } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { useApiJson } from '../../../lib/use-api'
 import { cn } from '../../../lib/cn'
 import { cardCls, cardHeadCls, cardTitleCls, primaryButton, shortSha, type BranchInfo } from './deploy-shared'
 import { EnvVarsEditor, sanitizeVarRows, type DeployVarRow } from './EnvVarsEditor'
+
+type ApproverPerson = { username: string; displayName?: string; disabled?: boolean }
 
 export function DeployConsole({
   branches,
@@ -22,10 +27,17 @@ export function DeployConsole({
   deployPort?: number
   creating: boolean
   onBranchChange: (name: string) => void
-  onCreate: (approvalRequired: boolean, vars: Record<string, string>) => Promise<void>
+  onCreate: (approvalRequired: boolean, vars: Record<string, string>, approverId: string) => Promise<void>
 }) {
   const { t } = useTranslation()
   const [approvalRequired, setApprovalRequired] = useState(false)
+  const [approverId, setApproverId] = useState('')
+  // 成员下拉数据源：/api/v1/users 过滤 disabled（与 CreateTaskDialog 同一契约）。
+  const usersState = useApiJson<ApproverPerson[]>('/api/v1/users', 0)
+  const approverOptions = useMemo(
+    () => (usersState.status === 'ok' ? usersState.data.filter((p) => !p.disabled && p.username) : []),
+    [usersState],
+  )
   const branchInfo = useMemo(() => branches.find((b) => b.name === branch) ?? null, [branches, branch])
   const commitOptions = useMemo(
     // BranchInfo 自带 commitId/commitTitle——单分支只有 tip 一个可选项，如实展示。
@@ -44,7 +56,8 @@ export function DeployConsole({
 
   const submit = () => {
     const vars = sanitizeVarRows(varRows)
-    void onCreate(approvalRequired, vars)
+    // 未指定审批人时提交空串——后端将 Approval map 留空，维持"项目内可审批成员均可"现状。
+    void onCreate(approvalRequired, vars, approvalRequired ? approverId : '')
   }
 
   return (
@@ -120,6 +133,27 @@ export function DeployConsole({
             <option value="required">{t('projectDeploy.approvalRequiredOption', { defaultValue: '需审批 · 审批人批准后自动触发' })}</option>
           </select>
         </label>
+
+        {/* 审批人（仅"需审批"时出现；首项不指定 = 项目内可审批成员均可） */}
+        {approvalRequired && (
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium text-neutral-500 dark:text-zinc-400">
+              {t('projectDeploy.approverLabel', { defaultValue: '审批人' })}
+            </span>
+            <select
+              value={approverId}
+              onChange={(e) => setApproverId(e.target.value)}
+              className="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-800 outline-none focus:border-sky-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+            >
+              <option value="">{t('projectDeploy.approverAny', { defaultValue: '不指定 · 项目内可审批成员均可' })}</option>
+              {approverOptions.map((p) => (
+                <option key={p.username} value={p.username}>
+                  {p.displayName ? `${p.displayName} (${p.username})` : p.username}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
 
         {/* 环境变量 */}
         <div>

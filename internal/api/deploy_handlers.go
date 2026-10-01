@@ -172,6 +172,10 @@ type createDeployRequest struct {
 	SHA              string            `json:"sha"`
 	Vars             map[string]string `json:"vars"`
 	ApprovalRequired *bool             `json:"approvalRequired"`
+	// ApproverID optionally pins the deploy request to one platform
+	// username (same namespace as CreatedBy and the chatops actor). Empty
+	// keeps the legacy behaviour: any project operator may approve.
+	ApproverID string `json:"approverId"`
 }
 
 // handleCreateDeployRequest serves POST /api/v1/projects/{name}/deploy/requests.
@@ -273,11 +277,39 @@ func (s *Server) handleCreateDeployRequest(w http.ResponseWriter, r *http.Reques
 	}
 
 	approvalRequired := s.deployApprovalRequired(r, p, body.ApprovalRequired)
+
+	// The designated approver must resolve to an enabled platform account,
+	// and only makes sense on a request that actually requires approval.
+	// Fail closed here: a typo'd approverId must not become an unclaimable
+	// pending_approval request nobody is allowed to advance.
+	approverID := strings.TrimSpace(body.ApproverID)
+	if approverID != "" {
+		if !approvalRequired {
+			s.jsonError(w, http.StatusBadRequest, "approverId requires approvalRequired")
+			return
+		}
+		u := s.users.GetUser(approverID)
+		if u == nil || u.Disabled {
+			s.jsonError(w, http.StatusBadRequest, "unknown or disabled approver: "+approverID)
+			return
+		}
+	}
+
 	now := nowUTCAPI()
 	id := newDeployRequestID()
 	status := "approved"
 	if approvalRequired {
 		status = "pending_approval"
+	}
+	approval := map[string]any{
+		"required": approvalRequired,
+		"state":    status,
+	}
+	if approverID != "" {
+		approval["approverId"] = approverID
+		if u := s.users.GetUser(approverID); u != nil && strings.TrimSpace(u.DisplayName) != "" {
+			approval["approverLabel"] = strings.TrimSpace(u.DisplayName)
+		}
 	}
 	req := controldb.DeployRequest{
 		ID:          id,
@@ -288,13 +320,10 @@ func (s *Server) handleCreateDeployRequest(w http.ResponseWriter, r *http.Reques
 		Env:         "production",
 		Vars:        localVars,
 		CommitSpan:  span,
-		Approval: map[string]any{
-			"required": approvalRequired,
-			"state":    status,
-		},
-		Status:    status,
-		CreatedBy: s.currentUserName(r),
-		CreatedAt: now,
+		Approval:    approval,
+		Status:      status,
+		CreatedBy:   s.currentUserName(r),
+		CreatedAt:   now,
 	}
 	if err := s.controlDB.InsertDeployRequest(req); err != nil {
 		if isDeployInflightConflict(err) {
@@ -344,6 +373,46 @@ func (s *Server) deployApprovalRequired(r *http.Request, p *entity.Project, expl
 	_ = r
 	_ = p
 	return false
+}
+
+// deployApproverAllowed enforces the designated-approver gate on a deploy
+// request. Requests without an approverId keep the legacy model (any
+// operator may decide); pinned requests accept only the named approver,
+// with admin as the fallback so a vacation never blocks delivery. The gate
+// is shared by the REST and chatops approve/reject paths — the MM @mention
+// is a notification, this function is the enforcement. Fails closed when
+// the user store cannot answer.
+func (s *Server) deployApproverAllowed(req *controldb.DeployRequest, actorUsername string) bool {
+	if req == nil {
+		return false
+	}
+	approver := approverIDFromApproval(req.Approval)
+	if approver == "" {
+		return true
+	}
+	if strings.TrimSpace(actorUsername) == "" {
+		return false
+	}
+	if actorUsername == approver {
+		return true
+	}
+	if s.users == nil {
+		return false
+	}
+	u := s.users.GetUser(actorUsername)
+	return u != nil && u.Role == RoleAdmin && !u.Disabled
+}
+
+// approverIDFromApproval reads the designated approver out of the Approval
+// map, tolerating non-string JSON values.
+func approverIDFromApproval(approval map[string]any) string {
+	if approval == nil {
+		return ""
+	}
+	if v, ok := approval["approverId"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
 }
 
 // deployHostEnv names the machine that hosts deployed apps; used both for
@@ -489,6 +558,11 @@ func (s *Server) handleApproveDeployRequest(w http.ResponseWriter, r *http.Reque
 		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "deploy request is not pending approval")
 		return
 	}
+	if !s.deployApproverAllowed(req, s.currentUserName(r)) {
+		s.jsonErrorCode(w, http.StatusForbidden, ErrCodeForbidden,
+			"only the designated approver may approve this deploy request")
+		return
+	}
 	moved, err := s.controlDB.UpdateDeployRequestStatus(workspaceID, req.ID, "pending_approval", "approved")
 	if err != nil {
 		s.serverError(w, fmt.Errorf("approve deploy request: %w", err))
@@ -610,6 +684,11 @@ func (s *Server) triggerDeployPipelineNow(w http.ResponseWriter, r *http.Request
 func (s *Server) handleRejectDeployRequest(w http.ResponseWriter, r *http.Request) {
 	_, workspaceID, req, ok := s.deployRequestContext(w, r)
 	if !ok {
+		return
+	}
+	if !s.deployApproverAllowed(req, s.currentUserName(r)) {
+		s.jsonErrorCode(w, http.StatusForbidden, ErrCodeForbidden,
+			"only the designated approver may reject this deploy request")
 		return
 	}
 	moved, err := s.controlDB.UpdateDeployRequestStatus(workspaceID, req.ID, "pending_approval", "rejected")
