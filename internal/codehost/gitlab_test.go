@@ -432,3 +432,33 @@ func TestGitLabHostPipelineJobsMapsRunner(t *testing.T) {
 		t.Errorf("expected empty runner description when runner absent, got %q", jobs[1].RunnerDescription)
 	}
 }
+
+// PipelineByID must hit the single-pipeline endpoint and 404 into ErrNotFound —
+// the deploy watcher's fail-closed path depends on that sentinel.
+func TestGitLabHostPipelineByID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v4/projects/42/pipelines/1219" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":1219,"sha":"4a5e5aec25a05b1b10f0073345895f39fd72d0b5","ref":"main","status":"success","web_url":"http://gl/pipelines/1219"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	host := NewGitLabHost(GitLabConfig{BaseURL: srv.URL, Token: "t"})
+	pipe, err := host.PipelineByID(context.Background(), "42", 1219)
+	if err != nil {
+		t.Fatalf("PipelineByID failed: %v", err)
+	}
+	if pipe.ID != 1219 || pipe.Status != "success" {
+		t.Fatalf("unexpected pipeline: %+v", pipe)
+	}
+	if pipe.SHA != "4a5e5aec25a05b1b10f0073345895f39fd72d0b5" {
+		t.Errorf("expected full sha echoed, got %q", pipe.SHA)
+	}
+
+	if _, err := host.PipelineByID(context.Background(), "42", 999999); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing pipeline: want ErrNotFound, got %v", err)
+	}
+}

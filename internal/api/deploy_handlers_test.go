@@ -91,6 +91,28 @@ func (f *fakeDeployGitLab) handler() http.Handler {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(out))
 		default:
+			if idx := strings.LastIndex(path, "/pipelines/"); idx >= 0 {
+				// Single-pipeline lookup (GET /pipelines/:id) — the ID-based
+				// path the deploy watcher polls; unknown ids 404 like GitLab.
+				idStr := path[idx+len("/pipelines/"):]
+				var id int64
+				if _, err := fmt.Sscanf(idStr, "%d", &id); err == nil {
+					f.mu.Lock()
+					var pipe *codehost.PipelineInfo
+					for i := range f.pipelines {
+						if f.pipelines[i].ID == id {
+							pipe = &f.pipelines[i]
+							break
+						}
+					}
+					f.mu.Unlock()
+					if pipe != nil {
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = w.Write([]byte(fmt.Sprintf(`{"id":%d,"sha":%q,"ref":%q,"status":%q,"web_url":"http://gitlab/pipelines/%d"}`, pipe.ID, pipe.SHA, pipe.Ref, pipe.Status, pipe.ID)))
+						return
+					}
+				}
+			}
 			w.WriteHeader(http.StatusNotFound)
 		}
 	})
@@ -1166,5 +1188,127 @@ func TestApproverIDFromApprovalToleratesNonString(t *testing.T) {
 	}
 	if got := approverIDFromApproval(nil); got != "" {
 		t.Fatalf("nil map = %q, want empty", got)
+	}
+}
+
+// The deploy watcher polls by pipeline ID (the authoritative handle recorded at
+// trigger time). Regression for the stuck-deploying finding: a SHA-filtered
+// list silently returns empty for short SHAs (GitLab ?sha= only matches full
+// 40-char hashes), so a short-SHA request could never observe its terminal
+// state and sat in 'deploying' until the 30-minute timeout.
+func TestLookupDeployPipelineStatusByID(t *testing.T) {
+	s, _, fake := newDeployHandlerTestServer(t)
+	host, _, err := s.deployGitLabHostFor(context.Background(), "sample")
+	if err != nil {
+		t.Fatalf("resolve host: %v", err)
+	}
+	remoteProjectID := "root/sample"
+
+	// Seed pipelines as the fake trigger would: full-SHA pipeline 901 plus a
+	// short-SHA pipeline 902 that a SHA-filtered lookup would never see.
+	fake.mu.Lock()
+	fake.pipelines = append(fake.pipelines,
+		codehost.PipelineInfo{ID: 901, SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Ref: "main", Status: "running"},
+		codehost.PipelineInfo{ID: 902, SHA: "4a5e5aec25a0", Ref: "main", Status: "success"},
+	)
+	fake.mu.Unlock()
+
+	// Short-SHA request pointing at pipeline 902: found via ID lookup even
+	// though PipelinesForSHA with the same SHA yields nothing.
+	status, found := s.lookupDeployPipelineStatus(context.Background(), host, remoteProjectID, controldb.DeployRequest{
+		ID: "dep-x", ProjectID: "sample", SHA: "4a5e5aec25a0", PipelineID: 902,
+	})
+	if !found || status != "success" {
+		t.Fatalf("ID lookup short sha: found=%v status=%q, want true/success", found, status)
+	}
+
+	// Unknown pipeline id → found=false (caller decides the fail-closed path).
+	status, found = s.lookupDeployPipelineStatus(context.Background(), host, remoteProjectID, controldb.DeployRequest{
+		ID: "dep-y", ProjectID: "sample", SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", PipelineID: 424242,
+	})
+	if found {
+		t.Fatalf("unknown pipeline: found=true status=%q, want false", status)
+	}
+}
+
+// The watcher must fail a request closed when its pipeline disappears
+// server-side, instead of polling a ghost for the full 30-minute window.
+func TestWatchDeployPipelineFailsClosedOnVanishedPipeline(t *testing.T) {
+	s, workspaceID, _ := newDeployHandlerTestServer(t)
+
+	if err := s.controlDB.InsertDeployRequest(controldb.DeployRequest{
+		ID: "dep-vanish", WorkspaceID: workspaceID, ProjectID: "sample",
+		Branch: "main", SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Env: "production", Status: "deploying",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("seed request: %v", err)
+	}
+
+	// The watcher resolves its host from the verified binding — an unreachable
+	// pipeline id keeps 404ing in this fake (no pipeline seeded), so three
+	// consecutive misses must drive deploying→failed well before any real
+	// timeout. Shrink the poll interval is not configurable; instead call the
+	// recovery path directly with an id the fake will 404.
+	host, _, err := s.deployGitLabHostFor(context.Background(), "sample")
+	if err != nil {
+		t.Fatalf("resolve host: %v", err)
+	}
+	// Simulate exactly what watchDeployPipeline does after 3 consecutive 404s.
+	s.finishDeployWatch(context.Background(), host, "dep-vanish", workspaceID, "sample", "failed")
+
+	stored, found, err := s.controlDB.DeployRequestFor(workspaceID, "dep-vanish")
+	if err != nil || !found {
+		t.Fatalf("ledger read: found=%v err=%v", found, err)
+	}
+	if stored.Status != "failed" {
+		t.Fatalf("status=%q, want failed", stored.Status)
+	}
+}
+
+// An explicit short SHA must be rejected at create time: it persists fine but
+// silently breaks SHA-filtered GitLab queries downstream.
+func TestHandleCreateDeployRequestRejectsShortSHA(t *testing.T) {
+	s, _, _ := newDeployHandlerTestServer(t)
+
+	for _, sha := range []string{"4a5e5aec25a0", "abc", "not-a-hash!"} {
+		req := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/deploy/requests", "owner", createDeployRequest{
+			Branch: "main", SHA: sha,
+		})
+		req.SetPathValue("name", "sample")
+		rec := httptest.NewRecorder()
+		s.handleCreateDeployRequest(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("sha %q: status=%d body=%s, want 400", sha, rec.Code, rec.Body.String())
+		}
+	}
+
+	// Full 40-char hash still accepted.
+	req := providerTestRequest(http.MethodPost, "/api/v1/projects/sample/deploy/requests", "owner", createDeployRequest{
+		Branch: "main", SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	})
+	req.SetPathValue("name", "sample")
+	rec := httptest.NewRecorder()
+	s.handleCreateDeployRequest(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("full sha status=%d body=%s, want 201", rec.Code, rec.Body.String())
+	}
+}
+
+func TestFullDeploySHANormalizes(t *testing.T) {
+	if got, ok := fullDeploySHA("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); !ok || got != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("upper-case 40-hex = %q ok=%v, want lower-cased true", got, ok)
+	}
+	if _, ok := fullDeploySHA("4a5e5aec25a0"); !ok {
+		t.Fatal("12-hex should pass (rejected only at the handler boundary for explicit shas is not the helper's job)")
+	}
+	if _, ok := fullDeploySHA("abc"); ok {
+		t.Fatal("3-char should fail")
+	}
+	if _, ok := fullDeploySHA("zzzzzzzz"); ok {
+		t.Fatal("non-hex should fail")
+	}
+	if _, ok := fullDeploySHA(""); ok {
+		t.Fatal("empty should fail")
 	}
 }

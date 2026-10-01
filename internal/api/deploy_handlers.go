@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -219,6 +220,17 @@ func (s *Server) handleCreateDeployRequest(w http.ResponseWriter, r *http.Reques
 	// HEAD from GitLab. Branch resolution is the one GitLab call that is
 	// mandatory here — without a SHA the request pins nothing.
 	sha := body.SHA
+	if sha != "" {
+		// Explicit SHAs must be a full 40-char hex hash (the deterministic
+		// baseline the whole request pins to). A short SHA persists fine but
+		// silently breaks SHA-filtered GitLab queries downstream (?sha= only
+		// matches full hashes) and leaves the request's baseline ambiguous.
+		if normalized, ok := fullDeploySHA(sha); !ok || len(normalized) != 40 {
+			s.jsonError(w, http.StatusBadRequest, "sha must be a full 40-char hex git hash")
+			return
+		}
+		sha = strings.ToLower(sha)
+	}
 	host, binding, hostErr := s.deployGitLabHostFor(r.Context(), project)
 	if hostErr != nil {
 		s.jsonErrorCode(w, http.StatusServiceUnavailable, ErrCodeServiceUnavailable,
@@ -770,8 +782,9 @@ func (s *Server) handleTriggerDeployRequest(w http.ResponseWriter, r *http.Reque
 // 30 minutes) and reconciles the ledger: success → live health probe +
 // status success + health snapshot; failed/canceled → status failed. All
 // errors are logged, never propagated — the goroutine owns no response.
-// The SHA is re-read from the ledger each round so the watcher survives a
-// pipeline recorded after the handler returned.
+// The pipeline is polled by its numeric ID (recorded at trigger time);
+// unlike a SHA-filtered list, GitLab's single-pipeline endpoint accepts no
+// SHA-format sensitivity and a deleted pipeline 404s into fail-closed.
 func (s *Server) watchDeployPipeline(requestID, workspaceID, project, remoteProjectID string, pipelineID int64) {
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -790,6 +803,7 @@ func (s *Server) watchDeployPipeline(requestID, workspaceID, project, remoteProj
 
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
+	notFoundRounds := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -797,18 +811,23 @@ func (s *Server) watchDeployPipeline(requestID, workspaceID, project, remoteProj
 			return
 		case <-ticker.C:
 		}
-		pipelines, err := host.PipelinesForSHA(ctx, remoteProjectID, s.latestDeploySHA(requestID, workspaceID))
-		if err != nil {
-			log.Printf("[deploy] %s: watch pipeline for %s: list pipelines failed: %v", project, requestID, err)
+		pipe, err := host.PipelineByID(ctx, remoteProjectID, pipelineID)
+		if errors.Is(err, codehost.ErrNotFound) {
+			// The pipeline vanished (manual delete / retention). One hit may be
+			// GitLab replication lag; several consecutive misses are terminal.
+			notFoundRounds++
+			if notFoundRounds >= 3 {
+				log.Printf("[deploy] %s: watch pipeline for %s: pipeline %d gone after %d rounds, failing", project, requestID, pipelineID, notFoundRounds)
+				s.finishDeployWatch(ctx, host, requestID, workspaceID, project, "failed")
+				return
+			}
 			continue
 		}
-		var status string
-		for _, pipe := range pipelines {
-			if pipe.ID == pipelineID {
-				status = strings.TrimSpace(pipe.Status)
-				break
-			}
+		if err != nil {
+			log.Printf("[deploy] %s: watch pipeline for %s: get pipeline %d failed: %v", project, requestID, pipelineID, err)
+			continue
 		}
+		status := strings.TrimSpace(pipe.Status)
 		if !isPipelineTerminal(status) {
 			continue
 		}
@@ -922,23 +941,23 @@ func (s *Server) recoverSingleDeployRequest(ctx context.Context, req controldb.D
 	s.finishDeployWatch(ctx, host, req.ID, req.WorkspaceID, project, status)
 }
 
-// lookupDeployPipelineStatus finds the terminal status of the recorded
-// pipeline: pipelines for the request's SHA, matched by pipeline id.
+// lookupDeployPipelineStatus finds the status of the recorded pipeline by its
+// numeric ID — the authoritative handle. A SHA-filtered list would silently
+// return empty for short SHAs (GitLab's ?sha= only matches full 40-char
+// hashes), leaving recovered requests stuck in 'deploying'.
 func (s *Server) lookupDeployPipelineStatus(ctx context.Context, host *codehost.GitLabHost, remoteProjectID string, req controldb.DeployRequest) (status string, found bool) {
-	if req.PipelineID <= 0 || strings.TrimSpace(req.SHA) == "" {
+	if req.PipelineID <= 0 {
 		return "", false
 	}
-	pipelines, err := host.PipelinesForSHA(ctx, remoteProjectID, req.SHA)
+	pipe, err := host.PipelineByID(ctx, remoteProjectID, req.PipelineID)
 	if err != nil {
-		log.Printf("[deploy-recovery] %s: list pipelines for sha %s failed: %v", req.ProjectID, req.SHA, err)
+		if errors.Is(err, codehost.ErrNotFound) {
+			return "", false
+		}
+		log.Printf("[deploy-recovery] %s: get pipeline %d for %s failed: %v", req.ProjectID, req.PipelineID, req.ID, err)
 		return "", false
 	}
-	for _, pipe := range pipelines {
-		if pipe.ID == req.PipelineID {
-			return strings.TrimSpace(pipe.Status), true
-		}
-	}
-	return "", false
+	return strings.TrimSpace(pipe.Status), true
 }
 
 // deployRequestAge parses an RFC3339 created_at; unparseable timestamps read
@@ -967,14 +986,27 @@ func shortDeploySHA(sha string) string {
 	return sha
 }
 
-// latestDeploySHA re-reads the request's SHA for pipeline lookups (the
-// watcher closure only carries the id; the SHA lives in the ledger).
-func (s *Server) latestDeploySHA(requestID, workspaceID string) string {
-	req, _, err := s.controlDB.DeployRequestFor(workspaceID, requestID)
-	if err != nil || req == nil {
-		return ""
+// fullDeploySHA normalizes an explicit SHA to a full 40-hex hash before it is
+// persisted. GitLab's pipelines?sha= filter (used by evidence/audit surfaces)
+// only matches full SHAs, so a short SHA would silently pin nothing; a value
+// that is neither hex nor a plausible hash prefix is rejected outright.
+func fullDeploySHA(sha string) (string, bool) {
+	sha = strings.ToLower(strings.TrimSpace(sha))
+	if sha == "" {
+		return "", false
 	}
-	return req.SHA
+	for _, r := range sha {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return "", false
+		}
+	}
+	if len(sha) == 40 {
+		return sha, true
+	}
+	if len(sha) >= 8 {
+		return sha, true
+	}
+	return "", false
 }
 
 // handleGetDeployPreviewState serves GET .../deploy/preview-state: the

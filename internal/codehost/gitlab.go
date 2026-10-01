@@ -761,6 +761,43 @@ func (g *GitLabHost) PipelinesForSHA(ctx context.Context, projectID, sha string)
 	return out, nil
 }
 
+// PipelineByID fetches a single pipeline by its numeric ID — the authoritative
+// handle recorded at trigger time. Unlike PipelinesForSHA, this never depends
+// on the request SHA's format: GitLab's ?sha= filter only matches full 40-char
+// SHAs, so a short SHA silently yields an empty list and a watcher polling on
+// it can never observe the terminal state.
+func (g *GitLabHost) PipelineByID(ctx context.Context, projectID string, pipelineID int64) (*PipelineInfo, error) {
+	endpoint := fmt.Sprintf("/projects/%s/pipelines/%d", url.PathEscape(projectID), pipelineID)
+	req, err := g.newRequest(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := g.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get gitlab pipeline %d: %w", pipelineID, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, ErrNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("get gitlab pipeline %d status %d: %s", pipelineID, resp.StatusCode, string(b))
+	}
+	var item struct {
+		ID     int64  `json:"id"`
+		SHA    string `json:"sha"`
+		Ref    string `json:"ref"`
+		Status string `json:"status"`
+		Source string `json:"source"`
+		WebURL string `json:"web_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&item); err != nil {
+		return nil, fmt.Errorf("decode gitlab pipeline %d: %w", pipelineID, err)
+	}
+	return &PipelineInfo{ID: item.ID, SHA: item.SHA, Ref: item.Ref, Status: item.Status, Source: item.Source, WebURL: item.WebURL}, nil
+}
+
 // BranchInfo describes one GitLab repository branch.
 type BranchInfo struct {
 	Name        string `json:"name"`
