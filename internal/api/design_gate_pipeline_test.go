@@ -252,6 +252,29 @@ func TestQASignoffGateValidation(t *testing.T) {
 		}
 	})
 
+	// Case 4b: QA agents habitually write `risk` instead of `risk_level` (the
+	// live P1.4 run bounced a 24-row matrix with "invalid risk_level \"\"",
+	// 2026-10): the alias must parse so an otherwise-valid matrix is accepted.
+	t.Run("RiskAliasAccepted", func(t *testing.T) {
+		s, workspaceID, task := seedDesignTask(t, entity.TaskStatusAwaitingConfirmation)
+		matrixJSON := `[
+			{"item_id":"AC-1","risk":"high","status":"passed","evidence":"All tests green"},
+			{"item_id":"AC-2","risk":"medium","status":"blocked","uncovered_reason":"env blocked"}
+		]`
+		seedQASignoffRun(t, s, workspaceID, task.ID, matrixJSON)
+
+		body := `{"decision":"approve","comments":"alias matrix","outputs":{"manual_waivers":"{\"AC-2\":\"verified manually\"}"}}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/resproj/tasks/"+task.ID+"/workflow/review", strings.NewReader(body))
+		req = req.WithContext(context.WithValue(req.Context(), ctxUserKey, "admin"))
+		req.SetPathValue("name", "resproj")
+		req.SetPathValue("taskId", task.ID)
+		w := httptest.NewRecorder()
+		s.handlePostTaskWorkflowReview(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 when risk alias carries the level, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
 	// Case 5: All high risk items passed passes without waiver
 	t.Run("AllPassedSucceeds", func(t *testing.T) {
 		s, workspaceID, task := seedDesignTask(t, entity.TaskStatusAwaitingConfirmation)

@@ -903,13 +903,18 @@ func (q *qaRiskItem) UnmarshalJSON(data []byte) error {
 		AcceptanceItem     string `json:"acceptance_item"`
 		AffectedAPIs       any    `json:"affected_apis"`
 		RiskLevel          string `json:"risk_level"`
-		ExecutionType      string `json:"execution_type"`
-		Status             string `json:"status"`
-		Result             string `json:"result"`
-		CoverageStatus     string `json:"coverage_status"`
-		Evidence           any    `json:"evidence"`
-		TestEvidence       any    `json:"test_evidence"`
-		UncoveredReason    string `json:"uncovered_reason"`
+		// QA agents habitually compress risk_level to "risk" (the live P1.4 run
+		// wrote `risk: "high"` on every row, 2026-10): accept it as a fallback
+		// so an otherwise-valid matrix is not bounced with a baffling
+		// "invalid risk_level \"\"" error. Canonical risk_level wins.
+		RiskShort     string `json:"risk"`
+		ExecutionType string `json:"execution_type"`
+		Status        string `json:"status"`
+		Result        string `json:"result"`
+		CoverageStatus string `json:"coverage_status"`
+		Evidence       any    `json:"evidence"`
+		TestEvidence   any    `json:"test_evidence"`
+		UncoveredReason string `json:"uncovered_reason"`
 	}
 	var r rawItem
 	if err := json.Unmarshal(data, &r); err != nil {
@@ -932,6 +937,9 @@ func (q *qaRiskItem) UnmarshalJSON(data []byte) error {
 	}
 	q.AffectedAPIs = r.AffectedAPIs
 	q.RiskLevel = strings.TrimSpace(r.RiskLevel)
+	if q.RiskLevel == "" {
+		q.RiskLevel = strings.TrimSpace(r.RiskShort)
+	}
 	q.ExecutionType = strings.TrimSpace(r.ExecutionType)
 	q.Status = strings.ToLower(strings.TrimSpace(r.Status))
 	if q.Status == "" {
