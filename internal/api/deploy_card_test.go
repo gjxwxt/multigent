@@ -37,7 +37,7 @@ func TestFormatDeployApprovalAttachment_Structure(t *testing.T) {
 	req := newDeployCardTestRequest("ws-card")
 	tok := "signed.token.payload"
 
-	att := FormatDeployApprovalAttachment(&req, deployCardActionApprove, tok)
+	att := FormatDeployApprovalAttachment(&req, deployCardActionApprove, tok, "http://console.example")
 
 	if got, _ := att["title"].(string); !strings.Contains(got, "部署审批") || !strings.Contains(got, "Deploy Approval") {
 		t.Fatalf("card title = %q, want bilingual deploy approval heading", got)
@@ -69,6 +69,13 @@ func TestFormatDeployApprovalAttachment_Structure(t *testing.T) {
 		}
 		if got, _ := integration["url"].(string); !strings.HasSuffix(got, "/api/v1/im/mattermost/actions") {
 			t.Fatalf("button %d integration.url = %q, want chatops actions endpoint", i, got)
+		}
+		// Regression for the "Action integration error" live finding: relative
+		// integration URLs resolve against the MM SiteURL, so the click POSTs
+		// to Mattermost itself (404). The URL must carry the absolute console
+		// origin passed in.
+		if got, _ := integration["url"].(string); !strings.HasPrefix(got, "http://console.example/") {
+			t.Fatalf("button %d integration.url = %q, want absolute callback base origin", i, got)
 		}
 		ctxMap, _ := integration["context"].(map[string]any)
 		if ctxMap == nil {
@@ -367,7 +374,7 @@ func TestFormatDeployApprovalAttachment_ApproverField(t *testing.T) {
 	base := newDeployCardTestRequest("ws-card")
 
 	// Legacy request: no approverId → no approver field (6 fields).
-	att := FormatDeployApprovalAttachment(&base, deployCardActionApprove, "tok")
+	att := FormatDeployApprovalAttachment(&base, deployCardActionApprove, "tok", "http://console.example")
 	fields, _ := att["fields"].([]map[string]any)
 	if len(fields) != 6 {
 		t.Fatalf("legacy fields = %d, want 6", len(fields))
@@ -376,7 +383,7 @@ func TestFormatDeployApprovalAttachment_ApproverField(t *testing.T) {
 	// Pinned with label.
 	withLabel := base
 	withLabel.Approval = map[string]any{"required": true, "state": "pending_approval", "approverId": "alex", "approverLabel": "Alex Chen"}
-	att = FormatDeployApprovalAttachment(&withLabel, deployCardActionApprove, "tok")
+	att = FormatDeployApprovalAttachment(&withLabel, deployCardActionApprove, "tok", "http://console.example")
 	fields, _ = att["fields"].([]map[string]any)
 	if len(fields) != 7 {
 		t.Fatalf("pinned fields = %d, want 7", len(fields))
@@ -389,7 +396,7 @@ func TestFormatDeployApprovalAttachment_ApproverField(t *testing.T) {
 	// Pinned without label falls back to the bare username.
 	bare := base
 	bare.Approval = map[string]any{"required": true, "state": "pending_approval", "approverId": "alex"}
-	att = FormatDeployApprovalAttachment(&bare, deployCardActionApprove, "tok")
+	att = FormatDeployApprovalAttachment(&bare, deployCardActionApprove, "tok", "http://console.example")
 	fields, _ = att["fields"].([]map[string]any)
 	last = fields[len(fields)-1]
 	if last["value"] != "alex" {

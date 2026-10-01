@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -53,8 +54,11 @@ const (
 // pending-approval deploy card. token is the pre-signed action token for the
 // button identified by action (deploy_approve | deploy_reject); the same
 // signed shape is used for both buttons, mirroring
-// imbridge.FormatHumanReviewAttachment.
-func FormatDeployApprovalAttachment(req *controldb.DeployRequest, action, token string) map[string]any {
+// imbridge.FormatHumanReviewAttachment. callbackBaseURL must be the absolute
+// console origin the Mattermost server can reach: button integration URLs
+// are resolved against the MM SiteURL when relative, which would post the
+// click back to Mattermost itself (404 → "Action integration error").
+func FormatDeployApprovalAttachment(req *controldb.DeployRequest, action, token, callbackBaseURL string) map[string]any {
 	fields := []map[string]any{
 		{"title": "项目 (Project)", "value": deployCardValue(req.ProjectID), "short": true},
 		{"title": "分支 (Branch)", "value": deployCardValue(req.Branch), "short": true},
@@ -77,8 +81,8 @@ func FormatDeployApprovalAttachment(req *controldb.DeployRequest, action, token 
 		"text":  "请核对以下部署单信息，选择审批操作：",
 		"fields": fields,
 		"actions": []map[string]any{
-			deployCardButton("deploy-approve", "✅ 批准部署 (Approve)", "success", deployCardActionApprove, token),
-			deployCardButton("deploy-reject", "⛔ 驳回 (Reject)", "danger", deployCardActionReject, token),
+			deployCardButton("deploy-approve", "✅ 批准部署 (Approve)", "success", deployCardActionApprove, token, callbackBaseURL),
+			deployCardButton("deploy-reject", "⛔ 驳回 (Reject)", "danger", deployCardActionReject, token, callbackBaseURL),
 		},
 	}
 }
@@ -86,14 +90,14 @@ func FormatDeployApprovalAttachment(req *controldb.DeployRequest, action, token 
 // deployCardButton renders one interactive button. The action verb is embedded
 // both in the signed token payload and in integration.context.action — the
 // callback handler rejects clicks where the two disagree (tamper check).
-func deployCardButton(id, name, style, action, token string) map[string]any {
+func deployCardButton(id, name, style, action, token, callbackBaseURL string) map[string]any {
 	return map[string]any{
 		"id":    id,
 		"name":  name,
 		"type":  "button",
 		"style": style,
 		"integration": map[string]any{
-			"url": "/api/v1/im/mattermost/actions",
+			"url": strings.TrimRight(callbackBaseURL, "/") + "/api/v1/im/mattermost/actions",
 			"context": map[string]any{
 				"action_token": token,
 				"action":       action,
@@ -216,11 +220,22 @@ func (s *Server) PostDeployApprovalCard(ctx context.Context, req *controldb.Depl
 		return "", fmt.Errorf("sign deploy reject token: %w", err)
 	}
 
-	attachment := FormatDeployApprovalAttachment(req, deployCardActionApprove, approveTok)
+	// Button integration URLs must be absolute for the Mattermost server:
+	// relative paths resolve against the MM SiteURL and the click would POST
+	// back to Mattermost itself. Same env chain as the human-review card.
+	callbackBaseURL := strings.TrimSpace(os.Getenv("MULTIGENT_CONSOLE_URL"))
+	if callbackBaseURL == "" {
+		callbackBaseURL = strings.TrimSpace(os.Getenv("MULTIGENT_API_URL"))
+	}
+	if callbackBaseURL == "" {
+		callbackBaseURL = strings.TrimSpace(os.Getenv("CHATOPS_CALLBACK_BASE_URL"))
+	}
+
+	attachment := FormatDeployApprovalAttachment(req, deployCardActionApprove, approveTok, callbackBaseURL)
 	actions, _ := attachment["actions"].([]map[string]any)
 	if len(actions) == 2 {
 		actions[1]["integration"] = map[string]any{
-			"url": "/api/v1/im/mattermost/actions",
+			"url": strings.TrimRight(callbackBaseURL, "/") + "/api/v1/im/mattermost/actions",
 			"context": map[string]any{
 				"action_token": rejectTok,
 				"action":       deployCardActionReject,
