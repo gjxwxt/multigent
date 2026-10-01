@@ -1,0 +1,1118 @@
+package api
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/multigent/multigent/internal/codehost"
+	controldb "github.com/multigent/multigent/internal/db"
+	"github.com/multigent/multigent/internal/entity"
+)
+
+// Deploy center handlers (batch 3): REST surface over the deploy_requests
+// ledger (internal/db/deploy_requests.go) plus the GitLab pipeline trigger
+// and the startup self-healing sweep. Auth posture:
+//
+//   - every endpoint runs s.checkProjectAccess first;
+//   - state-changing endpoints additionally require project operator
+//     (s.checkProjectOperator) — the same bar as preview write surfaces;
+//   - all routes are registered on the token-authenticated main mux. The
+//     ONLY public route is the read-only verify callback
+//     (GET /api/v1/deploy-verify, deploy_verify_token.go).
+//
+// Credential invariant: sensitive vars (keys matching SECRET/TOKEN/PASSWORD/
+// KEY) are pushed to GitLab CI/CD variables and stored locally masked as
+// "***" — credentials never land in the deploy ledger (AGENTS.md §5.2).
+
+// deploySensitiveVar reports whether a user-supplied deploy variable key
+// carries a credential that must not be persisted locally.
+func deploySensitiveVar(key string) bool {
+	k := strings.ToUpper(strings.TrimSpace(key))
+	for _, marker := range []string{"SECRET", "TOKEN", "PASSWORD", "KEY"} {
+		if strings.Contains(k, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// deploySensitiveVarMask is what the ledger stores in place of a secret value.
+const deploySensitiveVarMask = "***"
+
+// deployGitLabHostFor resolves the GitLab host for external operations on a
+// project. Production resolves through the verified remote binding
+// (fail-closed: no binding, no deploy). It is a plain method rather than an
+// inline call so tests can swap the GitLab surface without a live forge;
+// there is no var seam in production code.
+func (s *Server) deployGitLabHostFor(ctx context.Context, project string) (*codehost.GitLabHost, *controldb.VerifiedRemoteBinding, error) {
+	return s.verifiedGitLabHost(ctx, project)
+}
+
+// deployProjectRow loads the project entity (deploy port, approval default).
+func (s *Server) deployProjectRow(w http.ResponseWriter, project string) (*entity.Project, bool) {
+	p, err := s.st.Project(project)
+	if err != nil {
+		if isNotFoundErr(err) {
+			s.jsonErrorCode(w, http.StatusNotFound, ErrCodeProjectNotFound, "project not found")
+			return nil, false
+		}
+		s.serverError(w, err)
+		return nil, false
+	}
+	return p, true
+}
+
+// handleGetDeployAggregate serves GET /api/v1/projects/{name}/deploy: the
+// one round-trip the console deploy page needs — project, deploy port,
+// last finished deploy, in-flight deploy, live health probe of the deployed
+// app, and recent pipeline job summaries. Every GitLab-dependent section
+// degrades gracefully: a missing binding or an unreachable forge must not
+// block the ledger view (branches/pipelines render empty instead).
+func (s *Server) handleGetDeployAggregate(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("name")
+	if !s.checkProjectAccess(w, r, project) {
+		return
+	}
+	p, ok := s.deployProjectRow(w, project)
+	if !ok {
+		return
+	}
+	workspaceID, err := s.currentWorkspaceID()
+	if err != nil || workspaceID == "" {
+		s.serverError(w, fmt.Errorf("resolve workspace: %w", err))
+		return
+	}
+
+	// Ledger reads: newest request is the display candidate; it is
+	// "lastDeployed" only when success (a failed/cancelled/rejected run never
+	// changed the live version), "inflight" when not terminal.
+	requests, err := s.controlDB.ListDeployRequests(controldb.DeployRequestFilter{
+		WorkspaceID: workspaceID,
+		ProjectID:   project,
+		Limit:       10,
+	})
+	if err != nil {
+		s.serverError(w, fmt.Errorf("list deploy requests: %w", err))
+		return
+	}
+	var lastDeployed, inflight *controldb.DeployRequest
+	for i := range requests {
+		status := requests[i].Status
+		if isInflightDeployStatus(status) && inflight == nil {
+			inflight = &requests[i]
+		}
+		if status == "success" && lastDeployed == nil {
+			lastDeployed = &requests[i]
+		}
+	}
+
+	health := s.probeDeployedAppHealth(p, lastDeployed)
+
+	// Pipelines: best-effort job summaries; a failure degrades to an empty
+	// list (the frontend renders "—" rather than an error banner).
+	pipelines := s.deployPipelineSummaries(r.Context(), project, 10)
+
+	deployHostConfigured := strings.TrimSpace(os.Getenv(deployHostEnv)) != ""
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"project":              project,
+		"deployPort":           p.DeployPort,
+		"deployHostConfigured": deployHostConfigured,
+		"lastDeployed":         lastDeployed,
+		"inflight":             inflight,
+		"health":               health,
+		"pipelines":            pipelines,
+	})
+}
+
+// handleGetDeployBranches serves GET /api/v1/projects/{name}/deploy/branches:
+// a thin proxy over the verified binding's GitLab ListBranches so the deploy
+// page can pin a SHA. Unverified projects get an empty list, not an error —
+// the page treats "no branches" as "unbound".
+func (s *Server) handleGetDeployBranches(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("name")
+	if !s.checkProjectAccess(w, r, project) {
+		return
+	}
+	_, ok := s.deployProjectRow(w, project)
+	if !ok {
+		return
+	}
+	out := []map[string]any{}
+	host, binding, err := s.deployGitLabHostFor(r.Context(), project)
+	if err != nil {
+		log.Printf("[deploy] %s: branches unavailable: %v", project, err)
+	} else if branches, listErr := host.ListBranches(r.Context(), binding.RemoteProjectID); listErr != nil {
+		log.Printf("[deploy] %s: list branches failed: %v", project, listErr)
+	} else {
+		for _, b := range branches {
+			out = append(out, map[string]any{
+				"name":        b.Name,
+				"isDefault":   b.Default,
+				"commitId":    b.CommitID,
+				"commitTitle": b.CommitTitle,
+			})
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+type createDeployRequest struct {
+	Branch           string            `json:"branch"`
+	SHA              string            `json:"sha"`
+	Vars             map[string]string `json:"vars"`
+	ApprovalRequired *bool             `json:"approvalRequired"`
+	// ApproverID optionally pins the deploy request to one platform
+	// username (same namespace as CreatedBy and the chatops actor). Empty
+	// keeps the legacy behaviour: any project operator may approve.
+	ApproverID string `json:"approverId"`
+}
+
+// handleCreateDeployRequest serves POST /api/v1/projects/{name}/deploy/requests.
+// Operator-gated. Builds the commit span from the last successful deploy,
+// splits sensitive vars out to GitLab CI/CD variables (local ledger stores
+// only the mask), and either parks the request at pending_approval or moves
+// it straight to approved. The partial unique index
+// uq_deploy_requests_inflight guarantees at most one in-flight request per
+// project — a violation surfaces as 409.
+func (s *Server) handleCreateDeployRequest(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("name")
+	if !s.checkProjectAccess(w, r, project) {
+		return
+	}
+	if !s.checkProjectOperator(w, r, project) {
+		return
+	}
+	p, ok := s.deployProjectRow(w, project)
+	if !ok {
+		return
+	}
+	var body createDeployRequest
+	if err := s.readJSON(w, r, &body); err != nil {
+		s.jsonErrorCode(w, http.StatusBadRequest, ErrCodeInvalidRequestBody, "invalid request body")
+		return
+	}
+	body.Branch = strings.TrimSpace(body.Branch)
+	body.SHA = strings.TrimSpace(body.SHA)
+	if body.Branch == "" {
+		s.jsonError(w, http.StatusBadRequest, "branch is required")
+		return
+	}
+
+	workspaceID, err := s.currentWorkspaceID()
+	if err != nil || workspaceID == "" {
+		s.serverError(w, fmt.Errorf("resolve workspace: %w", err))
+		return
+	}
+
+	// Resolve the target SHA: an explicit SHA wins; otherwise the branch
+	// HEAD from GitLab. Branch resolution is the one GitLab call that is
+	// mandatory here — without a SHA the request pins nothing.
+	sha := body.SHA
+	if sha != "" {
+		// Explicit SHAs must be a full 40-char hex hash (the deterministic
+		// baseline the whole request pins to). A short SHA persists fine but
+		// silently breaks SHA-filtered GitLab queries downstream (?sha= only
+		// matches full hashes) and leaves the request's baseline ambiguous.
+		if normalized, ok := fullDeploySHA(sha); !ok || len(normalized) != 40 {
+			s.jsonError(w, http.StatusBadRequest, "sha must be a full 40-char hex git hash")
+			return
+		}
+		sha = strings.ToLower(sha)
+	}
+	host, binding, hostErr := s.deployGitLabHostFor(r.Context(), project)
+	if hostErr != nil {
+		s.jsonErrorCode(w, http.StatusServiceUnavailable, ErrCodeServiceUnavailable,
+			"deploy requires a verified remote binding; run the admin remote verify flow first")
+		return
+	}
+	if sha == "" {
+		branches, listErr := host.ListBranches(r.Context(), binding.RemoteProjectID)
+		if listErr != nil {
+			s.jsonErrorCode(w, http.StatusBadGateway, ErrCodeUpstreamError,
+				"resolve branch head from gitlab failed")
+			return
+		}
+		for _, b := range branches {
+			if b.Name == body.Branch {
+				sha = strings.TrimSpace(b.CommitID)
+				break
+			}
+		}
+		if sha == "" {
+			s.jsonError(w, http.StatusBadRequest, "branch not found on remote: "+body.Branch)
+			return
+		}
+	}
+
+	// Commit span: baseline is the last successful deploy's SHA; without a
+	// baseline (first deploy) the span is just the target commit.
+	span := []controldb.CommitSpanEntry{{SHA: sha, ShortSHA: shortDeploySHA(sha)}}
+	if base, found, baseErr := s.controlDB.LatestSucceededDeployRequest(workspaceID, project); baseErr != nil {
+		s.serverError(w, fmt.Errorf("read last successful deploy: %w", baseErr))
+		return
+	} else if found && base != nil && strings.TrimSpace(base.SHA) != "" && base.SHA != sha {
+		span = []controldb.CommitSpanEntry{
+			{SHA: base.SHA, ShortSHA: shortDeploySHA(base.SHA)},
+			{SHA: sha, ShortSHA: shortDeploySHA(sha)},
+		}
+	}
+
+	// Split sensitive vars: values go to GitLab CI/CD variables; the ledger
+	// keeps only the mask. A failed push fails the request — silently
+	// deploying with a missing secret would be worse than not deploying.
+	localVars := make(map[string]string, len(body.Vars))
+	for key, value := range body.Vars {
+		if !deploySensitiveVar(key) {
+			localVars[key] = value
+			continue
+		}
+		ciKey := deployVarCIPrefix + key
+		if err := host.SetProjectVariable(r.Context(), binding.RemoteProjectID, ciKey, value); err != nil {
+			log.Printf("[deploy] %s: push sensitive var %s to gitlab failed: %v", project, ciKey, err)
+			s.jsonErrorCode(w, http.StatusBadGateway, ErrCodeUpstreamError,
+				"push deploy variable to gitlab failed")
+			return
+		}
+		localVars[key] = deploySensitiveVarMask
+	}
+
+	approvalRequired := s.deployApprovalRequired(r, p, body.ApprovalRequired)
+
+	// The designated approver must resolve to an enabled platform account,
+	// and only makes sense on a request that actually requires approval.
+	// Fail closed here: a typo'd approverId must not become an unclaimable
+	// pending_approval request nobody is allowed to advance.
+	approverID := strings.TrimSpace(body.ApproverID)
+	if approverID != "" {
+		if !approvalRequired {
+			s.jsonError(w, http.StatusBadRequest, "approverId requires approvalRequired")
+			return
+		}
+		u := s.users.GetUser(approverID)
+		if u == nil || u.Disabled {
+			s.jsonError(w, http.StatusBadRequest, "unknown or disabled approver: "+approverID)
+			return
+		}
+	}
+
+	now := nowUTCAPI()
+	id := newDeployRequestID()
+	status := "approved"
+	if approvalRequired {
+		status = "pending_approval"
+	}
+	approval := map[string]any{
+		"required": approvalRequired,
+		"state":    status,
+	}
+	if approverID != "" {
+		approval["approverId"] = approverID
+		if u := s.users.GetUser(approverID); u != nil && strings.TrimSpace(u.DisplayName) != "" {
+			approval["approverLabel"] = strings.TrimSpace(u.DisplayName)
+		}
+	}
+	req := controldb.DeployRequest{
+		ID:          id,
+		WorkspaceID: workspaceID,
+		ProjectID:   project,
+		Branch:      body.Branch,
+		SHA:         sha,
+		Env:         "production",
+		Vars:        localVars,
+		CommitSpan:  span,
+		Approval:    approval,
+		Status:      status,
+		CreatedBy:   s.currentUserName(r),
+		CreatedAt:   now,
+	}
+	if err := s.controlDB.InsertDeployRequest(req); err != nil {
+		if isDeployInflightConflict(err) {
+			s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict,
+				"another deploy request is already in flight for this project")
+			return
+		}
+		s.serverError(w, fmt.Errorf("insert deploy request: %w", err))
+		return
+	}
+
+	s.auditLog(auditLogInput{
+		WorkspaceID:  workspaceID,
+		Action:       "deploy.request.create",
+		ResourceType: "deploy_request",
+		ResourceID:   id,
+		Summary:      fmt.Sprintf("deploy request %s for %s@%s (status %s)", id, body.Branch, shortDeploySHA(sha), status),
+		After: map[string]any{
+			"id": id, "project": project, "branch": body.Branch, "sha": sha, "status": status,
+		},
+		Request: r,
+	})
+
+	if status == "pending_approval" {
+		// Batch 4: render the approval card in the project's IM channel.
+		s.postDeployApprovalCard(&req)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(req)
+}
+
+// deployVarCIPrefix namespaces platform-pushed variables in the GitLab CI/CD
+// variable store.
+const deployVarCIPrefix = "MULTIGENT_DEPLOY_VAR_"
+
+// deployApprovalRequired resolves the approval gate: an explicit request
+// flag wins; otherwise the project-level default (entity.Project has no
+// dedicated field yet — TODO(batch-4): add ApprovalRequired to entity.Project
+// and persist it via the project PUT); otherwise approval is off.
+func (s *Server) deployApprovalRequired(r *http.Request, p *entity.Project, explicit *bool) bool {
+	if explicit != nil {
+		return *explicit
+	}
+	// TODO(batch-4): read p.ApprovalRequired once the entity field exists.
+	_ = r
+	_ = p
+	return false
+}
+
+// deployApproverAllowed enforces the designated-approver gate on a deploy
+// request. Requests without an approverId keep the legacy model (any
+// operator may decide); pinned requests accept only the named approver,
+// with admin as the fallback so a vacation never blocks delivery. The gate
+// is shared by the REST and chatops approve/reject paths — the MM @mention
+// is a notification, this function is the enforcement. Fails closed when
+// the user store cannot answer.
+func (s *Server) deployApproverAllowed(req *controldb.DeployRequest, actorUsername string) bool {
+	if req == nil {
+		return false
+	}
+	approver := approverIDFromApproval(req.Approval)
+	if approver == "" {
+		return true
+	}
+	if strings.TrimSpace(actorUsername) == "" {
+		return false
+	}
+	if actorUsername == approver {
+		return true
+	}
+	if s.users == nil {
+		return false
+	}
+	u := s.users.GetUser(actorUsername)
+	return u != nil && u.Role == RoleAdmin && !u.Disabled
+}
+
+// approverIDFromApproval reads the designated approver out of the Approval
+// map, tolerating non-string JSON values.
+func approverIDFromApproval(approval map[string]any) string {
+	if approval == nil {
+		return ""
+	}
+	if v, ok := approval["approverId"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
+// deployHostEnv names the machine that hosts deployed apps; used both for
+// the health probe target and the console URL handed to CI.
+const deployHostEnv = "MULTIGENT_DEPLOY_HOST"
+
+// consoleURLEnv overrides the console address handed to the CI deploy gate.
+const consoleURLEnv = "MULTIGENT_CONSOLE_URL"
+
+// consoleReachableURL builds the console base URL the CI deploy job calls
+// back to. MULTIGENT_CONSOLE_URL wins; next MULTIGENT_API_URL (set at startup
+// from the real listen address — reachable from CI containers on the same
+// host); last resort the request Host. The chatops path calls this with a
+// synthetic request whose Host is not resolvable by CI containers, so the
+// request Host is deliberately the last fallback, not the primary.
+func (s *Server) consoleReachableURL(r *http.Request) string {
+	if raw := strings.TrimSpace(os.Getenv(consoleURLEnv)); raw != "" {
+		return strings.TrimRight(raw, "/")
+	}
+	if raw := strings.TrimSpace(os.Getenv("MULTIGENT_API_URL")); raw != "" {
+		return strings.TrimRight(raw, "/")
+	}
+	scheme := "http"
+	if r != nil && r.TLS != nil {
+		scheme = "https"
+	}
+	if r == nil {
+		return "http://127.0.0.1:27892"
+	}
+	return scheme + "://" + r.Host
+}
+
+// deployedAppHealthURL builds the health endpoint of the deployed app on the
+// deploy host, or ("", false) when the deployment has no probe target.
+func deployedAppHealthURL(deployPort int) (string, bool) {
+	host := strings.TrimSpace(os.Getenv(deployHostEnv))
+	if host == "" || deployPort <= 0 {
+		return "", false
+	}
+	return fmt.Sprintf("http://%s:%d/api/health", host, deployPort), true
+}
+
+// probeDeployedAppHealth live-probes the deployed app when a finished
+// deployment exists. Unconfigured host → status unknown with reason; probe
+// failure is reported honestly (status down) — never an error response and
+// never a panic. Timeout is 3s so the aggregate endpoint stays snappy.
+func (s *Server) probeDeployedAppHealth(p *entity.Project, lastDeployed *controldb.DeployRequest) map[string]any {
+	if lastDeployed == nil {
+		return nil
+	}
+	url, ok := deployedAppHealthURL(p.DeployPort)
+	if !ok {
+		return map[string]any{"status": "unknown", "reason": "deploy host not configured"}
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	start := time.Now()
+	resp, err := client.Get(url)
+	if err != nil {
+		return map[string]any{"status": "down", "reason": err.Error()}
+	}
+	defer resp.Body.Close()
+	latencyMs := time.Since(start).Milliseconds()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return map[string]any{"status": "down", "httpStatus": resp.StatusCode, "latencyMs": latencyMs}
+	}
+	return map[string]any{"status": "up", "latencyMs": latencyMs}
+}
+
+// deployPipelineSummaries fetches the most recent pipelines with their job
+// summaries for the aggregate view. All failures degrade to an empty list.
+func (s *Server) deployPipelineSummaries(ctx context.Context, project string, limit int) []map[string]any {
+	out := []map[string]any{}
+	host, binding, err := s.deployGitLabHostFor(ctx, project)
+	if err != nil {
+		return out
+	}
+	pipelines, err := host.ListRecentPipelines(ctx, binding.RemoteProjectID, limit)
+	if err != nil {
+		log.Printf("[deploy] %s: list recent pipelines failed: %v", project, err)
+		return out
+	}
+	for _, pipe := range pipelines {
+		entry := map[string]any{
+			"id":     pipe.ID,
+			"ref":    pipe.Ref,
+			"sha":    pipe.SHA,
+			"status": pipe.Status,
+			"webUrl": pipe.WebURL,
+		}
+		if jobs, jobsErr := host.PipelineJobs(ctx, binding.RemoteProjectID, pipe.ID); jobsErr == nil {
+			summary := make([]map[string]any, 0, len(jobs))
+			for _, j := range jobs {
+				summary = append(summary, map[string]any{
+					"name":              j.Name,
+					"stage":             j.Stage,
+					"status":            j.Status,
+					"runnerDescription": j.RunnerDescription,
+				})
+			}
+			entry["jobs"] = summary
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// deployRequestContext resolves project + workspace + the request row for
+// {id}-scoped endpoints. Returns ok=false when a response was written.
+func (s *Server) deployRequestContext(w http.ResponseWriter, r *http.Request) (project string, workspaceID string, req *controldb.DeployRequest, ok bool) {
+	project = r.PathValue("name")
+	if !s.checkProjectAccess(w, r, project) {
+		return "", "", nil, false
+	}
+	if !s.checkProjectOperator(w, r, project) {
+		return "", "", nil, false
+	}
+	workspaceID, err := s.currentWorkspaceID()
+	if err != nil || workspaceID == "" {
+		s.serverError(w, fmt.Errorf("resolve workspace: %w", err))
+		return "", "", nil, false
+	}
+	id := r.PathValue("id")
+	req, found, err := s.controlDB.DeployRequestFor(workspaceID, id)
+	if err != nil {
+		s.serverError(w, fmt.Errorf("read deploy request: %w", err))
+		return "", "", nil, false
+	}
+	if !found || req == nil || req.ProjectID != project {
+		s.jsonErrorCode(w, http.StatusNotFound, ErrCodeNotFound, "deploy request not found")
+		return "", "", nil, false
+	}
+	return project, workspaceID, req, true
+}
+
+// handleApproveDeployRequest serves POST .../deploy/requests/{id}/approve:
+// CAS pending_approval → approved, then triggers the pipeline.
+func (s *Server) handleApproveDeployRequest(w http.ResponseWriter, r *http.Request) {
+	project, workspaceID, req, ok := s.deployRequestContext(w, r)
+	if !ok {
+		return
+	}
+	if req.Status != "pending_approval" {
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "deploy request is not pending approval")
+		return
+	}
+	if !s.deployApproverAllowed(req, s.currentUserName(r)) {
+		s.jsonErrorCode(w, http.StatusForbidden, ErrCodeForbidden,
+			"only the designated approver may approve this deploy request")
+		return
+	}
+	moved, err := s.controlDB.UpdateDeployRequestStatus(workspaceID, req.ID, "pending_approval", "approved")
+	if err != nil {
+		s.serverError(w, fmt.Errorf("approve deploy request: %w", err))
+		return
+	}
+	if !moved {
+		// Lost a race with another approver (REST or chatops) or a cancel —
+		// never continue to the trigger on an unowned transition.
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "deploy request is not pending approval")
+		return
+	}
+	approved, _, err := s.controlDB.DeployRequestFor(workspaceID, req.ID)
+	if err != nil || approved == nil {
+		approved = req
+		approved.Status = "approved"
+	}
+	s.auditLog(auditLogInput{
+		WorkspaceID:  workspaceID,
+		Action:       "deploy.request.approve",
+		ResourceType: "deploy_request",
+		ResourceID:   req.ID,
+		Summary:      "deploy request " + req.ID + " approved",
+		Request:      r,
+	})
+	// Approval implies the pipeline fires: reuse the trigger flow verbatim
+	// (CAS already moved the row to approved, so the CAS inside the trigger
+	// handler cannot run here — call the shared trigger body directly).
+	s.triggerDeployPipelineNow(w, r, project, workspaceID, approved)
+}
+
+// triggerDeployPipelineNow is the shared trigger body: mints the CI gate
+// token, fires the GitLab pipeline, records the pipeline id, and starts the
+// bounded watcher. Written so both the explicit trigger endpoint (after its
+// own CAS) and the approve endpoint (after its CAS) share one code path.
+func (s *Server) triggerDeployPipelineNow(w http.ResponseWriter, r *http.Request, project, workspaceID string, req *controldb.DeployRequest) {
+	moved, err := s.controlDB.UpdateDeployRequestStatus(workspaceID, req.ID, "approved", "deploying")
+	if err != nil {
+		s.serverError(w, fmt.Errorf("mark deploy request deploying: %w", err))
+		return
+	}
+	if !moved {
+		// Another approver/trigger got here first, or the request was
+		// cancelled between the precheck and this CAS. Refuse: firing a
+		// second pipeline (or deploying a cancelled request) is exactly the
+		// race the CAS exists to prevent.
+		log.Printf("[deploy] %s: trigger lost CAS approved→deploying (current status changed); refusing", req.ID)
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "deploy request is no longer approved")
+		return
+	}
+	req.Status = "deploying"
+	req.StartedAt = nowUTCAPI()
+
+	// Token + variables for the CI gate. The verify token is bound to the
+	// exact (project, SHA) and expires in 30 minutes — runner queue margin.
+	token, err := s.signDeployVerifyToken(project, req.SHA, req.ID, deployTokenTTL)
+	if err != nil {
+		_, _ = s.controlDB.UpdateDeployRequestStatus(workspaceID, req.ID, "deploying", "failed")
+		s.serverError(w, fmt.Errorf("sign deploy verify token: %w", err))
+		return
+	}
+	variables := map[string]string{
+		"MULTIGENT_DEPLOY":       "1",
+		"MULTIGENT_DEPLOY_TOKEN": token,
+		"MULTIGENT_CONSOLE_URL":  s.consoleReachableURL(r),
+		// The gate callback must identify the platform project. CI_PROJECT_NAME
+		// is the repo slug and only coincides with the platform name for
+		// platform-created repos; passing the name explicitly keeps brownfield
+		// bindings (platform project ≠ repo slug) working.
+		"MULTIGENT_PROJECT_NAME": project,
+	}
+	// The deploy job's post-up probe must target the same host:port the
+	// platform's own health card uses (deployedAppHealthURL). host.docker.internal
+	// is only correct when the deploy host runs the job's docker daemon; on
+	// OrbStack-style split topologies the published port is reachable via the
+	// deploy-host IP instead, and a fake-IP DNS proxy can hijack that hostname
+	// outright. Configured host wins; unset keeps the template default.
+	if probeHost := strings.TrimSpace(os.Getenv(deployHostEnv)); probeHost != "" {
+		variables["MULTIGENT_DEPLOY_HOST"] = probeHost
+	}
+
+	host, binding, err := s.deployGitLabHostFor(r.Context(), project)
+	if err != nil {
+		_, _ = s.controlDB.UpdateDeployRequestStatus(workspaceID, req.ID, "deploying", "failed")
+		s.jsonErrorCode(w, http.StatusServiceUnavailable, ErrCodeServiceUnavailable,
+			"deploy requires a verified remote binding; run the admin remote verify flow first")
+		return
+	}
+	pipeline, err := host.TriggerPipeline(r.Context(), binding.RemoteProjectID, req.Branch, variables)
+	if err != nil {
+		_, _ = s.controlDB.UpdateDeployRequestStatus(workspaceID, req.ID, "deploying", "failed")
+		log.Printf("[deploy] %s: trigger pipeline for %s failed: %v", project, req.ID, err)
+		s.jsonErrorCode(w, http.StatusBadGateway, ErrCodeUpstreamError, "trigger gitlab pipeline failed")
+		return
+	}
+	if err := s.controlDB.SetDeployRequestPipeline(workspaceID, req.ID, pipeline.ID); err != nil {
+		log.Printf("[deploy] %s: record pipeline %d for %s failed: %v", project, pipeline.ID, req.ID, err)
+	}
+	req.PipelineID = pipeline.ID
+
+	s.auditLog(auditLogInput{
+		WorkspaceID:  workspaceID,
+		Action:       "deploy.request.trigger",
+		ResourceType: "deploy_request",
+		ResourceID:   req.ID,
+		Summary:      fmt.Sprintf("deploy request %s triggered gitlab pipeline %d", req.ID, pipeline.ID),
+		Request:      r,
+	})
+
+	go s.watchDeployPipeline(req.ID, workspaceID, project, binding.RemoteProjectID, pipeline.ID)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(req)
+}
+
+// handleRejectDeployRequest serves POST .../deploy/requests/{id}/reject:
+// CAS pending_approval → rejected (terminal). The IM card archival is
+// batch 4's concern.
+func (s *Server) handleRejectDeployRequest(w http.ResponseWriter, r *http.Request) {
+	_, workspaceID, req, ok := s.deployRequestContext(w, r)
+	if !ok {
+		return
+	}
+	if !s.deployApproverAllowed(req, s.currentUserName(r)) {
+		s.jsonErrorCode(w, http.StatusForbidden, ErrCodeForbidden,
+			"only the designated approver may reject this deploy request")
+		return
+	}
+	moved, err := s.controlDB.UpdateDeployRequestStatus(workspaceID, req.ID, "pending_approval", "rejected")
+	if err != nil {
+		s.serverError(w, fmt.Errorf("reject deploy request: %w", err))
+		return
+	}
+	if !moved {
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "deploy request is not pending approval")
+		return
+	}
+	s.auditLog(auditLogInput{
+		WorkspaceID:  workspaceID,
+		Action:       "deploy.request.reject",
+		ResourceType: "deploy_request",
+		ResourceID:   req.ID,
+		Summary:      "deploy request " + req.ID + " rejected",
+		Request:      r,
+	})
+	req.Status = "rejected"
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(req)
+}
+
+// handleCancelDeployRequest serves POST .../deploy/requests/{id}/cancel:
+// pending_approval/approved → cancelled.
+func (s *Server) handleCancelDeployRequest(w http.ResponseWriter, r *http.Request) {
+	_, workspaceID, req, ok := s.deployRequestContext(w, r)
+	if !ok {
+		return
+	}
+	moved, err := s.controlDB.UpdateDeployRequestStatus(workspaceID, req.ID, "pending_approval", "cancelled")
+	if err != nil {
+		s.serverError(w, fmt.Errorf("cancel deploy request: %w", err))
+		return
+	}
+	if !moved {
+		moved, err = s.controlDB.UpdateDeployRequestStatus(workspaceID, req.ID, "approved", "cancelled")
+		if err != nil {
+			s.serverError(w, fmt.Errorf("cancel deploy request: %w", err))
+			return
+		}
+	}
+	if !moved {
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "deploy request can no longer be cancelled")
+		return
+	}
+	s.auditLog(auditLogInput{
+		WorkspaceID:  workspaceID,
+		Action:       "deploy.request.cancel",
+		ResourceType: "deploy_request",
+		ResourceID:   req.ID,
+		Summary:      "deploy request " + req.ID + " cancelled",
+		Request:      r,
+	})
+	req.Status = "cancelled"
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(req)
+}
+
+// handleTriggerDeployRequest serves POST .../deploy/requests/{id}/trigger:
+// CAS approved → deploying, mints the CI gate token, fires the GitLab
+// pipeline, and spawns a bounded watcher goroutine that reconciles the
+// ledger with the pipeline's terminal state. 202 because completion is
+// asynchronous by design.
+func (s *Server) handleTriggerDeployRequest(w http.ResponseWriter, r *http.Request) {
+	project, workspaceID, req, ok := s.deployRequestContext(w, r)
+	if !ok {
+		return
+	}
+	if req.Status != "approved" {
+		s.jsonErrorCode(w, http.StatusConflict, ErrCodeConflict, "deploy request is not approved")
+		return
+	}
+	s.triggerDeployPipelineNow(w, r, project, workspaceID, req)
+}
+
+// watchDeployPipeline polls the pipeline until terminal state (bounded at
+// 30 minutes) and reconciles the ledger: success → live health probe +
+// status success + health snapshot; failed/canceled → status failed. All
+// errors are logged, never propagated — the goroutine owns no response.
+// The pipeline is polled by its numeric ID (recorded at trigger time);
+// unlike a SHA-filtered list, GitLab's single-pipeline endpoint accepts no
+// SHA-format sensitivity and a deleted pipeline 404s into fail-closed.
+func (s *Server) watchDeployPipeline(requestID, workspaceID, project, remoteProjectID string, pipelineID int64) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("[deploy] watch pipeline for %s panicked: %v", requestID, rec)
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	host, _, err := s.deployGitLabHostFor(ctx, project)
+	if err != nil {
+		log.Printf("[deploy] %s: watch pipeline for %s: resolve host failed: %v", project, requestID, err)
+		_, _ = s.controlDB.UpdateDeployRequestStatus(workspaceID, requestID, "deploying", "failed")
+		return
+	}
+
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	notFoundRounds := 0
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("[deploy] %s: watch pipeline for %s timed out; leaving status as-is", project, requestID)
+			return
+		case <-ticker.C:
+		}
+		pipe, err := host.PipelineByID(ctx, remoteProjectID, pipelineID)
+		if errors.Is(err, codehost.ErrNotFound) {
+			// The pipeline vanished (manual delete / retention). One hit may be
+			// GitLab replication lag; several consecutive misses are terminal.
+			notFoundRounds++
+			if notFoundRounds >= 3 {
+				log.Printf("[deploy] %s: watch pipeline for %s: pipeline %d gone after %d rounds, failing", project, requestID, pipelineID, notFoundRounds)
+				s.finishDeployWatch(ctx, host, requestID, workspaceID, project, "failed")
+				return
+			}
+			continue
+		}
+		if err != nil {
+			log.Printf("[deploy] %s: watch pipeline for %s: get pipeline %d failed: %v", project, requestID, pipelineID, err)
+			continue
+		}
+		status := strings.TrimSpace(pipe.Status)
+		if !isPipelineTerminal(status) {
+			continue
+		}
+		s.finishDeployWatch(ctx, host, requestID, workspaceID, project, status)
+		return
+	}
+}
+
+// finishDeployWatch applies the terminal transition for a watched pipeline.
+func (s *Server) finishDeployWatch(ctx context.Context, host *codehost.GitLabHost, requestID, workspaceID, project, status string) {
+	if status == "success" {
+		p, err := s.st.Project(project)
+		if err != nil {
+			log.Printf("[deploy] %s: read project after pipeline success: %v", project, err)
+		}
+		health := map[string]any{"status": "unknown", "reason": "deploy host not configured"}
+		if p != nil {
+			if url, ok := deployedAppHealthURL(p.DeployPort); ok {
+				client := &http.Client{Timeout: 3 * time.Second}
+				start := time.Now()
+				resp, probeErr := client.Get(url)
+				if probeErr != nil {
+					health = map[string]any{"status": "down", "reason": probeErr.Error()}
+				} else {
+					latency := time.Since(start).Milliseconds()
+					defer resp.Body.Close()
+					if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+						health = map[string]any{"status": "up", "latencyMs": latency}
+					} else {
+						health = map[string]any{"status": "down", "httpStatus": resp.StatusCode, "latencyMs": latency}
+					}
+				}
+			}
+		}
+		if err := s.controlDB.SetDeployRequestHealth(workspaceID, requestID, health); err != nil {
+			log.Printf("[deploy] %s: write health snapshot for %s failed: %v", project, requestID, err)
+		}
+		moved, err := s.controlDB.UpdateDeployRequestStatus(workspaceID, requestID, "deploying", "success")
+		if err != nil || !moved {
+			log.Printf("[deploy] %s: CAS deploying→success for %s failed (moved=%v err=%v)", project, requestID, moved, err)
+		}
+		return
+	}
+	// failed / canceled / skipped: any non-success terminal state fails the
+	// request.
+	moved, err := s.controlDB.UpdateDeployRequestStatus(workspaceID, requestID, "deploying", "failed")
+	if err != nil || !moved {
+		log.Printf("[deploy] %s: CAS deploying→failed for %s failed (moved=%v err=%v)", project, requestID, moved, err)
+	}
+}
+
+// recoverActiveDeployRequests is the startup self-healing sweep (mirrors
+// recoverActiveWorkflowRuns): 3s after boot, every request stuck in
+// 'deploying' is reconciled against GitLab — terminal pipeline drives the
+// CAS, an unknown pipeline older than 2h fails the request, anything else
+// keeps deploying (a running pipeline is still live). All errors are logged,
+// never panicked.
+func (s *Server) recoverActiveDeployRequests() {
+	if s == nil || s.controlDB == nil {
+		return
+	}
+	time.Sleep(3 * time.Second)
+
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("[deploy-recovery] panicked: %v", rec)
+		}
+	}()
+	active, err := s.controlDB.ListDeployingDeployRequests()
+	if err != nil {
+		log.Printf("[deploy-recovery] list deploying requests: %v", err)
+		return
+	}
+	if len(active) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	for _, req := range active {
+		s.recoverSingleDeployRequest(ctx, req)
+	}
+}
+
+// recoverSingleDeployRequest reconciles one 'deploying' request against
+// GitLab. Panics are contained per-request so one bad row cannot abort the
+// sweep.
+func (s *Server) recoverSingleDeployRequest(ctx context.Context, req controldb.DeployRequest) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("[deploy-recovery] request %s panicked: %v", req.ID, rec)
+		}
+	}()
+	project := req.ProjectID
+	host, binding, err := s.deployGitLabHostFor(ctx, project)
+	if err != nil {
+		log.Printf("[deploy-recovery] %s: resolve gitlab host for %s failed: %v", project, req.ID, err)
+		return
+	}
+	status, found := s.lookupDeployPipelineStatus(ctx, host, binding.RemoteProjectID, req)
+	if !found {
+		if deployRequestAge(req.CreatedAt) > 2*time.Hour {
+			log.Printf("[deploy-recovery] %s: no pipeline found for %s after 2h, failing", project, req.ID)
+			s.finishDeployWatch(ctx, host, req.ID, req.WorkspaceID, project, "failed")
+		}
+		return
+	}
+	if !isPipelineTerminal(status) {
+		return
+	}
+	log.Printf("[deploy-recovery] %s: request %s pipeline terminal (%s)", project, req.ID, status)
+	s.finishDeployWatch(ctx, host, req.ID, req.WorkspaceID, project, status)
+}
+
+// lookupDeployPipelineStatus finds the status of the recorded pipeline by its
+// numeric ID — the authoritative handle. A SHA-filtered list would silently
+// return empty for short SHAs (GitLab's ?sha= only matches full 40-char
+// hashes), leaving recovered requests stuck in 'deploying'.
+func (s *Server) lookupDeployPipelineStatus(ctx context.Context, host *codehost.GitLabHost, remoteProjectID string, req controldb.DeployRequest) (status string, found bool) {
+	if req.PipelineID <= 0 {
+		return "", false
+	}
+	pipe, err := host.PipelineByID(ctx, remoteProjectID, req.PipelineID)
+	if err != nil {
+		if errors.Is(err, codehost.ErrNotFound) {
+			return "", false
+		}
+		log.Printf("[deploy-recovery] %s: get pipeline %d for %s failed: %v", req.ProjectID, req.PipelineID, req.ID, err)
+		return "", false
+	}
+	return strings.TrimSpace(pipe.Status), true
+}
+
+// deployRequestAge parses an RFC3339 created_at; unparseable timestamps read
+// as zero age (never auto-fail on malformed data).
+func deployRequestAge(createdAt string) time.Duration {
+	t, err := time.Parse(time.RFC3339, strings.TrimSpace(createdAt))
+	if err != nil {
+		return 0
+	}
+	return time.Since(t)
+}
+
+func isInflightDeployStatus(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "pending_approval", "approved", "deploying":
+		return true
+	}
+	return false
+}
+
+func shortDeploySHA(sha string) string {
+	sha = strings.TrimSpace(sha)
+	if len(sha) > 8 {
+		return sha[:8]
+	}
+	return sha
+}
+
+// fullDeploySHA normalizes an explicit SHA to a full 40-hex hash before it is
+// persisted. GitLab's pipelines?sha= filter (used by evidence/audit surfaces)
+// only matches full SHAs, so a short SHA would silently pin nothing; a value
+// that is neither hex nor a plausible hash prefix is rejected outright.
+func fullDeploySHA(sha string) (string, bool) {
+	sha = strings.ToLower(strings.TrimSpace(sha))
+	if sha == "" {
+		return "", false
+	}
+	for _, r := range sha {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return "", false
+		}
+	}
+	if len(sha) == 40 {
+		return sha, true
+	}
+	if len(sha) >= 8 {
+		return sha, true
+	}
+	return "", false
+}
+
+// handleGetDeployPreviewState serves GET .../deploy/preview-state: the
+// lightweight {lastDeployed, inflight} pair used by surfaces that only need
+// deployment state (e.g. preview banners), without health probes or
+// pipeline fan-out.
+func (s *Server) handleGetDeployPreviewState(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("name")
+	if !s.checkProjectAccess(w, r, project) {
+		return
+	}
+	workspaceID, err := s.currentWorkspaceID()
+	if err != nil || workspaceID == "" {
+		s.serverError(w, fmt.Errorf("resolve workspace: %w", err))
+		return
+	}
+	requests, err := s.controlDB.ListDeployRequests(controldb.DeployRequestFilter{
+		WorkspaceID: workspaceID,
+		ProjectID:   project,
+		Limit:       10,
+	})
+	if err != nil {
+		s.serverError(w, fmt.Errorf("list deploy requests: %w", err))
+		return
+	}
+	var lastDeployed, inflight *controldb.DeployRequest
+	for i := range requests {
+		status := requests[i].Status
+		if isInflightDeployStatus(status) && inflight == nil {
+			inflight = &requests[i]
+		}
+		if status == "success" && lastDeployed == nil {
+			lastDeployed = &requests[i]
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"lastDeployed": lastDeployed,
+		"inflight":     inflight,
+	})
+}
+
+// handleListDeployRequests serves GET .../deploy/requests: the deploy ledger
+// rows the console page renders (newest first). Read-only, project access
+// gated; the 50-row cap bounds the table without pagination plumbing.
+func (s *Server) handleListDeployRequests(w http.ResponseWriter, r *http.Request) {
+	project := r.PathValue("name")
+	if !s.checkProjectAccess(w, r, project) {
+		return
+	}
+	workspaceID, err := s.currentWorkspaceID()
+	if err != nil || workspaceID == "" {
+		s.serverError(w, fmt.Errorf("resolve workspace: %w", err))
+		return
+	}
+	requests, err := s.controlDB.ListDeployRequests(controldb.DeployRequestFilter{
+		WorkspaceID: workspaceID,
+		ProjectID:   project,
+		Limit:       50,
+	})
+	if err != nil {
+		s.serverError(w, fmt.Errorf("list deploy requests: %w", err))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"requests": requests})
+}
+
+// postDeployApprovalCard posts the pending-approval card into the project's
+// Mattermost channel (batch 4). Call-and-forget: card failures are logged and
+// never block the deploy request lifecycle.
+func (s *Server) postDeployApprovalCard(req *controldb.DeployRequest) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := s.PostDeployApprovalCard(ctx, req); err != nil {
+		log.Printf("[deploy] %s: post approval card failed: %v", req.ID, err)
+	}
+}
+
+// currentUserName is the audit/created_by actor for deploy requests.
+func (s *Server) currentUserName(r *http.Request) string {
+	if cur := s.currentUser(r); cur != nil && strings.TrimSpace(cur.Username) != "" {
+		return cur.Username
+	}
+	return "system"
+}
+
+func newDeployRequestID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("dep-%d", time.Now().UnixNano())
+	}
+	return "dep-" + hex.EncodeToString(b[:])
+}
+
+func nowUTCAPI() string {
+	return time.Now().UTC().Format(time.RFC3339)
+}
+
+// isDeployInflightConflict reports whether an InsertDeployRequest failure is
+// the partial unique index uq_deploy_requests_inflight rejecting a second
+// concurrent in-flight request for the same project.
+func isDeployInflightConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unique constraint failed") || strings.Contains(msg, "constraint failed: unique")
+}

@@ -93,6 +93,19 @@ type Store interface {
 	VerifiedRemoteBindingFor(workspaceID, projectID string) (*VerifiedRemoteBinding, bool, error)
 	DeleteVerifiedRemoteBinding(workspaceID, projectID string) error
 
+	// Deploy center: deployment request ledger. At most one request per
+	// (workspace, project) may be in an in-flight status, enforced by a
+	// partial unique index; status transitions are CAS-guarded.
+	InsertDeployRequest(req DeployRequest) error
+	DeployRequestFor(workspaceID, id string) (*DeployRequest, bool, error)
+	ListDeployRequests(filter DeployRequestFilter) ([]DeployRequest, error)
+	LatestSucceededDeployRequest(workspaceID, projectID string) (*DeployRequest, bool, error)
+	UpdateDeployRequestStatus(workspaceID, id, from, to string) (bool, error)
+	SetDeployRequestPipeline(workspaceID, id string, pipelineID int64) error
+	SetDeployRequestHealth(workspaceID, id string, health map[string]any) error
+	HasApprovedDeployRequestForSHA(workspaceID, projectID, sha string) (bool, error)
+	ListDeployingDeployRequests() ([]DeployRequest, error)
+
 	// Project assets: content-addressed attachment model. Blobs are never
 	// directly addressable — every read goes through a file/attachment row.
 	UpsertAssetBlob(b AssetBlob) error

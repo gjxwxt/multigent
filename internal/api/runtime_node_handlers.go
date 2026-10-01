@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/multigent/multigent/internal/assets"
-	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/ciready"
+	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/runner"
 	"github.com/multigent/multigent/internal/runtimeexec"
@@ -1586,6 +1586,38 @@ func (s *Server) applyFencedFinishTransition(run *controldb.RuntimeRun, body run
 				if run.Status != "failed" {
 					msg = runtimeWorkflowStepNotCompletedError
 					errorCode = "workflow_step_not_completed"
+				}
+				// B3 (dockerd-wedged incident): a run that died on a PROVABLY
+				// platform-side infra failure (the closed server-controlled
+				// code set: spec_fetch_failed, workspace_prepare_failed,
+				// agent_prepare_failed, executor_failed — executor_failed is
+				// what the runtime node reports when the runner's Docker probe
+				// fails, e.g. "docker sandbox: Docker daemon did not respond
+				// within 3s") must NOT archive the workflow task as a terminal
+				// done_failed. The step never ran: the agent never burned
+				// tokens, no business judgment produced a failure. Route the
+				// task through the SAME infra backoff channel as plain tasks —
+				// failures 1-2 re-dispatch after 5 minutes, the third parks
+				// blocked for a human (notifyInfraBlockedOwner fires after the
+				// fence). Only the run's own infra code counts: an agent-
+				// reported agent_run_failed stays a business outcome with
+				// done_failed + rework semantics (B11 unchanged), and a
+				// completed run whose step report was abandoned still lands
+				// workflow_step_not_completed (fail-closed).
+				if run.Status == "failed" && isRuntimeInfraFailureCode(body.ErrorCode) {
+					task.LastError = msg
+					if !applyInfraFailureBackoffMutation(task, body.ErrorCode) {
+						return fenceDecisionSkip
+					}
+					run.Status = "failed"
+					run.ErrorCode = body.ErrorCode
+					run.ErrorMessage = msg
+					if body.Result == nil {
+						body.Result = map[string]any{}
+					}
+					body.Result["error"] = msg
+					run.ResultJSON = marshalRuntimeObject(body.Result)
+					return fenceDecisionApply
 				}
 				prev := task.Status
 				task.Status = entity.TaskStatusDoneFailed

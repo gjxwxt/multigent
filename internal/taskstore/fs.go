@@ -122,6 +122,7 @@ func (s *FSStore) UpdateTask(project, agent string, t *entity.Task) error {
 	}
 	for i, task := range tasks {
 		if task.ID == t.ID {
+			clearArchivedAtForRestore(t)
 			t.UpdatedAt = time.Now().UTC()
 			tasks[i] = t
 			return s.saveTasks(project, agent, tasks)

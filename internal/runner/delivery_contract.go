@@ -91,6 +91,15 @@ func validateDeliveryEvidence(c deliveryContract, transcript, workspaceDir, base
 // caller can hand the machine-verified candidate SHA to downstream
 // acceptance steps (delivery SHA hand-off): a non-empty violation means the
 // evidence was NOT proven and must be discarded.
+//
+// No-remote mode (B1, 2026-09-29): a project with NO origin remote — or one
+// pointing inside .multigent/ (a bare repo the agent authored to satisfy the
+// old gate) — cannot prove push evidence by construction, so the gate
+// accepts LOCAL evidence instead: a commit beyond the frozen base plus the
+// committed (push.LocalSHA == verified local branch tip) delivery. The
+// branchName requirement stays: without a declared branch there is no
+// delivery ref to verify at all. Projects WITH a real remote keep the exact
+// SHA-accurate remote==local comparison.
 func ValidateGitDeliveryEvidence(c deliveryContract, workspaceDir, baseCommit, baseBranch, branchName string, env []string) (string, PushEvidence) {
 	fail := func(what, hint string) string {
 		return fmt.Sprintf("delivery contract unmet: %s (%s)", what, hint)
@@ -122,18 +131,30 @@ func ValidateGitDeliveryEvidence(c deliveryContract, workspaceDir, baseCommit, b
 		return fail("no commit beyond the frozen base "+baseRef, "commit the delivery on the declared branch"), PushEvidence{}
 	}
 	if c.RequirePush {
-		if strings.TrimSpace(branchName) == "" {
-			return fail("push required but task has no BranchName", "set BranchName on the task"), PushEvidence{}
-		}
-		// SHA-accurate push evidence (review round 3, item 2): a remote
-		// branch EXISTING is not proof — it may sit at an older commit while
-		// the local delivery commit is unpushed.
-		if !push.RemoteHasBranch {
-			return fail("branch not found on the remote", "push the declared branch before completing"), PushEvidence{}
-		}
-		if push.RemoteSHA != push.LocalSHA {
-			return fail(fmt.Sprintf("remote branch is at %s but the local delivery commit is %s (unpushed)", shortSHA(push.RemoteSHA), shortSHA(push.LocalSHA)),
-				"push the latest commit so the remote tip matches the delivery"), PushEvidence{}
+		// No-remote mode is signalled by gitDeliveryEvidence leaving
+		// RemoteHasBranch false while still returning a verified local tip
+		// (RemoteSHA == LocalSHA, no ls-remote error). A bound remote that
+		// simply lacks the branch also produces RemoteHasBranch == false, so
+		// distinguish by the origin classification, not by the flag.
+		noRemote := originEvidenceForDir(workspaceDir) != originBound
+		if !noRemote {
+			if strings.TrimSpace(branchName) == "" {
+				return fail("push required but task has no BranchName", "set BranchName on the task"), PushEvidence{}
+			}
+			// SHA-accurate push evidence (review round 3, item 2): a remote
+			// branch EXISTING is not proof — it may sit at an older commit while
+			// the local delivery commit is unpushed.
+			if !push.RemoteHasBranch {
+				return fail("branch not found on the remote", "push the declared branch before completing"), PushEvidence{}
+			}
+			if push.RemoteSHA != push.LocalSHA {
+				return fail(fmt.Sprintf("remote branch is at %s but the local delivery commit is %s (unpushed)", shortSHA(push.RemoteSHA), shortSHA(push.LocalSHA)),
+					"push the latest commit so the remote tip matches the delivery"), PushEvidence{}
+			}
+		} else if strings.TrimSpace(branchName) == "" || push.LocalSHA == "" {
+			// No-remote projects still need a declared branch carrying the
+			// delivery — without one nothing verifiable exists at all.
+			return fail("no remote configured and no delivery branch to verify", "commit the delivery on the declared branch (no push required: this project has no remote)"), PushEvidence{}
 		}
 	}
 	return "", push

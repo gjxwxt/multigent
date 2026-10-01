@@ -1368,6 +1368,9 @@ func (s *Server) nextRuntimeWakeupTask(workspaceID, project, agent string, hb *e
 	if err := s.ts.AddTask(project, agent, task); err != nil {
 		return nil, nil, err
 	}
+	if len(vars) > 0 {
+		s.rebindAttentionTargetAssets(workspaceID, task, vars)
+	}
 	return task, attentionIDs, nil
 }
 

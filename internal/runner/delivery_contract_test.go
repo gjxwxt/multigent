@@ -180,6 +180,226 @@ func TestGitDeliveryEvidenceMissingBaseFailsClosed(t *testing.T) {
 	}
 }
 
+// B1 (2026-09-29): a project with NO origin remote delivers on LOCAL
+// evidence — commit beyond the frozen base plus a verified local branch
+// tip. The old gate demanded `ls-remote origin <branch>`, which forced
+// agents on remote-less projects to `git init --bare` fake origins to
+// satisfy the evidence check.
+func TestDeliveryContractNoRemoteAcceptsLocalEvidence(t *testing.T) {
+	dir := t.TempDir()
+	seedGitRepo(t, dir, "init", "-b", "main")
+	seedGitRepo(t, dir, "config", "user.email", "t@t")
+	seedGitRepo(t, dir, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedGitRepo(t, dir, "add", ".")
+	seedGitRepo(t, dir, "commit", "-m", "base")
+	seedGitRepo(t, dir, "checkout", "-b", "task/x")
+
+	c := deliveryContract{RequireGitCommit: true, RequirePush: true}
+	// Nothing committed beyond base: the no-remote gate still requires the
+	// real commit evidence.
+	if v, _ := ValidateGitDeliveryEvidence(c, dir, "", "main", "task/x", nil); v == "" {
+		t.Fatal("no-remote mode must still demand a commit beyond the frozen base")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "w.go"), []byte("w\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedGitRepo(t, dir, "add", ".")
+	seedGitRepo(t, dir, "commit", "-m", "local delivery")
+
+	v, push := ValidateGitDeliveryEvidence(c, dir, "", "main", "task/x", nil)
+	if v != "" {
+		t.Fatalf("a committed local delivery on a remote-less project must satisfy the contract, got %q", v)
+	}
+	local := strings.TrimSpace(seedGitRepo(t, dir, "rev-parse", "refs/heads/task/x"))
+	if push.LocalSHA != local {
+		t.Fatalf("evidence must carry the verified local tip %q, got %+v", local, push)
+	}
+	// Delivery SHA hand-off: the local tip is machine-verified (rev-parse),
+	// so the proven pair is surfaced even without a remote — RemoteSHA ==
+	// LocalSHA is the hand-off's acceptance shape.
+	if push.RemoteSHA != local || len(push.RemoteSHA) != 40 {
+		t.Fatalf("no-remote evidence must carry the verified local tip as the pair, got %+v", push)
+	}
+	out := map[string]string{"delivery_sha": "forged"}
+	MergeDeliveryEvidence(out, "task/x", push)
+	if out["delivery_sha"] != local {
+		t.Fatalf("no-remote proven pair must anchor delivery_sha on the verified local tip, got %q", out["delivery_sha"])
+	}
+}
+
+// B1 counterexample: a remote EXISTS and is bound — the exact previous
+// behaviour must be preserved (branch missing on the remote = violation).
+func TestDeliveryContractWithRemoteKeepsPushRequirement(t *testing.T) {
+	remote := t.TempDir()
+	seedGitRepo(t, remote, "init", "--bare", "-b", "main")
+	dir := t.TempDir()
+	seedGitRepo(t, dir, "clone", remote, dir)
+	seedGitRepo(t, dir, "config", "user.email", "t@t")
+	seedGitRepo(t, dir, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedGitRepo(t, dir, "add", ".")
+	seedGitRepo(t, dir, "commit", "-m", "base")
+	seedGitRepo(t, dir, "push", "origin", "main")
+	seedGitRepo(t, dir, "checkout", "-b", "task/x")
+	if err := os.WriteFile(filepath.Join(dir, "w.go"), []byte("w\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedGitRepo(t, dir, "add", ".")
+	seedGitRepo(t, dir, "commit", "-m", "unpushed delivery")
+
+	c := deliveryContract{RequireGitCommit: true, RequirePush: true}
+	v, _ := ValidateGitDeliveryEvidence(c, dir, "", "main", "task/x", nil)
+	if v == "" || !strings.Contains(v, "branch not found on the remote") {
+		t.Fatalf("a bound remote without the branch must still fail the push evidence, got %q", v)
+	}
+
+	// Push and the exact previous pass shape must return.
+	seedGitRepo(t, dir, "push", "origin", "task/x")
+	if v, _ := ValidateGitDeliveryEvidence(c, dir, "", "main", "task/x", nil); v != "" {
+		t.Fatalf("pushed state must satisfy the contract as before, got %q", v)
+	}
+}
+
+// B1 anti-fabrication: an origin pointing INSIDE .multigent/ (the bare repo
+// the agent authored at /workspace/.multigent/origin-<x>.git in the real
+// incident) is not independent evidence — the gate must treat it exactly
+// like "no remote" and accept the LOCAL tip instead, so a self-created
+// origin neither helps nor is required.
+func TestDeliveryContractMultigentLocalOriginIsNotRemoteEvidence(t *testing.T) {
+	fabric := filepath.Join(t.TempDir(), "workspace", ".multigent", "origin-batch-test1.git")
+	if err := os.MkdirAll(fabric, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seedGitRepo(t, fabric, "init", "--bare", "-b", "main")
+	dir := t.TempDir()
+	seedGitRepo(t, dir, "init", "-b", "main")
+	seedGitRepo(t, dir, "config", "user.email", "t@t")
+	seedGitRepo(t, dir, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedGitRepo(t, dir, "add", ".")
+	seedGitRepo(t, dir, "commit", "-m", "base")
+	seedGitRepo(t, dir, "checkout", "-b", "task/x")
+	if err := os.WriteFile(filepath.Join(dir, "w.go"), []byte("w\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedGitRepo(t, dir, "add", ".")
+	seedGitRepo(t, dir, "commit", "-m", "local delivery")
+
+	c := deliveryContract{RequireGitCommit: true, RequirePush: true}
+
+	// The fabricated remote has NEVER seen the branch — under the old gate
+	// this state failed ("branch not found on the remote"), which is what
+	// pushed the agent to push into its own bare repo. The classification
+	// alone must NOT count as push evidence.
+	if mode := originEvidenceForDir(dir); mode == originBound {
+		t.Fatal("a .multigent/ origin must not classify as a bound remote")
+	}
+	if v, _ := ValidateGitDeliveryEvidence(c, dir, "", "main", "task/x", nil); v != "" {
+		t.Fatalf("a .multigent/ origin must downgrade to no-remote mode and accept the local tip, got %q", v)
+	}
+
+	// Even when the agent DID push into its fabricated bare repo, the
+	// fabricated remote must not be consulted: evidence stays the local tip
+	// (which coincides here), never a "remote push succeeded" verdict built
+	// on the agent's own repo.
+	seedGitRepo(t, dir, "remote", "add", "origin", fabric)
+	seedGitRepo(t, dir, "push", "origin", "task/x")
+	v, push := ValidateGitDeliveryEvidence(c, dir, "", "main", "task/x", nil)
+	if v != "" {
+		t.Fatalf("pushing into a .multigent/ origin must not fail the contract (local evidence stands), got %q", v)
+	}
+	local := strings.TrimSpace(seedGitRepo(t, dir, "rev-parse", "refs/heads/task/x"))
+	if push.LocalSHA != local || push.RemoteSHA != local {
+		t.Fatalf("evidence must be the locally verified tip, got %+v", push)
+	}
+}
+
+// B1 classification unit: every legitimate remote spelling stays bound;
+// every .multigent/ path spelling is fabrication.
+func TestClassifyOriginURL(t *testing.T) {
+	bound := []string{
+		"https://gitlab.com/group/repo.git",
+		"http://git.example.invalid/private/repo.git",
+		"git@gitlab.com:group/repo.git",
+		"ssh://git@host/group/repo.git",
+		"file:///srv/git/repo.git",
+		"/srv/git/repo.git",
+	}
+	for _, u := range bound {
+		if mode := classifyOriginURL(u); mode != originBound {
+			t.Errorf("%q must classify as originBound, got %d", u, mode)
+		}
+	}
+	fabric := []string{
+		"/workspace/.multigent/origin-x.git",
+		"file:///workspace/.multigent/origin-x.git",
+		"workspace/.multigent/origin-x.git",
+		"/workspace/.multigent/runtime-home/origin-x.git",
+	}
+	for _, u := range fabric {
+		if mode := classifyOriginURL(u); mode != originLocalFabric {
+			t.Errorf("%q must classify as originLocalFabric, got %d", u, mode)
+		}
+	}
+	// Lookalike that must NOT trip the check: .multigentX or multigent/.
+	if mode := classifyOriginURL("/srv/.multigentx/repo.git"); mode != originBound {
+		t.Errorf("partial-segment match must stay bound, got %d", mode)
+	}
+	if mode := classifyOriginURL("/srv/multigent/repo.git"); mode != originBound {
+		t.Errorf("non-dotted segment must stay bound, got %d", mode)
+	}
+}
+
+// B1 prompt text: a contract on a remote-less worktree must tell the agent
+// NOT to push and NOT to fabricate a remote; a bound worktree keeps the
+// exact push instruction.
+func TestDeliveryContractSectionNoRemoteWording(t *testing.T) {
+	dir := t.TempDir()
+	seedGitRepo(t, dir, "init", "-b", "main")
+	contractVars := map[string]string{DeliveryContractVar: `{"requireGitCommit":true,"requirePush":true}`}
+
+	noRemote := deliveryContractSection(&entity.Task{
+		WorktreeDir: dir,
+		BranchName:  "task/x",
+		Vars:        contractVars,
+	})
+	for _, want := range []string{"NO remote configured", "Do **not** push", "git remote add/set-url", "fabricated evidence"} {
+		if !strings.Contains(noRemote, want) {
+			t.Fatalf("no-remote contract section must contain %q, got:\n%s", want, noRemote)
+		}
+	}
+	for _, bad := range []string{"must exist on `origin`", "ls-remote origin"} {
+		if strings.Contains(noRemote, bad) {
+			t.Fatalf("no-remote contract section must not demand pushing, got:\n%s", noRemote)
+		}
+	}
+
+	boundDir := t.TempDir()
+	remote := t.TempDir()
+	seedGitRepo(t, remote, "init", "--bare", "-b", "main")
+	seedGitRepo(t, boundDir, "clone", remote, boundDir)
+	bound := deliveryContractSection(&entity.Task{
+		WorktreeDir: boundDir,
+		BranchName:  "task/x",
+		Vars:        contractVars,
+	})
+	for _, want := range []string{"must exist on `origin`", "ls-remote origin"} {
+		if !strings.Contains(bound, want) {
+			t.Fatalf("bound contract section must keep the push instruction, got:\n%s", bound)
+		}
+	}
+	if strings.Contains(bound, "NO remote configured") {
+		t.Fatalf("bound contract section must not render the no-remote wording, got:\n%s", bound)
+	}
+}
+
 // Round-3 item 2 counterexample: the remote branch EXISTS but sits at an
 // OLDER commit while the local delivery commit is unpushed — the push
 // evidence must NOT count as pushed, and the violation must name both SHAs.

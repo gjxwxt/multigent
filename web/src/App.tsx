@@ -34,6 +34,8 @@ import ProjectTasksPage from './pages/projects/ProjectTasksPage'
 import ProjectTaskFollowPage from './pages/projects/ProjectTaskFollowPage'
 import ProjectTaskTemplatesPage from './pages/projects/ProjectTaskTemplatesPage'
 import ProjectAssetsPage from './pages/projects/ProjectAssetsPage'
+import ObservabilityMockPage from './pages/ObservabilityMockPage'
+import ProjectDeployPage from './pages/projects/ProjectDeployPage'
 import TeamDetailPage from './pages/teams/TeamDetailPage'
 import TeamsPage from './pages/teams/TeamsPage'
 import DocsPage from './pages/docs/DocsPage'
@@ -167,6 +169,8 @@ function AuthenticatedRoutes() {
           <Route path="members/:agentName" element={<ProjectAgentDetailPage />} />
           {canAdmin && <Route path="schedule" element={<ProjectSchedulePage />} />}
           <Route path="runs" element={<ProjectRunsPage />} />
+        {canAdmin && <Route path="observability" element={<ObservabilityMockPage />} />}
+          <Route path="deploy" element={<ProjectDeployPage />} />
           {canAdmin && <Route path="settings" element={<ProjectSettingsPage />} />}
         </Route>
         <Route path="goals" element={<OKRPage />} />

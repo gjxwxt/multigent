@@ -44,7 +44,13 @@ func worktreeChangedPaths(worktreeDir string) ([]string, error) {
 			continue
 		}
 		status, path := entry[:2], entry[3:]
-		if status == "??" && strings.HasPrefix(path, ".multigent") {
+		// Platform runtime dirs are never the QA agent's delta. The exclusion
+		// covers EVERY status, not just "??" (untracked): a QA agent that
+		// runs `git add -A` stages .multigent/ runtime files, they show up as
+		// "A .multigent/...", and the ??-only form misattributed platform
+		// files to the agent's declaration — a false mismatch that parked an
+		// honest QA completion behind a 400 (2026-09 VM acceptance).
+		if strings.HasPrefix(path, ".multigent") {
 			continue
 		}
 		if strings.HasPrefix(path, `"`) && strings.HasSuffix(path, `"`) {

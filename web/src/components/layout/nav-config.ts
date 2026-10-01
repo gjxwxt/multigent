@@ -13,8 +13,10 @@ import {
   LayoutDashboard,
   ListTodo,
   Milestone,
+  Radar,
   MessageSquare,
   Puzzle,
+  Rocket,
   Settings,
   ShieldCheck,
   Target,
@@ -30,6 +32,7 @@ export type NavKey =
   | 'agents'
   | 'schedule'
   | 'runs'
+  | 'observability'
   | 'teams'
   | 'projects'
   | 'workflows'
@@ -44,7 +47,7 @@ export type NavKey =
   | 'settings'
 
 /** 项目内执行面：`projectNav.*` */
-export type ProjectNavKey = 'tasks' | 'taskTemplates' | 'assets' | 'goals' | 'milestones' | 'messages' | 'members' | 'schedule' | 'runs' | 'settings'
+export type ProjectNavKey = 'tasks' | 'taskTemplates' | 'assets' | 'goals' | 'milestones' | 'messages' | 'members' | 'schedule' | 'runs' | 'deploy' | 'settings'
 
 export type NavItem = {
   to: string
@@ -75,6 +78,7 @@ export const workspaceNav: NavItem[] = [
   { to: '/agents', navKey: 'agents', icon: Bot, activePrefix: '/agents', adminOnly: true },
   { to: '/schedule', navKey: 'schedule', icon: Clock3, activePrefix: '/schedule', adminOnly: true },
   { to: '/runs', navKey: 'runs', icon: BarChart3, activePrefix: '/runs', adminOnly: true },
+  { to: '/observability', navKey: 'observability', icon: Radar, activePrefix: '/observability', adminOnly: true },
   { to: '/workflows', navKey: 'workflows', icon: GitBranch, activePrefix: '/workflows' },
   { to: '/playbooks', navKey: 'playbooks', icon: LibraryBig, activePrefix: '/playbooks', adminOnly: true },
   { to: '/goals', navKey: 'goals', icon: Target, activePrefix: '/goals' },
@@ -96,6 +100,7 @@ export const projectSubNav: ProjectNavItem[] = [
   { segment: 'messages', icon: MessageSquare },
   { segment: 'members', icon: Users },
   { segment: 'runs', icon: BarChart3 },
+  { segment: 'deploy', icon: Rocket },
   { segment: 'settings', icon: Settings, adminOnly: true },
 ]
 
@@ -107,6 +112,7 @@ export function navKeyFromPath(pathname: string): NavKey {
     agents: 'agents',
     schedule: 'schedule',
     runs: 'runs',
+    observability: 'observability',
     teams: 'teams',
     projects: 'projects',
     workflows: 'workflows',
@@ -132,7 +138,7 @@ export function projectIdFromPath(pathname: string): string | null {
 
 export function projectNavKeyFromPath(pathname: string): ProjectNavKey | null {
   const m =
-    /^\/projects\/[^/]+\/(tasks|task-templates|assets|goals|milestones|messages|members|schedule|runs|settings)(?:\/|$)/.exec(pathname)
+    /^\/projects\/[^/]+\/(tasks|task-templates|assets|goals|milestones|messages|members|schedule|runs|deploy|settings)(?:\/|$)/.exec(pathname)
   if (m?.[1] === 'task-templates') return 'taskTemplates'
   return (m?.[1] as ProjectNavKey) ?? null
 }
