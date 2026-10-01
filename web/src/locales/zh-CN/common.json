@@ -690,7 +690,19 @@
     "aiInputPlaceholder": "描述现象、预期与复现路径…",
     "aiSend": "发送",
     "aiStop": "停止",
-    "aiHint": "Cmd/Ctrl+Enter 发送 · 对话保存在本地浏览器"
+    "aiHint": "Cmd/Ctrl+Enter 发送 · 对话保存在本地浏览器",
+    "verifyTitle": "部署后冒烟校验",
+    "verifyAllPassed": "全部通过",
+    "verifyFailedCount": "{{count}} 项失败",
+    "verifyRunning": "执行中…",
+    "verifyReplay": "重放校验",
+    "verifyRegenTitle": "根据部署区间重新生成规格",
+    "verifyGenerating": "生成中…",
+    "verifyRegen": "重新生成",
+    "verifyNotGenerated": "该部署单未生成校验规格（部署完成时自动生成，或点\"重新生成\"）",
+    "verifyGenFailed": "规格生成失败",
+    "verifyExecutedAt": "执行于",
+    "verifySpecOnly": "已生成 {{count}} 项校验规格，尚未执行"
   },
   "playbooks": {
     "subtitle": "把角色、技能、流程和任务模板打包成可复用的 Agent 协作结构。",

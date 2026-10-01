@@ -766,6 +766,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/projects/{name}/deploy/ai/context", s.handleDeployAIContext)
 	mux.HandleFunc("POST /api/v1/projects/{name}/deploy/ai/chat", s.handleDeployAIChat)
 	mux.HandleFunc("POST /api/v1/projects/{name}/deploy/ai/tasks", s.handleDeployAITasks)
+	// ── Deploy smoke verification (phase 3a, M5 deterministic): spec
+	// generation + pure-HTTP execution + replay. Main mux (token auth) +
+	// checkProjectAccess; replay/generation additionally require operator.
+	mux.HandleFunc("GET /api/v1/projects/{name}/deploy/requests/{id}/verification", s.handleGetDeployVerification)
+	mux.HandleFunc("POST /api/v1/projects/{name}/deploy/requests/{id}/verification/run", s.handleRunDeployVerification)
+	mux.HandleFunc("POST /api/v1/projects/{name}/deploy/requests/{id}/verification/generate", s.handleGenerateDeployVerification)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview", s.handleGetTaskPreview)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/resources", s.handleGetTaskResources)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/resources/worktree/cleanup", s.handlePostTaskWorktreeCleanup)

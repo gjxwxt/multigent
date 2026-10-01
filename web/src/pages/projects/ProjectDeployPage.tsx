@@ -265,5 +265,5 @@ function DeployLedgerSection({
   )
   const raw = state.status === 'ok' ? state.data : null
   const rows = Array.isArray(raw) ? raw : (raw?.requests ?? [])
-  return <DeployLedgerTable requests={rows} pipelines={pipelines} actionBusy={actionBusy} onAction={onAction} onRollback={onRollback} />
+  return <DeployLedgerTable requests={rows} pipelines={pipelines} actionBusy={actionBusy} onAction={onAction} onRollback={onRollback} projectId={projectId} />
 }

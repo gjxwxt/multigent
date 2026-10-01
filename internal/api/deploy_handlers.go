@@ -869,6 +869,15 @@ func (s *Server) finishDeployWatch(ctx context.Context, host *codehost.GitLabHos
 		if err != nil || !moved {
 			log.Printf("[deploy] %s: CAS deploying→success for %s failed (moved=%v err=%v)", project, requestID, moved, err)
 		}
+		// Phase 3a: best-effort smoke verification (spec generation via the
+		// project agent's model + deterministic HTTP execution) after the
+		// ledger transition. All failures are logged/persisted in the
+		// verification state, never re-raised here.
+		if moved {
+			if req, found, gerr := s.controlDB.DeployRequestFor(workspaceID, requestID); gerr == nil && found && req != nil {
+				s.maybeStartDeployVerification(workspaceID, project, req)
+			}
+		}
 		return
 	}
 	// failed / canceled / skipped: any non-success terminal state fails the

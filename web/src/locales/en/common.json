@@ -690,7 +690,19 @@
     "aiInputPlaceholder": "Describe symptom, expectation and repro steps…",
     "aiSend": "Send",
     "aiStop": "Stop",
-    "aiHint": "Cmd/Ctrl+Enter to send · conversation stays in this browser"
+    "aiHint": "Cmd/Ctrl+Enter to send · conversation stays in this browser",
+    "verifyTitle": "Post-deploy smoke checks",
+    "verifyAllPassed": "All passed",
+    "verifyFailedCount": "{{count}} failed",
+    "verifyRunning": "Running…",
+    "verifyReplay": "Replay checks",
+    "verifyRegenTitle": "Regenerate spec from the commit span",
+    "verifyGenerating": "Generating…",
+    "verifyRegen": "Regenerate",
+    "verifyNotGenerated": "No verification spec for this request (auto-generated on deploy success, or click \"Regenerate\")",
+    "verifyGenFailed": "Spec generation failed",
+    "verifyExecutedAt": "Executed at",
+    "verifySpecOnly": "{{count}} checks generated, not yet executed"
   },
   "playbooks": {
     "subtitle": "Package roles, skills, workflows, and task templates into reusable agent collaboration structures.",

@@ -15,6 +15,7 @@ import {
   type DeployRequest,
   type PipelineSummary,
 } from './deploy-shared'
+import { DeployVerificationPanel } from './DeployVerificationPanel'
 
 export function DeployLedgerTable({
   requests,
@@ -22,12 +23,14 @@ export function DeployLedgerTable({
   actionBusy,
   onAction,
   onRollback,
+  projectId,
 }: {
   requests: DeployRequest[]
   pipelines: PipelineSummary[]
   actionBusy: string | null
   onAction: (id: string, action: 'approve' | 'reject' | 'cancel' | 'trigger') => Promise<void>
   onRollback: (req: DeployRequest) => void
+  projectId: string
 }) {
   const { t } = useTranslation()
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
@@ -148,6 +151,10 @@ export function DeployLedgerTable({
                               </dd>
                             </div>
                           </dl>
+                          {/* 部署后冒烟校验报告（三期a）：success 行展示规格+结果+重放 */}
+                          {r.status === 'success' && projectId && (
+                            <DeployVerificationPanel projectId={projectId} requestId={r.id} />
+                          )}
                         </td>
                       </tr>
                     )}
