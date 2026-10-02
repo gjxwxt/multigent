@@ -8,6 +8,7 @@ import type { TaskOption } from '../task/TaskModals'
 import { overlayDismissProps } from '../ui/overlay'
 import { showToast } from '../ui/Toast'
 import { DeliveryModeNotice } from './DeliveryModeNotice'
+import { DeliveryPlanEditor, validatePlanDraft, type DeliveryPlanDraft } from './DeliveryPlanEditor'
 import { AssetMentionPopover, type AssetCandidate, type AssetMentionPopoverHandle, type AssetRole } from './AssetMentionPopover'
 import type { ProjectRemoteState } from '../../lib/delivery-mode'
 
@@ -116,7 +117,7 @@ function computeMentionPos(el: HTMLTextAreaElement, caret: number): { left: numb
 export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultAgents, allProjectsAgents, taskOptions = [], onCreated }: Props) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
-  const [createMode, setCreateMode] = useState<'blank' | 'template'>('blank')
+  const [createMode, setCreateMode] = useState<'blank' | 'template' | 'batch'>('blank')
   const [selectedProject, setSelectedProject] = useState(defaultProjectId)
   const [agent, setAgent] = useState('')
   const [title, setTitle] = useState('')
@@ -145,6 +146,15 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
   const [assetsBusy, setAssetsBusy] = useState(false)
   const assetInputRef = useRef<HTMLInputElement>(null)
   const promptInputRef = useRef<HTMLTextAreaElement>(null)
+  // Batch mode (large-requirement wizard): pasted requirement text (or
+  // library assets), the preplan LLM draft, and its busy/error state.
+  const [batchText, setBatchText] = useState('')
+  const [batchAssetIds, setBatchAssetIds] = useState<string[]>([])
+  const [preplanBusy, setPreplanBusy] = useState(false)
+  const [preplanErr, setPreplanErr] = useState<string | null>(null)
+  const [preplanHint, setPreplanHint] = useState<{ scaleHint: string; reason: string } | null>(null)
+  const [batchPlan, setBatchPlan] = useState<DeliveryPlanDraft | null>(null)
+  const GREENFIELD_PIPELINE_ID = 'greenfield-delivery-pipeline'
   // @-mention state: the caret offset where "@" was typed, and the query
   // string tracked after it. Null popover = closed.
   const [mention, setMention] = useState<{ at: number; query: string } | null>(null)
@@ -436,15 +446,56 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
     })
   }
 
-  function onCreateModeChange(mode: 'blank' | 'template') {
+  function onCreateModeChange(mode: 'blank' | 'template' | 'batch') {
     setCreateMode(mode)
     if (mode === 'blank') {
       setTaskTemplateId('')
       setTemplateInputs({})
       return
     }
+    if (mode === 'batch') {
+      // The batch mode targets the greenfield pipeline and seeds its default
+      // actor bindings immediately (scale_gate/contract_review/... need them).
+      if (!workflowDefinitionId) onWorkflowChange(GREENFIELD_PIPELINE_ID)
+      return
+    }
     if (!taskTemplateId && taskTemplates.length > 0) {
       onTemplateChange(taskTemplates[0].id)
+    }
+  }
+
+  // One preplan LLM call → editable draft. The draft is advisory only: the
+  // in-run scale_gate still issues the formal verdict.
+  async function runPreplan() {
+    if (!selectedProject) return
+    const hasText = batchText.trim().length > 0
+    if (!hasText && batchAssetIds.length === 0) {
+      setPreplanErr(t('tasks.preplan.noInput'))
+      return
+    }
+    setPreplanErr(null)
+    setPreplanBusy(true)
+    try {
+      const body = hasText
+        ? { source: 'text', text: batchText }
+        : { source: 'assets', fileIds: batchAssetIds }
+      const resp = await apiPost<{ scaleHint: string; reason?: string; plan?: DeliveryPlanDraft | null; planError?: string; model?: string }>(
+        `/api/v1/projects/${encodeURIComponent(selectedProject)}/delivery/preplan`,
+        body,
+      )
+      setPreplanHint({ scaleHint: resp.scaleHint, reason: resp.reason ?? '' })
+      if (resp.plan) {
+        setBatchPlan(resp.plan)
+        if (resp.planError) setPreplanErr(t('tasks.preplan.planError', { error: resp.planError }))
+      } else if (resp.planError) {
+        setPreplanErr(resp.planError)
+      } else {
+        setPreplanErr(t('tasks.preplan.linearNoPlan', { reason: resp.reason ?? '' }))
+      }
+    } catch (e) {
+      setPreplanErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setPreplanBusy(false)
     }
   }
 
@@ -527,6 +578,22 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
         setFieldErrors(nextFieldErrors)
         return
       }
+    } else if (createMode === 'batch') {
+      const hasInput = batchText.trim().length > 0 || batchAssetIds.length > 0
+      if (!hasInput) {
+        nextFieldErrors.batch = required
+        setErr(t('tasks.preplan.noInput'))
+        setFieldErrors(nextFieldErrors)
+        return
+      }
+      if (batchPlan) {
+        const planErrors = validatePlanDraft(batchPlan, t)
+        if (planErrors.length > 0) {
+          setErr(t('tasks.preplan.fixErrors'))
+          setFieldErrors(nextFieldErrors)
+          return
+        }
+      }
     } else if (!title.trim() || !prompt.trim()) {
       if (!title.trim()) nextFieldErrors.title = required
       if (!prompt.trim()) nextFieldErrors.prompt = required
@@ -564,7 +631,30 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
       // attention wakeup, and autoStart all fire before the 201 response —
       // a post-create bind loop would race them (empty manifest).
       const assetBindings = taskAssets.map((a) => ({ fileId: a.fileId, role: a.role, required: a.required }))
-      if (createMode === 'template' && selectedTemplate) {
+      if (createMode === 'batch') {
+        // Batch mode: one greenfield-pipeline task; the requirement rides the
+        // prompt (or library asset bindings) and the edited plan draft rides
+        // vars.delivery_plan_draft (reaches scale_gate as an advisory input).
+        const batchAssetBindings = batchAssetIds.map((fileId) => ({ fileId, role: 'requirement_input', required: true }))
+        const batchTitle = title.trim() || t('tasks.preplan.defaultTitle', { count: batchPlan?.workPackages.length ?? 0 })
+        const batchPromptParts = [batchText.trim(), t('tasks.preplan.promptSuffix')].filter(Boolean)
+        await apiPost<{ id: string }>(
+          `/api/v1/projects/${encodeURIComponent(selectedProject)}/tasks`,
+          {
+            agent: agent.trim(),
+            title: batchTitle,
+            description: description.trim() || preplanHint?.reason || '',
+            prompt: batchPromptParts.join('\n\n'),
+            type: 'feature',
+            priority,
+            ...(assignee ? { assignee } : {}),
+            workflowDefinitionId: GREENFIELD_PIPELINE_ID,
+            workflowActorBindings: workflowDefinitionId ? actorBindings : {},
+            ...(batchPlan ? { vars: { delivery_plan_draft: JSON.stringify(batchPlan) } } : {}),
+            ...(batchAssetBindings.length > 0 ? { assets: batchAssetBindings } : {}),
+          },
+        )
+      } else if (createMode === 'template' && selectedTemplate) {
         await apiPost<{ id: string }>(
           `/api/v1/projects/${encodeURIComponent(selectedProject)}/tasks/from-template`,
           {
@@ -754,8 +844,8 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
                 <p className="text-sm text-amber-800 dark:text-amber-400">{t('forms.needAgentsForTask')}</p>
               )}
 
-              <div className="grid grid-cols-2 gap-2 rounded-lg bg-neutral-100 p-1 dark:bg-zinc-800/70">
-                {(['blank', 'template'] as const).map((mode) => (
+              <div className="grid grid-cols-3 gap-2 rounded-lg bg-neutral-100 p-1 dark:bg-zinc-800/70">
+                {(['blank', 'template', 'batch'] as const).map((mode) => (
                   <button
                     key={mode}
                     type="button"
@@ -767,10 +857,81 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
                         : 'text-neutral-500 hover:text-neutral-800 dark:text-zinc-400 dark:hover:text-zinc-100',
                     )}
                   >
-                    {mode === 'blank' ? t('taskTemplates.createBlank') : t('taskTemplates.createFromTemplate')}
+                    {mode === 'blank'
+                      ? t('taskTemplates.createBlank')
+                      : mode === 'template'
+                        ? t('taskTemplates.createFromTemplate')
+                        : t('tasks.preplan.modeName')}
                   </button>
                 ))}
               </div>
+
+              {createMode === 'batch' ? (
+                <div className="space-y-3">
+                  <div className="rounded-lg border border-sky-200 bg-sky-50/60 p-3 text-xs text-sky-800 dark:border-sky-900 dark:bg-sky-950/30 dark:text-sky-300">
+                    {t('tasks.preplan.modeIntro')}
+                  </div>
+                  <label className="block text-sm">
+                    <span className="text-neutral-600 dark:text-zinc-400">{t('tasks.preplan.reqText')}</span>
+                    <textarea
+                      value={batchText}
+                      onChange={(e) => setBatchText(e.target.value)}
+                      rows={6}
+                      className={cn(fieldCls, 'resize-y font-mono text-xs')}
+                      placeholder={t('tasks.preplan.reqPlaceholder')}
+                    />
+                  </label>
+                  {(libraryAssets.length > 0 || batchAssetIds.length > 0) && (
+                    <div className="flex flex-wrap gap-1">
+                      {libraryAssets.map((f) => {
+                        const active = batchAssetIds.includes(f.id)
+                        return (
+                          <button
+                            key={f.id}
+                            type="button"
+                            onClick={() =>
+                              setBatchAssetIds((ids) => (active ? ids.filter((i) => i !== f.id) : [...ids, f.id]))
+                            }
+                            className={cn(
+                              'inline-flex max-w-full items-center gap-1 rounded-full px-2 py-0.5 text-xs transition-colors',
+                              active
+                                ? 'bg-sky-600 text-white'
+                                : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700',
+                            )}
+                          >
+                            <FileText className="size-3 shrink-0" />
+                            <span className="truncate">{f.displayName}</span>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  )}
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void runPreplan()}
+                      disabled={preplanBusy || (!batchText.trim() && batchAssetIds.length === 0)}
+                      className="rounded-lg bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50"
+                    >
+                      {preplanBusy ? t('tasks.preplan.running') : t('tasks.preplan.run')}
+                    </button>
+                    {preplanHint && (
+                      <span className="text-xs text-neutral-500 dark:text-zinc-400">
+                        {t('tasks.preplan.hint', { hint: preplanHint.scaleHint })}
+                        {preplanHint.reason ? ` · ${preplanHint.reason}` : ''}
+                      </span>
+                    )}
+                  </div>
+                  {preplanErr && <p className="text-xs text-red-600 dark:text-red-400">{preplanErr}</p>}
+                  {batchPlan && (
+                    <DeliveryPlanEditor
+                      plan={batchPlan}
+                      onChange={setBatchPlan}
+                      agentNames={currentAgentActors.map((a) => a.name)}
+                    />
+                  )}
+                </div>
+              ) : null}
 
               {createMode === 'template' ? (
                 <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-3 dark:border-zinc-700 dark:bg-zinc-950/40">
@@ -850,7 +1011,7 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
                     <PreviewBlock label={t('forms.prompt')} value={renderTemplatePreview(selectedTemplate.promptTemplate)} multiline />
                   </div>
                 </div>
-              ) : (
+              ) : createMode === 'batch' ? null : (
                 <>
                   <label className="block text-sm">
                     <span className="text-neutral-600 dark:text-zinc-400">{t('forms.title')}</span>
@@ -906,6 +1067,7 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
                 </>
               )}
 
+              {createMode !== 'batch' && (
               <div className="block text-sm">
                 <span className="text-neutral-600 dark:text-zinc-400">{t('tasks.assets.label')}</span>
                 {taskAssets.length > 0 && (
@@ -1006,6 +1168,7 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
                   onChange={(e) => void onAssetsSelected(e.target.files)}
                 />
               </div>
+              )}
 
               {createMode === 'blank' ? (
                 <div className="grid grid-cols-2 gap-3">
