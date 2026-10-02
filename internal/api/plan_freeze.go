@@ -53,7 +53,7 @@ func (s *Server) buildDeliveryPlanForFreeze(wfStore *workflowstore.Store, run en
 	ordered := stepsByRecency(instances)
 	planJSONs := stepOutputCandidates(outputs, ordered,
 		[]string{"scale_gate", "contract_batch"},
-		[]string{"delivery_plan", "batch_plan"})
+		planInputFieldNames())
 	// F1 fail-closed: when the freezing review step DECLARES a plan input
 	// field (the template promises the reviewer a plan to look at) but the
 	// review instance's input carries none of them, the human is approving a
@@ -72,7 +72,7 @@ func (s *Server) buildDeliveryPlanForFreeze(wfStore *workflowstore.Store, run en
 	declaresPlanInput := false
 	for _, f := range freezeStep.InputFields {
 		name := strings.TrimSpace(f.Name)
-		if name == "delivery_plan" || name == "batch_plan" {
+		if isPlanInputFieldName(name) {
 			declaresPlanInput = true
 			break
 		}

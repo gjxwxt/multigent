@@ -1407,6 +1407,27 @@ func (s *Store) ListDefinitions() ([]entity.WorkflowDefinition, error) {
 	return out, nil
 }
 
+// ListAllDefinitionsRaw returns EVERY stored definition in this workspace —
+// workspace-scoped AND project-scoped. ListDefinitions deliberately filters
+// to the workspace gallery view; startup sweeps that must converge stored
+// definitions (e.g. the parallel_stage plan-materialization config backfill)
+// need the unfiltered set, because a definition hidden from the gallery is
+// still selectable by an active run.
+func (s *Store) ListAllDefinitionsRaw() ([]entity.WorkflowDefinition, error) {
+	recs, err := s.db.ListRecords("workflow_definitions", s.workspaceID, nil)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]entity.WorkflowDefinition, 0, len(recs))
+	for _, rec := range recs {
+		var def entity.WorkflowDefinition
+		if json.Unmarshal([]byte(rec.Payload), &def) == nil && def.ID != "" {
+			out = append(out, def)
+		}
+	}
+	return out, nil
+}
+
 func (s *Store) Definition(id string) (entity.WorkflowDefinition, bool, error) {
 	raw, ok, err := s.db.GetRecord("workflow_definitions", s.workspaceID, []string{id})
 	if err != nil || !ok {

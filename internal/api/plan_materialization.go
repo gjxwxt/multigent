@@ -123,6 +123,39 @@ func planDriven(step entity.WorkflowStep) bool {
 	return strings.EqualFold(strings.TrimSpace(step.Config[planMaterializationConfigKey]), "frozen")
 }
 
+// planInputFieldNames lists the input field names that mark a step as
+// consuming a structured delivery plan. Shared by the freeze side (an
+// approving review that DECLARES these but carries none must refuse — F1)
+// and the materialization entry (a parallel stage that DECLARES these must
+// refuse to fall back to unapproved static branches — "declaration is
+// enforcement"). requirement_items deliberately stays OFF this list: it is
+// the requirement snapshot, not a plan, and static stages that merely
+// receive the snapshot must keep their legacy fallback.
+func planInputFieldNames() []string {
+	return []string{"delivery_plan", "batch_plan"}
+}
+
+func isPlanInputFieldName(name string) bool {
+	name = strings.TrimSpace(name)
+	for _, want := range planInputFieldNames() {
+		if name == want {
+			return true
+		}
+	}
+	return false
+}
+
+// stepDeclaresPlanInputs reports whether any of the step's input fields is a
+// structured plan field (see planInputFieldNames).
+func stepDeclaresPlanInputs(step entity.WorkflowStep) bool {
+	for _, f := range step.InputFields {
+		if isPlanInputFieldName(f.Name) {
+			return true
+		}
+	}
+	return false
+}
+
 // planStageBranches resolves the frozen plan for the run and derives the
 // branch list for the work packages that are READY and not yet materialized.
 //
@@ -136,8 +169,14 @@ func (s *Server) planStageBranches(project, runID string, step entity.WorkflowSt
 		return nil, nil, planRefusal("parallel stage %q: frozen delivery plan unreadable: %v", step.Title, err)
 	}
 	if !ok {
-		if planDriven(step) {
-			return nil, nil, planRefusal("parallel stage %q is plan-driven (config %s=frozen) but run %s has no frozen delivery plan; refusing to materialize unapproved branches", step.Title, planMaterializationConfigKey, runID)
+		// T2 ("declaration is enforcement"): a stage that declares plan
+		// inputs — via config OR via its input fields — has promised
+		// plan-driven behavior; falling back to the static branch list would
+		// materialize an identity surface the human never approved. Only a
+		// stage with NO plan declaration of any kind keeps the legacy static
+		// fallback (pre-plan projects must keep working unchanged).
+		if planDriven(step) || stepDeclaresPlanInputs(step) {
+			return nil, nil, planRefusal("parallel stage %q declares plan inputs (config %s=frozen or declared plan input fields) but run %s has no frozen delivery plan; refusing to materialize unapproved branches", step.Title, planMaterializationConfigKey, runID)
 		}
 		return nil, nil, nil
 	}

@@ -1960,13 +1960,76 @@ func (s *Server) ensurePlatformWorkflowDefinitions() {
 	if s == nil || s.controlDB == nil {
 		return
 	}
-	workspaceID, err := s.currentWorkspaceID()
-	if err != nil || strings.TrimSpace(workspaceID) == "" {
+	workspaces, err := s.controlDB.ListWorkspaces()
+	if err != nil {
+		log.Printf("[workflow-definitions] list workspaces: %v", err)
+		workspaces = nil
+	}
+	if workspaceID, err := s.currentWorkspaceID(); err == nil && strings.TrimSpace(workspaceID) != "" {
+		seen := false
+		for _, ws := range workspaces {
+			if ws.ID == workspaceID {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			workspaces = append(workspaces, controldb.Workspace{ID: workspaceID})
+		}
+	}
+	for _, ws := range workspaces {
+		if strings.TrimSpace(ws.ID) == "" {
+			continue
+		}
+		wfStore := workflowstore.NewStore(s.controlDB, ws.ID)
+		if err := wfStore.EnsureProjectInitializationDefinition(); err != nil {
+			log.Printf("[workflow-definitions] ensure project initialization definition: %v", err)
+		}
+		s.backfillParallelStagePlanConfigs(ws.ID, wfStore)
+	}
+}
+
+// backfillParallelStagePlanConfigs converges stored workflow definitions on
+// the plan-driven invariant for parallel stages: a parallel_stage that
+// DECLARES plan input fields (delivery_plan / batch_plan) but lost its
+// planMaterialization=frozen config — pre-25445bcf instantiation, or a canvas
+// edit that dropped the config — would silently fall back to unapproved
+// static branches at fan-out. The declaration itself promises plan-driven
+// behavior, so the config is restored (log + save, idempotent: already-fixed
+// definitions are skipped). Pure legacy static stages (no plan declaration)
+// keep their fallback and are untouched.
+func (s *Server) backfillParallelStagePlanConfigs(workspaceID string, wfStore *workflowstore.Store) {
+	defs, err := wfStore.ListAllDefinitionsRaw()
+	if err != nil {
+		log.Printf("[workflow-definitions] backfill scan for workspace: %v", err)
 		return
 	}
-	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
-	if err := wfStore.EnsureProjectInitializationDefinition(); err != nil {
-		log.Printf("[workflow-definitions] ensure project initialization definition: %v", err)
+	for _, def := range defs {
+		changed := false
+		for i := range def.Steps {
+			step := &def.Steps[i]
+			if strings.TrimSpace(step.Type) != "parallel_stage" {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(step.Config[planMaterializationConfigKey]), "frozen") {
+				continue
+			}
+			if !stepDeclaresPlanInputs(*step) {
+				continue
+			}
+			if step.Config == nil {
+				step.Config = map[string]string{}
+			}
+			step.Config[planMaterializationConfigKey] = "frozen"
+			changed = true
+			log.Printf("[workflow-definitions] backfilled %s=frozen on parallel stage %q of definition %s (%s) — it declares plan inputs but had lost the config",
+				planMaterializationConfigKey, step.ID, def.ID, def.Name)
+		}
+		if changed {
+			if err := wfStore.SaveDefinition(&def); err != nil {
+				log.Printf("[workflow-definitions] save backfilled definition %s: %v", def.ID, err)
+			}
+		}
 	}
 }
 
