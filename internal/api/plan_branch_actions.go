@@ -138,7 +138,7 @@ func (s *Server) handleTaskBranchAction(w http.ResponseWriter, r *http.Request, 
 		})
 		_ = json.NewEncoder(w).Encode(resp)
 	case "defer":
-		resp, status, err := s.deferPlanBranch(workspaceID, project, rootAgent, root, run, inst, strings.TrimSpace(body.Reason), strings.TrimSpace(body.FailureCategory), body.CreateFollowUp)
+		resp, status, err := s.deferPlanBranch(workspaceID, project, rootAgent, root, run, inst, strings.TrimSpace(body.Reason), strings.TrimSpace(body.FailureCategory), body.CreateFollowUp, r)
 		if err != nil {
 			if status != http.StatusInternalServerError {
 				s.jsonError(w, status, err.Error())
@@ -257,7 +257,7 @@ func (s *Server) retryPlanBranch(workspaceID, project, rootAgent string, root *e
 // summary is preserved verbatim inside the new summary, the category is
 // recorded on the instance, and an optional follow-up task keeps the waived
 // work from silently disappearing at the end of the round.
-func (s *Server) deferPlanBranch(workspaceID, project, rootAgent string, root *entity.Task, run entity.WorkflowRun, inst entity.WorkflowBranchInstance, reason, category string, createFollowUp bool) (branchActionResponse, int, error) {
+func (s *Server) deferPlanBranch(workspaceID, project, rootAgent string, root *entity.Task, run entity.WorkflowRun, inst entity.WorkflowBranchInstance, reason, category string, createFollowUp bool, r *http.Request) (branchActionResponse, int, error) {
 	resp := branchActionResponse{BranchID: inst.BranchID}
 	status := strings.TrimSpace(inst.Status)
 	if status != workflowstore.PlanWPStateFailed && status != workflowstore.PlanWPStateDeferred {
@@ -309,6 +309,50 @@ func (s *Server) deferPlanBranch(workspaceID, project, rootAgent string, root *e
 	resp.OK = true
 	resp.Status = workflowstore.PlanWPStateDeferred
 	resp.ChildTaskID = strings.TrimSpace(inst.ChildTaskID)
+
+	// A defer can be the ruling that un-parks the stage: the failure that
+	// blocked the join is now settled. Re-drive the stage through the same
+	// branch-transition machinery a completion uses — the store's idempotent
+	// replay path advances the join when every package is settled, and the
+	// API layer below materializes held-back waves otherwise. Without this,
+	// a stage whose last failure was deferred (or whose in-flight count
+	// dropped to zero) sits parked forever: nothing will complete, so the
+	// completion-driven re-drive never fires (live fire, batch-test1
+	// 2026-10-02).
+	drive, err := wfStore.CompleteBranchAndMaybeAdvance(project, root.ID, run.ID, inst.StepID, inst.BranchID, inst.ChildTaskID, deferredSummary, nil, workflowstore.PlanWPStateDeferred)
+	if err != nil {
+		// A concurrent winner (another ruling, a child completion, a cancel)
+		// may have moved the run past this stage first — the stage state is
+		// already correct, so a stale re-drive is not an operator error.
+		log.Printf("[plan-branch-actions] defer re-drive for branch %s on run %s: %v", inst.BranchID, run.ID, err)
+		return resp, http.StatusOK, nil
+	}
+	if drive.Transition.Run.ID != "" {
+		if err := s.advanceParentAfterBranchCompletion(workspaceID, project, drive, r); err != nil {
+			log.Printf("[plan-branch-actions] defer join advance for run %s: %v", run.ID, err)
+		}
+		return resp, http.StatusOK, nil
+	}
+	materialized, waveErr := s.materializeNextPlanWave(workspaceID, project, rootAgent, root, workflowstore.BranchTransitionResult{
+		Branch:     inst,
+		Transition: workflowstore.TransitionResult{Run: run},
+	}, r)
+	if waveErr != nil {
+		log.Printf("[plan-branch-actions] defer wave re-drive for run %s: %v", run.ID, waveErr)
+		return resp, http.StatusOK, nil
+	}
+	if materialized {
+		// The ruling freed capacity and a new wave is running: the root is
+		// no longer blocked on the deferred failure.
+		prev := root.Status
+		root.Status = entity.TaskStatusInProgress
+		root.LastError = ""
+		root.UpdatedAt = time.Now().UTC()
+		entity.ApplyStatusTimestamps(root, prev, time.Now().UTC())
+		if err := s.ts.PersistTask(project, rootAgent, root); err != nil {
+			log.Printf("[plan-branch-actions] root restore after defer wave: %v", err)
+		}
+	}
 	return resp, http.StatusOK, nil
 }
 
