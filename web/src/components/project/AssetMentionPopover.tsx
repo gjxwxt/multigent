@@ -11,6 +11,12 @@ export type AssetCandidate = {
   mime?: string
 }
 
+// Staged-binding roles. CreateTaskDialog imports this type; the streamline
+// refactor (f3664dc5) stopped exporting it and left the import dangling —
+// restored as the minimal fix so `tsc -b` builds again. requirement_input is
+// the batch-wizard role (mandatory prompt input), reference the advisory one.
+export type AssetRole = 'reference' | 'required' | 'requirement_input'
+
 type Props = {
   candidates: AssetCandidate[]
   query: string

@@ -1038,7 +1038,32 @@
       "colTask": "Task",
       "qaBaselineOk": "baseline on file",
       "signoffs": "Human sign-offs",
-      "readOnlyNote": "Read-only view: data comes from the frozen plan record; no actions here."
+      "readOnlyNote": "Read-only view: data comes from the frozen plan record; no actions here.",
+      "blockedNote": "Blocked work packages (upstream failed/skipped):",
+      "deferredNote": "Deferred this round (human ruling, not in delivery):",
+      "branchStatus": {
+        "pending": "pending",
+        "running": "running",
+        "completed": "completed",
+        "failed": "failed",
+        "skipped": "skipped",
+        "deferred": "deferred",
+        "cancelled": "cancelled"
+      },
+      "failureCategory": {
+        "compile_test": "Compile/test failure",
+        "business_assertion": "Business assertion failure",
+        "environment": "Environment failure",
+        "unknown": "Unclassified"
+      },
+      "actions": {
+        "retry": "Retry",
+        "retrying": "Retrying…",
+        "defer": "Defer",
+        "deferring": "Deferring…",
+        "confirmDefer": "Confirm",
+        "createFollowUp": "Follow-up task"
+      }
     },
     "freezeRejection": {
       "title": "Freeze refusal locator",

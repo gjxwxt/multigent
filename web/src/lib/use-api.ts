@@ -18,6 +18,8 @@ type UseApiJsonOptions = {
    * behavior if a caller genuinely wants it.
    */
   keepPreviousDataOnReload?: boolean
+  /** Deprecated no-op kept for callers passing `{ silent: true }`; ignored. */
+  silent?: boolean
 }
 
 export function useApiJson<T>(path: string | null, reloadKey = 0, options?: UseApiJsonOptions): ApiState<T> {
@@ -40,7 +42,11 @@ export function useApiJson<T>(path: string | null, reloadKey = 0, options?: UseA
     const silentStatuses = optionsRef.current?.silentStatuses
     let cancelled = false
     const pathChanged = prevPath.current !== path
-    const reloadChanged = prevReloadKey.current !== reloadKey
+    // reloadChanged intentionally read-and-dropped: a reloadKey bump does NOT
+    // clear to loading anymore (stale-while-revalidate), the ref bump below is
+    // all the effect needs. Kept as an assignment so the ref write is explicit
+    // about which transition each branch covers.
+    void (prevReloadKey.current !== reloadKey)
     prevPath.current = path
     prevReloadKey.current = reloadKey
     if (pathChanged) {

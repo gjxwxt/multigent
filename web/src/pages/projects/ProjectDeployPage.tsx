@@ -141,7 +141,7 @@ export default function ProjectDeployPage() {
   // 现有 create 端点显式收 sha（不可变基线红线），无需额外参数。
   async function rollbackConfirm(target: DeployRequest) {
     if (!projectId || !target) return
-    const created = await createRequest(false, {}, { silent: true })
+    const created = await createRequest(false, {}, '', { silent: true })
     if (!created?.id) throw new Error(t('projectDeploy.rollbackCreateFailed', { defaultValue: '回滚部署单创建失败' }))
     await apiPost(`/api/v1/projects/${encodeURIComponent(projectId)}/deploy/requests/${encodeURIComponent(created.id)}/trigger`, {})
     showToast(t('projectDeploy.rollbackCreated', { defaultValue: '回滚部署单已创建并触发' }), 'success')

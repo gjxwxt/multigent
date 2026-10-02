@@ -6,7 +6,6 @@ import { cn } from '../../lib/cn'
 import { useApiJson } from '../../lib/use-api'
 import type { TaskOption } from '../task/TaskModals'
 import { overlayDismissProps } from '../ui/overlay'
-import { showToast } from '../ui/Toast'
 import { DeliveryModeNotice } from './DeliveryModeNotice'
 import { DeliveryPlanEditor, validatePlanDraft, type DeliveryPlanDraft } from './DeliveryPlanEditor'
 import { AssetMentionPopover, type AssetCandidate, type AssetMentionPopoverHandle, type AssetRole } from './AssetMentionPopover'
@@ -396,13 +395,6 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
       const after = prev.slice(idx + marker.length)
       return (before + after).replace(/ {2,}/g, ' ').trimEnd()
     })
-  }
-
-  function openMention(textarea: HTMLTextAreaElement) {
-    const caret = textarea.selectionStart ?? textarea.value.length
-    setMention({ at: caret, query: '' })
-    setMentionPos(computeMentionPos(textarea, caret))
-    setLibraryRefreshKey((k) => k + 1)
   }
 
   function closeMentionAndInsert(displayName: string) {

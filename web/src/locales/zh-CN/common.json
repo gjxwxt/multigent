@@ -1038,7 +1038,32 @@
       "colTask": "任务",
       "qaBaselineOk": "基线在档",
       "signoffs": "人工签核",
-      "readOnlyNote": "只读视图：数据来自冻结计划记录，无操作入口。"
+      "readOnlyNote": "只读视图：数据来自冻结计划记录，无操作入口。",
+      "blockedNote": "阻塞中的工作包（上游失败/跳过）：",
+      "deferredNote": "本轮缓办（人工裁定，交付不含此包）：",
+      "branchStatus": {
+        "pending": "待运行",
+        "running": "运行中",
+        "completed": "已完成",
+        "failed": "失败",
+        "skipped": "已跳过",
+        "deferred": "已缓办",
+        "cancelled": "已取消"
+      },
+      "failureCategory": {
+        "compile_test": "编译/单测失败",
+        "business_assertion": "业务断言失败",
+        "environment": "环境类失败",
+        "unknown": "未分类"
+      },
+      "actions": {
+        "retry": "重试",
+        "retrying": "重试中…",
+        "defer": "缓办",
+        "deferring": "缓办中…",
+        "confirmDefer": "确认",
+        "createFollowUp": "建待办"
+      }
     },
     "freezeRejection": {
       "title": "冻结拒收定位",

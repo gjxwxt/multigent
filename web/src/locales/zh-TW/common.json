@@ -792,7 +792,32 @@
       "colTask": "任務",
       "qaBaselineOk": "基線在檔",
       "signoffs": "人工簽核",
-      "readOnlyNote": "唯讀檢視：資料來自凍結計畫記錄，無操作入口。"
+      "readOnlyNote": "唯讀檢視：資料來自凍結計畫記錄，無操作入口。",
+      "blockedNote": "阻塞中的工作包（上游失敗/跳過）：",
+      "deferredNote": "本輪緩辦（人工裁定，交付不含此包）：",
+      "branchStatus": {
+        "pending": "待運行",
+        "running": "運行中",
+        "completed": "已完成",
+        "failed": "失敗",
+        "skipped": "已跳過",
+        "deferred": "已緩辦",
+        "cancelled": "已取消"
+      },
+      "failureCategory": {
+        "compile_test": "編譯/單測失敗",
+        "business_assertion": "業務斷言失敗",
+        "environment": "環境類失敗",
+        "unknown": "未分類"
+      },
+      "actions": {
+        "retry": "重試",
+        "retrying": "重試中…",
+        "defer": "緩辦",
+        "deferring": "緩辦中…",
+        "confirmDefer": "確認",
+        "createFollowUp": "建待辦"
+      }
     },
     "freezeRejection": {
       "title": "凍結拒收定位",

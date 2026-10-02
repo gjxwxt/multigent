@@ -793,7 +793,32 @@
       "colTask": "タスク",
       "qaBaselineOk": "ベースライン保管済み",
       "signoffs": "人事サインオフ",
-      "readOnlyNote": "閲覧専用ビュー：データは凍結済み計画レコードから取得され、操作入口はありません。"
+      "readOnlyNote": "閲覧専用ビュー：データは凍結済み計画レコードから取得され、操作入口はありません。",
+      "blockedNote": "ブロック中の作業パッケージ（上流の失敗/スキップ）：",
+      "deferredNote": "今ラウンドは延期（人間の裁定、納品に含まれない）：",
+      "branchStatus": {
+        "pending": "待機中",
+        "running": "実行中",
+        "completed": "完了",
+        "failed": "失敗",
+        "skipped": "スキップ済み",
+        "deferred": "延期済み",
+        "cancelled": "キャンセル"
+      },
+      "failureCategory": {
+        "compile_test": "コンパイル/テスト失敗",
+        "business_assertion": "ビジネスアサーション失敗",
+        "environment": "環境系失敗",
+        "unknown": "未分類"
+      },
+      "actions": {
+        "retry": "再試行",
+        "retrying": "再試行中…",
+        "defer": "延期",
+        "deferring": "延期中…",
+        "confirmDefer": "確認",
+        "createFollowUp": "フォローアップ作成"
+      }
     },
     "freezeRejection": {
       "title": "凍結拒否の特定",
