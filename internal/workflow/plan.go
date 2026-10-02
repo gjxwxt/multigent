@@ -178,6 +178,18 @@ type PlanProgress struct {
 	Deferred []string
 }
 
+// DeferredJoinRuling is the over-deferral gate's verdict for a plan whose
+// stage is otherwise settled: a deferral wave this large means the ROUND's
+// plan itself failed, not just isolated packages.
+type DeferredJoinRuling struct {
+	// Blocked reports the join must be refused even though every package is
+	// settled.
+	Blocked bool
+	// Reason is a human-readable, actionable refusal text (empty when not
+	// blocked).
+	Reason string
+}
+
 // PlanWPState values accepted by EvaluatePlanProgress. Empty string means
 // "not materialized yet".
 const (
@@ -588,6 +600,83 @@ func EvaluatePlanProgress(plan DeliveryPlan, states map[string]string) (PlanProg
 		sort.Strings(s)
 	}
 	return progress, nil
+}
+
+// deferredJoinRatioThreshold: when MORE than half of the plan's work packages
+// are human-deferred, the deferral is not an isolated waiver but a verdict on
+// this round's plan itself — integration review must not receive a stage
+// built from a minority of its packages. Strictly greater: deferring exactly
+// half still joins.
+const deferredJoinRatioThreshold = 0.5
+
+// EvaluateDeferredJoinRuling is the over-deferral gate (pure function): a
+// stage whose packages are all settled may STILL refuse the join when
+// (a) strictly more than half the packages deferred, or (b) some requirement
+// item lost its entire delivery surface — every package referencing it is
+// deferred (guarded against the vacuous truth of a zero-reference item).
+// Unlike the settled/unfinished checks this does NOT heal by waiting: the
+// deferred ratio never drops on its own, so the ruling carries the escape
+// hatches in its reason text (retry the deferred work, or abandon the round).
+func EvaluateDeferredJoinRuling(plan DeliveryPlan, progress PlanProgress) DeferredJoinRuling {
+	total := len(plan.WorkPackages)
+	if total == 0 || len(progress.Deferred) == 0 {
+		return DeferredJoinRuling{}
+	}
+	if float64(len(progress.Deferred))/float64(total) > deferredJoinRatioThreshold {
+		return DeferredJoinRuling{
+			Blocked: true,
+			Reason: sprintfDeferredRuling(len(progress.Deferred), total, progress.Deferred),
+		}
+	}
+	// Requirement-surface check: item is "covered" when it has at least one
+	// referencing package and every referencing package is deferred. A
+	// requirement item nobody references cannot be "covered" by deferral —
+	// the vacuous-truth guard keeps an orphan item from blocking every join.
+	deferredSet := make(map[string]bool, len(progress.Deferred))
+	for _, id := range progress.Deferred {
+		deferredSet[id] = true
+	}
+	for _, item := range plan.RequirementItems {
+		referencing := 0
+		deferredRefs := 0
+		for _, wp := range plan.WorkPackages {
+			references := false
+			for _, ref := range wp.AcceptanceCriteria {
+				if strings.TrimSpace(ref) == strings.TrimSpace(item.ID) {
+					references = true
+					break
+				}
+			}
+			if !references {
+				continue
+			}
+			referencing++
+			if deferredSet[strings.TrimSpace(wp.ID)] {
+				deferredRefs++
+			}
+		}
+		if referencing > 0 && referencing == deferredRefs {
+			return DeferredJoinRuling{
+				Blocked: true,
+				Reason: sprintfRequirementRuling(item.ID, item.Text, referencing, len(progress.Deferred), total),
+			}
+		}
+	}
+	return DeferredJoinRuling{}
+}
+
+func sprintfDeferredRuling(deferred, total int, ids []string) string {
+	return fmt.Sprintf("delivery plan: %d of %d work packages deferred (>50%%: %s); join blocked — retry the deferred work or abandon this round and re-plan (a new plan version requires human re-approval)",
+		deferred, total, strings.Join(ids, ", "))
+}
+
+func sprintfRequirementRuling(itemID, itemText string, refs, deferred, total int) string {
+	text := strings.TrimSpace(itemText)
+	if len(text) > 80 {
+		text = text[:80] + "…"
+	}
+	return fmt.Sprintf("delivery plan: requirement item %q (%s) lost its entire delivery surface — all %d package(s) referencing it are deferred; join blocked — retry the deferred work or abandon this round and re-plan (a new plan version requires human re-approval)",
+		itemID, text, refs)
 }
 
 // PlanWaveIndex returns the 0-based wave index of a work package, or -1.

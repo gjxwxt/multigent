@@ -1940,9 +1940,15 @@ type TransitionResult struct {
 }
 
 type BranchTransitionResult struct {
-	Branch     entity.WorkflowBranchInstance
-	AllDone    bool
-	Transition TransitionResult
+	Branch  entity.WorkflowBranchInstance
+	AllDone bool
+	// JoinRefusalReason carries the over-deferral gate's actionable refusal
+	// text when the stage's packages are all settled but the join was
+	// refused anyway (deferred >50% or a requirement item lost its whole
+	// delivery surface). AllDone=false with a non-empty reason tells the
+	// API layer to surface the ruling instead of materializing more work.
+	JoinRefusalReason string
+	Transition        TransitionResult
 }
 
 // PreviewBranchQAGate exposes the branch QA real-change checkpoint for
@@ -2119,7 +2125,7 @@ func (s *Store) CompleteBranchAndMaybeAdvance(project, taskID, runID, stepID, br
 				// crash-window re-drive must also respect un-materialized plan
 				// work packages; otherwise a replayed completion could advance
 				// the stage while later waves have not been materialized yet.
-				joinAllowed, perr := s.stageJoinAllowedByPlan(project, run, branches)
+				joinAllowed, refusal, perr := s.stageJoinAllowedByPlan(project, run, branches)
 				if perr != nil {
 					return result, perr
 				}
@@ -2128,6 +2134,7 @@ func (s *Store) CompleteBranchAndMaybeAdvance(project, taskID, runID, stepID, br
 					// a refused join is NOT all-done for the caller: the API
 					// layer must materialize the next wave, not advance.
 					result.AllDone = false
+					result.JoinRefusalReason = refusal
 					return result, nil
 				}
 				aggregate := aggregateBranchOutputs(branches)
@@ -2240,12 +2247,13 @@ func (s *Store) CompleteBranchAndMaybeAdvance(project, taskID, runID, stepID, br
 	// result carries AllDone=false and no transition: the API layer's
 	// advanceParentAfterBranchCompletion then materializes the next wave
 	// instead of advancing the parent run.
-	joinAllowed, perr := s.stageJoinAllowedByPlan(project, run, branches)
+	joinAllowed, refusal, perr := s.stageJoinAllowedByPlan(project, run, branches)
 	if perr != nil {
 		return result, perr
 	}
 	if !joinAllowed {
 		result.AllDone = false
+		result.JoinRefusalReason = refusal
 		return result, nil
 	}
 	aggregate := aggregateBranchOutputs(branches)
@@ -2320,13 +2328,13 @@ func workflowBranchAnyFailed(branches []entity.WorkflowBranchInstance) bool {
 // static branches) this returns true unchanged.
 // Fail-closed: plan-state evaluation errors refuse the join rather than
 // guessing.
-func (s *Store) stageJoinAllowedByPlan(project string, run entity.WorkflowRun, branches []entity.WorkflowBranchInstance) (bool, error) {
+func (s *Store) stageJoinAllowedByPlan(project string, run entity.WorkflowRun, branches []entity.WorkflowBranchInstance) (bool, string, error) {
 	_, version, ok, err := s.LoadFrozenPlanForRun(strings.TrimSpace(project), run.ID)
 	if err != nil {
-		return false, fmt.Errorf("plan-aware join check for run %s: %w", run.ID, err)
+		return false, "", fmt.Errorf("plan-aware join check for run %s: %w", run.ID, err)
 	}
 	if !ok {
-		return true, nil
+		return true, "", nil
 	}
 	states := make(map[string]string, len(branches))
 	for _, inst := range branches {
@@ -2334,7 +2342,7 @@ func (s *Store) stageJoinAllowedByPlan(project string, run entity.WorkflowRun, b
 	}
 	progress, err := EvaluatePlanProgress(version.Plan, states)
 	if err != nil {
-		return false, fmt.Errorf("plan-aware join check for plan %s v%d: %w", version.Plan.PlanID, version.Version, err)
+		return false, "", fmt.Errorf("plan-aware join check for plan %s v%d: %w", version.Plan.PlanID, version.Version, err)
 	}
 	// Any un-materialized work package is absent from states (state ""), so
 	// it lands in Ready or Waiting; a running/failed/skipped package lands in
@@ -2342,7 +2350,7 @@ func (s *Store) stageJoinAllowedByPlan(project string, run entity.WorkflowRun, b
 	// this round) and must NOT hold the join. The stage may join only when
 	// none of the unsettled buckets exist.
 	if len(progress.Ready)+len(progress.Waiting)+len(progress.InProgress)+len(progress.Blocked) > 0 {
-		return false, nil
+		return false, "", nil
 	}
 	// Mixed mode guard (mirrors stageAuthoritativelyComplete): every plan work
 	// package must be settled per-work-package — completed, or deferred (the
@@ -2359,17 +2367,24 @@ func (s *Store) stageJoinAllowedByPlan(project string, run entity.WorkflowRun, b
 			continue
 		}
 		if states[wpID] != PlanWPStateCompleted {
-			return false, nil
+			return false, "", nil
 		}
 	}
 	for _, inst := range branches {
 		switch strings.TrimSpace(inst.Status) {
 		case PlanWPStateCompleted, PlanWPStateDeferred:
 		default:
-			return false, nil
+			return false, "", nil
 		}
 	}
-	return true, nil
+	// Over-deferral gate: everything is settled, but a deferral wave this
+	// size (or a requirement item stripped to nothing) is a verdict on the
+	// round itself. The refusal carries its own escape text because waiting
+	// cannot heal it (the ratio never drops on its own).
+	if ruling := EvaluateDeferredJoinRuling(version.Plan, progress); ruling.Blocked {
+		return false, ruling.Reason, nil
+	}
+	return true, "", nil
 }
 
 func workflowJoinPolicy(step entity.WorkflowStep) string {

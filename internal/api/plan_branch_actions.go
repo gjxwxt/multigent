@@ -82,6 +82,10 @@ func (s *Server) handlePostTaskBranchDefer(w http.ResponseWriter, r *http.Reques
 	s.handleTaskBranchAction(w, r, "defer")
 }
 
+func (s *Server) handlePostTaskBranchUndefer(w http.ResponseWriter, r *http.Request) {
+	s.handleTaskBranchAction(w, r, "undefer")
+}
+
 func (s *Server) handleTaskBranchAction(w http.ResponseWriter, r *http.Request, action string) {
 	project := r.PathValue("name")
 	taskID := r.PathValue("taskId")
@@ -153,6 +157,25 @@ func (s *Server) handleTaskBranchAction(w http.ResponseWriter, r *http.Request, 
 			ResourceID:   project + "/" + root.ID,
 			Summary:      fmt.Sprintf("branch %s deferred (%s)", branchID, body.FailureCategory),
 			After:        map[string]any{"branchId": branchID, "category": body.FailureCategory, "followUpTaskId": resp.FollowUpID, "reason": body.Reason},
+			Request:      r,
+		})
+		_ = json.NewEncoder(w).Encode(resp)
+	case "undefer":
+		resp, status, err := s.undeferPlanBranch(workspaceID, project, rootAgent, root, run, inst, strings.TrimSpace(body.Reason), r)
+		if err != nil {
+			if status != http.StatusInternalServerError {
+				s.jsonError(w, status, err.Error())
+				return
+			}
+			s.serverError(w, err)
+			return
+		}
+		s.auditLog(auditLogInput{
+			Action:       "workflow.branch.undefer",
+			ResourceType: "task",
+			ResourceID:   project + "/" + root.ID,
+			Summary:      fmt.Sprintf("branch %s defer withdrawn (back to failed)", branchID),
+			After:        map[string]any{"branchId": branchID, "reason": body.Reason},
 			Request:      r,
 		})
 		_ = json.NewEncoder(w).Encode(resp)
@@ -354,6 +377,101 @@ func (s *Server) deferPlanBranch(workspaceID, project, rootAgent string, root *e
 		}
 	}
 	return resp, http.StatusOK, nil
+}
+
+// undeferPlanBranch withdraws a human deferral: the instance goes back to
+// failed (the original failure summary is restored verbatim; the defer
+// wrapper is stripped), so the failure is EXPLICITLY exposed again — its
+// dependents un-defer into Blocked (never silently Ready), and the operator's
+// way out is the same as for any failure: retry, or abandon the round.
+//
+// Semantics note (spec v1.1 R1): undefer alone does NOT unlock an
+// over-deferral-blocked join — the package leaves the Deferred bucket (the
+// ratio drops) but re-enters Blocked. The full escape chain is
+// undefer → retry → completed → join re-evaluates. The join re-drive here
+// exists so a withdrawn ruling re-runs the gate with the corrected buckets
+// and re-surfaces whatever still holds the stage.
+func (s *Server) undeferPlanBranch(workspaceID, project, rootAgent string, root *entity.Task, run entity.WorkflowRun, inst entity.WorkflowBranchInstance, reason string, r *http.Request) (branchActionResponse, int, error) {
+	resp := branchActionResponse{BranchID: inst.BranchID}
+	if strings.TrimSpace(inst.Status) != workflowstore.PlanWPStateDeferred {
+		return resp, http.StatusConflict, fmt.Errorf("branch %q is %q, not deferred; only a deferred ruling can be withdrawn", inst.BranchID, inst.Status)
+	}
+	restored, category := stripDeferredSummary(inst.Summary)
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	now := time.Now().UTC()
+	inst.Status = workflowstore.PlanWPStateFailed
+	inst.Summary = restored
+	inst.UpdatedAt = now
+	if inst.InputValues != nil {
+		delete(inst.InputValues, failureCategoryField)
+	}
+	if err := wfStore.SaveBranchInstance(&inst); err != nil {
+		return resp, http.StatusInternalServerError, err
+	}
+	_ = wfStore.SaveStepEvent(&entity.WorkflowStepEvent{
+		ID:        "evt_" + run.ID + "_undefer_" + strconv.FormatInt(now.UnixNano(), 36),
+		RunID:     run.ID,
+		StepID:    inst.StepID,
+		Status:    "failed",
+		Summary:   "defer withdrawn — failure re-exposed" + categoryNote(category) + retryReasonSuffix(reason),
+		CreatedAt: now,
+	})
+	s.appendRootTaskComment(project, rootAgent, root, fmt.Sprintf("branch %s defer withdrawn — back to failed%s; retry it or re-plan this round", inst.BranchID, categoryNote(category)))
+	resp.OK = true
+	resp.Status = workflowstore.PlanWPStateFailed
+	resp.ChildTaskID = strings.TrimSpace(inst.ChildTaskID)
+
+	// Re-run the join gate with the corrected buckets. The store's idempotent
+	// replay path returns the recorded branch for an already-terminal
+	// instance without writes, so this re-drive cannot double-advance; if the
+	// over-deferral gate still refuses (ratio dropped but still >50%, or the
+	// package re-entered Blocked), the refusal reason flows back to the
+	// advance path for surfacing.
+	drive, err := wfStore.CompleteBranchAndMaybeAdvance(project, root.ID, run.ID, inst.StepID, inst.BranchID, inst.ChildTaskID, inst.Summary, nil, workflowstore.PlanWPStateFailed)
+	if err != nil {
+		log.Printf("[plan-branch-actions] undefer re-drive for branch %s on run %s: %v", inst.BranchID, run.ID, err)
+		return resp, http.StatusOK, nil
+	}
+	if drive.Transition.Run.ID != "" {
+		if err := s.advanceParentAfterBranchCompletion(workspaceID, project, drive, r); err != nil {
+			log.Printf("[plan-branch-actions] undefer join advance for run %s: %v", run.ID, err)
+		}
+		return resp, http.StatusOK, nil
+	}
+	if _, waveErr := s.materializeNextPlanWave(workspaceID, project, rootAgent, root, workflowstore.BranchTransitionResult{
+		Branch:     inst,
+		Transition: workflowstore.TransitionResult{Run: run},
+	}, r); waveErr != nil {
+		log.Printf("[plan-branch-actions] undefer wave re-drive for run %s: %v", run.ID, waveErr)
+	}
+	return resp, http.StatusOK, nil
+}
+
+// stripDeferredSummary reverses deferPlanBranch's summary wrapping:
+// "deferred; original failure: X[; operator note: Y]" → ("X", category hint
+// absent). A summary that was not deferred-wrapped returns unchanged.
+func stripDeferredSummary(summary string) (string, string) {
+	s := strings.TrimSpace(summary)
+	const prefix = "deferred"
+	if !strings.HasPrefix(s, prefix) {
+		return s, ""
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(s, prefix))
+	rest = strings.TrimPrefix(rest, ";")
+	original := rest
+	if idx := strings.Index(rest, "; operator note: "); idx >= 0 {
+		original = rest[:idx]
+	}
+	original = strings.TrimSpace(original)
+	original = strings.TrimSpace(strings.TrimPrefix(original, "original failure: "))
+	return original, ""
+}
+
+func categoryNote(category string) string {
+	if strings.TrimSpace(category) == "" {
+		return ""
+	}
+	return " (was category " + strings.TrimSpace(category) + ")"
 }
 
 // createDeferredFollowUpTask converts the waived work package into a normal

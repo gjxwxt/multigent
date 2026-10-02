@@ -1895,6 +1895,17 @@ func (s *Server) advanceParentAfterBranchCompletion(workspaceID, project string,
 		root.UpdatedAt = now
 		return s.ts.PersistTask(project, rootAgent, root)
 	}
+	// Over-deferral refusal surfacing (spec P1-B): the store refused the join
+	// with everything settled — more than half the packages deferred, or a
+	// requirement item lost its entire delivery surface. The refusal cannot
+	// heal by waiting (the ratio never drops on its own), so the ruling and
+	// its escape hatches land on the root task where the operator actually
+	// looks. Fired before the wave trigger: deferred work will not rematerialize.
+	if reason := strings.TrimSpace(result.JoinRefusalReason); reason != "" {
+		s.appendRootTaskComment(project, rootAgent, root, "join blocked — "+reason)
+		log.Printf("[workflow-join] run %s: join refused by the over-deferral gate: %s", result.Transition.Run.ID, reason)
+		return nil
+	}
 	// Frozen-plan wave trigger (minimal closed loop, slice 3): a completed
 	// branch may have satisfied the dependencies of un-materialized work
 	// packages. This runs BEFORE the all-done guard on purpose — dependent

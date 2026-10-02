@@ -137,16 +137,18 @@ function BranchStatusBadge({ status }: { status?: string }) {
 
 function BranchActionButtons({ project, taskId, row, onDone }: { project: string; taskId: string; row: AcceptanceRow; onDone: () => void }) {
   const { t } = useTranslation()
-  const [busy, setBusy] = useState<'retry' | 'defer' | null>(null)
+  const [busy, setBusy] = useState<'retry' | 'defer' | 'undefer' | null>(null)
   const [category, setCategory] = useState<FailureCategory>('environment')
   const [createFollowUp, setCreateFollowUp] = useState(true)
   const [deferOpen, setDeferOpen] = useState(false)
+  const [undoConfirmOpen, setUndoConfirmOpen] = useState(false)
   const status = (row.branchStatus ?? '').trim()
   const canRetry = status === 'failed'
   const canDefer = status === 'failed' || status === 'deferred'
+  const canUndefer = status === 'deferred'
   if (!canRetry && !canDefer) return null
 
-  const run = async (action: 'retry' | 'defer') => {
+  const run = async (action: 'retry' | 'defer' | 'undefer') => {
     setBusy(action)
     try {
       await apiPost(
@@ -154,6 +156,7 @@ function BranchActionButtons({ project, taskId, row, onDone }: { project: string
         action === 'defer' ? { failureCategory: category, createFollowUp } : {},
       )
       setDeferOpen(false)
+      setUndoConfirmOpen(false)
       onDone()
     } finally {
       setBusy(null)
@@ -172,7 +175,7 @@ function BranchActionButtons({ project, taskId, row, onDone }: { project: string
           {busy === 'retry' ? t('workflows.acceptance.actions.retrying', { defaultValue: '重试中…' }) : t('workflows.acceptance.actions.retry', { defaultValue: '重试' })}
         </button>
       )}
-      {canDefer && !deferOpen && (
+      {canDefer && !deferOpen && !undoConfirmOpen && (
         <button
           type="button"
           disabled={busy !== null}
@@ -181,6 +184,34 @@ function BranchActionButtons({ project, taskId, row, onDone }: { project: string
         >
           {t('workflows.acceptance.actions.defer', { defaultValue: '缓办' })}
         </button>
+      )}
+      {canUndefer && !undoConfirmOpen && !deferOpen && (
+        <button
+          type="button"
+          disabled={busy !== null}
+          onClick={() => setUndoConfirmOpen(true)}
+          className="rounded border border-neutral-300 bg-white px-1.5 py-0.5 text-[10px] font-medium text-neutral-600 hover:bg-neutral-100 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800"
+        >
+          {t('workflows.acceptance.actions.undefer', { defaultValue: '撤销缓办' })}
+        </button>
+      )}
+      {canUndefer && undoConfirmOpen && (
+        <span className="inline-flex flex-wrap items-center gap-1 rounded border border-neutral-200 bg-neutral-50 px-1.5 py-0.5 dark:border-zinc-700 dark:bg-zinc-900/60">
+          <span className="text-[10px] text-neutral-600 dark:text-zinc-400">
+            {t('workflows.acceptance.actions.undeferConfirm', { defaultValue: '撤销后失败将重新暴露，需重试或重排计划' })}
+          </span>
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={() => run('undefer')}
+            className="rounded bg-neutral-700 px-1.5 py-px text-[10px] font-medium text-white hover:bg-neutral-800 disabled:opacity-50"
+          >
+            {busy === 'undefer' ? t('workflows.acceptance.actions.undefering', { defaultValue: '撤销中…' }) : t('workflows.acceptance.actions.confirmUndefer', { defaultValue: '确认撤销' })}
+          </button>
+          <button type="button" onClick={() => setUndoConfirmOpen(false)} className="text-[10px] text-neutral-400 hover:text-neutral-600 dark:text-zinc-500">
+            ✕
+          </button>
+        </span>
       )}
       {deferOpen && (
         <span className="inline-flex flex-wrap items-center gap-1 rounded border border-amber-200 bg-amber-50/60 px-1.5 py-0.5 dark:border-amber-900 dark:bg-amber-950/30">
