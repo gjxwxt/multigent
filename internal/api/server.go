@@ -127,6 +127,9 @@ type Server struct {
 	runtimeReaperOnce           sync.Once
 	runtimeReaperDone           chan struct{}
 	runtimeReaperCancel         context.CancelFunc
+	workflowReconcilerOnce      sync.Once
+	workflowReconcilerDone      chan struct{}
+	workflowReconcilerCancel    context.CancelFunc
 	worktreeReaperOnce          sync.Once
 	worktreeReaperDone          chan struct{}
 	worktreeReaperCancel        context.CancelFunc
@@ -543,8 +546,10 @@ func (s *Server) ShutdownGracefully(ctx context.Context) {
 	}
 	// The runtime reaper must exit BEFORE the control DB closes (Q0 PR-2):
 	// its loop queries runtime_runs and would panic against a closed store.
+	// Same contract for the workflow reconciler.
 	s.stopRuntimeReaper()
 	s.stopWorktreeReaper()
+	s.stopWorkflowReconciler()
 	_ = s.controlDB.Close()
 }
 
