@@ -56,6 +56,9 @@ Thumbs.db
 docs/internal/
 internal/dev/
 
+# Session handoff notes are workspace-local operations records, never repo docs.
+HANDOFF*.md
+
 # Local agent memory (workbuddy)
 .workbuddy/
 
