@@ -3215,6 +3215,13 @@ func (s *Store) completeAndAdvanceWithExtras(project, taskID, summary, output st
 			maxReviewRounds, strings.TrimSpace(values[agentReviewVerdictField]),
 		)
 	}
+	// Default-edge fallback annotation (spec P1 顺手项): a step that has
+	// conditional routes but took the default edge means NO structured verdict
+	// matched — for scale_gate that is the "no ruling, degraded to linear"
+	// case, and it previously scrolled by with zero record. The annotation
+	// lands in the step summary (the surface the human review sees), computed
+	// by a pure helper so chooseNextEdge itself stays a pure function.
+	summary = annotateDefaultEdgeFallback(summary, def.Edges, currentStep.ID, edge, values)
 	if !hasNext && workflowHasOutgoingEdges(def.Edges, currentStep.ID) && !isTerminalReviewApproval(currentStep, def.Edges, values) {
 		// Release the transition claim: this abort happens BEFORE any
 		// persistence, so a corrected re-run must be able to claim again
@@ -3643,6 +3650,52 @@ func chooseNextEdge(edges []entity.WorkflowEdge, from string, outputValues map[s
 		return *fallback, true
 	}
 	return entity.WorkflowEdge{}, false
+}
+
+// defaultEdgeFallbackAnnotation is the marker appended to a step summary when
+// the step's structured outputs matched NO conditional edge and routing fell
+// to the default. Root-task scans and acceptance audits grep for it.
+const defaultEdgeFallbackAnnotation = "[平台裁决] 本步骤无结构化裁决命中任何条件路由，已按默认边降级处理"
+
+// annotateDefaultEdgeFallback returns the summary annotated when the taken
+// edge is the step's fallback (default/no-condition) while conditional edges
+// for the same step existed — i.e. a structured verdict was expected but
+// absent or unmatched. Otherwise the summary passes through unchanged.
+// Pure: chooseNextEdge stays untouched; the caller owns all record-keeping.
+func annotateDefaultEdgeFallback(summary string, edges []entity.WorkflowEdge, from string, taken entity.WorkflowEdge, outputValues map[string]string) string {
+	if strings.TrimSpace(taken.ID) == "" {
+		return summary
+	}
+	if !taken.IsDefault && taken.Condition != nil {
+		return summary // a conditional route matched: nothing degraded
+	}
+	hasConditional := false
+	for _, edge := range edges {
+		if edge.From == from && !edge.IsDefault && edge.Condition != nil {
+			hasConditional = true
+			break
+		}
+	}
+	if !hasConditional {
+		return summary // a plain linear hop: nothing degraded
+	}
+	routingValues, _ := applyReviewRoundCap(outputValues)
+	if routingValues != nil {
+		if verdict := strings.TrimSpace(routingValues["scale_verdict"]); verdict != "" {
+			// A verdict WAS present but matched nothing — a different kind of
+			// anomaly; name it precisely instead of the generic fallback text.
+			note := fmt.Sprintf("%s（结构化裁决 %q 存在但未命中任何条件边，请检查模板条件配置）", defaultEdgeFallbackAnnotation, verdict)
+			if strings.Contains(summary, note) {
+				return summary
+			}
+			return strings.TrimSpace(summary) + "\n\n" + note
+		}
+	}
+	note := defaultEdgeFallbackAnnotation + "（无裁决输出；示例：scale_gate 无裁决即降级为串行交付）"
+	if strings.Contains(summary, note) {
+		return summary
+	}
+	return strings.TrimSpace(summary) + "\n\n" + note
 }
 
 // agentReviewVerdictField is the single-token routing verdict the independent
