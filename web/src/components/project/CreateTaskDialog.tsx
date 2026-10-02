@@ -504,7 +504,16 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
       )
       setPreplanHint({ scaleHint: resp.scaleHint, reason: resp.reason ?? '' })
       if (resp.plan) {
-        setBatchPlan(resp.plan)
+        // Models omit optional arrays (dependsOn, acceptanceCriteria, ...);
+        // nil JSON arrays would crash the editor's .length/.includes calls.
+        setBatchPlan({
+          ...resp.plan,
+          workPackages: (resp.plan.workPackages ?? []).map((wp) => ({
+            ...wp,
+            dependsOn: wp.dependsOn ?? [],
+            acceptanceCriteria: wp.acceptanceCriteria ?? [],
+          })),
+        })
         if (resp.planError) setPreplanErr(t('tasks.preplan.planError', { error: resp.planError }))
       } else if (resp.planError) {
         setPreplanErr(resp.planError)

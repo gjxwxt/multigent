@@ -17,8 +17,8 @@ export type PlanWorkPackage = {
   title: string
   domain?: string
   details?: string
-  dependsOn: string[]
-  acceptanceCriteria: string[]
+  dependsOn?: string[]
+  acceptanceCriteria?: string[]
   agentBinding?: string
   actorRole?: string
   expectedDelivery?: string[]
@@ -77,7 +77,7 @@ export function validatePlanDraft(plan: DeliveryPlanDraft, t: (k: string, o?: Re
     if ((wp.acceptanceCriteria ?? []).length === 0) {
       errors.push(t('tasks.preplan.error.noAC', { id: wp.id || '?' }))
     } else {
-      for (const ac of wp.acceptanceCriteria) {
+      for (const ac of wp.acceptanceCriteria ?? []) {
         if (!ac.startsWith('infra:') && !reqIds.has(ac)) {
           errors.push(t('tasks.preplan.error.unknownAC', { id: wp.id || '?', ac }))
         }
@@ -172,8 +172,8 @@ export function DeliveryPlanEditor({ plan, onChange, agentNames }: Props) {
                   {open ? <ChevronUp className="size-3.5 shrink-0 text-neutral-400" /> : <ChevronDown className="size-3.5 shrink-0 text-neutral-400" />}
                   <span className="font-mono text-xs text-neutral-400 dark:text-zinc-500">{wp.id}</span>
                   <span className="min-w-0 truncate text-sm text-neutral-800 dark:text-zinc-200">{wp.title || t('tasks.preplan.untitled')}</span>
-                  {wp.dependsOn.length > 0 && (
-                    <span className="shrink-0 text-[11px] text-neutral-400 dark:text-zinc-500">← {wp.dependsOn.join(', ')}</span>
+                  {(wp.dependsOn ?? []).length > 0 && (
+                    <span className="shrink-0 text-[11px] text-neutral-400 dark:text-zinc-500">← {(wp.dependsOn ?? []).join(', ')}</span>
                   )}
                 </button>
                 <span className="shrink-0 rounded bg-sky-50 px-1.5 py-0.5 text-[11px] font-medium text-sky-700 dark:bg-sky-950/60 dark:text-sky-400">
@@ -207,7 +207,7 @@ export function DeliveryPlanEditor({ plan, onChange, agentNames }: Props) {
                     <span className="pt-1.5 text-xs text-neutral-500 dark:text-zinc-400">{t('tasks.preplan.wpAC')}</span>
                     <div className="flex flex-wrap gap-1">
                       {(plan.requirementItems ?? []).map((req) => {
-                        const active = wp.acceptanceCriteria.includes(req.id)
+                        const active = (wp.acceptanceCriteria ?? []).includes(req.id)
                         return (
                           <button
                             key={req.id}
@@ -216,8 +216,8 @@ export function DeliveryPlanEditor({ plan, onChange, agentNames }: Props) {
                             onClick={() =>
                               update(wp.id, {
                                 acceptanceCriteria: active
-                                  ? wp.acceptanceCriteria.filter((a) => a !== req.id)
-                                  : [...wp.acceptanceCriteria, req.id],
+                                  ? (wp.acceptanceCriteria ?? []).filter((a) => a !== req.id)
+                                  : [...(wp.acceptanceCriteria ?? []), req.id],
                               })
                             }
                             className={cn(
@@ -233,7 +233,7 @@ export function DeliveryPlanEditor({ plan, onChange, agentNames }: Props) {
                       })}
                       <button
                         type="button"
-                        onClick={() => update(wp.id, { acceptanceCriteria: [...wp.acceptanceCriteria, 'infra:' + (wp.id || 'work')] })}
+                        onClick={() => update(wp.id, { acceptanceCriteria: [...(wp.acceptanceCriteria ?? []), 'infra:' + (wp.id || 'work')] })}
                         className="rounded bg-amber-50 px-1.5 py-0.5 font-mono text-[11px] text-amber-700 hover:bg-amber-100 dark:bg-amber-950/40 dark:text-amber-400"
                       >
                         + infra
@@ -244,14 +244,16 @@ export function DeliveryPlanEditor({ plan, onChange, agentNames }: Props) {
                     <span className="pt-1.5 text-xs text-neutral-500 dark:text-zinc-400">{t('tasks.preplan.wpDeps')}</span>
                     <div className="flex flex-wrap gap-1">
                       {plan.workPackages.filter((w) => w.id !== wp.id).map((w) => {
-                        const active = wp.dependsOn.includes(w.id)
+                        const active = (wp.dependsOn ?? []).includes(w.id)
                         return (
                           <button
                             key={w.id}
                             type="button"
                             onClick={() =>
                               update(wp.id, {
-                                dependsOn: active ? wp.dependsOn.filter((d) => d !== w.id) : [...wp.dependsOn, w.id],
+                                dependsOn: active
+                                  ? (wp.dependsOn ?? []).filter((d) => d !== w.id)
+                                  : [...(wp.dependsOn ?? []), w.id],
                               })
                             }
                             className={cn(
