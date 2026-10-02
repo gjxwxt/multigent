@@ -37,6 +37,52 @@ func TestBuildDeliveryPlanFromRunOutputs(t *testing.T) {
 	}
 }
 
+// The freeze path must carry the agent's dependsKind through to the frozen
+// plan — both the map shape the template documents and the bare-string
+// shorthand models actually emit. Losing the contract edge at build time is
+// the freeze-path twin of the DependsKindMap decode defect (wfr-kwm2nckn).
+func TestBuildDeliveryPlanCarriesDependsKind(t *testing.T) {
+	anchors := `[{"id":"uc-1","text":"export endpoint","source":"requirements.md"}]`
+	mapShape := `{"planId":"p1","workPackages":[
+		{"id":"wp-1","title":"Frontend","acceptanceCriteria":["uc-1"],"agentBinding":"a"},
+		{"id":"wp-2","title":"Backend","dependsOn":["wp-1"],"dependsKind":{"wp-1":"contract"},"acceptanceCriteria":["uc-1"],"agentBinding":"a"},
+		{"id":"wp-3","title":"Tests","dependsOn":["wp-2"],"dependsKind":{"wp-2":"artifact"},"acceptanceCriteria":["uc-1"],"agentBinding":"a"}
+	]}`
+	built, err := BuildDeliveryPlanFromRunOutputs("run-1", []string{mapShape}, []string{anchors})
+	if err != nil {
+		t.Fatalf("map-shape dependsKind must build: %v", err)
+	}
+	if built.WorkPackages[1].DependsKind["wp-1"] != PlanDepKindContract {
+		t.Fatalf("contract edge lost at freeze: %+v", built.WorkPackages[1].DependsKind)
+	}
+	if built.WorkPackages[2].DependsKind["wp-2"] != PlanDepKindArtifact {
+		t.Fatalf("artifact edge lost at freeze: %+v", built.WorkPackages[2].DependsKind)
+	}
+
+	// Shorthand: a bare "contract" applies to every edge of the package.
+	shorthand := `{"planId":"p1","workPackages":[
+		{"id":"wp-1","title":"Frontend","acceptanceCriteria":["uc-1"],"agentBinding":"a"},
+		{"id":"wp-2","title":"Backend","dependsOn":["wp-1"],"dependsKind":"contract","acceptanceCriteria":["uc-1"],"agentBinding":"a"}
+	]}`
+	built, err = BuildDeliveryPlanFromRunOutputs("run-1", []string{shorthand}, []string{anchors})
+	if err != nil {
+		t.Fatalf("string-shorthand dependsKind must build: %v", err)
+	}
+	if built.WorkPackages[1].DependsKind["wp-1"] != PlanDepKindContract {
+		t.Fatalf("shorthand contract edge lost at freeze: %+v", built.WorkPackages[1].DependsKind)
+	}
+
+	// An unknown kind must be refused at build time, not silently dropped.
+	bad := `{"planId":"p1","workPackages":[
+		{"id":"wp-1","title":"A","acceptanceCriteria":["uc-1"],"agentBinding":"a"},
+		{"id":"wp-2","title":"B","dependsOn":["wp-1"],"dependsKind":"bond","acceptanceCriteria":["uc-1"],"agentBinding":"a"}
+	]}`
+	if _, err := BuildDeliveryPlanFromRunOutputs("run-1", []string{bad}, []string{anchors}); err == nil ||
+		!strings.Contains(err.Error(), "dependsKind") {
+		t.Fatalf("unknown dependsKind must fail closed, got %v", err)
+	}
+}
+
 func TestBuildDeliveryPlanRequirementAnchorRules(t *testing.T) {
 	anchors := `[{"id":"uc-1","text":"clear local state","source":"requirements.md"}]`
 	nonInfra := `{"workPackages":[{"id":"wp-a","title":"A","acceptanceCriteria":["uc-1"],"agentBinding":"pm"}]}`

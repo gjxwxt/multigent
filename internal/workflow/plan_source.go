@@ -51,11 +51,18 @@ type planSourceWorkPack struct {
 	Details   string `json:"details"`
 	Rationale string `json:"rationale"`
 
-	DependsOn          []string `json:"dependsOn"`
-	AcceptanceCriteria []string `json:"acceptanceCriteria"`
-	UCs                []string `json:"ucs"`
-	UseCases           []string `json:"useCases"`
-	UCLegacy           []string `json:"use_cases"`
+	DependsOn          []string      `json:"dependsOn"`
+	// DependsKind rides through DependsKindMap, which accepts both the
+	// {workPackageId: kind} map shape and the bare-string shorthand the
+	// models actually emit ("contract"). Without this field the freeze path
+	// dropped every contract edge silently (live fire, wfr-kwm2nckn
+	// 2026-10-03: scale_gate wrote {'wp-1':'contract'}, the frozen plan lost
+	// it, and contract_review approve died on the next defect instead).
+	DependsKind        DependsKindMap `json:"dependsKind,omitempty"`
+	AcceptanceCriteria []string       `json:"acceptanceCriteria"`
+	UCs                []string       `json:"ucs"`
+	UseCases           []string       `json:"useCases"`
+	UCLegacy           []string       `json:"use_cases"`
 
 	AgentBinding     string   `json:"agentBinding"`
 	ActorRole        string   `json:"actorRole"`
@@ -145,8 +152,9 @@ func BuildDeliveryPlanFromRunOutputs(runID string, planJSONs, requirementItemJSO
 			ID:                 id,
 			Title:              strings.TrimSpace(wp.Title),
 			Domain:             firstNonEmptyString(wp.Domain, wp.Scope),
-			Details:            firstNonEmptyString(wp.Details, wp.Rationale),
+			Details:             firstNonEmptyString(wp.Details, wp.Rationale),
 			DependsOn:          wp.DependsOn,
+			DependsKind:        wp.DependsKind,
 			AcceptanceCriteria: acs,
 			AgentBinding:       strings.TrimSpace(wp.AgentBinding),
 			ActorRole:          strings.TrimSpace(wp.ActorRole),
@@ -174,7 +182,13 @@ func BuildDeliveryPlanFromRunOutputs(runID string, planJSONs, requirementItemJSO
 	if err := ValidateDeliveryPlan(plan); err != nil {
 		return DeliveryPlan{}, err
 	}
-	return plan, nil
+	// The frozen plan is the canonical form: sorted slices, trimmed strings,
+	// and the dependsKind "*" shorthand expanded onto real edges. Validation
+	// above ran on the raw shape (operator-readable errors); everything
+	// downstream — digest, freeze record, EvaluatePlanProgress — must see the
+	// same canonical bytes, so a "*" shorthand can never survive into a frozen
+	// record.
+	return canonicalDeliveryPlan(plan), nil
 }
 
 // planHasNonInfraAnchor reports whether any work package references a

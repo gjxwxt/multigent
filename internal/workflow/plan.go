@@ -478,7 +478,26 @@ func ValidateDeliveryPlan(plan DeliveryPlan) error {
 		for dep, kind := range wp.DependsKind {
 			kind = strings.ToLower(strings.TrimSpace(kind))
 			if dep == "*" {
-				return fmt.Errorf("delivery plan work package %q declares dependsKind %q as a bare shorthand with no dependsOn to expand it onto", id, kind)
+				// String-shorthand form ("contract") as decoded from source:
+				// every declared edge carries the kind. Validate the shorthand
+				// against the declared edges here rather than rejecting it —
+				// the freeze path validates the RAW parsed plan before
+				// canonicalization ever expands the wildcard (live fire,
+				// wfr-kwm2nckn: a valid shorthand plan died at approve). A
+				// shorthand with no dependsOn has nothing to apply to.
+				if len(wp.DependsOn) == 0 {
+					return fmt.Errorf("delivery plan work package %q declares dependsKind %q as a bare shorthand with no dependsOn to expand it onto", id, kind)
+				}
+				for _, dep2 := range wp.DependsOn {
+					dep2 = strings.TrimSpace(dep2)
+					if dep2 == "" {
+						continue
+					}
+					if kind != PlanDepKindContract && kind != PlanDepKindArtifact {
+						return fmt.Errorf("delivery plan work package %q declares dependsKind %q for %q (want %q or %q)", id, kind, dep2, PlanDepKindContract, PlanDepKindArtifact)
+					}
+				}
+				continue
 			}
 			if kind != PlanDepKindContract && kind != PlanDepKindArtifact {
 				return fmt.Errorf("delivery plan work package %q declares dependsKind %q for %q (want %q or %q)", id, kind, dep, PlanDepKindContract, PlanDepKindArtifact)
