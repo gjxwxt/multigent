@@ -402,6 +402,24 @@ func (s *Server) deliveryPlanView(project, taskID string) (map[string]any, int, 
 			"versions":   len(record.Versions),
 		}
 	}
+	// Five-bucket plan progress (Ready/Waiting/InProgress/Completed/Blocked +
+	// Deferred) so the acceptance table can badge every work package's
+	// settlement state, including un-materialized ones no instance exists for.
+	states := make(map[string]string, len(byBranch))
+	for branchID, inst := range byBranch {
+		states[branchID] = strings.TrimSpace(inst.Status)
+	}
+	progress := map[string][]string{}
+	if p, err := workflowstore.EvaluatePlanProgress(current.Plan, states); err == nil {
+		progress = map[string][]string{
+			"ready":      p.Ready,
+			"waiting":    p.Waiting,
+			"inProgress": p.InProgress,
+			"completed":  p.Completed,
+			"blocked":    p.Blocked,
+			"deferred":   p.Deferred,
+		}
+	}
 	return map[string]any{
 		"ok":               true,
 		"runId":            run.ID,
@@ -410,5 +428,6 @@ func (s *Server) deliveryPlanView(project, taskID string) (map[string]any, int, 
 		"approval":         approval,
 		"materializations": rows,
 		"signoffs":         signoffs,
+		"progress":         progress,
 	}, http.StatusOK, nil
 }

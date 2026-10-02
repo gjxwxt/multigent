@@ -744,6 +744,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/start", s.handleStartProjectTask)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/unblock", s.handleUnblockProjectTask)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/workflow/review", s.handlePostTaskWorkflowReview)
+	// Branch-level human rulings on plan-driven stages (retry / defer). Main
+	// mux only; project access + agent-operator checks inside the handlers.
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/workflow/branch/{branchId}/retry", s.handlePostTaskBranchRetry)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/workflow/branch/{branchId}/defer", s.handlePostTaskBranchDefer)
 	mux.HandleFunc("GET /api/v1/projects/{name}/branches", s.handleListProjectBranches)
 	mux.HandleFunc("POST /api/v1/projects/{name}/branches/refresh", s.handlePostProjectBranchesRefresh)
 	// ── Deploy Center (batch 3): ledger + GitLab pipeline trigger. Main mux
