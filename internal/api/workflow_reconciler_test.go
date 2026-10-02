@@ -2,9 +2,11 @@ package api
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
@@ -144,4 +146,55 @@ func TestWorkflowReconcilerPlanWaveRedriveResolvesStage(t *testing.T) {
 		t.Fatalf("a stalled parallel_stage run must still be re-fired, got %d", refired)
 	}
 	_ = task
+}
+
+// TestWorkflowReconcilerAlertsStaleRuntimeRun is the Tier-2 positive path:
+// a workflow task whose runtime run is still marked running but whose
+// updated_at froze past the threshold gets an attention note on the task
+// (alert-only — a busy build and a wedge look identical without agent-side
+// heartbeats).
+func TestWorkflowReconcilerAlertsStaleRuntimeRun(t *testing.T) {
+	s, workspaceID := newBranchJoinHTTPServer(t)
+	task, _ := seedStalledRunFixture(t, s, workspaceID, "agent_task", 2*time.Hour)
+
+	stale := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339Nano)
+	if err := s.controlDB.UpsertRuntimeRun(controldb.RuntimeRun{
+		ID:          "rtrun-stale-hang",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		AgentID:     "pm",
+		TaskID:      task.ID,
+		Status:      "running",
+		StartedAt:   stale,
+		UpdatedAt:   stale,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fresh runtime run on the same task must NOT alert.
+	fresh := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := s.controlDB.UpsertRuntimeRun(controldb.RuntimeRun{
+		ID:          "rtrun-fresh",
+		WorkspaceID: workspaceID,
+		ProjectID:   "sample",
+		AgentID:     "pm",
+		TaskID:      task.ID,
+		Status:      "running",
+		StartedAt:   fresh,
+		UpdatedAt:   fresh,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	alerted := s.alertStalledRuntimeRuns(workspaceID, "sample", task.ID, 15*time.Minute, time.Now().UTC())
+	if alerted != 1 {
+		t.Fatalf("exactly the stale runtime run must alert, got %d", alerted)
+	}
+	stored, err := s.ts.GetTask("sample", "pm", task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stored.Summary, "rtrun-stale-hang") || !strings.Contains(stored.Summary, "suspected agent hang") {
+		t.Fatalf("task must carry the hang alert, got summary %q", stored.Summary)
+	}
 }
