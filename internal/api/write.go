@@ -687,6 +687,7 @@ func (s *Server) createProjectTaskFromBody(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		initialInputs := workflowInitialInputsFromPrompt(workflowDef, promptText)
+		initialInputs = mergeTaskVarsIntoInitialInputs(initialInputs, workflowDef, t.Vars)
 		if _, _, err := workflowStore.StartRunWithInput(name, t.ID, workflowID, body.WorkflowActorBindings, initialInputs); err != nil {
 			s.serverError(w, err)
 			return
@@ -1376,6 +1377,45 @@ func normalizeToRecipients(v any) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("to must be a string or array of strings")
 	}
+}
+
+// mergeTaskVarsIntoInitialInputs lets structured task vars feed the start
+// step the same way prompt `key: value` lines do. Only fields the start step
+// declares as inputs are accepted, so scheduler-reserved and unknown vars
+// never reach workflow steps. Prompt-parsed values win over vars.
+func mergeTaskVarsIntoInitialInputs(initial map[string]string, def entity.WorkflowDefinition, vars map[string]string) map[string]string {
+	if len(vars) == 0 {
+		return initial
+	}
+	startStep, ok := workflowDefinitionStartStep(def)
+	if !ok {
+		return initial
+	}
+	allowed := make(map[string]struct{}, len(startStep.InputFields))
+	for _, field := range startStep.InputFields {
+		name := strings.TrimSpace(field.Name)
+		if name != "" {
+			allowed[name] = struct{}{}
+		}
+	}
+	out := initial
+	if out == nil {
+		out = make(map[string]string, len(vars))
+	}
+	for key, value := range vars {
+		key = strings.TrimSpace(key)
+		if _, isPromptParsed := out[key]; isPromptParsed {
+			continue
+		}
+		if _, ok := allowed[key]; !ok || value == "" {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func workflowInitialInputsFromPrompt(def entity.WorkflowDefinition, prompt string) map[string]string {

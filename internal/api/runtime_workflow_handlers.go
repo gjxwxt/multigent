@@ -846,6 +846,7 @@ func (s *Server) createRuntimeTaskFromBody(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		initialInputs := workflowInitialInputsFromPrompt(workflowDef, prompt)
+		initialInputs = mergeTaskVarsIntoInitialInputs(initialInputs, workflowDef, t.Vars)
 		if _, _, err := workflowStore.StartRunWithInput(project, t.ID, workflowID, body.WorkflowActorBindings, initialInputs); err != nil {
 			s.serverError(w, err)
 			return
