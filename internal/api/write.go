@@ -1037,7 +1037,98 @@ func (s *Server) handlePostCancelTask(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, err)
 		return
 	}
+	cancelled, err := s.cancelTaskCascade(workspaceID, project, id, "root task cancelled")
+	if err != nil {
+		// The root task is already cancelled; a cascade failure must not
+		// rewind that, but it must be loud — the branch children keep running
+		// otherwise, with nothing pointing back at them.
+		s.serverError(w, err)
+		return
+	}
+	s.auditLog(auditLogInput{
+		Action:       "task.cancel",
+		ResourceType: "task",
+		ResourceID:   project + "/" + id,
+		Summary:      fmt.Sprintf("task cancelled (%d branch children cancelled)", cancelled),
+		After: map[string]any{
+			"project":                 project,
+			"task":                    id,
+			"branchChildrenCancelled": cancelled,
+		},
+		Request: r,
+	})
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+// cancelTaskCascade cancels every branch child of the given root task (P0-3):
+// plan materialization and static fan-out both spawn independent child tasks,
+// and leaving them alive after the parent dies strands running sandboxes with
+// no owner watching. One enumeration is complete for plan branches (their
+// single-step child definitions never spawn grandchildren); static branch
+// templates that nest a parallel stage are out of scope and noted at the
+// bottom. Each child walks the same four-step chain the cancel endpoint uses:
+// terminal skip, status transition + inbox removal, run cancel, runtime-run
+// cancel. The returned count only counts children actually cancelled here.
+func (s *Server) cancelTaskCascade(workspaceID, project, rootTaskID, reason string) (int, error) {
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	run, found, err := wfStore.RunForTask(project, rootTaskID)
+	if err != nil {
+		return 0, err
+	}
+	if !found {
+		return 0, nil
+	}
+	branches, err := wfStore.ListBranchInstances(run.ID)
+	if err != nil {
+		return 0, err
+	}
+	cancelled := 0
+	for _, inst := range branches {
+		childID := strings.TrimSpace(inst.ChildTaskID)
+		if childID == "" {
+			continue
+		}
+		child, childAgent, err := s.findTaskInProject(project, childID)
+		if err != nil {
+			continue
+		}
+		if child.Status.IsTerminal() {
+			continue
+		}
+		prev := child.Status
+		now := time.Now().UTC()
+		child.Status = entity.TaskStatusCancelled
+		child.UpdatedAt = now
+		entity.ApplyStatusTimestamps(child, prev, now)
+		if err := s.ts.PersistTask(project, childAgent, child); err != nil {
+			return cancelled, err
+		}
+		_ = s.ts.RemoveFromInbox(childID)
+		if _, _, err := wfStore.CancelRunForTask(project, childID, reason); err != nil {
+			return cancelled, err
+		}
+		if _, err := s.cancelRuntimeRunsForAgent(workspaceID, project, childAgent, childID, reason); err != nil {
+			return cancelled, err
+		}
+		cancelled++
+	}
+	// Keep the parent's branch ledger consistent with what just happened: a
+	// still-running instance whose child is now cancelled would read as live
+	// work on every later evaluation.
+	refreshed, err := wfStore.ListBranchInstances(run.ID)
+	if err != nil {
+		return cancelled, err
+	}
+	for _, inst := range refreshed {
+		if strings.TrimSpace(inst.Status) == "running" || strings.TrimSpace(inst.Status) == "pending" {
+			inst.Status = "cancelled"
+			inst.UpdatedAt = time.Now().UTC()
+			if err := wfStore.SaveBranchInstance(&inst); err != nil {
+				return cancelled, err
+			}
+		}
+	}
+	return cancelled, nil
 }
 
 func (s *Server) handlePostArchiveTask(w http.ResponseWriter, r *http.Request) {
