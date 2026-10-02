@@ -12,6 +12,66 @@ import (
 	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
 
+// wireTriggerHooks attaches the Server-level callbacks every triggerManager
+// needs. It must be called on every construction path — NewServer, workspace
+// swap, and test fixtures alike — otherwise dispatch skips fall silent again.
+func (s *Server) wireTriggerHooks() {
+	if s == nil || s.triggers == nil {
+		return
+	}
+	s.triggers.nodeTaskDispatch = func(project, agent, reason string) bool {
+		return s.dispatchTaskTriggerViaRuntime(project, agent, reason, nil)
+	}
+	s.triggers.onSkippedTrigger = s.onSkippedTriggerAttention
+}
+
+// onSkippedTriggerAttention surfaces a silently-skipped trigger dispatch on
+// the tasks it was supposed to wake (spec P2 顺手项): a workflow step whose
+// agent binding resolves to nothing used to vanish behind a stderr line while
+// the run sat parked. The dispatcher has no task context (project+agent
+// only), and the binding that failed to resolve may spell the agent
+// differently from the tasks' stored assignee — so the comment lands on
+// every in_progress/pending task in the project that sits on an active
+// workflow run (those are the ones actually waiting on a dispatch). Best-
+// effort by design: the trigger loop must keep working even when task
+// resolution fails.
+func (s *Server) onSkippedTriggerAttention(project, agent, skipReason string) {
+	if s == nil || s.ts == nil {
+		return
+	}
+	project = strings.TrimSpace(project)
+	if project == "" {
+		return
+	}
+	workspaceID, err := s.currentWorkspaceID()
+	if err != nil || strings.TrimSpace(workspaceID) == "" {
+		return
+	}
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	body := "[platform] 派发被跳过（目标 agent：" + strings.TrimSpace(agent) + "）：" + strings.TrimSpace(skipReason) + "。任务在等待工作流派发，但该 agent 无法解析到可调度的 worker——请检查 agent 的 worker 配置/暂停状态/触发器设置，或手动启动任务。"
+	records, err := s.ts.ListAllTaskRecords("")
+	if err != nil {
+		return
+	}
+	for _, rec := range records {
+		if rec.Task == nil || strings.TrimSpace(rec.Project) != project {
+			continue
+		}
+		task := rec.Task
+		if task.Status != entity.TaskStatusInProgress && task.Status != entity.TaskStatusPending {
+			continue
+		}
+		if _, found, runErr := wfStore.RunForTask(project, task.ID); runErr != nil || !found {
+			continue
+		}
+		taskAgent := agentOfAssignee(task.Assignee)
+		if taskAgent == "" {
+			taskAgent = agent
+		}
+		s.addTaskSystemComment(project, taskAgent, task, "", body)
+	}
+}
+
 func (s *Server) recordTaskAttentionSignal(workspaceID, project, agent string, task *entity.Task, reason string) string {
 	if s == nil || s.controlDB == nil || s.agentDirectory == nil || task == nil {
 		return ""

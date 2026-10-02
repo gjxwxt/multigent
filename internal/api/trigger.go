@@ -46,6 +46,14 @@ type triggerManager struct {
 	// runtime path (or intentionally dropped); false falls back to local.
 	nodeTaskDispatch func(project, agent, reason string) bool
 
+	// onSkippedTrigger, when set, is invoked for every Fire that resolves to
+	// a silent skip (no heartbeat/worker schedule, trigger not configured,
+	// paused). The dispatch path used to vanish behind a stderr line only:
+	// a workflow step whose agent binding resolves to nothing left the run
+	// parked with zero operator-visible record (spec P2 顺手项). project and
+	// agent identify the target; skipReason is operator-readable.
+	onSkippedTrigger func(project, agent, skipReason string)
+
 	cancel   context.CancelFunc
 	pollDone chan struct{}
 }
@@ -319,6 +327,20 @@ func (tm *triggerManager) checkMessageTriggers() {
 	}
 }
 
+// notifySkip surfaces a skipped dispatch to the server layer (nil-callback
+// safe; a panic inside the callback must never break the trigger loop).
+func (tm *triggerManager) notifySkip(project, agent, skipReason string) {
+	if tm == nil || tm.onSkippedTrigger == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "[trigger] skip-notify recovered: %v\n", r)
+		}
+	}()
+	tm.onSkippedTrigger(project, agent, skipReason)
+}
+
 // Fire checks whether the agent has the given trigger configured and, if so,
 // launches an asynchronous wakeup. It is safe to call from any goroutine.
 // reason is a human-readable label for logging (e.g. "message from pm").
@@ -326,14 +348,17 @@ func (tm *triggerManager) Fire(project, agent string, triggerType entity.Trigger
 	hb, configured := tm.heartbeatForTrigger(project, agent)
 	if !configured || hb == nil {
 		fmt.Fprintf(os.Stderr, "[trigger] %s/%s: skip — no heartbeat or worker schedule\n", project, agent)
+		tm.notifySkip(project, agent, "no heartbeat or worker schedule for this agent (agent worker missing, removed, or not scheduled)")
 		return
 	}
 	if !hb.HasTrigger(triggerType) {
 		fmt.Fprintf(os.Stderr, "[trigger] %s/%s: skip — trigger %q not configured (has: %v)\n", project, agent, triggerType, hb.Triggers)
+		tm.notifySkip(project, agent, fmt.Sprintf("trigger %q is not configured on this agent (has: %v)", triggerType, hb.Triggers))
 		return
 	}
 	if hb.Paused {
 		fmt.Fprintf(os.Stderr, "[trigger] %s/%s: skip — paused\n", project, agent)
+		tm.notifySkip(project, agent, "agent worker is paused")
 		return
 	}
 

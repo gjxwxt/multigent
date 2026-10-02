@@ -39,6 +39,7 @@ func newBranchJoinHTTPServer(t *testing.T) (*Server, string) {
 	s := &Server{root: root, controlDB: db, st: store.NewDB(root, db), ts: taskstore.NewDB(root, db),
 		users: newUserStore(db), agentDirectory: agentdir.New(db), previewSessions: make(map[string]*previewChatSession)}
 	s.triggers = newTriggerManager(root, "", s.ts, s.controlDB)
+	s.wireTriggerHooks()
 	workspaceID, err := s.currentWorkspaceID()
 	if err != nil {
 		t.Fatalf("workspace id: %v", err)

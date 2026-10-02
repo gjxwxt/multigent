@@ -242,10 +242,9 @@ func NewServer(root, apiKey string) *Server {
 	// through the same shared trigger body the REST approve endpoint uses.
 	s.deployTriggerHook = s.triggerApprovedDeployRequest
 	// Runtime-node agents' task triggers join the node dispatch queue instead
-	// of the local wakeup cycle (hook wired after s exists; nil-safe before).
-	tm.nodeTaskDispatch = func(project, agent, reason string) bool {
-		return s.dispatchTaskTriggerViaRuntime(project, agent, reason, nil)
-	}
+	// of the local wakeup cycle; skipped dispatches surface on waiting tasks
+	// (hook wired after s exists; nil-safe before).
+	s.wireTriggerHooks()
 	// Test-data sandbox (V1): provision the task-private fixture database
 	// before preview containers start, and tear it down on stop/reap. The
 	// generator runs the contract's argv inside a disposable container —

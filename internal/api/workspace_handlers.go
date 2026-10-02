@@ -550,9 +550,7 @@ func (s *Server) switchWorkspaceRoot(root string) error {
 	s.ts = taskstore.NewDB(absRoot, s.controlDB)
 	s.sched = newSchedulerManager(absRoot)
 	s.triggers = newTriggerManager(absRoot, s.sched.binPath, s.ts, s.controlDB)
-	s.triggers.nodeTaskDispatch = func(project, agent, reason string) bool {
-		return s.dispatchTaskTriggerViaRuntime(project, agent, reason, nil)
-	}
+	s.wireTriggerHooks()
 	s.triggers.StartPoller()
 	s.okrStore = store.NewOKRStore(absRoot)
 	s.msStore = store.NewMilestoneStore(absRoot)
@@ -575,6 +573,7 @@ func (s *Server) clearActiveWorkspaceRoot() {
 	s.ts = taskstore.NewDB(root, s.controlDB)
 	s.sched = newSchedulerManager(root)
 	s.triggers = newTriggerManager(root, s.sched.binPath, s.ts, s.controlDB)
+	s.wireTriggerHooks()
 	s.okrStore = store.NewOKRStore(root)
 	s.msStore = store.NewMilestoneStore(root)
 }
