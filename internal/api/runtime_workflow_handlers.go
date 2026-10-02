@@ -2256,7 +2256,19 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 		if strings.TrimSpace(startInst.ActorType) != "agent" || strings.TrimSpace(startInst.ActorID) == "" {
 			return fmt.Errorf("parallel branch %q requires an agent actor binding for role %q or branch key %q (pass workflowActorBindings when the task is created)", branch.Title, startStep.ActorRole, branch.ID)
 		}
+		// Plan agentBinding values may arrive project-prefixed
+		// ("batch-test1/FP Dev B" — model-drafted plans copy the assignee
+		// spelling). Every consumer downstream (AddTask's canonical key,
+		// trigger heartbeat matching, runtime node dispatch) matches the BARE
+		// agent name against membership titles; a prefixed value stored the
+		// child task under a rogue alias key and every dispatch logged
+		// "skip — no heartbeat or worker schedule" (batch-test1 live,
+		// 2026-10-02). Strip the prefix when it names THIS project.
 		nextAgent := strings.TrimSpace(startInst.ActorID)
+		if bindProject, bindAgent, ok := splitAgentMailbox(nextAgent); ok && bindProject == project && bindAgent != "" {
+			nextAgent = bindAgent
+			startInst.ActorID = bindAgent
+		}
 		inputValues := workflowBranchInputValuesForFields(transition.Current, workflowBranchInputFields(branch, *startStep))
 		inputArtifact := workflowBranchInputArtifact(step, transition.Current, branch, inputValues)
 		branchTask := &entity.Task{

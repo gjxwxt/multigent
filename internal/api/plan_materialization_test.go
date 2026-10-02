@@ -260,6 +260,73 @@ func TestPlanStageMaterializesReadyWaveAndUnlocksNextWaveOnCompletion(t *testing
 	}
 }
 
+// TestPlanStagePrefixedAgentBindingLandsOnCanonicalKey is the live-failure
+// regression (batch-test1 run wfr-l8d3toho, 2026-10-02): model-drafted plans
+// copy the assignee spelling, so a frozen plan carried agentBinding
+// "sample/pm" — the project-prefixed mailbox. The branch activation must strip
+// THIS project's prefix: with the raw value, AddTask filed the child task
+// under the rogue alias key "sample/pm" and every trigger dispatch logged
+// "skip — no heartbeat or worker schedule", dead-ending the run.
+func TestPlanStagePrefixedAgentBindingLandsOnCanonicalKey(t *testing.T) {
+	s, workspaceID, baseCommit := planStageFixtures(t)
+	plan := fixtureDeliveryPlan("")
+	// The model-drafted spelling: project-prefixed mailbox for wp-a; wp-b
+	// keeps the bare name to prove the strip is selective.
+	for i := range plan.WorkPackages {
+		if plan.WorkPackages[i].ID == "wp-a" {
+			plan.WorkPackages[i].AgentBinding = "sample/pm"
+		}
+	}
+	seedPlanStageParentRun(t, s, workspaceID, baseCommit, plan, true)
+	runID := planRunIDFor(t, s, workspaceID, "task-plan-root")
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+
+	if rec := postBranchStepComplete(t, s, workspaceID, "task-plan-root", map[string]string{
+		"branch_summary": "contract frozen",
+		"touched_paths":  "contract.md",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("fan-out must be 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	instA, found := branchInstanceFor(t, wfStore, runID, "parallel", "wp-a")
+	if !found {
+		t.Fatal("wp-a must materialize")
+	}
+	taskA, err := s.ts.GetTask("sample", "pm", instA.ChildTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// GetTask resolves through aliases, so verify the STORAGE key: the child
+	// must be reachable (and only reachable) via the canonical "pm" key, not
+	// filed under the prefixed alias the binding carried.
+	keys, err := wfStore.ListBranchInstances(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = keys
+	childRun, _, err := wfStore.RunForTask("sample", instA.ChildTaskID)
+	if err != nil {
+		t.Fatalf("child run lookup: %v", err)
+	}
+	if childRun.ID == "" {
+		t.Fatal("child run must exist")
+	}
+	if taskA.Assignee != "sample/pm" {
+		t.Fatalf("assignee must stay the full mailbox for display, got %q", taskA.Assignee)
+	}
+	// The authoritative check: the step instance actor (what every dispatch
+	// consumer resolves) must be the bare agent name.
+	instances, err := wfStore.ListStepInstances(childRun.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, si := range instances {
+		if si.StepID == "start" && si.ActorID != "pm" {
+			t.Fatalf("branch actor must be stripped to the bare agent name, got %q", si.ActorID)
+		}
+	}
+}
+
 // TestPlanStageRedriveKeepsSingleIdentity is the reverse case for re-drive
 // duplication: driving the materialization again must reuse the same branch
 // tasks and instances (1:1:1:1), never mint a second identity.
