@@ -143,6 +143,14 @@ type PlanProgress struct {
 	// a failed/skipped package. Blocked is VISIBLE on purpose: a failure
 	// upstream must never look like "nothing to do".
 	Blocked []string
+	// Deferred: the package itself was deferred by a human decision, or
+	// transitively depends on a deferred package. Deferred is a HUMAN
+	// terminal ruling ("approved out of this round") derived from a failed
+	// branch — unlike failed/skipped it does not block the stage: guards
+	// treat Deferred as settled. The transitive derivation is deterministic
+	// (recomputed from the DAG on every evaluation, never stored), so no
+	// manual cascading of the ruling onto dependents is needed or possible.
+	Deferred []string
 }
 
 // PlanWPState values accepted by EvaluatePlanProgress. Empty string means
@@ -152,6 +160,13 @@ const (
 	PlanWPStateCompleted = "completed"
 	PlanWPStateFailed    = "failed"
 	PlanWPStateSkipped   = "skipped"
+	// PlanWPStateDeferred marks a work package a human ruled out of this
+	// round. It is a terminal state recorded on the branch instance; unlike
+	// failed/skipped it does NOT poison dependents into Blocked — they defer
+	// too. A deferred package still shows in the acceptance surface with its
+	// original failure reason; dropping that history would let integration
+	// review mistake "human waived" for "never attempted".
+	PlanWPStateDeferred = "deferred"
 )
 
 // ---------------------------------------------------------------------------
@@ -444,6 +459,7 @@ func EvaluatePlanProgress(plan DeliveryPlan, states map[string]string) (PlanProg
 		return strings.TrimSpace(strings.ToLower(states[id]))
 	}
 	unsatisfiable := map[string]bool{}
+	deferredSet := map[string]bool{}
 	// Wave order guarantees dependencies are classified before dependents.
 	for _, wave := range waves {
 		for _, id := range wave {
@@ -452,11 +468,17 @@ func EvaluatePlanProgress(plan DeliveryPlan, states map[string]string) (PlanProg
 			for _, dep := range deps[id] {
 				switch state(dep) {
 				case PlanWPStateCompleted:
+				case PlanWPStateDeferred:
+					deferredSet[id] = true
 				case PlanWPStateFailed, PlanWPStateSkipped:
 					blocked = true
 				default:
 					if unsatisfiable[dep] {
 						blocked = true
+					} else if deferredSet[dep] {
+						// A deferred dependency defers the dependent too —
+						// deterministic propagation, no manual cascade.
+						deferredSet[id] = true
 					} else {
 						waiting = true
 					}
@@ -470,13 +492,18 @@ func EvaluatePlanProgress(plan DeliveryPlan, states map[string]string) (PlanProg
 			switch state(id) {
 			case PlanWPStateCompleted:
 				progress.Completed = append(progress.Completed, id)
+			case PlanWPStateDeferred:
+				deferredSet[id] = true
+				progress.Deferred = append(progress.Deferred, id)
 			case PlanWPStateFailed, PlanWPStateSkipped:
 				unsatisfiable[id] = true
 				progress.Blocked = append(progress.Blocked, id)
 			case PlanWPStateRunning:
 				progress.InProgress = append(progress.InProgress, id)
 			default:
-				if waiting {
+				if deferredSet[id] {
+					progress.Deferred = append(progress.Deferred, id)
+				} else if waiting {
 					progress.Waiting = append(progress.Waiting, id)
 				} else {
 					progress.Ready = append(progress.Ready, id)
@@ -484,7 +511,7 @@ func EvaluatePlanProgress(plan DeliveryPlan, states map[string]string) (PlanProg
 			}
 		}
 	}
-	for _, s := range [][]string{progress.Ready, progress.Waiting, progress.InProgress, progress.Completed, progress.Blocked} {
+	for _, s := range [][]string{progress.Ready, progress.Waiting, progress.InProgress, progress.Completed, progress.Blocked, progress.Deferred} {
 		sort.Strings(s)
 	}
 	return progress, nil

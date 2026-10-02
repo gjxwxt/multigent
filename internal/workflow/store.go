@@ -2257,12 +2257,14 @@ func workflowRunStatusTerminal(status string) bool {
 }
 
 // workflowBranchAllTerminal reports whether every branch instance of the
-// stage reached a terminal status (completed/failed/skipped) — used by the
-// idempotent re-join path to reproduce AllDone without re-running the join.
+// stage reached a terminal status (completed/failed/skipped/deferred) — used
+// by the idempotent re-join path to reproduce AllDone without re-running the
+// join. deferred is terminal: a human ruling settles the branch even though
+// nothing was delivered.
 func workflowBranchAllTerminal(branches []entity.WorkflowBranchInstance) bool {
 	for _, b := range branches {
 		switch strings.TrimSpace(b.Status) {
-		case "completed", "failed", "skipped":
+		case "completed", "failed", "skipped", PlanWPStateDeferred:
 		default:
 			return false
 		}
@@ -2286,13 +2288,15 @@ func workflowBranchAnyFailed(branches []entity.WorkflowBranchInstance) bool {
 
 // stageJoinAllowedByPlan guards the plan-driven premature-join defect (S2 run5,
 // 2026-09-26): for a parallel_stage whose run has a FROZEN delivery plan, the
-// stage may only advance when EVERY plan work package is materialized (its
-// branch instance exists) AND completed. Branch instances exist only for
-// materialized work; downstream packages materialize AFTER a dependency
-// completes (wave unlock lives in the API layer), so the instance set alone
-// always under-reports remaining work — the set ([infra]) looked all-terminal
-// and the stage closed while waves 1..n were still un-materialized. With no
-// frozen plan (legacy static branches) this returns true unchanged.
+// stage may only advance when EVERY plan work package is settled — completed,
+// or deferred by a human ruling (unlike failed/skipped, deferred does not
+// poison the stage: its dependents defer deterministically via
+// EvaluatePlanProgress). Branch instances exist only for materialized work;
+// downstream packages materialize AFTER a dependency completes (wave unlock
+// lives in the API layer), so the instance set alone always under-reports
+// remaining work — the set ([infra]) looked all-terminal and the stage closed
+// while waves 1..n were still un-materialized. With no frozen plan (legacy
+// static branches) this returns true unchanged.
 // Fail-closed: plan-state evaluation errors refuse the join rather than
 // guessing.
 func (s *Store) stageJoinAllowedByPlan(project string, run entity.WorkflowRun, branches []entity.WorkflowBranchInstance) (bool, error) {
@@ -2313,20 +2317,34 @@ func (s *Store) stageJoinAllowedByPlan(project string, run entity.WorkflowRun, b
 	}
 	// Any un-materialized work package is absent from states (state ""), so
 	// it lands in Ready or Waiting; a running/failed/skipped package lands in
-	// InProgress/Blocked. The stage may join only when none of those exist.
+	// InProgress/Blocked. Deferred work is settled (a human ruled it out of
+	// this round) and must NOT hold the join. The stage may join only when
+	// none of the unsettled buckets exist.
 	if len(progress.Ready)+len(progress.Waiting)+len(progress.InProgress)+len(progress.Blocked) > 0 {
 		return false, nil
 	}
 	// Mixed mode guard (mirrors stageAuthoritativelyComplete): every plan work
-	// package must be materialized per-work-package (not by counting
-	// instances), and every existing branch of the stage must be completed.
+	// package must be settled per-work-package — completed, or deferred (the
+	// progress bucket, because an un-materialized deferred package has no
+	// instance to look up in the states map) — and every existing branch of
+	// the stage must be terminal-settled.
+	deferredSet := make(map[string]bool, len(progress.Deferred))
+	for _, id := range progress.Deferred {
+		deferredSet[id] = true
+	}
 	for _, wp := range version.Plan.WorkPackages {
-		if states[strings.TrimSpace(wp.ID)] != PlanWPStateCompleted {
+		wpID := strings.TrimSpace(wp.ID)
+		if deferredSet[wpID] {
+			continue
+		}
+		if states[wpID] != PlanWPStateCompleted {
 			return false, nil
 		}
 	}
 	for _, inst := range branches {
-		if strings.TrimSpace(inst.Status) != PlanWPStateCompleted {
+		switch strings.TrimSpace(inst.Status) {
+		case PlanWPStateCompleted, PlanWPStateDeferred:
+		default:
 			return false, nil
 		}
 	}

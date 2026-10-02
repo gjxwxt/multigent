@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,6 +48,33 @@ import (
 // to "frozen": the stage then REQUIRES a frozen plan record and refuses to
 // fall back to static branches (fail-closed).
 const planMaterializationConfigKey = "planMaterialization"
+
+const (
+	planMaxParallelEnv = "MULTIGENT_PLAN_MAX_PARALLEL"
+	// Default cap of branch materializations per drive. Each materialized
+	// work package gets its own sandbox container with a 4GB memory promise,
+	// so an unbounded wave can over-commit the host several times over.
+	// 2 keeps a small host (CI services + IM bridge resident) safe by
+	// default; raise via the env once `docker stats` shows headroom.
+	defaultPlanMaxParallel = 2
+)
+
+// planMaxParallelMaterialization parses MULTIGENT_PLAN_MAX_PARALLEL. 0 or a
+// negative value disables the cap; an unparseable value falls back to the
+// default (logged, like the deploy port range). Read at use so deployments
+// pick the value up without any start-flag plumbing.
+func planMaxParallelMaterialization() int {
+	raw := strings.TrimSpace(os.Getenv(planMaxParallelEnv))
+	if raw == "" {
+		return defaultPlanMaxParallel
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		log.Printf("[plan-materialization] ignoring invalid %s=%q, using %d", planMaxParallelEnv, raw, defaultPlanMaxParallel)
+		return defaultPlanMaxParallel
+	}
+	return n
+}
 
 // Task Vars carrying the frozen plan identity on every materialized branch
 // task. These are the audit trail from a branch back to the approved plan.
@@ -153,21 +181,67 @@ func (s *Server) planStageBranches(project, runID string, step entity.WorkflowSt
 		return nil, nil, planRefusal("parallel stage %q: frozen delivery plan %s v%d has no materializable work package (ready: 0 of %d) and no branch exists yet; refusing to leave the stage without materialized work",
 			step.Title, plan.PlanID, version.Version, len(plan.WorkPackages))
 	}
-	sort.SliceStable(branches, func(i, j int) bool { return branches[i].ID < branches[j].ID })
-
-	waveIndex := -1
-	if len(branches) > 0 {
-		waveIndex = workflowstore.PlanWaveIndex(plan, branches[0].ID)
+	// Deterministic materialization order: lowest wave first, then stable by
+	// package id. progress.Ready alone is lexicographically sorted (not wave
+	// order), so ordering by wave keeps early-branch completions unlocking
+	// downstream work on the critical path instead of random high-wave
+	// packages.
+	sort.SliceStable(branches, func(i, j int) bool {
+		wi, wj := workflowstore.PlanWaveIndex(plan, branches[i].ID), workflowstore.PlanWaveIndex(plan, branches[j].ID)
+		if wi != wj {
+			return wi < wj
+		}
+		return branches[i].ID < branches[j].ID
+	})
+	// Concurrency gate (P0-1): keep at most N branch instances in flight.
+	// The allowance is cap MINUS what is already running (not just this
+	// drive's size) — a sequence of single-branch completions must not
+	// re-materialize a full cap each time. Held-back packages stay Ready in
+	// every later evaluation (they have no branch instance), so any
+	// subsequent branch completion re-materializes them through this same
+	// path — no extra trigger needed.
+	if cap := planMaxParallelMaterialization(); cap > 0 {
+		inFlight := 0
+		for _, inst := range existing {
+			switch strings.TrimSpace(inst.Status) {
+			case workflowstore.PlanWPStateRunning, "pending":
+				inFlight++
+			}
+		}
+		allowance := cap - inFlight
+		if allowance < 0 {
+			allowance = 0
+		}
+		if allowance < len(branches) {
+			held := branches[allowance:]
+			heldIDs := make([]string, 0, len(held))
+			for _, b := range held {
+				heldIDs = append(heldIDs, b.ID)
+			}
+			log.Printf("[plan-materialization] run %s plan %s v%d: holding back %d ready work package(s) behind the concurrency cap (%d, %d in flight): %s",
+				runID, plan.PlanID, version.Version, len(held), cap, inFlight, strings.Join(heldIDs, ", "))
+			branches = branches[:allowance]
+		}
 	}
-	// The plan record is the source of truth for work package identity; the
-	// hints carry it into the materialization loop.
+	if len(branches) > 0 {
+		waveIndex := workflowstore.PlanWaveIndex(plan, branches[0].ID)
+		// The plan record is the source of truth for work package identity; the
+		// hints carry it into the materialization loop.
+		return branches, &planStageHints{
+			PlanID:    plan.PlanID,
+			Version:   version.Version,
+			Digest:    version.Digest,
+			WaveIndex: waveIndex,
+			Plan:      plan,
+			WPByID:    wpByID,
+		}, nil
+	}
 	return branches, &planStageHints{
-		PlanID:    plan.PlanID,
-		Version:   version.Version,
-		Digest:    version.Digest,
-		WaveIndex: waveIndex,
-		Plan:      plan,
-		WPByID:    wpByID,
+		PlanID:  plan.PlanID,
+		Version: version.Version,
+		Digest:  version.Digest,
+		Plan:    plan,
+		WPByID:  wpByID,
 	}, nil
 }
 
@@ -244,19 +318,32 @@ func (s *Server) stageAuthoritativelyComplete(workspaceID, project string, resul
 	if len(progress.Ready)+len(progress.Waiting)+len(progress.InProgress)+len(progress.Blocked) > 0 {
 		return false, nil
 	}
-	// Every work package must be materialized. Checked PER WORK PACKAGE
-	// rather than by counting instances, so a stage that also carries static
-	// branches (mixed mode) can neither look complete early nor be judged on
-	// the wrong denominator.
+	// Every work package must be settled: materialized AND terminal, or
+	// deferred by a human ruling. Deferred packages may exist WITHOUT a
+	// branch instance (the ruling can arrive for an un-materialized
+	// dependent), so membership is checked against the progress bucket, not
+	// the states map. Checked PER WORK PACKAGE rather than by counting
+	// instances, so a stage that also carries static branches (mixed mode)
+	// can neither look complete early nor be judged on the wrong denominator.
+	deferredSet := make(map[string]bool, len(progress.Deferred))
+	for _, id := range progress.Deferred {
+		deferredSet[id] = true
+	}
 	for _, wp := range version.Plan.WorkPackages {
-		if _, materialized := states[strings.TrimSpace(wp.ID)]; !materialized {
+		wpID := strings.TrimSpace(wp.ID)
+		if deferredSet[wpID] {
+			continue
+		}
+		if _, materialized := states[wpID]; !materialized {
 			return false, nil
 		}
 	}
-	// And every existing branch of THIS stage must be completed: a static
+	// And every existing branch of THIS stage must be settled: a static
 	// branch that is still running (mixed mode) blocks the advance too.
 	for _, inst := range instances {
-		if strings.TrimSpace(inst.Status) != workflowstore.PlanWPStateCompleted {
+		switch strings.TrimSpace(inst.Status) {
+		case workflowstore.PlanWPStateCompleted, workflowstore.PlanWPStateDeferred:
+		default:
 			return false, nil
 		}
 	}

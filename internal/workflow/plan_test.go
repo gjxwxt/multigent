@@ -238,6 +238,81 @@ func TestEvaluatePlanProgressBlocksDownstreamOnUpstreamFailure(t *testing.T) {
 	}
 }
 
+func TestEvaluatePlanProgressDefersDownstreamOnHumanDeferral(t *testing.T) {
+	plan := fixturePlan()
+	// A transitive chain so the deferral must propagate beyond the direct child.
+	plan.WorkPackages = append(plan.WorkPackages, PlanWorkPackage{
+		ID: "wp-release", Title: "Release", DependsOn: []string{"wp-infra"},
+		AcceptanceCriteria: []string{"infra:release"}, AgentBinding: "Mira",
+	})
+
+	// A deferred package settles itself WITHOUT poisoning the stage: the
+	// whole downstream subtree defers (deterministic propagation), the
+	// Blocked bucket stays empty, the independent sibling stays ready.
+	progress, err := EvaluatePlanProgress(plan, map[string]string{"wp-session": PlanWPStateDeferred})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(progress.Deferred, ",") != "wp-infra,wp-release,wp-session" {
+		t.Fatalf("deferred package and its subtree must land in the deferred bucket, got %+v", progress)
+	}
+	if len(progress.Blocked) != 0 {
+		t.Fatalf("a human deferral must not block the stage: %+v", progress)
+	}
+	if strings.Join(progress.Ready, ",") != "wp-audit" {
+		t.Fatalf("the independent wave-1 package stays ready: %+v", progress)
+	}
+
+	// With the sibling done, the dependent of the deferred package defers
+	// transitively (NOT blocked, NOT ready) — deterministic propagation, no
+	// manual cascade required.
+	progress, err = EvaluatePlanProgress(plan, map[string]string{
+		"wp-session": PlanWPStateDeferred,
+		"wp-audit":   PlanWPStateCompleted,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(progress.Deferred, ",") != "wp-infra,wp-release,wp-session" {
+		t.Fatalf("dependent of a deferred package must defer too, got %+v", progress)
+	}
+	if len(progress.Blocked) != 0 || len(progress.Ready) != 0 || len(progress.Waiting) != 0 {
+		t.Fatalf("deferred dependents must land in the deferred bucket only: %+v", progress)
+	}
+
+	// A completed package inside a deferred subtree stays completed: the
+	// deferral of a SIBLING must not rewrite real outcomes.
+	progress, err = EvaluatePlanProgress(plan, map[string]string{
+		"wp-session": PlanWPStateCompleted,
+		"wp-audit":   PlanWPStateDeferred,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(progress.Deferred, ",") != "wp-audit,wp-infra,wp-release" {
+		t.Fatalf("only the ruled-out subtree defers, got %+v", progress)
+	}
+	if strings.Join(progress.Completed, ",") != "wp-session" {
+		t.Fatalf("completed work must stay completed: %+v", progress)
+	}
+
+	// Mixing a deferral with a real failure keeps both visible and separate:
+	// failure poisons (Blocked), deferral settles (Deferred).
+	progress, err = EvaluatePlanProgress(plan, map[string]string{
+		"wp-session": PlanWPStateDeferred,
+		"wp-audit":   PlanWPStateFailed,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(progress.Deferred, ",") != "wp-session" {
+		t.Fatalf("deferred subtree must stay deferred: %+v", progress)
+	}
+	if strings.Join(progress.Blocked, ",") != "wp-audit,wp-infra,wp-release" {
+		t.Fatalf("failed subtree must stay blocked, got %+v", progress)
+	}
+}
+
 func newPlanTestStore(t *testing.T) (*Store, string) {
 	t.Helper()
 	controlDB, err := controldb.Open(t.TempDir() + "/control.db")

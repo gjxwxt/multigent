@@ -709,3 +709,210 @@ func TestPlanStageUnrelatedCompletionStillAdvancesAfterPlanDone(t *testing.T) {
 		t.Fatalf("a fully delivered plan must still finish the run, got %s@%s", after.Status, after.ActiveStepID)
 	}
 }
+
+// TestPlanStageDeferralUnblocksJoin is the human-ruling path for an otherwise
+// permanent stall: a failed branch, once deferred by an operator, must not
+// poison the stage. The deferred package and its un-materialized dependents
+// settle via the deterministic deferred propagation, the wave hook stops
+// refusing, and the stage joins once every package is settled.
+func TestPlanStageDeferralUnblocksJoin(t *testing.T) {
+	s, workspaceID, baseCommit := planStageFixtures(t)
+	plan := fixtureDeliveryPlan("")
+	root := seedPlanStageParentRun(t, s, workspaceID, baseCommit, plan, true)
+	runID := planRunIDFor(t, s, workspaceID, "task-plan-root")
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+
+	if rec := postBranchStepComplete(t, s, workspaceID, "task-plan-root", map[string]string{
+		"branch_summary": "contract frozen",
+		"touched_paths":  "contract.md",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("fan-out must be 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// wp-a fails through the production shape (instance failed + root blocked).
+	instA, found := branchInstanceFor(t, wfStore, runID, "parallel", "wp-a")
+	if !found {
+		t.Fatal("wp-a must be materialized in wave 0")
+	}
+	instA.Status = "failed"
+	instA.Summary = "module A could not be delivered"
+	if err := wfStore.SaveBranchInstance(&instA); err != nil {
+		t.Fatal(err)
+	}
+	run, _, err := wfStore.RunForTask("sample", "task-plan-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, waveErr := s.materializeNextPlanWave(workspaceID, "sample", "pm", root, workflowstore.BranchTransitionResult{
+		Branch:  instA,
+		AllDone: true,
+		Transition: workflowstore.TransitionResult{
+			Run:     run,
+			Current: entity.WorkflowStepInstance{RunID: runID, StepID: "parallel"},
+		},
+	}, httptest.NewRequest(http.MethodPost, "/", nil))
+	if waveErr == nil {
+		t.Fatal("a failed upstream must still block the wave BEFORE the ruling")
+	}
+
+	// The operator defers the failed branch (the defer endpoint's store-level
+	// effect: fail summary preserved in the deferred summary).
+	instA.Status = workflowstore.PlanWPStateDeferred
+	instA.Summary = "deferred; original failure: module A could not be delivered"
+	if err := wfStore.SaveBranchInstance(&instA); err != nil {
+		t.Fatal(err)
+	}
+
+	// The wave hook no longer refuses: the deferred ruling settles the stage's
+	// Blocked set, and wp-c (dependent of the deferred wp-a) defers with it —
+	// nothing is materialized behind a human "not this round".
+	// The join must now be allowed with the remaining packages completed.
+	if _, err := wfStore.CompleteBranchAndMaybeAdvance("sample", root.ID, runID, "parallel", instA.BranchID, instA.ChildTaskID, instA.Summary, nil, workflowstore.PlanWPStateDeferred); err != nil {
+		t.Fatalf("deferred branch completion must drive the join: %v", err)
+	}
+
+	states := map[string]string{}
+	instances, err := wfStore.BranchInstancesForStep(runID, "parallel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, inst := range instances {
+		states[inst.BranchID] = strings.TrimSpace(inst.Status)
+	}
+	progress, err := workflowstore.EvaluatePlanProgress(plan, states)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(progress.Blocked) != 0 {
+		t.Fatalf("a deferral must clear the blocked set, got %+v (states %v)", progress.Blocked, states)
+	}
+	if len(progress.Deferred) == 0 {
+		t.Fatalf("the deferred ruling must be visible in progress, states %v", states)
+	}
+}
+
+// TestPlanStageConcurrencyCapHoldsBackReadyPackages drives the P0-1 gate: an
+// eight-package wave under a cap of 3 materializes only three (lowest wave,
+// then id order), the held-back packages stay Ready, and a re-drive after the
+// first three complete picks up exactly the next batch without duplicating
+// anything.
+func TestPlanStageConcurrencyCapHoldsBackReadyPackages(t *testing.T) {
+	s, workspaceID, baseCommit := planStageFixtures(t)
+	plan := workflowstore.DeliveryPlan{
+		SchemaVersion: workflowstore.DeliveryPlanSchemaVersion,
+		PlanID:        "plan-cap-fixture",
+		Version:       1,
+		RequirementItems: []workflowstore.PlanRequirementItem{
+			{ID: "uc-x", Text: "deliver everything"},
+		},
+		WorkPackages: []workflowstore.PlanWorkPackage{
+			{ID: "wp-h", Title: "H", AcceptanceCriteria: []string{"uc-x"}, AgentBinding: "pm"},
+			{ID: "wp-g", Title: "G", AcceptanceCriteria: []string{"uc-x"}, AgentBinding: "pm"},
+			{ID: "wp-f", Title: "F", AcceptanceCriteria: []string{"uc-x"}, AgentBinding: "pm"},
+			{ID: "wp-e", Title: "E", AcceptanceCriteria: []string{"uc-x"}, AgentBinding: "pm"},
+			{ID: "wp-d", Title: "D", AcceptanceCriteria: []string{"uc-x"}, AgentBinding: "pm"},
+			{ID: "wp-c2", Title: "C2", AcceptanceCriteria: []string{"uc-x"}, AgentBinding: "pm"},
+			{ID: "wp-b2", Title: "B2", AcceptanceCriteria: []string{"uc-x"}, AgentBinding: "pm"},
+			{ID: "wp-a2", Title: "A2", AcceptanceCriteria: []string{"uc-x"}, AgentBinding: "pm"},
+		},
+	}
+	seedPlanStageParentRun(t, s, workspaceID, baseCommit, plan, true)
+	runID := planRunIDFor(t, s, workspaceID, "task-plan-root")
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+
+	t.Setenv("MULTIGENT_PLAN_MAX_PARALLEL", "3")
+	if got := planMaxParallelMaterialization(); got != 3 {
+		t.Fatalf("env override must parse, got %d", got)
+	}
+
+	if rec := postBranchStepComplete(t, s, workspaceID, "task-plan-root", map[string]string{
+		"branch_summary": "contract frozen",
+		"touched_paths":  "contract.md",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("fan-out must be 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	instances, err := wfStore.BranchInstancesForStep(runID, "parallel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instances) != 3 {
+		t.Fatalf("cap must hold the wave to 3 materializations, got %d", len(instances))
+	}
+	seen := map[string]bool{}
+	for _, inst := range instances {
+		seen[inst.BranchID] = true
+	}
+	// Wave-ordered, then id-ordered: the first three id-sorted packages win.
+	for _, want := range []string{"wp-a2", "wp-b2", "wp-c2"} {
+		if !seen[want] {
+			t.Fatalf("expected %q in the first capped batch, got %v", want, seen)
+		}
+	}
+
+	// The held-back five must still be Ready in the frozen plan's evaluation.
+	states := map[string]string{}
+	for _, inst := range instances {
+		states[inst.BranchID] = inst.Status
+	}
+	progress, err := workflowstore.EvaluatePlanProgress(plan, states)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(progress.Ready) != 5 {
+		t.Fatalf("held-back packages must stay ready, got %+v", progress)
+	}
+
+	// Complete the first batch: the completion path must re-materialize the
+	// next three without duplicating the settled ones.
+	for _, inst := range instances {
+		task, err := s.ts.GetTask("sample", "pm", inst.ChildTaskID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(task.WorktreeDir, inst.BranchID+".go"), []byte("package main\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if rec := postBranchStepComplete(t, s, workspaceID, inst.ChildTaskID, map[string]string{
+			"branch_summary": inst.BranchID + " done",
+			"touched_paths":  inst.BranchID + ".go",
+		}); rec.Code != http.StatusOK {
+			t.Fatalf("branch %s completion must be 200, got %d: %s", inst.BranchID, rec.Code, rec.Body.String())
+		}
+	}
+	after, err := wfStore.BranchInstancesForStep(runID, "parallel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 6 {
+		t.Fatalf("next drive must materialize the next 3 packages, got %d instances", len(after))
+	}
+	ids := map[string]bool{}
+	for _, inst := range after {
+		if ids[inst.BranchID] {
+			t.Fatalf("branch %s duplicated across drives", inst.BranchID)
+		}
+		ids[inst.BranchID] = true
+	}
+	for _, want := range []string{"wp-d", "wp-e", "wp-f"} {
+		if !ids[want] {
+			t.Fatalf("expected %q in the second batch, got %v", want, ids)
+		}
+	}
+}
+
+// TestPlanStageConcurrencyCapZeroMeansUnbounded verifies the escape hatch: a
+// value of 0 disables the cap entirely.
+func TestPlanStageConcurrencyCapZeroMeansUnbounded(t *testing.T) {
+	t.Setenv("MULTIGENT_PLAN_MAX_PARALLEL", "0")
+	if got := planMaxParallelMaterialization(); got != 0 {
+		t.Fatalf("0 must disable the cap, got %d", got)
+	}
+	t.Setenv("MULTIGENT_PLAN_MAX_PARALLEL", "not-a-number")
+	if got := planMaxParallelMaterialization(); got != defaultPlanMaxParallel {
+		t.Fatalf("invalid value must fall back to the default, got %d", got)
+	}
+	if planMaxParallelMaterialization() == 0 {
+		t.Fatal("default must never be 0")
+	}
+}
