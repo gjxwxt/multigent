@@ -1719,7 +1719,12 @@
         "unknownAC": "Work package \"{{id}}\" references unknown requirement anchor \"{{ac}}\"",
         "selfDep": "Work package \"{{id}}\" depends on itself",
         "cycle": "Dependency cycle detected; waves cannot be laid out"
-      }
+      },
+      "importFindings": "Import from last review (paste findings JSON)",
+      "importApply": "Merge into requirement text",
+      "importNone": "No unfixed findings to import",
+      "importDone": "Merged {{count}} unfixed findings",
+      "importBadJson": "JSON parse failed, check the format"
     }
   },
   "projects": {

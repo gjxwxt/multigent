@@ -1719,7 +1719,12 @@
         "unknownAC": "工作包 \"{{id}}\" 引用了不存在的需求锚点 \"{{ac}}\"",
         "selfDep": "工作包 \"{{id}}\" 依赖自身",
         "cycle": "依赖存在环，无法排布波次"
-      }
+      },
+      "importFindings": "从上轮审查导入（粘贴 findings JSON）",
+      "importApply": "拼入需求文本",
+      "importNone": "没有可导入的未修复发现",
+      "importDone": "已拼入 {{count}} 条未修复发现",
+      "importBadJson": "JSON 解析失败，请检查格式"
     }
   },
   "projects": {

@@ -155,6 +155,25 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
   const [preplanHint, setPreplanHint] = useState<{ scaleHint: string; reason: string } | null>(null)
   const [batchPlan, setBatchPlan] = useState<DeliveryPlanDraft | null>(null)
   const GREENFIELD_PIPELINE_ID = 'greenfield-delivery-pipeline'
+  // 从上轮批次审查导入（W3 方向B）：findings JSON 粘贴区 + 应用消息
+  const [findingsJson, setFindingsJson] = useState('')
+  const [findingsMsg, setFindingsMsg] = useState('')
+
+  function importFindingsIntoText() {
+    try {
+      const parsed = JSON.parse(findingsJson) as { findings?: { id?: string; title?: string; severity?: string; evidence?: string; fixed?: boolean }[] }
+      const findings = (parsed.findings ?? []).filter((f) => !f.fixed && f.title)
+      if (findings.length === 0) {
+        setFindingsMsg(t('tasks.preplan.importNone'))
+        return
+      }
+      const lines = findings.map((f) => `- [${f.severity || 'P?'}] ${f.title}${f.id ? ` (${f.id})` : ''}`)
+      setBatchText((current) => `${current.trim()}\n\n【上轮审查未修复发现（作为本轮约束，须逐条复核处置）】\n${lines.join('\n')}`.trim())
+      setFindingsMsg(t('tasks.preplan.importDone', { count: findings.length }))
+    } catch {
+      setFindingsMsg(t('tasks.preplan.importBadJson'))
+    }
+  }
   // @-mention state: the caret offset where "@" was typed, and the query
   // string tracked after it. Null popover = closed.
   const [mention, setMention] = useState<{ at: number; query: string } | null>(null)
@@ -923,6 +942,27 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
                     )}
                   </div>
                   {preplanErr && <p className="text-xs text-red-600 dark:text-red-400">{preplanErr}</p>}
+                  {/* 从上轮批次审查导入：粘贴 findings JSON，未修复发现拼进需求文本作为约束 */}
+                  <details className="rounded-lg border border-neutral-200 bg-neutral-50 p-2 dark:border-zinc-700 dark:bg-zinc-950/40">
+                    <summary className="cursor-pointer text-xs text-neutral-500 dark:text-zinc-400">
+                      {t('tasks.preplan.importFindings')}
+                    </summary>
+                    <textarea
+                      value={findingsJson}
+                      onChange={(e) => setFindingsJson(e.target.value)}
+                      rows={3}
+                      className={cn(fieldCls, 'mt-2 resize-y font-mono text-[11px]')}
+                      placeholder='{"findings":[{"id":"A1","title":"…","severity":"P1","evidence":"…"}]}'
+                    />
+                    <button
+                      type="button"
+                      onClick={() => importFindingsIntoText()}
+                      className="mt-1.5 rounded-md border border-neutral-300 px-2 py-1 text-xs text-neutral-600 hover:border-sky-400 hover:text-sky-700 dark:border-zinc-600 dark:text-zinc-300"
+                    >
+                      {t('tasks.preplan.importApply')}
+                    </button>
+                    {findingsMsg && <p className="mt-1 text-xs text-emerald-600 dark:text-emerald-400">{findingsMsg}</p>}
+                  </details>
                   {batchPlan && (
                     <DeliveryPlanEditor
                       plan={batchPlan}

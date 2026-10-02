@@ -776,6 +776,10 @@ func (s *Server) Handler() http.Handler {
 	// for the CreateTaskDialog batch mode. Read-natured (nothing persisted);
 	// main mux (token auth) + checkProjectAccess + per-project LLM rate limit.
 	mux.HandleFunc("POST /api/v1/projects/{name}/delivery/preplan", s.handleDeliveryPreplan)
+	// ── Review findings import (large-requirement W3): batch-review findings
+	// JSON → per-finding tasks via createProjectTaskFromBody. Main mux +
+	// checkProjectAccess + checkProjectOperator (bulk task creation).
+	mux.HandleFunc("POST /api/v1/projects/{name}/review-findings/import", s.handleReviewFindingsImport)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview", s.handleGetTaskPreview)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/resources", s.handleGetTaskResources)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/resources/worktree/cleanup", s.handlePostTaskWorktreeCleanup)

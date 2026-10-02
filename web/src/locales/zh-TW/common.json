@@ -1289,7 +1289,12 @@
         "unknownAC": "工作包 \"{{id}}\" 引用了不存在的需求錨點 \"{{ac}}\"",
         "selfDep": "工作包 \"{{id}}\" 依賴自身",
         "cycle": "依賴存在環，無法排布波次"
-      }
+      },
+      "importFindings": "從上輪審查審查匯入（貼上 findings JSON）",
+      "importApply": "併入需求文字",
+      "importNone": "沒有可匯入的未修復發現",
+      "importDone": "已併入 {{count}} 條未修復發現",
+      "importBadJson": "JSON 解析失敗，請檢查格式"
     }
   },
   "projects": {

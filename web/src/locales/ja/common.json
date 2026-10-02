@@ -1281,7 +1281,12 @@
         "unknownAC": "作業パッケージ \"{{id}}\" が存在しないアンカー \"{{ac}}\" を参照しています",
         "selfDep": "作業パッケージ \"{{id}}\" が自身に依存しています",
         "cycle": "依存に循環がありウェーブを構成できません"
-      }
+      },
+      "importFindings": "前回レビューから取り込み（findings JSON を貼付）",
+      "importApply": "要件テキストに統合",
+      "importNone": "取り込める未修正の発見はありません",
+      "importDone": "{{count}} 件の未修正発見を統合しました",
+      "importBadJson": "JSON の解析に失敗しました"
     }
   },
   "projects": {
