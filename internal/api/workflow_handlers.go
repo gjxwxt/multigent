@@ -1381,7 +1381,11 @@ func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Tas
 	// status must read stdout only: CombinedOutput would fold stderr warnings
 	// (dubious ownership, CRLF notice) into the porcelain stream and make a
 	// clean tree look dirty → a phantom commit with no changes.
-	statusOut, statusErr := git.runStdout(10*time.Second, "status", "--porcelain")
+	// Task worktrees are registered as gitlinks (mode 160000); untracked files
+	// INSIDE one (qa-baseline artifacts, a bare origin mirror) mark the gitlink
+	// S..U without any stageable change — ignore untracked submodule content so
+	// every approval does not die on "nothing to commit".
+	statusOut, statusErr := git.runStdout(10*time.Second, "status", "--porcelain", "--ignore-submodules=untracked")
 	if statusErr != nil {
 		log.Printf("[review-commit] git status failed for task %s (project %s): %v", t.ID, project, statusErr)
 		if len(committingReceipts) > 0 && engine != nil {
@@ -1424,7 +1428,10 @@ func (s *Server) commitAndPushReviewChanges(project, agent string, t *entity.Tas
 		return "", "", nil
 	}
 
-	// 2. Stage and commit
+	// 2. Stage and commit. Reachable only when the filtered status above saw
+	// stageable content — untracked inner worktree content alone never gets
+	// here (the clean-tree early return catches it), and `git add -A` cannot
+	// stage inside a gitlink anyway.
 	addOut, addErr := git.run(30*time.Second, "add", "-A")
 	if addErr != nil {
 		log.Printf("[review-commit] git add failed for task %s (project %s): %v (%s)", t.ID, project, addErr, strings.TrimSpace(string(addOut)))

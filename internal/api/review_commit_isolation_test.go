@@ -201,11 +201,84 @@ func TestCommitAndPushReviewChangesCleanTreeWithStderrNoise(t *testing.T) {
 	}
 }
 
-// Concurrent review commits over the same project must serialize on the lock
-// and never corrupt the index or lose a staged fix. Note: a fix may be swept
-// into the other caller's commit (both write before either acquires the
-// lock, and `git add -A` stages everything) — the invariant is that BOTH
-// files are committed and the repo stays consistent, not a fixed commit count.
+// Regression (batch-test1 live): task worktrees are registered as gitlinks in
+// the project repo index. Untracked files INSIDE a worktree (qa-baseline
+// artifacts) mark the gitlink S..U — status --porcelain reports it dirty while
+// `git add -A` can stage nothing, so `git commit` exits 1 and EVERY approval
+// returned 500. The clean-tree check must ignore untracked submodule content;
+// a real gitlink SHA move must still commit.
+func TestCommitAndPushReviewChangesGitlinkUntrackedInnerContent(t *testing.T) {
+	repo := newReviewCommitRepo(t)
+
+	// Register a gitlink pointing at a real nested repo (mode 160000), then
+	// drop an untracked file inside it — the production phantom.
+	nested := filepath.Join(repo, "wt-inner")
+	if err := os.MkdirAll(nested, 0755); err != nil {
+		t.Fatal(err)
+	}
+	nestedRun := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = nested
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, string(out))
+		}
+	}
+	nestedRun("init", "-b", "main")
+	nestedRun("config", "user.email", "nested@example.com")
+	nestedRun("config", "user.name", "Nested")
+	if err := os.WriteFile(filepath.Join(nested, "inner.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	nestedRun("add", "inner.txt")
+	nestedRun("commit", "-m", "inner head")
+	addCmd := exec.Command("git", "add", "wt-inner")
+	addCmd.Dir = repo
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add gitlink: %v (%s)", err, string(out))
+	}
+	runCmd := exec.Command("git", "commit", "-m", "register gitlink")
+	runCmd.Dir = repo
+	if out, err := runCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit gitlink: %v (%s)", err, string(out))
+	}
+	if err := os.WriteFile(filepath.Join(nested, "untracked_artifact.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirty, dirtyErr := exec.Command("git", "status", "--porcelain").Output()
+	_ = dirtyErr // informational: git DOES report the phantom here
+	if len(dirty) == 0 {
+		t.Fatal("precondition: git must see the gitlink as dirty for this regression to bite")
+	}
+
+	s, _ := newConnectionGrantPolicyServer(t)
+	task := &entity.Task{ID: "t-gitlink", BranchName: "main", WorktreeDir: repo}
+
+	if _, _, err := s.commitAndPushReviewChanges("sample", "pm", task); err != nil {
+		t.Fatalf("review commit must tolerate untracked inner worktree content, got: %v", err)
+	}
+
+	// No phantom commit landed for the gitlink-only dirt…
+	statusCmd := exec.Command("git", "log", "--oneline")
+	statusCmd.Dir = repo
+	out, _ := statusCmd.Output()
+	if strings.Contains(string(out), "in-context preview feedback") {
+		t.Fatalf("gitlink-only dirt must not produce a phantom review commit, got: %s", string(out))
+	}
+	// …but a real staged change alongside it still commits.
+	if err := os.WriteFile(filepath.Join(repo, "copilot_fix.txt"), []byte("reviewed fix"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.commitAndPushReviewChanges("sample", "pm", task); err != nil {
+		t.Fatalf("real change must still commit: %v", err)
+	}
+	logCmd := exec.Command("git", "log", "-n", "1", "--name-only", "--format=")
+	logCmd.Dir = repo
+	names, _ := logCmd.Output()
+	if !strings.Contains(string(names), "copilot_fix.txt") {
+		t.Fatalf("expected copilot_fix.txt in the review commit, got: %s", string(names))
+	}
+}
 func TestCommitAndPushReviewChangesConcurrentSerialize(t *testing.T) {
 	repo := newReviewCommitRepo(t)
 	s, _ := newConnectionGrantPolicyServer(t)
