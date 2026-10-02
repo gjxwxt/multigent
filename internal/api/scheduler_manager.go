@@ -425,6 +425,7 @@ func (s *Server) StartWorkspaceScheduler() error {
 	s.startRuntimeReaper(context.Background())
 	s.startWorktreeReaper(context.Background())
 	s.startWorkflowReconciler(context.Background())
+	s.startPlanWaveBackfillLoop(context.Background())
 	return s.sched.StartWorkspace()
 }
 
