@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -242,4 +243,94 @@ func TestFrozenPlanWithDependsKindRoundTripsThroughStore(t *testing.T) {
 	}
 	_ = record
 	_ = statesFor
+}
+
+// TestDependsKindStringShorthandExpandsToAllEdges: models reliably emit the
+// string form "dependsKind": "contract" (live-fire t-20261002-6l65om did, and
+// the map-only decoder silently dropped it — a lost contract edge silently
+// restores defer propagation). The string means EVERY edge in dependsOn has
+// that kind, and it must survive canonicalization into the map form.
+func TestDependsKindStringShorthandExpandsToAllEdges(t *testing.T) {
+	var decoded struct {
+		WP PlanWorkPackage `json:"wp"`
+	}
+	if err := json.Unmarshal([]byte(`{"wp":{"id":"wp-2","title":"x","dependsOn":["wp-3"],"agentBinding":"a","acceptanceCriteria":["infra:c"],"dependsKind":"contract"}}`), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.WP.DependsKind["*"] != PlanDepKindContract {
+		t.Fatalf("string shorthand must decode onto the wildcard key, got %v", decoded.WP.DependsKind)
+	}
+
+	// Round-trip through the canonicalizer: the wildcard expands to every
+	// declared edge and the canonical JSON carries the map form. Packages are
+	// sorted by id, so find wp-infra instead of assuming its index.
+	plan := fixturePlan()
+	plan.WorkPackages[2].DependsKind = decoded.WP.DependsKind
+	canon := canonicalDeliveryPlan(plan)
+	var got map[string]string
+	for _, wp := range canon.WorkPackages {
+		if wp.ID == "wp-infra" {
+			got = wp.DependsKind
+		}
+	}
+	if got["wp-session"] != PlanDepKindContract || got["wp-audit"] != PlanDepKindContract || len(got) != 2 {
+		t.Fatalf("shorthand must expand to every dependsOn edge, got %v", got)
+	}
+
+	// And the expanded form must behave like the explicit map at evaluation:
+	// deferring one upstream must NOT defer wp-infra (all edges contract).
+	states := map[string]string{"wp-session": PlanWPStateDeferred, "wp-audit": PlanWPStateCompleted}
+	progress, err := EvaluatePlanProgress(plan, states)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range progress.Deferred {
+		if id == "wp-infra" {
+			t.Fatalf("shorthand-declared contract edges must not transmit deferral; deferred=%v", progress.Deferred)
+		}
+	}
+
+	// Marshaling always emits the map form (digest stability for old readers).
+	var marshaledWP PlanWorkPackage
+	for _, wp := range canon.WorkPackages {
+		if wp.ID == "wp-infra" {
+			marshaledWP = wp
+		}
+	}
+	blob, err := json.Marshal(marshaledWP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(blob), `"dependsKind":{"wp-audit":"contract","wp-session":"contract"}`) {
+		t.Fatalf("canonical JSON must carry the map form, got %s", blob)
+	}
+
+	// Unknown kind in the string form must FAIL the decode — never silently
+	// become artifact.
+	var bad struct {
+		WP PlanWorkPackage `json:"wp"`
+	}
+	if err := json.Unmarshal([]byte(`{"wp":{"id":"wp-2","title":"x","dependsOn":["wp-3"],"agentBinding":"a","acceptanceCriteria":["infra:c"],"dependsKind":"bond"}}`), &bad); err == nil {
+		t.Fatal("an unknown dependsKind string must fail the decode")
+	}
+
+	// A malformed shape (array) must fail the decode too.
+	var arr struct {
+		WP PlanWorkPackage `json:"wp"`
+	}
+	if err := json.Unmarshal([]byte(`{"wp":{"id":"wp-2","title":"x","dependsOn":["wp-3"],"agentBinding":"a","acceptanceCriteria":["infra:c"],"dependsKind":["contract"]}}`), &arr); err == nil {
+		t.Fatal("an array dependsKind must fail the decode")
+	}
+
+	// Shorthand with no dependsOn: nothing to expand onto — canonicalization
+	// drops the map entirely (a no-op declaration, not an error).
+	empty := fixturePlan()
+	empty.WorkPackages[0].DependsKind = DependsKindMap{"*": PlanDepKindContract}
+	canonEmpty := canonicalDeliveryPlan(empty)
+	if len(canonEmpty.WorkPackages[0].DependsKind) != 0 {
+		t.Fatalf("shorthand with no edges must canonicalize to nothing, got %v", canonEmpty.WorkPackages[0].DependsKind)
+	}
+	if err := ValidateDeliveryPlan(canonEmpty); err != nil {
+		t.Fatalf("a shorthand with no edges is a harmless no-op: %v", err)
+	}
 }

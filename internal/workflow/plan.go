@@ -72,6 +72,55 @@ const (
 	PlanDepKindArtifact = "artifact"
 )
 
+// DependsKindMap is the map form of PlanWorkPackage.DependsKind. It decodes
+// from either the canonical map or the string shorthand; see the field doc.
+type DependsKindMap map[string]string
+
+// UnmarshalJSON accepts the map form {"wp-3":"contract"} and the string
+// shorthand "contract"/"artifact" (every edge in DependsOn gets that kind).
+// Any other JSON shape — including a string with an unknown kind — fails the
+// decode: a silently-dropped dependsKind would silently restore defer
+// propagation on what the plan author meant to be a contract edge.
+func (m *DependsKindMap) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	switch {
+	case trimmed == "null":
+		*m = nil
+		return nil
+	case strings.HasPrefix(trimmed, "{"):
+		var raw map[string]string
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return err
+		}
+		*m = raw
+		return nil
+	case strings.HasPrefix(trimmed, "\""):
+		var kind string
+		if err := json.Unmarshal(data, &kind); err != nil {
+			return err
+		}
+		kind = strings.ToLower(strings.TrimSpace(kind))
+		if kind != PlanDepKindContract && kind != PlanDepKindArtifact {
+			return fmt.Errorf("dependsKind %q (want %q or %q, either as a string or as a {workPackageId: kind} map)", kind, PlanDepKindContract, PlanDepKindArtifact)
+		}
+		// The per-edge expansion happens in canonicalDeliveryPlan, which sees
+		// the whole work package (DependsOn included).
+		*m = DependsKindMap{"*": kind}
+		return nil
+	default:
+		return fmt.Errorf("dependsKind must be a string or an object, got %s", trimmed)
+	}
+}
+
+// MarshalJSON always emits the canonical map form, so digests never see the
+// shorthand and old binaries read back frozen records unchanged.
+func (m DependsKindMap) MarshalJSON() ([]byte, error) {
+	if m == nil {
+		return []byte("null"), nil
+	}
+	return json.Marshal(map[string]string(m))
+}
+
 // DeliveryPlan is the frozen decomposition artifact.
 type DeliveryPlan struct {
 	SchemaVersion int    `json:"schemaVersion"`
@@ -136,7 +185,14 @@ type PlanWorkPackage struct {
 	// semantics). Keys must reference ids already listed in DependsOn
 	// (validated); the field is canonicalized only when non-empty, so plans
 	// written before it existed keep their exact digest.
-	DependsKind map[string]string `json:"dependsKind,omitempty"`
+	//
+	// The JSON form is union: the canonical map form {"wp-3":"contract"},
+	// or the string shorthand "contract" / "artifact" (models reliably emit
+	// this — live-fire round t-20261002-6l65om), meaning EVERY edge in
+	// DependsOn has that kind. An unrecognized shape fails the decode (it
+	// must never be silently dropped — a lost contract edge silently
+	// restores defer propagation). See UnmarshalJSON below.
+	DependsKind DependsKindMap `json:"dependsKind,omitempty"`
 	// AcceptanceCriteria references requirement item ids, or "infra:<name>"
 	// for infrastructure packages. At least one entry is required.
 	AcceptanceCriteria []string `json:"acceptanceCriteria"`
@@ -279,7 +335,23 @@ func canonicalDeliveryPlan(plan DeliveryPlan) DeliveryPlan {
 				}
 				kinds[dep] = kind
 			}
-			cp.DependsKind = kinds
+			// String-shorthand decode ("contract") lands on the "*" key:
+			// expand it to every declared edge. With no declared edges the
+			// shorthand is meaningless — validation rejects it below.
+			if wildcard, ok := kinds["*"]; ok && len(cp.DependsKind) == 1 {
+				delete(kinds, "*")
+				for _, dep := range cp.DependsOn {
+					dep = strings.TrimSpace(dep)
+					if dep != "" {
+						kinds[dep] = wildcard
+					}
+				}
+			}
+			if len(kinds) == 0 {
+				cp.DependsKind = nil
+			} else {
+				cp.DependsKind = kinds
+			}
 		}
 		out.WorkPackages = append(out.WorkPackages, cp)
 	}
@@ -405,6 +477,9 @@ func ValidateDeliveryPlan(plan DeliveryPlan) error {
 		}
 		for dep, kind := range wp.DependsKind {
 			kind = strings.ToLower(strings.TrimSpace(kind))
+			if dep == "*" {
+				return fmt.Errorf("delivery plan work package %q declares dependsKind %q as a bare shorthand with no dependsOn to expand it onto", id, kind)
+			}
 			if kind != PlanDepKindContract && kind != PlanDepKindArtifact {
 				return fmt.Errorf("delivery plan work package %q declares dependsKind %q for %q (want %q or %q)", id, kind, dep, PlanDepKindContract, PlanDepKindArtifact)
 			}
@@ -525,7 +600,20 @@ func EvaluatePlanProgress(plan DeliveryPlan, states map[string]string) (PlanProg
 		if len(wp.DependsKind) > 0 {
 			kinds := make(map[string]string, len(wp.DependsKind))
 			for dep, kind := range wp.DependsKind {
-				kinds[strings.TrimSpace(dep)] = strings.ToLower(strings.TrimSpace(kind))
+				dep = strings.TrimSpace(dep)
+				kind = strings.ToLower(strings.TrimSpace(kind))
+				if dep == "*" {
+					// String-shorthand form ("contract") as stored pre-
+					// canonicalization: every declared edge gets the kind.
+					// (canonicalDeliveryPlan expands it; plans read back from
+					// records frozen before that expansion need the same
+					// semantics here — never a silently-dropped edge kind.)
+					for _, dep2 := range deps[id] {
+						kinds[dep2] = kind
+					}
+					continue
+				}
+				kinds[dep] = kind
 			}
 			kindOf[id] = kinds
 		}
