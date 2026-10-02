@@ -25,10 +25,14 @@ const PlanFreezeConfigKey = "planFreeze"
 // Field aliases are accepted so an agent following the historical batch_plan
 // wording ("branch_id", "expected UC set") still produces a valid plan.
 type planSourceJSON struct {
-	PlanID            string               `json:"planId"`
-	IntegrationPolicy string               `json:"integrationPolicy"`
-	QAPolicy          string               `json:"qaPolicy"`
-	SharedContract    []planSourceContract `json:"sharedContract"`
+	PlanID            string          `json:"planId"`
+	IntegrationPolicy string          `json:"integrationPolicy"`
+	QAPolicy          string          `json:"qaPolicy"`
+	// SharedContract accepts the documented object array; a bare string array
+	// is decoded too (contract ids the agent already committed in
+	// contract_batch's contract_artifacts) — models reliably emit it and the
+	// strict shape froze nothing (wfr-kwm2nckn: "sharedContract":["infra:…"]).
+	SharedContract    json.RawMessage `json:"sharedContract"`
 	WorkPackages      []planSourceWorkPack `json:"workPackages"`
 }
 
@@ -130,14 +134,8 @@ func BuildDeliveryPlanFromRunOutputs(runID string, planJSONs, requirementItemJSO
 	if plan.PlanID == "" {
 		plan.PlanID = "plan-" + runID
 	}
-	for _, item := range source.SharedContract {
-		plan.SharedContract = append(plan.SharedContract, PlanContractItem{
-			ID:       strings.TrimSpace(item.ID),
-			Artifact: strings.TrimSpace(item.Artifact),
-			Path:     strings.TrimSpace(item.Path),
-			Owner:    strings.TrimSpace(item.Owner),
-			Evidence: strings.TrimSpace(item.Evidence),
-		})
+	for _, item := range parseSharedContract(source.SharedContract) {
+		plan.SharedContract = append(plan.SharedContract, item)
 	}
 	for i, wp := range source.WorkPackages {
 		id := firstNonEmptyString(wp.ID, wp.Branch, wp.WPID)
@@ -244,6 +242,51 @@ func parseRequirementItems(candidates []string) ([]PlanRequirementItem, error) {
 		return out, nil
 	}
 	return nil, nil
+}
+
+// parseSharedContract accepts the shared-contract snapshot in either shape
+// models actually produce:
+//   - object array (documented): [{"id":"...","artifact":"...","path":...}]
+//   - string array (shorthand):  ["infra:app-skeleton", ...] — the string is
+//     both the id and the artifact name; the full artifact details live in
+//     contract_batch's contract_artifacts output, which the reviewer inspects
+//     alongside this plan.
+//
+// A non-empty, non-array, non-object-array payload fails closed.
+func parseSharedContract(raw json.RawMessage) []PlanContractItem {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return nil
+	}
+	// Documented shape first.
+	var objects []planSourceContract
+	if err := json.Unmarshal(raw, &objects); err == nil {
+		out := make([]PlanContractItem, 0, len(objects))
+		for _, item := range objects {
+			out = append(out, PlanContractItem{
+				ID:       strings.TrimSpace(item.ID),
+				Artifact: strings.TrimSpace(item.Artifact),
+				Path:     strings.TrimSpace(item.Path),
+				Owner:    strings.TrimSpace(item.Owner),
+				Evidence: strings.TrimSpace(item.Evidence),
+			})
+		}
+		return out
+	}
+	// String shorthand.
+	var names []string
+	if err := json.Unmarshal(raw, &names); err != nil {
+		return nil // malformed shapes are rejected later by the id/artifact rules
+	}
+	out := make([]PlanContractItem, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		out = append(out, PlanContractItem{ID: name, Artifact: name})
+	}
+	return out
 }
 
 func firstNonEmptyString(values ...string) string {

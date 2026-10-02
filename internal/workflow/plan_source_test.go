@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -80,6 +81,47 @@ func TestBuildDeliveryPlanCarriesDependsKind(t *testing.T) {
 	if _, err := BuildDeliveryPlanFromRunOutputs("run-1", []string{bad}, []string{anchors}); err == nil ||
 		!strings.Contains(err.Error(), "dependsKind") {
 		t.Fatalf("unknown dependsKind must fail closed, got %v", err)
+	}
+}
+
+// sharedContract arrives in two shapes: the documented object array and the
+// bare string array models reliably emit (contract ids already committed by
+// contract_batch). Both must freeze; the string form carries id=artifact.
+func TestBuildDeliveryPlanSharedContractShapes(t *testing.T) {
+	anchors := `[{"id":"uc-1","text":"export endpoint","source":"requirements.md"}]`
+	base := `{"planId":"p1","sharedContract":%s,"workPackages":[
+		{"id":"wp-1","title":"Frontend","acceptanceCriteria":["uc-1"],"agentBinding":"a","contractRefs":["infra:app-skeleton"]}
+	]}`
+
+	objects := `[{"id":"infra:app-skeleton","artifact":"repo skeleton","path":"/"}]`
+	built, err := BuildDeliveryPlanFromRunOutputs("run-1", []string{fmt.Sprintf(base, objects)}, []string{anchors})
+	if err != nil {
+		t.Fatalf("object-array sharedContract must build: %v", err)
+	}
+	if len(built.SharedContract) != 1 || built.SharedContract[0].Artifact != "repo skeleton" {
+		t.Fatalf("object shape lost: %+v", built.SharedContract)
+	}
+
+	stringsShape := `["infra:app-skeleton","contract:markdown-table-columns"]`
+	built, err = BuildDeliveryPlanFromRunOutputs("run-1", []string{fmt.Sprintf(base, stringsShape)}, []string{anchors})
+	if err != nil {
+		t.Fatalf("string-array sharedContract must build: %v", err)
+	}
+	// canonicalization sorts by id; assert by content.
+	if len(built.SharedContract) != 2 {
+		t.Fatalf("string shape dropped entries: %+v", built.SharedContract)
+	}
+	byID := map[string]PlanContractItem{}
+	for _, c := range built.SharedContract {
+		byID[c.ID] = c
+	}
+	c := byID["infra:app-skeleton"]
+	if c.ID != "infra:app-skeleton" || c.Artifact != "infra:app-skeleton" {
+		t.Fatalf("string shape mistranslated: %+v", built.SharedContract)
+	}
+
+	if _, err := BuildDeliveryPlanFromRunOutputs("run-1", []string{fmt.Sprintf(base, `42`)}, []string{anchors}); err == nil {
+		t.Fatal("a non-array sharedContract must fail closed")
 	}
 }
 
