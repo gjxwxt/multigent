@@ -772,6 +772,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/projects/{name}/deploy/requests/{id}/verification", s.handleGetDeployVerification)
 	mux.HandleFunc("POST /api/v1/projects/{name}/deploy/requests/{id}/verification/run", s.handleRunDeployVerification)
 	mux.HandleFunc("POST /api/v1/projects/{name}/deploy/requests/{id}/verification/generate", s.handleGenerateDeployVerification)
+	// ── Delivery preplan (large-requirement W1): stateless draft generator
+	// for the CreateTaskDialog batch mode. Read-natured (nothing persisted);
+	// main mux (token auth) + checkProjectAccess + per-project LLM rate limit.
+	mux.HandleFunc("POST /api/v1/projects/{name}/delivery/preplan", s.handleDeliveryPreplan)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/preview", s.handleGetTaskPreview)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/resources", s.handleGetTaskResources)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/resources/worktree/cleanup", s.handlePostTaskWorktreeCleanup)

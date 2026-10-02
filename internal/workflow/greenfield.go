@@ -58,6 +58,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 
 		"requestField":           "Original request and business context for the new project.",
 		"contextField":           "Known background, constraints, and references.",
+		"preplanDraftField":      "Optional. Delivery-plan DRAFT produced by the create-dialog preplan (same schema as delivery_plan). Advisory only: the scale gate still issues its own verdict; this draft accelerates it. Forwarded unchanged to the scale gate.",
 		"decisionField":          "approve or request_changes.",
 		"commentsField":          "Review comments and guidance.",
 		"designSourceField":      "Optional. existing (pick a listed design) or generated (created from the requirement). Empty on rework.",
@@ -145,6 +146,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 
 		"requestField":           "新项目的原始请求与业务背景。",
 		"contextField":           "已知背景、约束与参考资料。",
+		"preplanDraftField":      "可选。创建任务时预拆分（preplan）产出的交付计划草案（schema 与 delivery_plan 相同）。仅供参考：scale_gate 仍会独立裁决，草案仅加速收敛。原样透传给 scale_gate。",
 		"decisionField":          "approve 或 request_changes。",
 		"commentsField":          "审核意见与指导。",
 		"designSourceField":      "可选。existing（选择已有设计）或 generated（由需求生成）。打回时留空。",
@@ -238,6 +240,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			field("approved_requirement", "requestField"),
 			optionalField("delivery_plan", "deliveryPlanField"),
 			optionalField("batch_plan", "batchPlanField"),
+			optionalField("delivery_plan_draft", "preplanDraftField"),
 			optionalField("requirement_items", "requirementItemsField"),
 			optionalField("approved_design_snapshot_path", "designSnapshotField"),
 		},
@@ -357,7 +360,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 	return templateFromParts("greenfield-delivery-pipeline", text["name"], text["description"], locale, "requirement_draft",
 		[]entity.WorkflowStep{
 			tmplStep("requirement_draft", "agent_task", text["reqDraftTitle"], text["reqDraftDesc"], "pm-agent", "sky", 80,
-				[]entity.WorkflowField{field("request", "requestField"), field("context", "contextField")},
+				[]entity.WorkflowField{field("request", "requestField"), field("context", "contextField"), optionalField("delivery_plan_draft", "preplanDraftField")},
 				[]entity.WorkflowField{field("requirement_draft", "requestField"), field("open_questions", "contextField"), optionalField("requirement_items", "requirementItemsField")}),
 			tmplStep("requirement_review", "human_review", text["reqReviewTitle"], text["reqReviewDesc"], "product-owner", "amber", 360,
 				[]entity.WorkflowField{field("requirement_draft", "requestField"), optionalField("requirement_items", "requirementItemsField")},
@@ -505,6 +508,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"approved_requirement": "$output.approved_requirement",
 				"requirement_draft":    "$input.requirement_draft",
 				"requirement_items":    "$input.requirement_items",
+				"delivery_plan_draft":  "$input.delivery_plan_draft",
 			}, false),
 			edge("e-req-review-rework", "requirement_review", "requirement_draft", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "previous_draft": "$input.requirement_draft"}, false),
 			// Design gate approve now routes to the scale gate (large-requirement
@@ -514,6 +518,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"approved_requirement":          "$input.approved_requirement",
 				"requirement_draft":             "$input.requirement_draft",
 				"requirement_items":             "$input.requirement_items",
+				"delivery_plan_draft":           "$input.delivery_plan_draft",
 				"approved_design_source":        "$output.approved_design_source",
 				"approved_design_project_id":    "$output.approved_design_project_id",
 				"approved_design_preview_url":   "$output.approved_design_preview_url",
@@ -540,6 +545,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"requirement_items":             "$input.requirement_items",
 				"delivery_plan":                 "$output.delivery_plan",
 				"batch_plan":                    "$output.batch_plan",
+				"delivery_plan_draft":           "$input.delivery_plan_draft",
 				"approved_design_source":        "$input.approved_design_source",
 				"approved_design_project_id":    "$input.approved_design_project_id",
 				"approved_design_preview_url":   "$input.approved_design_preview_url",
@@ -568,13 +574,14 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			// both plan fields as outputs and re-emits the plan it received
 			// when it does not refine it.
 			edge("e-contract-batch-review", "contract_batch", "contract_review", "", nil, map[string]string{
-				"contract_artifacts": "$output.contract_artifacts",
-				"delivery_plan":      "$output.delivery_plan",
-				"batch_plan":         "$output.batch_plan",
-				"requirement_items":  "$output.requirement_items",
+				"contract_artifacts":  "$output.contract_artifacts",
+				"delivery_plan":       "$output.delivery_plan",
+				"batch_plan":          "$output.batch_plan",
+				"requirement_items":   "$output.requirement_items",
+				"delivery_plan_draft": "$input.delivery_plan_draft",
 			}, true),
 			edge("e-contract-review-rework", "contract_review", "contract_batch", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{
-				"review_comments":               "$output.comments",
+				"review_comments": "$output.comments",
 				// F1: carry the plan through the rework loop. Without it the
 				// second contract_batch pass loses delivery_plan from its
 				// input, so the re-mapped review edge forwards an EMPTY plan
