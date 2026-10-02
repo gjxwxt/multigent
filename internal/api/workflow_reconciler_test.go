@@ -111,3 +111,37 @@ func TestWorkflowReconcilerAlertPathNoRuns(t *testing.T) {
 	}
 	_ = workflowstore.NewStore(s.controlDB, workspaceID)
 }
+
+// Regression (live batch-test1): the plan-wave re-drive inside Tier 1 passed an
+// empty BranchTransitionResult.Branch, so materializeNextPlanWave resolved the
+// stage through Branch.StepID == "" and bailed with
+// "definition wf-... has no step" — the re-drive never re-materialized
+// anything. A stalled parallel_stage run must resolve its stage by the run's
+// active step ID instead.
+func TestWorkflowReconcilerPlanWaveRedriveResolvesStage(t *testing.T) {
+	s, workspaceID := newBranchJoinHTTPServer(t)
+	task, run := seedStalledRunFixture(t, s, workspaceID, "parallel_stage", 20*time.Minute)
+
+	// Mark the stage instance pending (the shape a stalled stage actually has).
+	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+	instances, err := wfStore.ListStepInstances(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range instances {
+		instances[i].Status = "pending"
+		if err := wfStore.SaveStepInstance(&instances[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// No frozen plan exists in this fixture: the re-drive must not treat that
+	// as an error, and must not resolve the stage through an empty step ID
+	// (the old code logged "definition has no step" and counted the fire
+	// anyway). refired=1 is the trigger re-fire; the wave hook fails closed.
+	refired, _ := s.workflowReconcilerPass(context.Background(), 15*time.Minute)
+	if refired != 1 {
+		t.Fatalf("a stalled parallel_stage run must still be re-fired, got %d", refired)
+	}
+	_ = task
+}

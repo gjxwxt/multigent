@@ -188,7 +188,16 @@ func (s *Server) reconcileStalledWorkflowRun(workspaceID, project, agent string,
 	// event parks held-back or claim-expired packages; re-run the hook.
 	if activeStep.Type == "parallel_stage" {
 		if _, _, _, planErr := wfStore.LoadFrozenPlanForRun(project, run.ID); planErr == nil {
+			// materializeNextPlanWave resolves the stage through
+			// result.Branch.StepID — an empty Branch made the re-drive a
+			// silent no-op ("definition has no step \"\"") on the first live
+			// fire. The active step IS the parallel stage here.
 			if _, waveErr := s.materializeNextPlanWave(workspaceID, project, agent, task, workflowstore.BranchTransitionResult{
+				Branch: entity.WorkflowBranchInstance{
+					RunID:    run.ID,
+					StepID:   run.ActiveStepID,
+					BranchID: run.ActiveStepID,
+				},
 				Transition: workflowstore.TransitionResult{Run: run, Current: *activeInst},
 			}, nil); waveErr != nil {
 				log.Printf("[workflow-reconciler] plan wave re-drive for run %s: %v", run.ID, waveErr)
