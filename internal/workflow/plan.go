@@ -60,6 +60,18 @@ const (
 // (no requirement item linkage) — e.g. "infra:shared-migration-runner".
 const PlanInfraPrefix = "infra:"
 
+// Dependency edge kinds (dependsKind). Absent = PlanDepKindArtifact.
+const (
+	// PlanDepKindContract: the edge points at the shared contract baseline,
+	// which is committed before the parallel stage starts and therefore
+	// exists regardless of whether the upstream package executes. It takes
+	// no part in progress propagation (no defer/block transmission).
+	PlanDepKindContract = "contract"
+	// PlanDepKindArtifact: the dependent needs the upstream deliverable; a
+	// deferred upstream defers the dependent (pre-existing default).
+	PlanDepKindArtifact = "artifact"
+)
+
 // DeliveryPlan is the frozen decomposition artifact.
 type DeliveryPlan struct {
 	SchemaVersion int    `json:"schemaVersion"`
@@ -112,6 +124,19 @@ type PlanWorkPackage struct {
 	// DependsOn lists work package ids that must COMPLETE (successfully)
 	// before this one may be materialized and dispatched.
 	DependsOn []string `json:"dependsOn,omitempty"`
+	// DependsKind maps a dependency work package id to the kind of the
+	// dependency edge. "contract": the dependency only has to land its
+	// contract artifact — the shared contract baseline is committed by the
+	// contract batch step BEFORE the parallel stage starts, so it exists
+	// regardless of whether the upstream package ever executes; deferring
+	// (or failing) the upstream package must not defer (or block) the
+	// dependent, and the edge takes no part in progress propagation at all.
+	// "artifact": the dependent needs the real deliverable — a deferred
+	// upstream defers the dependent. Absent key = "artifact" (pre-existing
+	// semantics). Keys must reference ids already listed in DependsOn
+	// (validated); the field is canonicalized only when non-empty, so plans
+	// written before it existed keep their exact digest.
+	DependsKind map[string]string `json:"dependsKind,omitempty"`
 	// AcceptanceCriteria references requirement item ids, or "infra:<name>"
 	// for infrastructure packages. At least one entry is required.
 	AcceptanceCriteria []string `json:"acceptanceCriteria"`
@@ -228,6 +253,22 @@ func canonicalDeliveryPlan(plan DeliveryPlan) DeliveryPlan {
 		cp.AcceptanceCriteria = sortedTrimmed(cp.AcceptanceCriteria)
 		cp.ExpectedDelivery = sortedTrimmed(cp.ExpectedDelivery)
 		cp.ContractRefs = sortedTrimmed(cp.ContractRefs)
+		// dependsKind is canonicalized only when non-empty: an absent map on
+		// the pre-field plans must serialize to nothing at all (omitempty on
+		// a nil map drops the key), keeping their canonical JSON — and thus
+		// their frozen digest — byte-for-byte identical across the upgrade.
+		if len(cp.DependsKind) > 0 {
+			kinds := make(map[string]string, len(cp.DependsKind))
+			for dep, kind := range cp.DependsKind {
+				dep = strings.TrimSpace(dep)
+				kind = strings.ToLower(strings.TrimSpace(kind))
+				if dep == "" || kind == "" {
+					continue
+				}
+				kinds[dep] = kind
+			}
+			cp.DependsKind = kinds
+		}
 		out.WorkPackages = append(out.WorkPackages, cp)
 	}
 	sort.SliceStable(out.WorkPackages, func(i, j int) bool {
@@ -346,6 +387,19 @@ func ValidateDeliveryPlan(plan DeliveryPlan) error {
 	// Second pass: cross-references (ids are unique by now).
 	for _, wp := range plan.WorkPackages {
 		id := strings.TrimSpace(wp.ID)
+		dependsOn := map[string]bool{}
+		for _, dep := range wp.DependsOn {
+			dependsOn[strings.TrimSpace(dep)] = true
+		}
+		for dep, kind := range wp.DependsKind {
+			kind = strings.ToLower(strings.TrimSpace(kind))
+			if kind != PlanDepKindContract && kind != PlanDepKindArtifact {
+				return fmt.Errorf("delivery plan work package %q declares dependsKind %q for %q (want %q or %q)", id, kind, dep, PlanDepKindContract, PlanDepKindArtifact)
+			}
+			if !dependsOn[strings.TrimSpace(dep)] {
+				return fmt.Errorf("delivery plan work package %q declares dependsKind for %q which is not in its dependsOn", id, dep)
+			}
+		}
 		for _, dep := range wp.DependsOn {
 			dep = strings.TrimSpace(dep)
 			if dep == id {
@@ -452,8 +506,17 @@ func EvaluatePlanProgress(plan DeliveryPlan, states map[string]string) (PlanProg
 		return progress, err
 	}
 	deps := map[string][]string{}
+	kindOf := map[string]map[string]string{}
 	for _, wp := range plan.WorkPackages {
-		deps[strings.TrimSpace(wp.ID)] = sortedTrimmed(wp.DependsOn)
+		id := strings.TrimSpace(wp.ID)
+		deps[id] = sortedTrimmed(wp.DependsOn)
+		if len(wp.DependsKind) > 0 {
+			kinds := make(map[string]string, len(wp.DependsKind))
+			for dep, kind := range wp.DependsKind {
+				kinds[strings.TrimSpace(dep)] = strings.ToLower(strings.TrimSpace(kind))
+			}
+			kindOf[id] = kinds
+		}
 	}
 	state := func(id string) string {
 		return strings.TrimSpace(strings.ToLower(states[id]))
@@ -466,6 +529,16 @@ func EvaluatePlanProgress(plan DeliveryPlan, states map[string]string) (PlanProg
 			blocked := false
 			waiting := false
 			for _, dep := range deps[id] {
+				// A contract edge takes no part in propagation at all: the
+				// shared contract baseline predates the stage (committed by
+				// the contract batch step), so the upstream package's fate —
+				// deferred, failed, or never materialized — cannot touch the
+				// dependent. Filtering HERE, at the loop head, covers both
+				// transmission sites below (the direct deferred edge and the
+				// transitive deferredSet/block fallthrough) with one gate.
+				if kindOf[id][dep] == PlanDepKindContract {
+					continue
+				}
 				switch state(dep) {
 				case PlanWPStateCompleted:
 				case PlanWPStateDeferred:
