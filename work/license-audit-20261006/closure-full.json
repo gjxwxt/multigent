@@ -1,0 +1,721 @@
+{
+  "repo": "/Users/imac/Documents/code/github/multigent",
+  "module": "github.com/multigent/multigent",
+  "packages": [
+    {
+      "package": "github.com/multigent/multigent/cmd/mga",
+      "total_lines": 3539,
+      "upstream_lines": 3495,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/entity",
+        "github.com/multigent/multigent/internal/runtimeguide"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/cmd/mga"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/cmd/multigent",
+      "total_lines": 29026,
+      "upstream_lines": 24078,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/agentcli",
+        "github.com/multigent/multigent/internal/agentdir",
+        "github.com/multigent/multigent/internal/api",
+        "github.com/multigent/multigent/internal/appconfig",
+        "github.com/multigent/multigent/internal/attention",
+        "github.com/multigent/multigent/internal/avatar",
+        "github.com/multigent/multigent/internal/contextpack",
+        "github.com/multigent/multigent/internal/ctxbuild",
+        "github.com/multigent/multigent/internal/daemon",
+        "github.com/multigent/multigent/internal/db",
+        "github.com/multigent/multigent/internal/entity",
+        "github.com/multigent/multigent/internal/errs",
+        "github.com/multigent/multigent/internal/imbridge",
+        "github.com/multigent/multigent/internal/playbook",
+        "github.com/multigent/multigent/internal/runner",
+        "github.com/multigent/multigent/internal/runtimecli",
+        "github.com/multigent/multigent/internal/runtimeexec",
+        "github.com/multigent/multigent/internal/sandbox",
+        "github.com/multigent/multigent/internal/scaffold",
+        "github.com/multigent/multigent/internal/secretbox",
+        "github.com/multigent/multigent/internal/store",
+        "github.com/multigent/multigent/internal/taskstore",
+        "github.com/multigent/multigent/internal/tasktemplate",
+        "github.com/multigent/multigent/internal/telemetry",
+        "github.com/multigent/multigent/internal/template",
+        "github.com/multigent/multigent/internal/worker",
+        "github.com/multigent/multigent/internal/workflow",
+        "github.com/multigent/multigent/internal/workspace"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/cmd/multigent"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/agentcli",
+      "total_lines": 367,
+      "upstream_lines": 241,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/entity"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/agentcli"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/agentdir",
+      "total_lines": 327,
+      "upstream_lines": 327,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/db"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/agentdir"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/api",
+      "total_lines": 136740,
+      "upstream_lines": 63923,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/agentcli",
+        "github.com/multigent/multigent/internal/agentdir",
+        "github.com/multigent/multigent/internal/attention",
+        "github.com/multigent/multigent/internal/avatar",
+        "github.com/multigent/multigent/internal/builtins",
+        "github.com/multigent/multigent/internal/connector",
+        "github.com/multigent/multigent/internal/contextpack",
+        "github.com/multigent/multigent/internal/ctxbuild",
+        "github.com/multigent/multigent/internal/db",
+        "github.com/multigent/multigent/internal/entity",
+        "github.com/multigent/multigent/internal/errs",
+        "github.com/multigent/multigent/internal/formatter",
+        "github.com/multigent/multigent/internal/imbridge",
+        "github.com/multigent/multigent/internal/imbridge/lark",
+        "github.com/multigent/multigent/internal/interaction",
+        "github.com/multigent/multigent/internal/playbook",
+        "github.com/multigent/multigent/internal/rbac",
+        "github.com/multigent/multigent/internal/runner",
+        "github.com/multigent/multigent/internal/runtimeauth",
+        "github.com/multigent/multigent/internal/runtimeexec",
+        "github.com/multigent/multigent/internal/sandbox",
+        "github.com/multigent/multigent/internal/scaffold",
+        "github.com/multigent/multigent/internal/secretbox",
+        "github.com/multigent/multigent/internal/store",
+        "github.com/multigent/multigent/internal/taskstore",
+        "github.com/multigent/multigent/internal/tasktemplate",
+        "github.com/multigent/multigent/internal/telemetry",
+        "github.com/multigent/multigent/internal/workflow"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/api"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/appconfig",
+      "total_lines": 785,
+      "upstream_lines": 363,
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/appconfig"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/assets",
+      "total_lines": 509,
+      "upstream_lines": 0,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/db"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/assets",
+        "github.com/multigent/multigent/internal/db"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/attention",
+      "total_lines": 160,
+      "upstream_lines": 160,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/db",
+        "github.com/multigent/multigent/internal/entity"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/attention"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/avatar",
+      "total_lines": 52,
+      "upstream_lines": 52,
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/avatar"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/brownfield",
+      "total_lines": 1107,
+      "upstream_lines": 0,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/sandbox"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/brownfield",
+        "github.com/multigent/multigent/internal/sandbox"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/builtins",
+      "total_lines": 92,
+      "upstream_lines": 92,
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/builtins"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/changerun",
+      "total_lines": 2257,
+      "upstream_lines": 0,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/db"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/changerun",
+        "github.com/multigent/multigent/internal/db"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/ciready",
+      "total_lines": 952,
+      "upstream_lines": 0,
+      "clean": true
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/codehost",
+      "total_lines": 2136,
+      "upstream_lines": 0,
+      "clean": true
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/connector",
+      "total_lines": 1276,
+      "upstream_lines": 1234,
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/connector"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/contextpack",
+      "total_lines": 1661,
+      "upstream_lines": 1661,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/store"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/contextpack"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/ctxbuild",
+      "total_lines": 517,
+      "upstream_lines": 517,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/contextpack",
+        "github.com/multigent/multigent/internal/db",
+        "github.com/multigent/multigent/internal/store"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/ctxbuild"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/daemon",
+      "total_lines": 838,
+      "upstream_lines": 838,
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/daemon"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/db",
+      "total_lines": 14388,
+      "upstream_lines": 6590,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/connector"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/db"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/deliverymode",
+      "total_lines": 141,
+      "upstream_lines": 0,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/entity"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/deliverymode",
+        "github.com/multigent/multigent/internal/entity"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/doctor",
+      "total_lines": 865,
+      "upstream_lines": 0,
+      "clean": true
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/entity",
+      "total_lines": 2134,
+      "upstream_lines": 1864,
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/entity"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/errs",
+      "total_lines": 63,
+      "upstream_lines": 63,
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/errs"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/fixturesandbox",
+      "total_lines": 2490,
+      "upstream_lines": 0,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/db"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/fixturesandbox",
+        "github.com/multigent/multigent/internal/db"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/formatter",
+      "total_lines": 911,
+      "upstream_lines": 911,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/ctxbuild",
+        "github.com/multigent/multigent/internal/entity"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/formatter"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/gitworktree",
+      "total_lines": 3981,
+      "upstream_lines": 0,
+      "clean": true
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/imbridge",
+      "total_lines": 6153,
+      "upstream_lines": 1531,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/db",
+        "github.com/multigent/multigent/internal/imbridge/lark",
+        "github.com/multigent/multigent/internal/workflow"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/imbridge"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/imbridge/lark",
+      "total_lines": 3130,
+      "upstream_lines": 3130,
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/imbridge/lark"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/interaction",
+      "total_lines": 208,
+      "upstream_lines": 208,
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/interaction"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/playbook",
+      "total_lines": 3306,
+      "upstream_lines": 3297,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/entity",
+        "github.com/multigent/multigent/internal/workflow"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/playbook"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/preview",
+      "total_lines": 1975,
+      "upstream_lines": 0,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/agentcli",
+        "github.com/multigent/multigent/internal/entity",
+        "github.com/multigent/multigent/internal/sandbox"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/preview",
+        "github.com/multigent/multigent/internal/agentcli"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/previewreceipt",
+      "total_lines": 5243,
+      "upstream_lines": 0,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/db",
+        "github.com/multigent/multigent/internal/secretbox"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/previewreceipt",
+        "github.com/multigent/multigent/internal/db"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/projecttemplate",
+      "total_lines": 666,
+      "upstream_lines": 0,
+      "clean": true
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/rbac",
+      "total_lines": 680,
+      "upstream_lines": 680,
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/rbac"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/runenv",
+      "total_lines": 521,
+      "upstream_lines": 413,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/agentcli",
+        "github.com/multigent/multigent/internal/entity",
+        "github.com/multigent/multigent/internal/runtimecli",
+        "github.com/multigent/multigent/internal/sandbox"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/runenv"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/runner",
+      "total_lines": 9629,
+      "upstream_lines": 5832,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/agentcli",
+        "github.com/multigent/multigent/internal/daemon",
+        "github.com/multigent/multigent/internal/db",
+        "github.com/multigent/multigent/internal/entity",
+        "github.com/multigent/multigent/internal/runenv",
+        "github.com/multigent/multigent/internal/runtimeauth",
+        "github.com/multigent/multigent/internal/runtimecli",
+        "github.com/multigent/multigent/internal/runtimeexec",
+        "github.com/multigent/multigent/internal/runtimeguide",
+        "github.com/multigent/multigent/internal/sandbox",
+        "github.com/multigent/multigent/internal/store",
+        "github.com/multigent/multigent/internal/taskstore",
+        "github.com/multigent/multigent/internal/telemetry",
+        "github.com/multigent/multigent/internal/workflow"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/runner"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/runtimeauth",
+      "total_lines": 260,
+      "upstream_lines": 260,
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/runtimeauth"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/runtimecli",
+      "total_lines": 335,
+      "upstream_lines": 330,
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/runtimecli"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/runtimeexec",
+      "total_lines": 40,
+      "upstream_lines": 21,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/entity"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/runtimeexec"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/runtimeguide",
+      "total_lines": 205,
+      "upstream_lines": 205,
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/runtimeguide"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/sandbox",
+      "total_lines": 2904,
+      "upstream_lines": 1246,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/entity"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/sandbox"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/scaffold",
+      "total_lines": 263,
+      "upstream_lines": 263,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/builtins",
+        "github.com/multigent/multigent/internal/entity",
+        "github.com/multigent/multigent/internal/store"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/scaffold"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/secretbox",
+      "total_lines": 413,
+      "upstream_lines": 161,
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/secretbox"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/store",
+      "total_lines": 3481,
+      "upstream_lines": 3423,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/db",
+        "github.com/multigent/multigent/internal/entity",
+        "github.com/multigent/multigent/internal/errs",
+        "github.com/multigent/multigent/internal/secretbox"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/store"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/taskstore",
+      "total_lines": 3507,
+      "upstream_lines": 2858,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/db",
+        "github.com/multigent/multigent/internal/entity",
+        "github.com/multigent/multigent/internal/errs"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/taskstore"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/tasktemplate",
+      "total_lines": 76,
+      "upstream_lines": 76,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/db",
+        "github.com/multigent/multigent/internal/entity"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/tasktemplate"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/telemetry",
+      "total_lines": 1124,
+      "upstream_lines": 1027,
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/telemetry"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/template",
+      "total_lines": 325,
+      "upstream_lines": 325,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/entity",
+        "github.com/multigent/multigent/internal/scaffold"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/template"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/worker",
+      "total_lines": 313,
+      "upstream_lines": 313,
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/worker"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/workflow",
+      "total_lines": 17749,
+      "upstream_lines": 2705,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/db",
+        "github.com/multigent/multigent/internal/entity",
+        "github.com/multigent/multigent/internal/errs"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/workflow"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/internal/workspace",
+      "total_lines": 69,
+      "upstream_lines": 69,
+      "contaminated_via": [
+        "github.com/multigent/multigent/internal/workspace"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/tools/ciready-check",
+      "total_lines": 90,
+      "upstream_lines": 0,
+      "clean": true
+    },
+    {
+      "package": "github.com/multigent/multigent/tools/export-playbooks",
+      "total_lines": 133,
+      "upstream_lines": 133,
+      "direct_polluted_deps": [
+        "github.com/multigent/multigent/internal/entity",
+        "github.com/multigent/multigent/internal/playbook"
+      ],
+      "contaminated_via": [
+        "github.com/multigent/multigent/tools/export-playbooks"
+      ],
+      "clean": false
+    },
+    {
+      "package": "github.com/multigent/multigent/tools/license-audit/blame-authors",
+      "total_lines": 689,
+      "upstream_lines": 0,
+      "clean": true
+    },
+    {
+      "package": "github.com/multigent/multigent/tools/license-audit/closure-scan",
+      "total_lines": 457,
+      "upstream_lines": 0,
+      "clean": true
+    },
+    {
+      "package": "github.com/multigent/multigent/tools/license-audit/verify-clean",
+      "total_lines": 245,
+      "upstream_lines": 0,
+      "clean": true
+    }
+  ],
+  "polluted_packages": [
+    "github.com/multigent/multigent/cmd/mga",
+    "github.com/multigent/multigent/cmd/multigent",
+    "github.com/multigent/multigent/internal/agentcli",
+    "github.com/multigent/multigent/internal/agentdir",
+    "github.com/multigent/multigent/internal/api",
+    "github.com/multigent/multigent/internal/appconfig",
+    "github.com/multigent/multigent/internal/attention",
+    "github.com/multigent/multigent/internal/avatar",
+    "github.com/multigent/multigent/internal/builtins",
+    "github.com/multigent/multigent/internal/connector",
+    "github.com/multigent/multigent/internal/contextpack",
+    "github.com/multigent/multigent/internal/ctxbuild",
+    "github.com/multigent/multigent/internal/daemon",
+    "github.com/multigent/multigent/internal/db",
+    "github.com/multigent/multigent/internal/entity",
+    "github.com/multigent/multigent/internal/errs",
+    "github.com/multigent/multigent/internal/formatter",
+    "github.com/multigent/multigent/internal/imbridge",
+    "github.com/multigent/multigent/internal/imbridge/lark",
+    "github.com/multigent/multigent/internal/interaction",
+    "github.com/multigent/multigent/internal/playbook",
+    "github.com/multigent/multigent/internal/rbac",
+    "github.com/multigent/multigent/internal/runenv",
+    "github.com/multigent/multigent/internal/runner",
+    "github.com/multigent/multigent/internal/runtimeauth",
+    "github.com/multigent/multigent/internal/runtimecli",
+    "github.com/multigent/multigent/internal/runtimeexec",
+    "github.com/multigent/multigent/internal/runtimeguide",
+    "github.com/multigent/multigent/internal/sandbox",
+    "github.com/multigent/multigent/internal/scaffold",
+    "github.com/multigent/multigent/internal/secretbox",
+    "github.com/multigent/multigent/internal/store",
+    "github.com/multigent/multigent/internal/taskstore",
+    "github.com/multigent/multigent/internal/tasktemplate",
+    "github.com/multigent/multigent/internal/telemetry",
+    "github.com/multigent/multigent/internal/template",
+    "github.com/multigent/multigent/internal/worker",
+    "github.com/multigent/multigent/internal/workflow",
+    "github.com/multigent/multigent/internal/workspace",
+    "github.com/multigent/multigent/tools/export-playbooks"
+  ],
+  "summary": {
+    "contaminated_total": 47,
+    "gate_clean": false,
+    "packages_scanned": 56,
+    "polluted_packages": 40
+  }
+}
