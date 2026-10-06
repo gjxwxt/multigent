@@ -445,3 +445,148 @@ func failBranchChild(t *testing.T, s *Server, project, workspaceID, runID, branc
 		t.Fatal(err)
 	}
 }
+
+// seedDesyncedBranchFixture produces the wp-7 desync shape (2026-10-06): the
+// child failed on the RUNNER side (delivery-contract gate), so the child task
+// is done_failed but the child run is still active on a pending step and the
+// branch instance is still running — unreachable by retry until realigned.
+func seedDesyncedBranchFixture(t *testing.T) (*Server, string, *entity.Task, workflowstore.Store, string, entity.WorkflowBranchInstance) {
+	t.Helper()
+	s, workspaceID, baseCommit := planStageFixtures(t)
+	plan := fixtureDeliveryPlan("")
+	seedPlanStageParentRun(t, s, workspaceID, baseCommit, plan, true)
+	runID := planRunIDFor(t, s, workspaceID, "task-plan-root")
+	wfStore := *workflowstore.NewStore(s.controlDB, workspaceID)
+
+	if rec := postBranchStepComplete(t, s, workspaceID, "task-plan-root", map[string]string{
+		"branch_summary": "contract frozen",
+		"touched_paths":  "contract.md",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("fan-out must be 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	inst, found := branchInstanceFor(t, &wfStore, runID, "parallel", "wp-a")
+	if !found {
+		t.Fatal("wp-a must be materialized in wave 0")
+	}
+	// Runner-side failure shape: child task done_failed, child run STILL
+	// active on a pending start step, instance STILL running.
+	child, err := s.ts.GetTask("sample", "pm", inst.ChildTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := child.Status
+	now := time.Now().UTC()
+	child.Status = entity.TaskStatusDoneFailed
+	child.LastError = "delivery contract unmet: git delivery evidence unreadable (git ls-remote: could not read Username)"
+	child.UpdatedAt = now
+	entity.ApplyStatusTimestamps(child, prev, now)
+	if err := s.ts.PersistTask("sample", "pm", child); err != nil {
+		t.Fatal(err)
+	}
+	root, _, err := s.findTaskInProject("sample", "task-plan-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, workspaceID, root, wfStore, runID, inst
+}
+
+// The desync self-heal: retry on a running instance with a terminal-failed
+// child must realign the states (step failed + run failed + instance failed)
+// and then succeed through the normal retry chain.
+func TestBranchRetryHealsDesyncedRunnerSideFailure(t *testing.T) {
+	s, _, root, wfStore, runID, inst := seedDesyncedBranchFixture(t)
+
+	// Precondition: the desynced shape is really there (retry would 409
+	// before the heal).
+	got, err := wfStore.BranchInstancesForStep(runID, "parallel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range got {
+		if b.BranchID == "wp-a" && b.Status != "running" {
+			t.Fatalf("fixture must start desynced (instance running), got %s", b.Status)
+		}
+	}
+
+	req := branchActionRequest("admin", "sample", root.ID, "wp-a", "retry", map[string]string{"reason": "metric misjudged a real push"})
+	rec := httptest.NewRecorder()
+	s.handlePostTaskBranchRetry(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("retry must heal + succeed, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp branchActionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.OK || resp.ChildTaskID != inst.ChildTaskID {
+		t.Fatalf("retry must reuse the same child identity, got %+v", resp)
+	}
+
+	// Child task reopened; child run active again; instance running with the
+	// failure summary retained in the step history.
+	gotChild, err := s.ts.GetTask("sample", "pm", inst.ChildTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotChild.Status != entity.TaskStatusInProgress {
+		t.Fatalf("child task must reopen, got %s", gotChild.Status)
+	}
+	childRun, _, err := wfStore.RunForTask("sample", inst.ChildTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if childRun.Status != "active" {
+		t.Fatalf("child run must be reactivated, got %s", childRun.Status)
+	}
+	after, aerr := wfStore.BranchInstancesForStep(runID, "parallel")
+	if aerr != nil {
+		t.Fatal(aerr)
+	}
+	_ = after
+	instances, err := wfStore.ListBranchInstances(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range instances {
+		if b.BranchID == "wp-a" && b.Status != "running" {
+			t.Fatalf("instance must be back to running after retry, got %s", b.Status)
+		}
+	}
+	// The heal summary survives the reactivate reset via the reactivated
+	// audit event ("previous failure: ..." clause).
+	events, err := wfStore.ListStepEvents(childRun.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundTrail := false
+	for _, ev := range events {
+		if strings.Contains(ev.Summary, "previous failure:") && strings.Contains(ev.Summary, "runner-side failure") {
+			foundTrail = true
+		}
+	}
+	if !foundTrail {
+		t.Fatal("reactivated event must carry the heal summary as the previous-failure clause")
+	}
+}
+
+// A genuinely mid-flight child (in_progress task) must NOT be healed — retry
+// keeps refusing with the operator-readable conflict.
+func TestBranchRetryRefusesMidFlightChild(t *testing.T) {
+	s, _, root, _, _, inst := seedDesyncedBranchFixture(t)
+	// Make the child look mid-flight: reopen it behind the heal's back.
+	child, err := s.ts.GetTask("sample", "pm", inst.ChildTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child.Status = entity.TaskStatusInProgress
+	if err := s.ts.PersistTask("sample", "pm", child); err != nil {
+		t.Fatal(err)
+	}
+
+	req := branchActionRequest("admin", "sample", root.ID, "wp-a", "retry", map[string]string{"reason": "should refuse"})
+	rec := httptest.NewRecorder()
+	s.handlePostTaskBranchRetry(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("mid-flight child must keep the 409 precondition, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

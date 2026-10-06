@@ -30,6 +30,50 @@ func processAlive(pid int) bool {
 	return proc.Signal(syscall.Signal(0)) == nil
 }
 
+// schedulerCycleLivenessGrace extends the busy window past the configured
+// cycle cap. A cycle that just exceeded max_cycle_duration is still finishing
+// its final task; the grace period keeps the heuristic busy for that tail
+// while the interaction lease remains the authoritative mutual exclusion.
+// Mirrors the constant in cmd/multigent/scheduler.go.
+const schedulerCycleLivenessGrace = 15 * time.Minute
+
+// schedulerCycleInFlight reports whether a scheduler cycle has recent evidence
+// of actually being in flight. hb.PID names the scheduler-loop process, which
+// on a resident systemd scheduler is alive for the daemon's entire uptime —
+// PID liveness alone would permanently refuse every manual/autostart wakeup
+// (the t-20261003-thh6tn dispatch deadlock: autostart failed with "agent is
+// already running" against an idle-but-eternal scheduler PID, then every
+// reconciler re-fire queued behind the same verdict). The in-flight evidence
+// is the run start timestamp (RunStartedAt, falling back to LastWakeup for
+// heartbeats written before the field existed); a "running" status with a
+// live PID but no fresh start timestamp is a stale flag from a crashed
+// predecessor and must not block. Mirrors isAlreadyRunningAt in
+// cmd/multigent/scheduler.go — keep the two in sync.
+func schedulerCycleInFlight(hb *entity.HeartbeatConfig) bool {
+	if hb == nil || hb.PID <= 0 || hb.LastWakeupStatus != "running" {
+		return false
+	}
+	if !processAlive(hb.PID) {
+		return false
+	}
+	started := hb.RunStartedAt
+	if started == nil || started.IsZero() {
+		started = hb.LastWakeup
+	}
+	if started == nil || started.IsZero() {
+		// No in-flight evidence at all: a stale "running" flag. Treat the
+		// cycle as dead instead of blocking wakeups forever.
+		return false
+	}
+	window := schedulerCycleLivenessGrace
+	if hb.MaxCycleDuration != "" {
+		if parsed, err := time.ParseDuration(hb.MaxCycleDuration); err == nil && parsed > 0 {
+			window = parsed + schedulerCycleLivenessGrace
+		}
+	}
+	return time.Since(started.Local()) <= window
+}
+
 func (s *Server) handleGetProjectSchedule(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !s.checkProjectAccess(w, r, name) {

@@ -12,9 +12,12 @@ package api
 // 人审拍板、引擎执行" split, moved earlier in time.
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -30,14 +33,58 @@ import (
 // bounds the prompt side. 512KB comfortably covers a 156KB military SRS.
 const preplanMaxInputBytes = 512 * 1024
 
+// preplanMaxOutputTokens is the preplan-specific output budget. The shared
+// 16k cap (deployAIMaxOutputTokens) is calibrated for deploy-AI chats; live
+// incident 2026-10-03 20:57 (gateway row 330000): a 163KB requirement made
+// the model emit a full-length draft that hit the 16k ceiling mid-JSON —
+// output truncated, unparseable, "unexpected end of JSON input". 32k is
+// accepted by the gateway (live probe 200) and covers a 40-package draft.
+const preplanMaxOutputTokens = 32768
+
 // preplanMaxInputAssets bounds how many library files one call may source.
 const preplanMaxInputAssets = 4
+
+// preplanCallTimeout bounds one preplan model call. The old 120s deadline was
+// calibrated on the bare-model non-streaming path, which averages ~26s and
+// hangs under upstream load (live incident 2026-10-03: a 163KB draft hit the
+// 120s wall with no upstream bytes). Streaming Fusion-path drafts complete in
+// single-digit seconds; 240s only absorbs the slow tail, it is not the fix.
+const preplanCallTimeout = 240 * time.Second
+
+// preplanAttemptTimeout is one attempt's slice of preplanCallTimeout. Two
+// independent slices (110s + 120s + 2s backoff + slack) keep a byte-less
+// first attempt from starving the retry — the shared-budget retry never
+// fired in the 21:11 incident because the first attempt burned all 240s.
+//
+// 2026-10-03 23:01 incident (gateway rows 330011/330012): the deadline itself
+// became the killer — the upstream STREAMED continuously (581-726KB of SSE in
+// 110s, ~22k tokens of output needs 110-130s for this input size) and both
+// attempts were cut at exactly 110s while still producing bytes. A wall-clock
+// deadline cannot distinguish "slow but alive" from "hung", so it now only
+// arms the OVERALL budget (preplanCallTimeout); liveness is enforced per-read
+// by preplanStallTimeout below.
+const preplanAttemptTimeout = 110 * time.Second
+
+// preplanStallTimeout is the no-progress watchdog: if no SSE byte arrives for
+// this long, the attempt is declared hung and aborted (retrying within the
+// overall budget). A healthy stream for a 163KB requirement emits deltas
+// continuously for 110-130s (rows 330011/330012: 5-7KB/s of SSE while alive);
+// a truly hung upstream emits zero bytes (rows 329996/330003). 120s of
+// silence is far beyond any observed healthy gap and still leaves 110s+ for
+// a retry inside the 240s budget.
+const preplanStallTimeout = 120 * time.Second
 
 type deliveryPreplanRequest struct {
 	// Source selects where the requirement text comes from.
 	Source string   `json:"source"` // "text" | "assets"
 	Text   string   `json:"text,omitempty"`
 	FileIDs []string `json:"fileIds,omitempty"`
+	// Agent optionally names the project agent whose model routing backs the
+	// preplan call. Agents bound to a Fusion/* runtime model ride the
+	// gateway's streaming virtual-model path (2026-10-03: 878/878 ok, ~7s avg)
+	// instead of the bare-model non-streaming path (17/61 failed, ~26s avg,
+	// hangs past the deadline under upstream load).
+	Agent string `json:"agent,omitempty"`
 }
 
 type deliveryPreplanResponse struct {
@@ -93,12 +140,24 @@ func (s *Server) handleDeliveryPreplan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent := s.deployAIProjectAgent(project)
+	agent := strings.TrimSpace(body.Agent)
+	if agent == "" {
+		agent = s.deployAIProjectAgent(project)
+	}
 	if agent == "" {
 		s.jsonError(w, http.StatusConflict, "project has no agent to run the preplan model")
 		return
 	}
-	creds, err := s.resolveDesignModelProvider(project, agent, deployAIDefaultModel)
+	// Model priority: the named agent's runtime model (rides the same
+	// Fusion/* fast path its runs use) > deployAIProjectAgentModel (first
+	// agent with a runtime model) > deployAIDefaultModel (bare glm name).
+	preplanModel := deployAIDefaultModel
+	if meta := s.designAgentMeta(project, agent); meta != nil && strings.TrimSpace(meta.RuntimeModel) != "" {
+		preplanModel = strings.TrimSpace(meta.RuntimeModel)
+	} else if m := s.deployAIProjectAgentModel(project); m != "" {
+		preplanModel = m
+	}
+	creds, err := s.resolveDesignModelProvider(project, agent, preplanModel)
 	if err != nil || creds == nil || creds.BaseURL == "" || creds.APIKey == "" {
 		s.jsonError(w, http.StatusConflict, "model provider unresolved for project agent")
 		return
@@ -110,10 +169,47 @@ func (s *Server) handleDeliveryPreplan(w http.ResponseWriter, r *http.Request) {
 		APIKey:  creds.APIKey,
 		Model:   creds.Model,
 	}
-	gctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	gctx, cancel := context.WithTimeout(r.Context(), preplanCallTimeout)
 	defer cancel()
-	reply, err := invokeDeployAIProviderChat(gctx, provider,
-		buildDeliveryPreplanPrompt(), nil, requirement)
+	// Two INDEPENDENT attempt deadlines inside the 240s budget. Live incident
+	// 21:11 (gateway row 330003): the first attempt hung byte-less for the
+	// full 240s, so the shared-budget retry never got its turn — a hung
+	// upstream must burn only its own slice, leaving room for a fresh
+	// connection. The 12:57 companion row (330000) proves the same 163KB
+	// input CAN complete given a healthy upstream (238s, output hit the old
+	// 16k ceiling). Only hung/empty streams retry; auth/parse failures would
+	// fail identically.
+	//
+	// 2026-10-03 23:01 (rows 330011/330012) taught the second half: a
+	// wall-clock attempt deadline also kills SLOW-BUT-ALIVE streams (both
+	// attempts cut at 110s while the upstream was actively emitting 5-7KB/s).
+	// So the per-attempt ctx now carries only the OVERALL budget; liveness is
+	// enforced inside the stream loop by the preplanStallTimeout watchdog —
+	// any SSE byte resets it, silence for 120s aborts the attempt.
+	var reply string
+	var callErr error
+	for attempt := 1; attempt <= 2; attempt++ {
+		attemptCtx, attemptCancel := context.WithTimeout(gctx, preplanCallTimeout)
+		reply, callErr = preplanAnthropicChatStreaming(attemptCtx, provider,
+			buildDeliveryPreplanPrompt(), requirement)
+		attemptCancel()
+		if callErr == nil {
+			err = nil
+			break
+		}
+		if attempt == 1 && gctx.Err() == nil &&
+			(strings.Contains(callErr.Error(), "读取模型响应失败") ||
+				strings.Contains(callErr.Error(), "模型服务没有返回内容") ||
+				strings.Contains(callErr.Error(), "流停滞")) {
+			select {
+			case <-time.After(2 * time.Second):
+			case <-gctx.Done():
+			}
+			continue
+		}
+		err = callErr
+		break
+	}
 	if err != nil {
 		s.jsonError(w, http.StatusBadGateway, "preplan model call failed: "+truncateDeployVerify(err.Error(), 200))
 		return
@@ -123,6 +219,122 @@ func (s *Server) handleDeliveryPreplan(w http.ResponseWriter, r *http.Request) {
 	resp.Model = creds.Model
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// preplanAnthropicChatStreaming is the preplan call transport. It forces
+// stream:true and accumulates the SSE deltas: live incident 2026-10-03 showed
+// the same gateway model completes in ~5s streamed vs 26-64s (or an
+// indefinite hang) non-streamed — the upstream buffers the whole completion
+// before answering a stream:false request, while streamed bytes flow as they
+// are produced. Also strips any Expect header: the ccr gateway's undici fetch
+// rejects Expect: 100-continue with UND_ERR_NOT_SUPPORTED (502) at any body
+// size. Mirrors deployAIAnthropicChat's request shape otherwise.
+func preplanAnthropicChatStreaming(ctx context.Context, provider entity.APIProvider, systemPrompt, message string) (string, error) {
+	model := strings.TrimSpace(provider.Model)
+	if model == "" {
+		return "", fmt.Errorf("preplan 模型账号缺少默认模型")
+	}
+	apiKey := strings.TrimSpace(provider.APIKey)
+	if apiKey == "" {
+		return "", fmt.Errorf("preplan 模型账号缺少 API Key")
+	}
+	endpoint := assistantAnthropicEndpoint(provider.BaseURL)
+	reqBody := map[string]any{
+		"model":      model,
+		"system":     systemPrompt,
+		"messages":   []assistantLLMMessage{{Role: "user", Content: message}},
+		"max_tokens": preplanMaxOutputTokens,
+		"stream":     true,
+	}
+	raw, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("构造模型请求失败：%w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
+	if err != nil {
+		return "", fmt.Errorf("构造模型请求失败：%w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+	// The gateway re-sends upstream headers verbatim via undici, which does
+	// not support Expect; drop it defensively regardless of client default.
+	req.Header.Del("Expect")
+
+	// Stall watchdog: scanner.Scan() blocks with no way to bound a silent
+	// connection via the request deadline alone. The request rides stallCtx
+	// (a child of the attempt ctx, so the deadline still cascades), and a
+	// timer re-armed on every upstream byte aborts the read when the stream
+	// goes quiet for preplanStallTimeout — live rows 330011/330012 show a
+	// healthy 163KB stream emits bytes continuously (5-7KB/s) while a hung
+	// one emits zero (rows 329996/330003), so "no byte for 120s" separates
+	// the two failure shapes cleanly.
+	stallCtx, stallCancel := context.WithCancel(ctx)
+	defer stallCancel()
+	stallTimer := time.AfterFunc(preplanStallTimeout, stallCancel)
+	defer stallTimer.Stop()
+	req = req.WithContext(stallCtx)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("请求模型服务失败：%w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		rawResp, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("模型服务返回 HTTP %d：%s", resp.StatusCode, strings.TrimSpace(string(rawResp)))
+	}
+
+	var text strings.Builder
+	var deltas int
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		// Any byte from upstream proves liveness; re-arm the watchdog.
+		stallTimer.Reset(preplanStallTimeout)
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var event struct {
+			Type  string `json:"type"`
+			Delta *struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"delta"`
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error,omitempty"`
+		}
+		if err := json.Unmarshal([]byte(payload), &event); err != nil {
+			continue
+		}
+		deltas++
+		if event.Error != nil {
+			return "", fmt.Errorf("模型服务错误：%s", event.Error.Message)
+		}
+		if event.Type == "content_block_delta" && event.Delta != nil && event.Delta.Type == "text_delta" {
+			text.WriteString(event.Delta.Text)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		// Distinguish watchdog aborts (context.Canceled from stallCancel)
+		// from ordinary read failures — the retry gate matches on wording.
+		if stallCtx.Err() != nil && ctx.Err() == nil {
+			return "", fmt.Errorf("流停滞：上游 %s 内没有任何字节（已收到 %d 个事件）", preplanStallTimeout, deltas)
+		}
+		return "", fmt.Errorf("读取模型响应失败：%w", err)
+	}
+	out := strings.TrimSpace(text.String())
+	if out == "" {
+		return "", fmt.Errorf("模型服务没有返回内容（流式事件 %d 个）", deltas)
+	}
+	return out, nil
 }
 
 // preplanRequirementText assembles the requirement payload. For assets it
@@ -231,7 +443,14 @@ func parseDeliveryPreplanReply(raw string) *deliveryPreplanResponse {
 	}
 	resp := &deliveryPreplanResponse{ScaleHint: "linear"}
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {
-		resp.PlanError = "preplan json: " + truncateDeployVerify(err.Error(), 200)
+		// A draft truncated mid-JSON means the model hit the output ceiling
+		// (live incident: 163KB requirement, 16384-token cap). Say that
+		// instead of leaking a bare parser error.
+		msg := "preplan json: " + truncateDeployVerify(err.Error(), 200)
+		if strings.Contains(err.Error(), "unexpected end of JSON input") {
+			msg = "preplan 输出在 JSON 完成前被截断（模型达到输出 token 上限）。请精简需求原文后重试，或将需求分批提交拆分"
+		}
+		resp.PlanError = msg
 		return resp
 	}
 	resp.ScaleHint = strings.ToLower(strings.TrimSpace(out.ScaleHint))

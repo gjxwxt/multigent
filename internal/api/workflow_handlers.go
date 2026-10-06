@@ -340,7 +340,68 @@ func (s *Server) handleGetTaskWorkflow(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, err)
 		return
 	}
+	// Plan-driven parallel stages derive their branch list at run time from
+	// the frozen delivery plan and deliberately never write it into the run's
+	// definition snapshot (internal/workflow/plan_branch.go: shared-state
+	// lost-update surface). The canvas therefore still shows the template's
+	// static placeholder branches. Project the plan-derived branch DEFINITIONS
+	// into this read-only response so the canvas subflow preview renders the
+	// real work packages — persistence stays untouched.
+	s.projectPlanDerivedBranches(project, run, &def, branches)
+
 	_ = json.NewEncoder(w).Encode(taskWorkflowResponse{Definition: def, Run: run, Steps: steps, Branches: branches, History: history, DocTitles: s.workflowDocTitles()})
+}
+
+// projectPlanDerivedBranches overlays plan-derived branch definitions onto the
+// definition snapshot served to the canvas. For every parallel step that has
+// materialized branch instances whose branchId is not a static definition
+// branch, the corresponding work-package branch (same PlanBranchFromWorkPackage
+// shape the engine materialized) replaces the static placeholder list. The
+// def is already a per-request clone (RunDefinition), so mutating it here
+// cannot poison any shared cache; persistence is never written.
+func (s *Server) projectPlanDerivedBranches(project string, run entity.WorkflowRun, def *entity.WorkflowDefinition, branches []entity.WorkflowBranchInstance) {
+	if def == nil || len(branches) == 0 {
+		return
+	}
+	wfStore := workflowstore.NewStore(s.controlDB, s.currentWorkspaceIDValue(nil))
+	instancesByStep := make(map[string][]entity.WorkflowBranchInstance)
+	for _, inst := range branches {
+		instancesByStep[inst.StepID] = append(instancesByStep[inst.StepID], inst)
+	}
+	for i := range def.Steps {
+		step := &def.Steps[i]
+		if step.Type != "parallel_stage" {
+			continue
+		}
+		insts := instancesByStep[step.ID]
+		if len(insts) == 0 {
+			continue
+		}
+		staticIDs := make(map[string]bool, len(step.Branches))
+		for _, b := range step.Branches {
+			staticIDs[b.ID] = true
+		}
+		derived := make([]entity.WorkflowBranch, 0, len(insts))
+		for _, inst := range insts {
+			if staticIDs[inst.BranchID] {
+				continue
+			}
+			branch, found, err := wfStore.ResolveStageBranch(project, run.ID, *step, inst.BranchID)
+			if err != nil || !found {
+				// A missing resolution leaves the static placeholder in place
+				// for that instance rather than failing the whole read: the
+				// acceptance table on the follow page stays the authority.
+				log.Printf("[workflow-view] run %s step %s: resolve plan branch %q failed (found=%v err=%v); keeping placeholder", run.ID, step.ID, inst.BranchID, found, err)
+				continue
+			}
+			derived = append(derived, branch)
+		}
+		if len(derived) == 0 {
+			continue
+		}
+		sort.Slice(derived, func(a, b int) bool { return derived[a].ID < derived[b].ID })
+		step.Branches = derived
+	}
 }
 
 func (s *Server) workflowDocTitles() map[string]string {
@@ -637,11 +698,15 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 	// defaults to 1 (legacy) when the run has no resolvable definition.
 	defVersion := 1
 	var currentStep entity.WorkflowStep
+	var runDef entity.WorkflowDefinition
+	defFound := false
 	if runFound {
 		if def, found, err := workflowStore.RunDefinition(run); err != nil {
 			return taskWorkflowResponse{}, http.StatusInternalServerError, err
 		} else if found {
 			defVersion = def.Version
+			runDef = def
+			defFound = true
 			for _, step := range def.Steps {
 				if step.ID == run.ActiveStepID {
 					currentStep = step
@@ -657,6 +722,27 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 		}
 	}
 	summary := formatWorkflowReviewFields(outputs)
+
+	// Requirement-freeze gate (requirement clarification loop): the greenfield
+	// requirement_review step has exactly two outgoing edges — a rework edge
+	// (request_changes → requirement_draft) and a freeze edge (approve →
+	// design_review). The freeze is only legitimate after the agent's reworked
+	// draft declared open_questions empty (the UI only surfaces the freeze
+	// button on that declaration). The server enforces the same gate
+	// deterministically so a stale panel, a ChatOps approve, or an IM callback
+	// can never push a requirement with unresolved questions into design —
+	// fail-closed with an actionable message instead of silently freezing.
+	// Runs frozen on pre-v6 definition snapshots keep the legacy free review:
+	// their requirement_review step doesn't declare open_questions as an
+	// input, so there is nothing to converge and the gate steps aside.
+	if runFound && defFound && isRequirementReviewStep(currentStep) && isApprovalDecision(outputs["decision"]) &&
+		requirementReviewDeclaresOpenQuestions(runDef, run.ActiveStepID) {
+		if open, err := requirementReviewOpenQuestions(wfStore, run); err != nil {
+			return taskWorkflowResponse{}, http.StatusInternalServerError, err
+		} else if n := countOpenQuestionLines(open); n > 0 {
+			return taskWorkflowResponse{}, http.StatusConflict, fmt.Errorf("requirement_freeze_blocked: %d pending clarification question(s) remain (open_questions not cleared by the agent); submit the conclusions via request_changes to keep the loop going", n)
+		}
+	}
 
 	// Terminal delivery has external side effects. Complete those side effects
 	// before committing the workflow terminal state, otherwise a failed merge
@@ -686,6 +772,15 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 		delete(outputs, "approved_design_snapshot_path")
 		delete(outputs, "approved_design_html")
 		delete(outputs, "design_waived")
+		// Design delta audit record (v2.6): the adjudication bundle is validated
+		// here — same-source freeze (html hash must match the audited fetch) —
+		// then re-serialized server-side into the outputs. Client-supplied
+		// free-form JSON is never persisted as-is.
+		deltaPayload, deltaErr := ParseDesignDeltaConfirmPayload(outputs["design_delta_decisions"])
+		if deltaErr != nil {
+			return taskWorkflowResponse{}, http.StatusBadRequest, deltaErr
+		}
+		delete(outputs, "design_delta_decisions")
 
 		odProjectID := strings.TrimSpace(outputs["approved_design_project_id"])
 		waiverReason := strings.TrimSpace(outputs["design_waiver_reason"])
@@ -704,12 +799,43 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 				if snapPath != "" {
 					outputs["approved_design_snapshot_path"] = snapPath
 				}
+				// Same-source contract check (docs proposal §6.7): when an audit
+				// ran, the frozen snapshot must be the audited document. The
+				// snapshot entry HTML and the audit HTML are both the entry
+				// artifact's bytes; a mismatch means OD changed the file between
+				// audit and confirm — fail closed with a re-audit instruction
+				// rather than freezing an un-adjudicated document.
+				if deltaPayload != nil && inline != "" && !strings.EqualFold(deltaPayload.HTMLSHA256, auditEntryHash(inline)) {
+					// The inline copy may be capped (512KiB); only compare when
+					// the audited HTML itself is within the cap, else skip.
+					if len(inline) < designSnapshotInlineCap {
+						return taskWorkflowResponse{}, http.StatusBadRequest, errors.New("design_delta_stale: the prototype changed after the audit; re-run 差异审计 before confirming")
+					}
+				}
 			}
 		} else if waiverReason != "" {
 			outputs["design_waived"] = "true"
 			s.addComment(t, project, agent, fmt.Sprintf("design verification waived by reviewer: %s", waiverReason))
 		} else {
 			return taskWorkflowResponse{}, http.StatusBadRequest, errors.New("design verification requires either an approved design reference or an explicit design_waiver_reason")
+		}
+		// Persist the adjudication record after snapshot bookkeeping so a
+		// snapshot failure (or waiver) never loses the human's decisions and a
+		// failed transition never keeps them either — both are re-runnable.
+		if err := s.persistDesignDeltaOutputs(outputs, deltaPayload); err != nil {
+			return taskWorkflowResponse{}, http.StatusInternalServerError, err
+		}
+		if deltaPayload != nil {
+			s.addComment(t, project, agent, fmt.Sprintf("design delta audit: %d differences adjudicated (%s)",
+				len(deltaPayload.Decisions), designDeltaActionSummary(deltaPayload.Decisions)))
+		} else {
+			// §6.7 fail-open traceability: an approve that freezes a generated
+			// design WITHOUT an adjudication record (audit skipped, failed, or
+			// submitted through a legacy panel) must not pass silently. The
+			// downstream agents read audit_status=incomplete from the outputs
+			// and know this design never went through the delta audit.
+			outputs["design_delta_audit_status"] = "incomplete"
+			s.addComment(t, project, agent, "design delta audit: SKIPPED — approve carried no adjudication record (audit not run or legacy confirm path); downstream steps see design_delta_audit_status=incomplete")
 		}
 	}
 
@@ -876,6 +1002,119 @@ func isPullRequestReviewStep(step entity.WorkflowStep) bool {
 // isDesignGateStep reports whether the step is the platform's design gate.
 func isDesignGateStep(step entity.WorkflowStep) bool {
 	return workflowstore.IsDesignGateStep(step)
+}
+
+// isRequirementReviewStep reports whether the step is the requirement
+// clarification review (the greenfield pipeline's per-question clarification
+// gate). Matched by the template's stable step ID: the greenfield template is
+// the only definition that carries the clarification loop, and its
+// requirement_review step is fixed by the built-in template contract.
+func isRequirementReviewStep(step entity.WorkflowStep) bool {
+	return strings.TrimSpace(step.ID) == "requirement_review" && strings.EqualFold(strings.TrimSpace(step.Type), "human_review")
+}
+
+// requirementReviewOpenQuestions returns the open_questions value the reviewer
+// is actually judging: the requirement_review step instance's INPUT values as
+// materialized for this round (what the agent's latest rework delivered), or
+// "" when cleared/unavailable. Matched by the run's active step, not by
+// instance status — a step awaiting human review sits in "pending", so a
+// status=="running" filter silently skips it and the freeze gate would
+// always pass (caught live: a raw REST approve slipped through with 3 open
+// questions). Reads instance inputs — not the upstream step's historical
+// outputs — so the gate judges the version the reviewer is looking at.
+func requirementReviewOpenQuestions(wfStore *workflowstore.Store, run entity.WorkflowRun) (string, error) {
+	if wfStore == nil {
+		return "", nil
+	}
+	instances, err := wfStore.ListStepInstances(run.ID)
+	if err != nil {
+		return "", err
+	}
+	for _, inst := range instances {
+		if strings.TrimSpace(inst.StepID) == strings.TrimSpace(run.ActiveStepID) {
+			return strings.TrimSpace(inst.InputValues["open_questions"]), nil
+		}
+	}
+	return "", nil
+}
+
+// requirementReviewDeclaresOpenQuestions reports whether THIS run's
+// requirement_review step participates in the clarification loop at all —
+// i.e. its definition declares open_questions as an input field. Template v6
+// introduced that declaration; runs frozen on older snapshots (v5 and back)
+// keep the legacy free review: their edges never materialize open_questions
+// into the instance inputs, so a freeze gate keyed on that value could never
+// be satisfied and approve would 409 forever (caught live: a v5 run's reviewer
+// saw the UI fall back to plain approve/request_changes while the server
+// still demanded a declaration the v5 edge map never fills).
+func requirementReviewDeclaresOpenQuestions(def entity.WorkflowDefinition, activeStepID string) bool {
+	for _, step := range def.Steps {
+		if strings.TrimSpace(step.ID) != strings.TrimSpace(activeStepID) {
+			continue
+		}
+		for _, field := range step.InputFields {
+			if strings.TrimSpace(field.Name) == "open_questions" {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// countOpenQuestionLines counts question rows in an open_questions value.
+// Accepts the agent's JSON array shape ([{id, question, ...}]) counting array
+// entries, and falls back to line-based counting (lines starting with
+// O<digit> / bullet markers, mirroring the UI's parseOpenQuestionCards);
+// multi-line non-JSON text falls back to non-empty line count.
+func countOpenQuestionLines(raw string) int {
+	if strings.TrimSpace(raw) == "" {
+		return 0
+	}
+	if strings.HasPrefix(strings.TrimSpace(raw), "[") {
+		var entries []any
+		if json.Unmarshal([]byte(raw), &entries) == nil {
+			count := 0
+			for _, entry := range entries {
+				switch val := entry.(type) {
+				case string:
+					if strings.TrimSpace(val) != "" {
+						count++
+					}
+				case map[string]any:
+					// Mirror the UI's card rendering: an entry counts only
+					// when it carries question text the reviewer can see.
+					for _, key := range []string{"question", "text", "description"} {
+						if str, ok := val[key].(string); ok && strings.TrimSpace(str) != "" {
+							count++
+							break
+						}
+					}
+				default:
+					if entry != nil {
+						count++
+					}
+				}
+			}
+			return count
+		}
+		// Not valid JSON at all — fall through to line-based counting.
+	}
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
+	questionRows := 0
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || trimmed == "[]" || trimmed == "none" || trimmed == "无" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "O") || strings.HasPrefix(trimmed, "-") || strings.HasPrefix(trimmed, "*") || strings.HasPrefix(trimmed, "•") {
+			questionRows++
+		}
+	}
+	if questionRows == 0 {
+		return len(lines)
+	}
+	return questionRows
 }
 
 // isQASignoffStep reports whether the step is the platform's QA sign-off gate.
@@ -1984,6 +2223,17 @@ func (s *Server) ensurePlatformWorkflowDefinitions() {
 		wfStore := workflowstore.NewStore(s.controlDB, ws.ID)
 		if err := wfStore.EnsureProjectInitializationDefinition(); err != nil {
 			log.Printf("[workflow-definitions] ensure project initialization definition: %v", err)
+		}
+		// Same convergence contract as project-initialization-v1: the
+		// greenfield pipeline is platform-owned (fixed id, seeded at task
+		// creation), so version bumps — like the v2 canvas layout fix — must
+		// reach already-stored copies on boot, not only at task creation.
+		locale := ""
+		if agency, aerr := s.st.Agency(); aerr == nil && agency != nil {
+			locale = strings.TrimSpace(agency.Lang)
+		}
+		if err := workflowstore.EnsureGreenfieldDefinition(wfStore, locale); err != nil {
+			log.Printf("[workflow-definitions] ensure greenfield definition: %v", err)
 		}
 		s.backfillParallelStagePlanConfigs(ws.ID, wfStore)
 	}

@@ -108,7 +108,7 @@ func driveToContractReviewNoPlan(t *testing.T, s *Server, workspaceID, taskID st
 	t.Helper()
 	rec := postBranchStepComplete(t, s, workspaceID, taskID, map[string]string{
 		"requirement_draft": "The console must clear local session state on expiry and export audit logs.",
-		"open_questions":    "none",
+		"open_questions": "[]",
 		"requirement_items": requirementItemsJSON(),
 	})
 	if rec.Code != http.StatusOK {

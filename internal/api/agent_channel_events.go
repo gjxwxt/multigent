@@ -295,7 +295,7 @@ func (s *Server) requestAgentAttentionWakeup(binding controldb.AgentChannelBindi
 	if attentionTask != nil {
 		providerContext["attentionTaskId"] = attentionTask.ID
 	}
-	if hb.PID > 0 && hb.LastWakeupStatus == "running" && processAlive(hb.PID) {
+	if schedulerCycleInFlight(hb) {
 		s.auditLog(auditLogInput{
 			WorkspaceID:  binding.WorkspaceID,
 			ActorType:    "system",

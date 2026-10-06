@@ -245,3 +245,38 @@ func TestDraftApprovedRequirementFallsBackToDraft(t *testing.T) {
 		t.Fatalf("missing both must be empty/none, got %q/%q", v3, src3)
 	}
 }
+
+func TestCountOpenQuestionLinesJSONAndLineForms(t *testing.T) {
+	// Agent JSON-array shape: one count per entry carrying a question-like field.
+	jsonForm := `[{"id":"q1","priority":"medium","question":"技术栈选什么？","blocking_reason":"影响骨架"},{"id":"q2","priority":"low","question":"持久化用内存还是 SQLite？"}]`
+	if got := countOpenQuestionLines(jsonForm); got != 2 {
+		t.Fatalf("JSON array count = %d, want 2", got)
+	}
+	// Entries without question text render no card in the UI, so the gate
+	// must not count them either (gate mirrors what the reviewer sees).
+	opaqueJSON := `[{"foo":1},{"bar":"baz"}]`
+	if got := countOpenQuestionLines(opaqueJSON); got != 0 {
+		t.Fatalf("opaque JSON entries count = %d, want 0", got)
+	}
+	// String-array shape counts non-empty strings.
+	stringJSON := `["第一个问题？","第二个问题？",""]`
+	if got := countOpenQuestionLines(stringJSON); got != 2 {
+		t.Fatalf("string array count = %d, want 2", got)
+	}
+	// Cleared value: empty array is converged, not one open question.
+	if got := countOpenQuestionLines("[]"); got != 0 {
+		t.Fatalf("cleared [] count = %d, want 0", got)
+	}
+	// Line-based contract still counts marker rows.
+	lineForm := "O1【高】技术栈选什么？\nO2【低】持久化怎么做？"
+	if got := countOpenQuestionLines(lineForm); got != 2 {
+		t.Fatalf("line-form count = %d, want 2", got)
+	}
+	// Non-JSON, non-marker prose falls back to non-empty line count.
+	if got := countOpenQuestionLines("第一行问题\n第二行问题"); got != 2 {
+		t.Fatalf("prose fallback count = %d, want 2", got)
+	}
+	if got := countOpenQuestionLines(""); got != 0 {
+		t.Fatalf("empty count = %d, want 0", got)
+	}
+}

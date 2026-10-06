@@ -3,6 +3,8 @@ package workflow
 import (
 	"encoding/json"
 	"os"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/multigent/multigent/internal/entity"
@@ -24,6 +26,97 @@ func TestExportGreenfieldJSON(t *testing.T) {
 	}
 	if err := os.WriteFile(exportPath, data, 0644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Requirement clarification loop (v6): submitting a round is the ONLY exit of
+// requirement_review — every non-freeze submit maps back to requirement_draft
+// with the full clarification contract, and the freeze edge keys on approve
+// with the server enforcing the open_questions-cleared gate. A direct
+// approve→design edge that bypasses the clarification loop must not exist.
+func TestGreenfieldRequirementClarificationLoop(t *testing.T) {
+	tmpl, ok := Template("greenfield-delivery-pipeline", "zh-CN")
+	if !ok {
+		t.Fatal("greenfield template not registered")
+	}
+	var reqDraft, reqReview *entity.WorkflowStep
+	for i := range tmpl.Steps {
+		switch tmpl.Steps[i].ID {
+		case "requirement_draft":
+			reqDraft = &tmpl.Steps[i]
+		case "requirement_review":
+			reqReview = &tmpl.Steps[i]
+		}
+	}
+	if reqDraft == nil || reqReview == nil {
+		t.Fatal("requirement_draft/requirement_review step missing")
+	}
+	// The review step declares open_questions as an input (per-question cards
+	// have a declared source) and clarifications as a declared output.
+	inputs := map[string]bool{}
+	for _, f := range reqReview.InputFields {
+		inputs[f.Name] = true
+	}
+	if !inputs["open_questions"] || !inputs["requirement_draft"] {
+		t.Fatalf("requirement_review inputs = %v, want open_questions + requirement_draft", inputs)
+	}
+	outputs := map[string]bool{}
+	for _, f := range reqReview.OutputFields {
+		outputs[f.Name] = true
+	}
+	if !outputs["clarifications"] {
+		t.Fatalf("requirement_review outputs = %v, want clarifications", outputs)
+	}
+	// The draft step receives the clarification contract on rework entry.
+	draftInputs := map[string]bool{}
+	for _, f := range reqDraft.InputFields {
+		draftInputs[f.Name] = true
+	}
+	for _, want := range []string{"clarifications", "previous_draft", "open_questions", "review_rounds"} {
+		if !draftInputs[want] {
+			t.Fatalf("requirement_draft inputs missing %q (clarification contract)", want)
+		}
+	}
+	// Edge topology: exactly one forward edge (freeze, approve-conditioned)
+	// and one rework edge back to requirement_draft (request_changes).
+	forward, rework := 0, 0
+	for _, e := range tmpl.Edges {
+		if e.From != "requirement_review" {
+			continue
+		}
+		switch {
+		case e.To == "design_review":
+			forward++
+			if e.Condition == nil || e.Condition.Field != "decision" || e.Condition.Value != "approve" {
+				t.Fatalf("freeze edge condition = %+v, want decision eq approve", e.Condition)
+			}
+			if e.InputMapping["clarifications"] != "$output.clarifications" ||
+				e.InputMapping["approved_requirement"] != "$input.requirement_draft" {
+				t.Fatalf("freeze edge must carry the woven draft + clarification log, mapping=%v", e.InputMapping)
+			}
+		case e.To == "requirement_draft":
+			rework++
+			if e.Condition == nil || e.Condition.Value != "request_changes" {
+				t.Fatalf("rework edge condition = %+v, want decision eq request_changes", e.Condition)
+			}
+			for _, want := range []string{"clarifications", "previous_draft", "open_questions", "review_rounds"} {
+				if e.InputMapping[want] == "" {
+					t.Fatalf("rework edge missing mapping for %s: %v", want, e.InputMapping)
+				}
+			}
+		default:
+			t.Fatalf("unexpected edge from requirement_review to %q — the clarification loop has exactly two exits", e.To)
+		}
+	}
+	if forward != 1 || rework != 1 {
+		t.Fatalf("requirement_review edges: forward=%d rework=%d, want 1/1", forward, rework)
+	}
+	// The rework edge id carries "rework" so the platform increments
+	// review_rounds (isReworkEdge matches on the id substring).
+	for _, e := range tmpl.Edges {
+		if e.From == "requirement_review" && e.To == "requirement_draft" && !strings.Contains(strings.ToLower(e.ID), "rework") {
+			t.Fatalf("rework edge id %q must contain 'rework' for platform round accounting", e.ID)
+		}
 	}
 }
 
@@ -353,5 +446,40 @@ func TestGreenfieldDesignContractAndQAPreMergeFlow(t *testing.T) {
 	}
 	if !signoffToMerge {
 		t.Fatal("missing qa_signoff -> pr_open_and_merge edge (QA MUST strictly precede merge to protect main!)")
+	}
+}
+
+// Regression (2026-10-03, round L): the template's scattered x positions put
+// several steps within one node width (198px) of each other, and every step
+// shares y=180 — the read-only React Flow board (ProjectTaskFollowPage) renders
+// stored positions verbatim, so the 17 nodes visibly stacked on top of each
+// other. Positions must follow the main spine at the same 280px pitch as
+// software-delivery-v1, and the template version must advance so
+// EnsureGreenfieldDefinition upgrades already-seeded copies in place.
+func TestGreenfieldTemplateLayoutNoOverlap(t *testing.T) {
+	tmpl, ok := Template("greenfield-delivery-pipeline", "en")
+	if !ok {
+		t.Fatal("greenfield template not registered")
+	}
+	if tmpl.Version < 2 {
+		t.Fatalf("template version = %d; must be >= 2 so EnsureGreenfieldDefinition upgrades stored v1 copies (canvas layout fix)", tmpl.Version)
+	}
+	const nodeWidth = 198 // WORKFLOW_NODE_WIDTH in web/src/components/workflow/WorkflowBoard.tsx
+	byX := map[int]string{}
+	for _, s := range tmpl.Steps {
+		if prev, clash := byX[s.Position.X]; clash {
+			t.Fatalf("steps %q and %q share x=%d (same-column overlap is only acceptable with distinct y; all steps use y=180)", prev, s.ID, s.Position.X)
+		}
+		byX[s.Position.X] = s.ID
+	}
+	xs := make([]int, 0, len(byX))
+	for x := range byX {
+		xs = append(xs, x)
+	}
+	sort.Ints(xs)
+	for i := 1; i < len(xs); i++ {
+		if gap := xs[i] - xs[i-1]; gap < nodeWidth {
+			t.Fatalf("gap between x=%d (%s) and x=%d (%s) is %d < node width %d — nodes will overlap on the canvas", xs[i-1], byX[xs[i-1]], xs[i], byX[xs[i]], gap, nodeWidth)
+		}
 	}
 }

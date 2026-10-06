@@ -666,7 +666,7 @@ func (s *Server) handleSchedulerWakeup(w http.ResponseWriter, r *http.Request) {
 		s.jsonErrorCode(w, http.StatusNotFound, ErrCodeValidationFailed, "heartbeat not found")
 		return
 	}
-	if hb.PID > 0 && hb.LastWakeupStatus == "running" && processAlive(hb.PID) {
+	if schedulerCycleInFlight(hb) {
 		s.jsonErrorCode(w, http.StatusConflict, ErrCodeSchedulerWakeupFailed, fmt.Sprintf("agent %s/%s is already running", project, agent))
 		return
 	}
@@ -1002,7 +1002,7 @@ func (s *Server) startProjectTaskDirect(workspaceID, project, agent string, task
 	if err != nil || hb == nil {
 		return 0, "", fmt.Errorf("heartbeat not found")
 	}
-	if hb.PID > 0 && hb.LastWakeupStatus == "running" && processAlive(hb.PID) {
+	if schedulerCycleInFlight(hb) {
 		return 0, "", fmt.Errorf("%w: agent %s/%s is already running", errAgentAlreadyRunning, project, agent)
 	}
 	// S2 hardening batch 2 (run4 finding): a live scheduler interaction

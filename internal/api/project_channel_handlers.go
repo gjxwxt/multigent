@@ -833,9 +833,16 @@ func (s *Server) handleListProjectChannels(w http.ResponseWriter, r *http.Reques
 		bindingsByChatID[b.ExternalChatID] = append(bindingsByChatID[b.ExternalChatID], b)
 	}
 
+	// A channel link with zero agent bindings deserializes as `"bindings": null`
+	// on the web side, where chan.bindings.filter(...) white-screens the whole
+	// settings page (same nil-array family as the 2ef9a165 preplan crash).
+	// Normalize at the source so the JSON contract is always an array.
 	items := make([]projectChannelListItem, 0, len(links))
 	for _, link := range links {
 		chanBindings := bindingsByChatID[link.ChannelID]
+		if chanBindings == nil {
+			chanBindings = []controldb.AgentChannelBinding{}
+		}
 		hasErr := false
 		for _, b := range chanBindings {
 			if b.Status == "error" {

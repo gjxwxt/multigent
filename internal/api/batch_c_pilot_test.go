@@ -81,7 +81,7 @@ func TestBatchCPilotGreenfieldVNextOverRealRepo(t *testing.T) {
 	// matrix, the full chain over one run ────────────────────────────────
 	advance("requirement_draft", map[string]string{
 		"requirement_draft": "AC-1: GET /version returns v2; AC-2 (high risk): auth bypass attempt yields 401",
-		"open_questions":    "none",
+		"open_questions": "[]",
 	})
 	advance("requirement_review", map[string]string{
 		"decision":             "approve",

@@ -557,6 +557,19 @@ func (s *Server) createProjectTaskFromBody(w http.ResponseWriter, r *http.Reques
 				return
 			}
 		}
+		// The batch mode targets the greenfield pipeline by its fixed ID;
+		// auto-seed it on first use (a fresh deployment has no instance —
+		// UI instantiation creates a random wf-* id that never matches).
+		if workflowID == workflowstore.GreenfieldDeliveryWorkflowID {
+			locale := ""
+			if agency, aerr := s.st.Agency(); aerr == nil && agency != nil {
+				locale = strings.TrimSpace(agency.Lang)
+			}
+			if err := workflowstore.EnsureGreenfieldDefinition(wfStore, locale); err != nil {
+				s.serverError(w, err)
+				return
+			}
+		}
 		workflowStore = wfStore
 		def, found, err := wfStore.Definition(workflowID)
 		if err != nil {
@@ -705,6 +718,22 @@ func (s *Server) createProjectTaskFromBody(w http.ResponseWriter, r *http.Reques
 	if body.AutoStart {
 		if _, _, err := s.startProjectTaskDirect(workspaceID, name, agentName, t, r); err != nil {
 			log.Printf("[task-autostart] direct start failed for %s/%s task=%s: %v, fallback to attention", name, agentName, t.ID, err)
+			// The task row may have been flipped to in_progress before the
+			// start failed (workflow start path persists it first). Roll it
+			// back to pending so the poller — which only scans pending tasks —
+			// can still pick it up once the agent frees up; otherwise a busy
+			// assignee at creation time permanently strands the task
+			// (t-20261003-thh6tn dispatch deadlock). Attention wakeups alone
+			// can't recover it: their signals are marked handled on sight.
+			if fresh, getErr := s.ts.GetTask(name, agentName, t.ID); getErr == nil && fresh != nil && fresh.Status == entity.TaskStatusInProgress {
+				fresh.Status = entity.TaskStatusPending
+				fresh.UpdatedAt = time.Now().UTC()
+				fresh.StartedAt = nil
+				fresh.FinishedAt = nil
+				if persistErr := s.ts.PersistTask(name, agentName, fresh); persistErr != nil {
+					log.Printf("[task-autostart] pending rollback failed for %s/%s task=%s: %v", name, agentName, t.ID, persistErr)
+				}
+			}
 			signalID := s.recordTaskAttentionSignal(workspaceID, name, agentName, t, "task_assigned")
 			s.requestTaskAttentionWakeup(workspaceID, name, agentName, t, "task_assigned", signalID)
 		}

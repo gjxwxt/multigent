@@ -45,10 +45,13 @@ func TestPilotGreenfieldDeliveryPipelineFullLifecycle(t *testing.T) {
 		t.Fatalf("expected run status active, got %s", run.Status)
 	}
 
-	// 3. Step 1: requirement_draft (PM agent task) completes
+	// 3. Step 1: requirement_draft (PM agent task) completes. The draft
+	// declares open_questions cleared (the freeze gate's converged contract —
+	// "None"/"[]" both parse to zero questions), otherwise the server-side
+	// requirement-freeze gate would fail the approve below closed.
 	draftOutputs := map[string]string{
 		"requirement_draft": "PRD v1: User Authentication & Profile with SQLite & JWT",
-		"open_questions":    "None",
+		"open_questions":    "[]",
 	}
 	trans1, err := wfStore.CompleteAndAdvance("resproj", task.ID, "Requirement drafted", "", draftOutputs, "completed")
 	if err != nil {

@@ -2366,7 +2366,20 @@ func (s *Server) activateParallelWorkflowStep(workspaceID, project, previousAgen
 					return fmt.Errorf("fan-out branch %q: project is a git repository but no base commit could be resolved", branch.ID)
 				}
 				branchTask.BaseCommit = fanoutBaseCommit
-				branchTask.BaseBranch = "main"
+				// Merge-target label: the child integrates toward the ROOT
+				// task's working branch (its BaseBranch), not a hard-coded
+				// "main". A root task created with branch isolation works on
+				// feature/<taskID> while parallel children each get their own
+				// feature/wf-<run>-<branch>; every child then merges into the
+				// same root branch, and the root's PR step MRs that single
+				// branch into main. The baseline itself stays the frozen
+				// fanoutBaseCommit SHA — this label only names the integration
+				// target for evidence/PR semantics, never a moving ref as a
+				// baseline (AGENTS.md determinism red line).
+				branchTask.BaseBranch = strings.TrimSpace(completed.BaseBranch)
+				if branchTask.BaseBranch == "" {
+					branchTask.BaseBranch = "main"
+				}
 				// branch.ID comes from workflow definitions (template authors),
 				// so sanitize it before it lands in a git refspec argument.
 				// Closure item 1: the branch name must be unique ACROSS runs —

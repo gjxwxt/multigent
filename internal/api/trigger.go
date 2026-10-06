@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	controldb "github.com/multigent/multigent/internal/db"
@@ -153,12 +152,8 @@ func (tm *triggerManager) checkPendingTaskTriggers() {
 				continue
 			}
 
-			if hb.PID > 0 && hb.LastWakeupStatus == "running" {
-				if proc, err := os.FindProcess(hb.PID); err == nil {
-					if proc.Signal(syscall.Signal(0)) == nil {
-						continue
-					}
-				}
+			if schedulerCycleInFlight(hb) {
+				continue
 			}
 
 			tasks, err := tm.ts.ListTasks(project, agent)
@@ -390,15 +385,14 @@ func (tm *triggerManager) fireWakeup(project, agent string, hb *entity.Heartbeat
 		fmt.Fprintf(os.Stderr, "[trigger] %s/%s: queued — already inflight\n", project, targetAgent)
 		return
 	}
-	if hb.PID > 0 && hb.LastWakeupStatus == "running" {
-		if proc, err := os.FindProcess(hb.PID); err == nil {
-			if proc.Signal(syscall.Signal(0)) == nil {
-				tm.queued[key] = queuedTrigger{triggerType: triggerType, reason: reason}
-				tm.mu.Unlock()
-				fmt.Fprintf(os.Stderr, "[trigger] %s/%s: queued — agent already running (pid=%d)\n", project, targetAgent, hb.PID)
-				return
-			}
-		}
+	// schedulerCycleInFlight, not raw PID liveness: a resident scheduler's PID
+	// is alive for the daemon's whole uptime, so queueing on PID alone turns a
+	// busy misjudge into a permanent wakeup refusal (thh6tn dispatch deadlock).
+	if schedulerCycleInFlight(hb) {
+		tm.queued[key] = queuedTrigger{triggerType: triggerType, reason: reason}
+		tm.mu.Unlock()
+		fmt.Fprintf(os.Stderr, "[trigger] %s/%s: queued — agent already running (pid=%d)\n", project, targetAgent, hb.PID)
+		return
 	}
 	tm.inflight[key] = time.Now()
 	tm.mu.Unlock()

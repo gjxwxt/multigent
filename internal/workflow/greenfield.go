@@ -1,8 +1,48 @@
 package workflow
 
 import (
+	"time"
+
 	"github.com/multigent/multigent/internal/entity"
 )
+
+// GreenfieldDeliveryWorkflowID is the fixed definition ID the CreateTaskDialog
+// batch mode requests (CreateTaskDialog.tsx GREENFIELD_PIPELINE_ID). Unlike
+// UI-instantiated templates (random wf-* ids from POST /workflows), tasks
+// reference this pipeline by its stable id, so the definition is auto-seeded
+// at task-creation time via EnsureGreenfieldDefinition — mirroring
+// project-initialization-v1.
+const GreenfieldDeliveryWorkflowID = "greenfield-delivery-pipeline"
+
+// EnsureGreenfieldDefinition installs the fixed greenfield pipeline under its
+// stable ID and keeps it current with the built-in template. The seed is
+// idempotent: an existing definition at or above the template version is left
+// untouched (user edits survive); an older copy is upgraded in place. Without
+// this, a fresh deployment 404s ("workflow definition not found") the first
+// time a large-requirement task is created — the random-ID instance created
+// via the UI lives under a different id and is never resolved.
+func EnsureGreenfieldDefinition(s *Store, locale string) error {
+	tmpl := greenfieldDeliveryTemplate(locale)
+	if existing, ok, err := s.Definition(GreenfieldDeliveryWorkflowID); err != nil {
+		return err
+	} else if ok && existing.Version >= tmpl.Version {
+		return nil
+	}
+	now := time.Now().UTC()
+	def := entity.WorkflowDefinition{
+		ID:          GreenfieldDeliveryWorkflowID,
+		Name:        tmpl.Name,
+		Description: tmpl.Description,
+		Version:     tmpl.Version,
+		Scope:       "workspace",
+		StartStepID: tmpl.StartStepID,
+		Steps:       tmpl.Steps,
+		Edges:       tmpl.Edges,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	return s.SaveDefinition(&def)
+}
 
 // greenfieldDeliveryTemplate is the greenfield-only delivery pipeline: for a
 // project's first delivery there is no existing UI, so a visual design gate
@@ -18,9 +58,11 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"changesRequested": "changes requested",
 
 		"reqDraftTitle":  "Requirement Clarification",
-		"reqDraftDesc":   "An agent turns the initial request into a structured requirement: problem, goal, scope, non-goals, risks, and open questions.",
+		"reqDraftDesc":   "An agent turns the initial request into a structured requirement: problem, goal, scope, non-goals, risks, and open questions. When clarifications is present this is a clarification-round rework entry: weave every answered conclusion into its corresponding section (the answers are decisions, not suggestions), keep only genuinely pending items as open_questions (each noting why it blocks), and output the revised requirement_draft. When there are no open questions left, output open_questions exactly as the single token [] — the platform surfaces the freeze button to the reviewer only on that declaration.",
 		"reqReviewTitle": "Requirement Quick Review",
-		"reqReviewDesc":  "A human quickly confirms the requirement draft is aiming at the right thing before any design or code work starts.",
+		"reqReviewDesc":  "Per-question requirement clarification gate. Each open question gets exactly one default action: write a conclusion (a low-frequency \"defer with reason\" link is collapsed per card). Submitting is the ONLY exit of a round: the conclusions flow back to the agent, which weaves them into the requirement body and produces the next version. The approve/freeze button appears only after a reworked draft reports open_questions empty — a requirement with holes can never reach design or implementation.",
+		"reqClarificationsField": "Structured per-question conclusions (JSON array): [{id, priority, category, question, status (answered|deferred), conclusion, deferred_reason}]. Submitted each round; the agent MUST weave every answered conclusion into the corresponding requirement section and keep only genuinely open items as open_questions.",
+		"reviewRoundsField":      "Clarification round counter, incremented by the platform on each rework entry (capped). Context only — do not modify.",
 		"designTitle":    "Design Confirmation",
 		"designDesc":     "Review the visual prototype produced in OpenDesign (or pick an existing design). Confirm the direction, request changes, or generate a new variant before implementation begins.",
 
@@ -42,11 +84,11 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"integrationReviewTitle": "Integration Review",
 		"integrationReviewDesc":  "Human gate after parallel workstreams converge (joinPolicy all): verify the branches merge cleanly on the shared contract — no schema drift, no duplicate/conflicting error codes, no API contract violations. Seam problems found here route through Acceptance Test Design first (the spec must reflect the integration verdict before the reworked implementation starts), then into the linear implementation step as unified rework; branch-internal problems were already caught inside each branch.",
 		"atdTitle":               "Acceptance Test Design",
-		"atdDesc":                "Independent QA agent produces a risk-driven acceptance test specification BEFORE coding starts, so the developer's TDD has explicit external behavior targets. Inputs: the approved requirement (ACs, non-goals, constraints), the frozen design references, and the project's runtime capabilities. Output contract: test_spec_doc holds the full specification document (one section per case: case_id, ac_id, scenario Given/When/Then, expected_result observable and assertable); test_spec_manifest holds a JSON array — every entry exactly {\"case_id\" (unique, stable, e.g. AUTH-001), \"ac_id\" (linked acceptance criterion or requirement section), \"risk_level\" (high|medium|low), \"automation_level\" (unit|api_integration|ui_e2e|manual), \"execution_type\" (auto|manual|environment_blocked), \"expected_result\" (non-empty)}. Hard rules: high-risk cases must have an executable verification path or an explicit manual waiver premise; 'to be observed' or 'as appropriate' is never a valid expected_result; do not pad the case list with scenarios that link to no AC. test_spec_summary states the case count, risk distribution, non-automatable items and environment prerequisites. When review_comments is present, this is a post-integration-rework entry: the spec MUST absorb the integration verdict (seam problems become cases) before the reworked implementation starts.",
+		"atdDesc":                "An independent QA agent produces a risk-driven acceptance test specification BEFORE coding starts, so the developer's TDD has explicit external behavior targets.\n\nInputs: the approved requirement (ACs, non-goals, constraints), the frozen design references, and the project's runtime capabilities.\n\nOutput contract: test_spec_doc holds the full specification document (one section per case: case_id, ac_id, scenario Given/When/Then, expected_result observable and assertable); test_spec_manifest is a JSON array — every entry contains exactly:\ncase_id (unique, stable, e.g. AUTH-001)\nac_id (linked acceptance criterion or requirement section)\nrisk_level (high|medium|low)\nautomation_level (unit|api_integration|ui_e2e|manual)\nexecution_type (auto|manual|environment_blocked)\nexpected_result (non-empty)\n\nHard rules: high-risk cases must have an executable verification path or an explicit manual waiver premise; 'to be observed' or 'as appropriate' is never a valid expected_result; do not pad the case list with scenarios that link to no AC. test_spec_summary states the case count, risk distribution, non-automatable items and environment prerequisites.\n\nWhen review_comments is present, this is a post-integration-rework entry: the spec MUST absorb the integration verdict (seam problems become cases) before the reworked implementation starts.\n\nWhen design_delta_decisions is present, consume the adjudication record: adopted items become supplementary test-case sources (ac_id annotated design_delta, note text or the element's visible behavior as the expected behavior); dropped/waived items get NO cases and are recorded as forbidden zones; skipped items get no cases but the spec notes they will be checked at self review.",
 		"implTitle":              "Implementation",
-		"implDesc":               "Implement the approved requirement following the approved design references AND the acceptance test specification (test_spec_doc + manifest): every automated case in the manifest is an external behavior target — write the failing test first (TDD), then make it pass. Record the PR, tests executed (with case_id mapping in test_implementation_evidence), and any risks.",
+		"implDesc":               "Implement the approved requirement following the approved design references AND the acceptance test specification (test_spec_doc + manifest): every automated case in the manifest is an external behavior target — write the failing test first (TDD), then make it pass. When design_delta_decisions is present it OVERRIDES the prototype: adopted items must be implemented per their note (or visible behavior); dropped/waived items are explicit FORBIDDEN ZONES — the element exists in the prototype but must NOT appear in the code (implementing one is a defect self review will catch); skipped items are unspecified — do not invent behavior for them. Record the PR, tests executed (with case_id mapping in test_implementation_evidence), and any risks.",
 		"selfReviewTitle":        "Agent Self Review",
-		"selfReviewDesc":         "Independent reviewer agent — judge the diff against an independently built baseline, not against the author's narrative. Method: (1) read the approved requirement and design references; without opening the diff, write your own baseline of the behavior each acceptance criterion implies, the data flow, permission boundaries, and the test surfaces that should exist. (2) Note the base SHA and HEAD SHA from the implementation evidence, then read ONLY that diff and compare it against your baseline, criterion by criterion, including design conformance. (3) Re-run build and tests yourself — a check you did not run is unverified and cannot back an approval. Request fixes for up to three rounds. Write the verdict to self_review_verdict: pass when the acceptance criteria are met, issues_fixed when the implementation must be reworked, with findings written as structured issues (what contract is violated, file:line, impact, minimal fix, missing verification). Independence boundaries: do not treat 'a different architecture would be better' as a defect, and judge only the diff and its observable behavior, not the author's reasoning.",
+		"selfReviewDesc":         "Independent reviewer agent — judge the diff against an independently built baseline, not against the author's narrative. Method: (1) read the approved requirement and design references; without opening the diff, write your own baseline of the behavior each acceptance criterion implies, the data flow, permission boundaries, and the test surfaces that should exist. (2) Note the base SHA and HEAD SHA from the implementation evidence, then read ONLY that diff and compare it against your baseline, criterion by criterion, including design conformance. When design_delta_decisions is present, verify the adjudications were honored: an implemented dropped/waived item is a defect; an adopted item missing from the code is a defect; note any skipped item found implemented in design_conformance so the human reviewer re-adjudicates it with real code in view. (3) Re-run build and tests yourself — a check you did not run is unverified and cannot back an approval. Request fixes for up to three rounds. Write the verdict to self_review_verdict: pass when the acceptance criteria are met, issues_fixed when the implementation must be reworked, with findings written as structured issues (what contract is violated, file:line, impact, minimal fix, missing verification). Independence boundaries: do not treat 'a different architecture would be better' as a defect, and judge only the diff and its observable behavior, not the author's reasoning.",
 		"codeReviewTitle":        "Human Code Review",
 		"codeReviewDesc":         "A human reviews the implementation evidence and decides whether it can proceed to PR and merge.",
 		"prMergeTitle":           "Open PR and Merge",
@@ -94,6 +136,8 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"qaTouchedPathsField":    "Newline-separated list of every file path the QA agent created or modified (tests, fixtures, probe scripts only — business code is forbidden and the platform gate rejects it).",
 		"designWaiverField":      "Explicit justification for approving when automated design snapshot capture failed.",
 		"designWaivedField":      "true if design verification was granted an explicit audited waiver.",
+		"designDeltaField":       "Optional. Platform design-delta audit adjudication record (JSON) captured at design confirmation: audit-found difference entries, the human's per-item verdicts (adopt into requirement / drop / skip / note), and the sha256 of the frozen HTML. ATD and implementation MUST consume it: adopted items are specified from the note or the element's visible behavior; dropped items are explicit forbidden zones (present in the prototype but must NOT be implemented — implementing one is a defect); skipped items are unspecified, and if one is found implemented, route back to human adjudication. For both_diverge items every decision carries a side verdict: side=prototype or side=requirement names the authoritative side (specify behavior from THAT side's description; the other side is not a basis), side=other means neither side was taken — decision.sideNote is the fresh authoritative description and overrides BOTH sides; diverge items with no side fall back to the requirement side.",
+		"designDeltaStatusField": "Optional. Platform marker written when a design approve froze a prototype WITHOUT a delta-audit adjudication record (audit skipped, failed, or legacy confirm path). Value is always \"incomplete\". Downstream agents (ATD, implementation, self review) MUST treat the design as unaudited: the prototype-vs-requirement deltas were never adjudicated by a human.",
 		"designConformanceField": "Reviewer agent's structured assessment of implementation visual and interaction fidelity against the design prototype.",
 	}, map[string]string{
 		"name":             "新项目交付流水线（设计确认闸门）",
@@ -102,9 +146,11 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"changesRequested": "需要修改",
 
 		"reqDraftTitle":  "需求澄清",
-		"reqDraftDesc":   "Agent 把初始请求整理成结构化需求：问题、目标、范围、非目标、风险与待澄清问题。",
+		"reqDraftDesc":   "Agent 把初始请求整理成结构化需求：问题、目标、范围、非目标、风险与待澄清问题。当 clarifications 存在时，本次是澄清轮返工进入：把每条已答复结论织进对应章节（结论是裁决，不是建议），只保留真正待定项为 open_questions（每项注明阻塞原因），产出修订后的 requirement_draft。待澄清问题清零时，open_questions 必须精确输出单词元 []——平台只有在收到该申报后才会向审核人展示「确认冻结」按钮。",
 		"reqReviewTitle": "需求快审",
-		"reqReviewDesc":  "在设计或编码开始前，人工快速确认需求方向正确。",
+		"reqReviewDesc":  "逐题需求澄清闸门。每个待澄清问题只有一个默认动作：写结论（低频出口「本轮不答」折叠在卡片角落，需留原因）。提交是每一轮的唯一出口：结论回流给 agent，agent 把结论织进需求正文产出下一版。只有当重梳后的草稿申报 open_questions 已清零时，才会出现「确认冻结」按钮——带洞的需求永远到不了设计与实现。",
+		"reqClarificationsField": "逐题结论结构化数组（JSON）：[{id, priority, category, question, status（answered|deferred）, conclusion, deferred_reason}]。每轮提交；agent 必须把每条已答复结论织进对应需求章节，只保留真正待定项为 open_questions。",
+		"reviewRoundsField":      "澄清轮次计数，由平台在每次返工进入时递增（有上限）。仅作上下文——不要修改。",
 		"designTitle":    "设计确认",
 		"designDesc":     "审阅 OpenDesign 生成的可视化原型（或选择已有设计），确认方向、打回修改或重新生成，然后再进入实现。",
 
@@ -126,11 +172,11 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"integrationReviewTitle": "集成评审",
 		"integrationReviewDesc":  "并行工作流汇聚后（joinPolicy all）的人工闸门：核对各分支在共享契约上无缝合并——无 schema 漂移、无错误码重复/冲突、无 API 契约违约。此处发现的接缝问题先经验收测试设计刷新规格（规格必须吸收集成评审裁决后再进入返工实现），再路由到线性实现步骤统一返工；分支内部问题已在各分支内消化。",
 		"atdTitle":               "验收测试设计",
-		"atdDesc":                "独立 QA Agent 在编码开始前产出风险驱动的验收测试规格，让研发的 TDD 有清晰的外部行为目标。输入：已审核需求全文（验收标准、非目标、约束）、已冻结的设计引用、项目运行时能力。输出契约：test_spec_doc 为完整规格文档（每条 Case 一节：case_id、ac_id、Given/When/Then 场景、可观察可断言的 expected_result）；test_spec_manifest 为 JSON 数组——每项恰好包含 {\"case_id\"（唯一稳定，如 AUTH-001）、\"ac_id\"（关联验收标准或需求章节）、\"risk_level\"（high|medium|low）、\"automation_level\"（unit|api_integration|ui_e2e|manual）、\"execution_type\"（auto|manual|environment_blocked）、\"expected_result\"（非空）}。硬规则：高风险 Case 必须有可执行验证路径或明确的人工豁免前提；「待观察」「视情况」不构成合法预期结果；禁止生成不关联任何 AC 的凑数 Case。test_spec_summary 概述用例数量、风险分布、不可自动化项与环境前提。当 review_comments 非空时，本次是集成返工后的进入：规格必须吸收集成评审裁决（接缝问题转化为 Case）后才能开始返工实现。",
+		"atdDesc":                "独立 QA Agent 在编码开始前产出风险驱动的验收测试规格，让研发的 TDD 有清晰的外部行为目标。\n\n输入：已审核需求全文（验收标准、非目标、约束）、已冻结的设计引用、项目运行时能力。\n\n输出契约：test_spec_doc 为完整规格文档（每条 Case 一节：case_id、ac_id、Given/When/Then 场景、可观察可断言的 expected_result）；test_spec_manifest 为 JSON 数组，每项恰好包含：\ncase_id（唯一稳定，如 AUTH-001）\nac_id（关联验收标准或需求章节）\nrisk_level（high|medium|low）\nautomation_level（unit|api_integration|ui_e2e|manual）\nexecution_type（auto|manual|environment_blocked）\nexpected_result（非空）\n\n硬规则：高风险 Case 必须有可执行验证路径或明确的人工豁免前提；「待观察」「视情况」不构成合法预期结果；禁止生成不关联任何 AC 的凑数 Case。test_spec_summary 概述用例数量、风险分布、不可自动化项与环境前提。\n\n当 review_comments 非空时，本次是集成返工后的进入：规格必须吸收集成评审裁决（接缝问题转化为 Case）后才能开始返工实现。\n\n当 design_delta_decisions 存在时必须消费裁决记录：纳入项转为补充用例来源（ac_id 标注 design_delta，备注文本或元素可见行为作为预期行为）；不纳入/豁免项不生成用例并记为禁区；跳过项不生成用例，但规格中注明将在初审时对照实现情况。",
 		"implTitle":              "实现编码",
-		"implDesc":               "以已确认的设计产物和验收测试规格（test_spec_doc + manifest）为参考实现需求：manifest 中每条 auto Case 都是外部行为目标——先写失败测试（TDD），再使其通过。记录 PR、执行的测试（在 test_implementation_evidence 中给出 case_id 映射）与风险。",
+		"implDesc":               "以已确认的设计产物和验收测试规格（test_spec_doc + manifest）为参考实现需求：manifest 中每条 auto Case 都是外部行为目标——先写失败测试（TDD），再使其通过。当 design_delta_decisions 存在时它优先于原型：纳入项按备注（或元素可见行为）实现；不纳入/豁免项是明确禁区——元素在原型中存在但代码中不得出现（擅自实现判缺陷）；跳过项未规格化——不得自行发明行为。记录 PR、执行的测试（在 test_implementation_evidence 中给出 case_id 映射）与风险。",
 		"selfReviewTitle":        "Agent 初审",
-		"selfReviewDesc":         "独立 reviewer agent——对照自己独立建立的预期基线裁决 diff，而非对照作者的自述。方法：(1) 先读已确认的需求与设计参考，不打开 diff，独立写出预期基线：每条验收标准蕴含的行为、数据流、权限边界、应当存在的测试切面。(2) 从实现证据记下 base SHA 与 HEAD SHA，只读该区间的 diff，逐条标准对照基线（含设计一致性）。(3) 亲自重跑构建与测试——没有亲手跑过的检查视为 unverified，不能支撑通过。最多三轮返工。初审结论写入 self_review_verdict：验收达标写 pass，需要返工写 issues_fixed；发现的问题写成结构化条目（违反什么契约、文件:行号、影响、最小修复、缺失的验证）。独立性边界：不要把「换一种架构更好」当作缺陷；只裁决 diff 与其可观察行为，不读取或信任作者的思考链。",
+		"selfReviewDesc":         "独立 reviewer agent——对照自己独立建立的预期基线裁决 diff，而非对照作者的自述。方法：(1) 先读已确认的需求与设计参考，不打开 diff，独立写出预期基线：每条验收标准蕴含的行为、数据流、权限边界、应当存在的测试切面。(2) 从实现证据记下 base SHA 与 HEAD SHA，只读该区间的 diff，逐条标准对照基线（含设计一致性）。当 design_delta_decisions 存在时，核对裁决是否被遵守：不纳入/豁免项被实现=缺陷；纳入项在代码中缺失=缺陷；发现跳过项被实现时在 design_conformance 中标注，交人工代码审核结合真实代码再次裁决。(3) 亲自重跑构建与测试——没有亲手跑过的检查视为 unverified，不能支撑通过。最多三轮返工。初审结论写入 self_review_verdict：验收达标写 pass，需要返工写 issues_fixed；发现的问题写成结构化条目（违反什么契约、文件:行号、影响、最小修复、缺失的验证）。独立性边界：不要把「换一种架构更好」当作缺陷；只裁决 diff 与其可观察行为，不读取或信任作者的思考链。",
 		"codeReviewTitle":        "人工代码审核",
 		"codeReviewDesc":         "人工审核实现证据，决定是否进入 QA 验证。",
 		"qaTitle":                "QA 测试与风险矩阵",
@@ -178,6 +224,8 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"qaTouchedPathsField":    "QA Agent 新建或修改的全部文件路径（换行分隔，仅限测试文件/夹具/探测脚本——业务代码被平台闸门拒绝）。",
 		"designWaiverField":      "设计快照抓取异常时，人工特批放行的明确豁免理由。",
 		"designWaivedField":      "若本次交付经过设计特批豁免则为 true。",
+		"designDeltaField":       "可选。平台在设计确认时做的差异审计裁决记录（JSON）：审计发现的差异条目、人的逐条裁决（纳入需求/不纳入/跳过/备注）与冻结 HTML 的 sha256。ATD 与实现步必须消费：纳入项按备注或元素可见行为规格化；不纳入项是明确禁区（原型里有但不许实现，擅自实现判缺陷）；跳过项未规格化，若在实现中发现被实现须回流人工裁决。双侧偏离（both_diverge）每条裁决都带选边结果：side=prototype 或 side=requirement 指明权威侧（按该侧描述规格化行为，另一侧不作依据）；side=other 表示两侧都不采用——decision.sideNote 是全新权威描述，覆盖双侧；无 side 的偏离项回落需求侧为准。",
+		"designDeltaStatusField": "可选。平台标记：本次设计确认在缺少差异审计裁决记录的情况下冻结了原型（审计被跳过、失败或走了旧确认路径）。取值恒为 \"incomplete\"。下游 Agent（ATD、实现、初审）必须把设计视为未经差异审计：原型与需求之间的差异从未经人逐条裁决。",
 		"designConformanceField": "初审 Agent 对比实现产物与设计原型的结构化一致性评估与合理偏差说明。",
 	})
 	field := func(name, descKey string) entity.WorkflowField {
@@ -202,6 +250,8 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			optionalField("approved_design_preview_url", "designPreviewField"),
 			optionalField("approved_design_html", "designHTMLField"),
 			optionalField("approved_design_snapshot_path", "designSnapshotField"),
+			optionalField("design_delta_decisions", "designDeltaField"),
+			optionalField("design_delta_audit_status", "designDeltaStatusField"),
 			optionalField("design_waiver_reason", "designWaiverField"),
 			optionalField("design_waived", "designWaivedField"),
 		})
@@ -218,12 +268,14 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 	// deterministic cond() edges route on the verdict; the default edge falls
 	// back to linear so an undecided verdict can never silently fan out
 	// (fail-safe toward the historical single-track path).
-	scaleGateStep := tmplStep("scale_gate", "agent_task", text["scaleGateTitle"], text["scaleGateDesc"], "pm-agent", "cyan", 500,
+	scaleGateStep := tmplStep("scale_gate", "agent_task", text["scaleGateTitle"], text["scaleGateDesc"], "pm-agent", "cyan", 920,
 		[]entity.WorkflowField{
 			field("approved_requirement", "requestField"),
 			optionalField("requirement_draft", "requestField"),
 			optionalField("requirement_items", "requirementItemsField"),
 			optionalField("approved_design_snapshot_path", "designSnapshotField"),
+			optionalField("design_delta_decisions", "designDeltaField"),
+			optionalField("design_delta_audit_status", "designDeltaStatusField"),
 		},
 		[]entity.WorkflowField{
 			field("scale_verdict", "scaleVerdictField"),
@@ -235,7 +287,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 	// The contract MUST land on the integration baseline before branches fork
 	// (large-requirement module DM5): parallel branches cannot see each
 	// other's code, so the committed contract is their only shared surface.
-	contractBatchStep := tmplStep("contract_batch", "agent_task", text["contractBatchTitle"], text["contractBatchDesc"], "developer-agent", "violet", 700,
+	contractBatchStep := tmplStep("contract_batch", "agent_task", text["contractBatchTitle"], text["contractBatchDesc"], "developer-agent", "violet", 1200,
 		[]entity.WorkflowField{
 			field("approved_requirement", "requestField"),
 			optionalField("delivery_plan", "deliveryPlanField"),
@@ -264,7 +316,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			optionalField("requirement_items", "requirementItemsField"),
 		})
 
-	contractReviewStep := tmplStep("contract_review", "human_review", text["contractReviewTitle"], text["contractReviewDesc"], "owner-engineer", "amber", 860,
+	contractReviewStep := tmplStep("contract_review", "human_review", text["contractReviewTitle"], text["contractReviewDesc"], "owner-engineer", "amber", 1480,
 		[]entity.WorkflowField{
 			field("contract_artifacts", "contractArtifactsField"),
 			optionalField("delivery_plan", "deliveryPlanField"),
@@ -287,7 +339,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 	// roles, descriptions and input fields on the canvas following the
 	// batch_plan BEFORE the run reaches this step. Engine-side, each branch
 	// spawns a child task + sub-run and must carry an agent actor binding.
-	parallelStep := tmplStep("parallel_workstreams", "parallel_stage", "Parallel Workstreams", "Fan-out of the decomposed workstreams. Branches are derived from the FROZEN delivery plan approved at the contract review (one branch per work package, dependency order); no canvas editing is required. The static branches below are the legacy fallback for runs without a frozen plan.", "", "violet", 1020,
+	parallelStep := tmplStep("parallel_workstreams", "parallel_stage", "Parallel Workstreams", "Fan-out of the decomposed workstreams. Branches are derived from the FROZEN delivery plan approved at the contract review (one branch per work package, dependency order); no canvas editing is required. The static branches below are the legacy fallback for runs without a frozen plan.", "", "violet", 1760,
 		[]entity.WorkflowField{
 			field("contract_artifacts", "contractArtifactsField"),
 			optionalField("approved_requirement", "requestField"),
@@ -323,7 +375,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		},
 	}
 
-	integrationReviewStep := tmplStep("integration_review", "human_review", text["integrationReviewTitle"], text["integrationReviewDesc"], "owner-engineer", "amber", 1240,
+	integrationReviewStep := tmplStep("integration_review", "human_review", text["integrationReviewTitle"], text["integrationReviewDesc"], "owner-engineer", "amber", 2040,
 		[]entity.WorkflowField{
 			field("contract_artifacts", "contractArtifactsField"),
 			optionalField("approved_requirement", "requestField"),
@@ -340,7 +392,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			field("comments", "commentsField"),
 		})
 
-	acceptanceTestDesignStep := tmplStep("acceptance_test_design", "agent_task", text["atdTitle"], text["atdDesc"], "qa-agent", "rose", 780,
+	acceptanceTestDesignStep := tmplStep("acceptance_test_design", "agent_task", text["atdTitle"], text["atdDesc"], "qa-agent", "rose", 2320,
 		[]entity.WorkflowField{
 			field("approved_requirement", "requestField"),
 			optionalField("approved_design_source", "designSourceField"),
@@ -348,6 +400,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			optionalField("approved_design_preview_url", "designPreviewField"),
 			optionalField("approved_design_html", "designHTMLField"),
 			optionalField("approved_design_snapshot_path", "designSnapshotField"),
+			optionalField("design_delta_decisions", "designDeltaField"),
 			optionalField("review_comments", "atdReviewCommentsField"),
 			optionalField("branch_reports", "atdBranchReportsField"),
 		},
@@ -357,14 +410,36 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			field("test_spec_summary", "testSpecSummaryField"),
 		})
 
-	return templateFromParts("greenfield-delivery-pipeline", text["name"], text["description"], locale, "requirement_draft",
+	// v2: canvas layout fix — the 17 steps previously carried scattered x
+	// positions with gaps smaller than one node width (198px), so the
+	// read-only React Flow view stacked them. Positions now follow the main
+	// spine at the same 280px pitch as software-delivery-v1. Bumping the
+	// version lets EnsureGreenfieldDefinition upgrade already-seeded copies
+	// in place (positions are canvas metadata only; runs resolve steps from
+	// the stored definition, and no runtime semantics changed).
+	tmpl := templateFromParts("greenfield-delivery-pipeline", text["name"], text["description"], locale, "requirement_draft",
 		[]entity.WorkflowStep{
 			tmplStep("requirement_draft", "agent_task", text["reqDraftTitle"], text["reqDraftDesc"], "pm-agent", "sky", 80,
-				[]entity.WorkflowField{field("request", "requestField"), field("context", "contextField"), optionalField("delivery_plan_draft", "preplanDraftField")},
+				// clarifications/previous_draft/open_questions arrive from the
+				// clarification-loop rework edge; review_rounds is the
+				// platform-counted clarification round (the rework edge
+				// increments it, clamped at the escalation cap).
+				[]entity.WorkflowField{field("request", "requestField"), field("context", "contextField"), optionalField("delivery_plan_draft", "preplanDraftField"), optionalField("clarifications", "reqClarificationsField"), optionalField("previous_draft", "requestField"), optionalField("open_questions", "contextField"), optionalField("review_comments", "reviewCommentsField"), optionalField("review_rounds", "reviewRoundsField")},
 				[]entity.WorkflowField{field("requirement_draft", "requestField"), field("open_questions", "contextField"), optionalField("requirement_items", "requirementItemsField")}),
 			tmplStep("requirement_review", "human_review", text["reqReviewTitle"], text["reqReviewDesc"], "product-owner", "amber", 360,
-				[]entity.WorkflowField{field("requirement_draft", "requestField"), optionalField("requirement_items", "requirementItemsField")},
-				[]entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("approved_requirement", "requestField")}),
+				// open_questions is declared as an input so the per-question
+				// clarification cards have a declared source (the edge mapping
+				// forwards it regardless, but a declared input surfaces it in
+				// "expected input fields" for the reviewer).
+				[]entity.WorkflowField{field("requirement_draft", "requestField"), field("open_questions", "contextField"), optionalField("requirement_items", "requirementItemsField")},
+				// clarifications is the structured per-question conclusion log
+				// (optional: legacy panels and ChatOps submits may only carry
+				// free-text comments — the loop still works, the rework prompt
+				// just falls back to review_comments). decision/comments stay
+				// for the platform routing + summary. approved_requirement is
+				// filled by the platform from the requirement_draft on the
+				// freeze edge (the reviewer never retypes the full document).
+				[]entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("clarifications", "reqClarificationsField"), optionalField("approved_requirement", "requestField")}),
 			designStep,
 			scaleGateStep,
 			contractBatchStep,
@@ -372,7 +447,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			parallelStep,
 			integrationReviewStep,
 			acceptanceTestDesignStep,
-			tmplStep("implementation", "agent_task", text["implTitle"], text["implDesc"], "developer-agent", "emerald", 920,
+			tmplStep("implementation", "agent_task", text["implTitle"], text["implDesc"], "developer-agent", "emerald", 2600,
 				[]entity.WorkflowField{
 					field("approved_requirement", "requestField"),
 					optionalField("approved_design_source", "designSourceField"),
@@ -380,6 +455,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 					optionalField("approved_design_preview_url", "designPreviewField"),
 					optionalField("approved_design_html", "designHTMLField"),
 					optionalField("approved_design_snapshot_path", "designSnapshotField"),
+					optionalField("design_delta_decisions", "designDeltaField"),
 					optionalField("test_spec_doc", "testSpecDocField"),
 					optionalField("test_spec_manifest", "testSpecManifestField"),
 					optionalField("test_spec_summary", "testSpecSummaryField"),
@@ -388,7 +464,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 					optionalField("qa_rework_items", "qaReworkItemsField"),
 				},
 				[]entity.WorkflowField{field("pr", "prField"), field("tests_run", "testsField"), field("risks", "risksField"), field("test_implementation_evidence", "testReportField"), optionalField("delivery_sha", "deliveryShaField"), optionalField("delivery_branch", "deliveryBranchField")}),
-			tmplStep("self_review", "agent_task", text["selfReviewTitle"], text["selfReviewDesc"], "reviewer-agent", "rose", 1200,
+			tmplStep("self_review", "agent_task", text["selfReviewTitle"], text["selfReviewDesc"], "reviewer-agent", "rose", 2880,
 				[]entity.WorkflowField{
 					field("pr", "prField"),
 					// The threaded machine anchor is part of the declared input
@@ -403,6 +479,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 					optionalField("approved_design_preview_url", "designPreviewField"),
 					optionalField("approved_design_html", "designHTMLField"),
 					optionalField("approved_design_snapshot_path", "designSnapshotField"),
+					optionalField("design_delta_decisions", "designDeltaField"),
 					optionalField("design_waiver_reason", "designWaiverField"),
 					optionalField("design_waived", "designWaivedField"),
 					optionalField("test_spec_doc", "testSpecDocField"),
@@ -415,7 +492,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 					field("review_comments", "reviewCommentsField"),
 					optionalField("design_conformance", "designConformanceField"),
 				}),
-			tmplStep("code_review", "human_review", text["codeReviewTitle"], text["codeReviewDesc"], "owner-engineer", "amber", 1480,
+			tmplStep("code_review", "human_review", text["codeReviewTitle"], text["codeReviewDesc"], "owner-engineer", "amber", 3160,
 				[]entity.WorkflowField{
 					field("pr", "prField"),
 					// The threaded machine anchor: the human gate sees exactly
@@ -434,7 +511,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 					optionalField("test_implementation_evidence", "testReportField"),
 				},
 				[]entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("approved_change", "prField")}),
-			tmplStep("qa", "agent_task", text["qaTitle"], text["qaDesc"], "qa-agent", "rose", 1760,
+			tmplStep("qa", "agent_task", text["qaTitle"], text["qaDesc"], "qa-agent", "rose", 3440,
 				[]entity.WorkflowField{
 					field("pr", "prField"),
 					field("approved_change", "prField"),
@@ -462,7 +539,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 					// reconciled — qa_signoff and rework read it from here.
 					optionalField("test_implementation_evidence", "testReportField"),
 				}),
-			tmplStep("qa_signoff", "human_review", text["qaSignoffTitle"], text["qaSignoffDesc"], "qa-owner", "amber", 2040,
+			tmplStep("qa_signoff", "human_review", text["qaSignoffTitle"], text["qaSignoffDesc"], "qa-owner", "amber", 3720,
 				[]entity.WorkflowField{
 					field("risk_coverage_matrix", "riskMatrixField"),
 					field("test_report", "testReportField"),
@@ -492,25 +569,53 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 					// instead of only free-text comments.
 					optionalField("qa_rework_items", "qaReworkItemsField"),
 				}),
-			withStepConfig(tmplStep("pr_open_and_merge", "agent_task", text["prMergeTitle"], text["prMergeDesc"], "developer-agent", "violet", 2320,
+			withStepConfig(tmplStep("pr_open_and_merge", "agent_task", text["prMergeTitle"], text["prMergeDesc"], "developer-agent", "violet", 4000,
 				[]entity.WorkflowField{field("approved_change", "prField"), field("pr", "prField")},
 				[]entity.WorkflowField{field("merged_sha", "mergedField"), field("pr_url", "prURLField")}), map[string]string{StepConfigRequiresRemote: "true"}),
-			withStepConfig(tmplStep("release", "agent_task", text["releaseTitle"], text["releaseDesc"], "release-agent", "emerald", 2600,
+			withStepConfig(tmplStep("release", "agent_task", text["releaseTitle"], text["releaseDesc"], "release-agent", "emerald", 4280,
 				[]entity.WorkflowField{field("merged_sha", "mergedField")},
 				[]entity.WorkflowField{field("tag", "tagField"), field("deployed_version", "deployedField"), field("health_status", "healthField")}), map[string]string{StepConfigRequiresRemote: "true"}),
-			tmplStep("go_live_confirm", "human_review", text["goLiveTitle"], text["goLiveDesc"], "product-owner", "amber", 2880,
+			tmplStep("go_live_confirm", "human_review", text["goLiveTitle"], text["goLiveDesc"], "product-owner", "amber", 4560,
 				[]entity.WorkflowField{field("tag", "tagField"), field("deployed_version", "deployedField"), field("health_status", "healthField")},
 				[]entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField")}),
 		},
 		[]entity.WorkflowEdge{
 			edge("e-req-draft-review", "requirement_draft", "requirement_review", "", nil, nil, true),
+			// Requirement clarification loop: submitting a round is the ONLY
+			// exit of the review step, and every submit maps back to
+			// requirement_draft (the agent weaves the conclusions into the body
+			// and re-emits open_questions). There is deliberately NO
+			// direct-to-design edge from this step: the freeze (approve) edge
+			// below only becomes routable after a reworked draft declares
+			// open_questions empty, and the server enforces the same gate on
+			// the approve transition (see requirementFreezeGate in
+			// internal/api/workflow_handlers.go). clarifications flows to the
+			// reworked draft so the agent never guesses which answer belongs
+			// to which question; review_rounds counts clarification rounds and
+			// the rework edge increments it (platform-side, clamped).
+			edge("e-req-review-rework", "requirement_review", "requirement_draft", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{
+				"request":             "$input.request",
+				"context":             "$input.context",
+				"review_comments":     "$output.comments",
+				"clarifications":      "$output.clarifications",
+				"previous_draft":      "$input.requirement_draft",
+				"open_questions":      "$input.open_questions",
+				"delivery_plan_draft": "$input.delivery_plan_draft",
+				"review_rounds":       "$input.review_rounds",
+			}, false),
+			// Freeze edge: keyed on approve, but the server rejects the approve
+			// transition unless the CURRENT draft (the instance inputs) has
+			// open_questions empty — i.e. the reviewer can only freeze the
+			// version the agent reported as fully clarified. The freeze carries
+			// the woven draft forward (not the reviewer's retyped copy) plus
+			// the full clarification log for downstream audit.
 			edge("e-req-review-design", "requirement_review", "design_review", text["approved"], cond("decision", "eq", "approve"), map[string]string{
-				"approved_requirement": "$output.approved_requirement",
+				"approved_requirement": "$input.requirement_draft",
 				"requirement_draft":    "$input.requirement_draft",
 				"requirement_items":    "$input.requirement_items",
+				"clarifications":       "$output.clarifications",
 				"delivery_plan_draft":  "$input.delivery_plan_draft",
 			}, false),
-			edge("e-req-review-rework", "requirement_review", "requirement_draft", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{"review_comments": "$output.comments", "previous_draft": "$input.requirement_draft"}, false),
 			// Design gate approve now routes to the scale gate (large-requirement
 			// module S1) instead of directly to acceptance_test_design; the scale
 			// gate forwards the full design contract downstream on both paths.
@@ -523,6 +628,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"approved_design_project_id":    "$output.approved_design_project_id",
 				"approved_design_preview_url":   "$output.approved_design_preview_url",
 				"approved_design_html":          "$output.approved_design_html",
+				"design_delta_decisions":        "$output.design_delta_decisions",
 				"approved_design_snapshot_path": "$output.approved_design_snapshot_path",
 				"design_waiver_reason":          "$output.design_waiver_reason",
 				"design_waived":                 "$output.design_waived",
@@ -536,6 +642,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"approved_design_project_id":    "$input.approved_design_project_id",
 				"approved_design_preview_url":   "$input.approved_design_preview_url",
 				"approved_design_html":          "$input.approved_design_html",
+				"design_delta_decisions":        "$input.design_delta_decisions",
 				"approved_design_snapshot_path": "$input.approved_design_snapshot_path",
 				"design_waiver_reason":          "$input.design_waiver_reason",
 				"design_waived":                 "$input.design_waived",
@@ -550,6 +657,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"approved_design_project_id":    "$input.approved_design_project_id",
 				"approved_design_preview_url":   "$input.approved_design_preview_url",
 				"approved_design_html":          "$input.approved_design_html",
+				"design_delta_decisions":        "$input.design_delta_decisions",
 				"approved_design_snapshot_path": "$input.approved_design_snapshot_path",
 				"design_waiver_reason":          "$input.design_waiver_reason",
 				"design_waived":                 "$input.design_waived",
@@ -560,6 +668,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"approved_design_project_id":    "$input.approved_design_project_id",
 				"approved_design_preview_url":   "$input.approved_design_preview_url",
 				"approved_design_html":          "$input.approved_design_html",
+				"design_delta_decisions":        "$input.design_delta_decisions",
 				"approved_design_snapshot_path": "$input.approved_design_snapshot_path",
 				"design_waiver_reason":          "$input.design_waiver_reason",
 				"design_waived":                 "$input.design_waived",
@@ -621,6 +730,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"approved_design_project_id":    "$input.approved_design_project_id",
 				"approved_design_preview_url":   "$input.approved_design_preview_url",
 				"approved_design_html":          "$input.approved_design_html",
+				"design_delta_decisions":        "$input.design_delta_decisions",
 				"approved_design_snapshot_path": "$input.approved_design_snapshot_path",
 				"design_waiver_reason":          "$input.design_waiver_reason",
 				"design_waived":                 "$input.design_waived",
@@ -650,6 +760,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"approved_design_project_id":    "$input.approved_design_project_id",
 				"approved_design_preview_url":   "$input.approved_design_preview_url",
 				"approved_design_html":          "$input.approved_design_html",
+				"design_delta_decisions":        "$input.design_delta_decisions",
 				"approved_design_snapshot_path": "$input.approved_design_snapshot_path",
 				"design_waiver_reason":          "$input.design_waiver_reason",
 				"design_waived":                 "$input.design_waived",
@@ -669,6 +780,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"approved_design_project_id":    "$input.approved_design_project_id",
 				"approved_design_preview_url":   "$input.approved_design_preview_url",
 				"approved_design_html":          "$input.approved_design_html",
+				"design_delta_decisions":        "$input.design_delta_decisions",
 				"approved_design_snapshot_path": "$input.approved_design_snapshot_path",
 				"design_waiver_reason":          "$input.design_waiver_reason",
 				"design_waived":                 "$input.design_waived",
@@ -694,6 +806,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"approved_design_project_id":    "$input.approved_design_project_id",
 				"approved_design_preview_url":   "$input.approved_design_preview_url",
 				"approved_design_html":          "$input.approved_design_html",
+				"design_delta_decisions":        "$input.design_delta_decisions",
 				"approved_design_snapshot_path": "$input.approved_design_snapshot_path",
 				"design_waiver_reason":          "$input.design_waiver_reason",
 				"design_waived":                 "$input.design_waived",
@@ -732,6 +845,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"approved_design_project_id":    "$input.approved_design_project_id",
 				"approved_design_preview_url":   "$input.approved_design_preview_url",
 				"approved_design_html":          "$input.approved_design_html",
+				"design_delta_decisions":        "$input.design_delta_decisions",
 				"approved_design_snapshot_path": "$input.approved_design_snapshot_path",
 				"test_spec_doc":                 "$input.test_spec_doc",
 				"test_spec_manifest":            "$input.test_spec_manifest",
@@ -763,6 +877,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"approved_design_project_id":    "$input.approved_design_project_id",
 				"approved_design_preview_url":   "$input.approved_design_preview_url",
 				"approved_design_html":          "$input.approved_design_html",
+				"design_delta_decisions":        "$input.design_delta_decisions",
 				"approved_design_snapshot_path": "$input.approved_design_snapshot_path",
 				"test_spec_doc":                 "$input.test_spec_doc",
 				"test_spec_manifest":            "$input.test_spec_manifest",
@@ -794,6 +909,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 				"approved_design_project_id":    "$input.approved_design_project_id",
 				"approved_design_preview_url":   "$input.approved_design_preview_url",
 				"approved_design_html":          "$input.approved_design_html",
+				"design_delta_decisions":        "$input.design_delta_decisions",
 				"approved_design_snapshot_path": "$input.approved_design_snapshot_path",
 				"test_spec_doc":                 "$input.test_spec_doc",
 				"test_spec_manifest":            "$input.test_spec_manifest",
@@ -811,4 +927,36 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			edge("e-pr-merge-release", "pr_open_and_merge", "release", "", nil, map[string]string{"merged_sha": "$output.merged_sha", "pr_url": "$output.pr_url"}, true),
 			edge("e-release-go-live", "release", "go_live_confirm", "", nil, map[string]string{"tag": "$output.tag", "deployed_version": "$output.deployed_version", "health_status": "$output.health_status"}, true),
 		})
+	// v3: design delta audit (docs/design-gate-delta-audit-proposal.md v2.6).
+	// The design gate gains an optional design_delta_decisions output — the
+	// platform's delta-audit adjudication record frozen at confirm time —
+	// threaded to scale_gate, ATD, implementation and self_review so the
+	// adjudications reach the steps that must honor them (adopted → spec'd,
+	// dropped → forbidden zone, skipped → re-check at review). Purely additive
+	// optional fields: runs without an audit behave exactly as before. v4 adds
+	// the §6.7 traceability marker design_delta_audit_status (incomplete when
+	// an approve freezes a prototype without an adjudication record).
+	tmpl.Version = 4
+	// v5: reflow the atdDesc/integrationReviewDesc description paragraphs —
+	// the output-contract enum runs (test_spec_manifest fields, risk matrix
+	// schema) were single unbroken ASCII lines, which overflowed the follow
+	// panel's fixed 420px column and forced a horizontal scrollbar. The text
+	// now carries explicit newlines so step.description renders as paragraphs
+	// (the panel renders with whitespace-pre-line + break-words). Description
+	// text is canvas/panel metadata only; no runtime semantics changed.
+	tmpl.Version = 5
+	// v6: requirement clarification loop (需求快审 v2 交互模型). The
+	// requirement_review step declares open_questions as an input and a
+	// structured clarifications output; the rework edge now forwards the full
+	// clarification contract (request/context/previous_draft/clarifications/
+	// open_questions/delivery_plan_draft/review_comments/review_rounds), the
+	// freeze edge keys on approve AND the server rejects approving while
+	// open_questions is non-empty (requirementFreezeGate), and the freeze
+	// carries the woven draft + clarification log downstream. Submitting a
+	// round is the only exit; review_rounds counts clarification rounds
+	// (platform-incremented on the rework edge, clamped at the escalation
+	// cap). Steps/edges changed → runtime semantics changed, hence the bump
+	// so EnsureGreenfieldDefinition upgrades stored copies in place.
+	tmpl.Version = 6
+	return tmpl
 }

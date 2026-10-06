@@ -801,6 +801,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/design/start", s.handleDesignStart)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/design/status", s.handleDesignStatus)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/design/chat", s.handleDesignChat)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/design/audit-delta", s.handleDesignAuditDelta)
+	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/design/rework", s.handleDesignRework)
 	mux.HandleFunc("GET /api/v1/projects/{name}/tasks/{taskId}/design/snapshot/{path...}", s.handleGetDesignSnapshotFile)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/start", s.handlePostTaskPreviewStart)
 	mux.HandleFunc("POST /api/v1/projects/{name}/tasks/{taskId}/preview/stop", s.handlePostTaskPreviewStop)

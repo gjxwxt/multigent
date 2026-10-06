@@ -469,6 +469,24 @@ func saveSchedulerHeartbeat(root, project, agent string, ts taskstore.Store, hb 
 	if !ok {
 		return fmt.Errorf("agent worker membership %s/%s not found", project, agent)
 	}
+	// Merge-save, not blind overwrite. This loop holds its hb copy across the
+	// whole sleep (30s+); a config change saved from the UI/API inside that
+	// window (pause, disable, wakeup-prompt edit) would otherwise be silently
+	// reverted here — live incident 2026-10-03: pause flips kept re-enabling
+	// Nora/Lina every ~30s. The scheduler loop only owns scheduling-progress
+	// fields (NextWakeupAt / SchedulerStartedAt); everything else — config
+	// (Enabled/Paused/Interval/…) and runtime state written by other paths
+	// (LastWakeup/PID/SessionID/…) — must come from the row as it exists now.
+	if current, ok2, _, _, err2 := resolveCLIProjectWorker(root, project, agent); err2 == nil && ok2 && current.ScheduleJSON != "" {
+		var live entity.HeartbeatConfig
+		if json.Unmarshal([]byte(current.ScheduleJSON), &live) == nil {
+			owned := hb.NextWakeupAt
+			schedStarted := hb.SchedulerStartedAt
+			*hb = live
+			hb.NextWakeupAt = owned
+			hb.SchedulerStartedAt = schedStarted
+		}
+	}
 	raw, err := json.Marshal(hb)
 	if err != nil {
 		return err

@@ -95,7 +95,9 @@ func driveToContractReview(t *testing.T, s *Server, workspaceID, taskID, planJSO
 	t.Helper()
 	rec := postBranchStepComplete(t, s, workspaceID, taskID, map[string]string{
 		"requirement_draft": "The console must clear local session state on expiry and export audit logs.",
-		"open_questions":    "none",
+		// The freeze gate requires the agent's converged declaration; "none"
+		// parses to zero open questions.
+		"open_questions":    "[]",
 		"requirement_items": requirementItemsJSON(),
 	})
 	if rec.Code != http.StatusOK {
@@ -176,7 +178,7 @@ func TestContractBatchReworkRepairsRequirementAnchors(t *testing.T) {
 	malformedAnchors := `["uc-1:POST /fingerprints computes SHA-256","uc-2:same fingerprint dedupes"]`
 	rec := postBranchStepComplete(t, s, workspaceID, "task-anchor-rework", map[string]string{
 		"requirement_draft": "The service must fingerprint content and dedupe registrations.",
-		"open_questions":    "none",
+		"open_questions": "[]",
 		"requirement_items": malformedAnchors,
 	})
 	if rec.Code != http.StatusOK {

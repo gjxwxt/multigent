@@ -205,9 +205,6 @@ func (s *Server) branchInstanceForAction(wfStore *workflowstore.Store, runID, br
 // the budget must have room.
 func (s *Server) retryPlanBranch(workspaceID, project, rootAgent string, root *entity.Task, run entity.WorkflowRun, inst entity.WorkflowBranchInstance, stepID, reason string) (branchActionResponse, int, error) {
 	resp := branchActionResponse{BranchID: inst.BranchID}
-	if strings.TrimSpace(inst.Status) != workflowstore.PlanWPStateFailed {
-		return resp, http.StatusConflict, fmt.Errorf("branch %q is %q, not failed; only a failed branch can be retried", inst.BranchID, inst.Status)
-	}
 	budget := 0
 	if inst.InputValues != nil {
 		if n, err := strconv.Atoi(strings.TrimSpace(inst.InputValues[planWPRetryBudgetField])); err == nil && n > 0 {
@@ -227,6 +224,31 @@ func (s *Server) retryPlanBranch(workspaceID, project, rootAgent string, root *e
 		return resp, http.StatusInternalServerError, err
 	}
 	wfStore := workflowstore.NewStore(s.controlDB, workspaceID)
+
+	// Desync self-heal (wp-7, 2026-10-06): a child that fails on the RUNNER
+	// side (delivery-contract gate, sandbox exit) reaches its terminal task
+	// status without ever reporting through the workflow step-complete path,
+	// so the branch instance can stay "running" while its child task is
+	// already done_failed — unreachable by this retry (which requires a
+	// failed instance) and invisible to the reconciler (which never reopens
+	// terminal child tasks). Realign the three states before the retry
+	// preconditions: instance → failed (with the child's last error), child
+	// run → failed on its active step. Anything still genuinely mid-flight
+	// (child task not terminal) keeps the strict preconditions below.
+	if strings.TrimSpace(inst.Status) != workflowstore.PlanWPStateFailed && child.Status.IsTerminal() {
+		healed, healErr := s.healDesyncedFailedBranch(wfStore, project, run, inst, stepID, child)
+		if healErr != nil {
+			return resp, http.StatusInternalServerError, healErr
+		}
+		if healed {
+			inst.Status = workflowstore.PlanWPStateFailed
+			log.Printf("[branch-action] run %s branch %s: desynced states realigned (child task %s terminal %s) before retry", run.ID, inst.BranchID, childID, child.Status)
+		}
+	}
+	if strings.TrimSpace(inst.Status) != workflowstore.PlanWPStateFailed {
+		return resp, http.StatusConflict, fmt.Errorf("branch %q is %q, not failed; only a failed branch can be retried", inst.BranchID, inst.Status)
+	}
+
 	childRun, found, err := wfStore.RunForTask(project, childID)
 	if err != nil || !found {
 		return resp, http.StatusNotFound, fmt.Errorf("child run not found for branch %q", inst.BranchID)
@@ -555,4 +577,86 @@ func (s *Server) appendRootTaskComment(project, rootAgent string, root *entity.T
 	root.Summary = strings.TrimSpace(strings.TrimSpace(root.Summary) + "\n[" + stamp + "] " + note)
 	root.UpdatedAt = time.Now().UTC()
 	_ = s.ts.PersistTask(project, rootAgent, root)
+}
+
+// healDesyncedFailedBranch realigns a branch whose child reached a terminal
+// FAILED task status without the workflow step-complete report (runner-side
+// gate failure, sandbox crash). The honest "already dispatched, never
+// reported" shape is: child run active on a pending step, instance running.
+// The heal marks that active step failed (carrying the child task's last
+// error), the child run failed, and the instance failed — exactly the state a
+// workflow-reported failure would have produced, making the branch reachable
+// by the operator retry. Returns false (no writes) when the child run is
+// already failed (nothing desynced on that side) or any shape it does not
+// recognise — recognised shapes only, so a mid-flight child can never be
+// failed by this path.
+func (s *Server) healDesyncedFailedBranch(wfStore *workflowstore.Store, project string, run entity.WorkflowRun, inst entity.WorkflowBranchInstance, stepID string, child *entity.Task) (bool, error) {
+	childRun, found, err := wfStore.RunForTask(project, child.ID)
+	if err != nil || !found {
+		return false, err
+	}
+	childRunStatus := strings.TrimSpace(childRun.Status)
+	if childRunStatus == "failed" {
+		// Run side already failed; only the instance is stale.
+		inst.Status = workflowstore.PlanWPStateFailed
+		inst.UpdatedAt = time.Now().UTC()
+		if strings.TrimSpace(child.LastError) != "" && inst.Summary == "" {
+			inst.Summary = fmt.Sprintf("child task %s failed: %s", child.ID, strings.TrimSpace(child.LastError))
+		}
+		if err := wfStore.SaveBranchInstance(&inst); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if childRunStatus != "active" {
+		return false, nil // cancelled/terminal shapes are not ours to touch
+	}
+	instances, err := wfStore.ListStepInstances(childRun.ID)
+	if err != nil {
+		return false, err
+	}
+	now := time.Now().UTC()
+	healedStep := false
+	for i := range instances {
+		if instances[i].StepID != childRun.ActiveStepID {
+			continue
+		}
+		if strings.TrimSpace(instances[i].Status) != "pending" && strings.TrimSpace(instances[i].Status) != "running" {
+			return false, nil // step already terminal: unrecognised shape
+		}
+		instances[i].Status = "failed"
+		instances[i].Summary = fmt.Sprintf("runner-side failure reported on task %s: %s", child.ID, strings.TrimSpace(child.LastError))
+		instances[i].FinishedAt = now
+		instances[i].UpdatedAt = now
+		if err := wfStore.SaveStepInstance(&instances[i]); err != nil {
+			return false, err
+		}
+		_ = wfStore.SaveStepEvent(&entity.WorkflowStepEvent{
+			RunID: childRun.ID, StepID: instances[i].StepID, Status: "failed",
+			ActorType: instances[i].ActorType, ActorID: instances[i].ActorID,
+			Summary: instances[i].Summary, StartedAt: instances[i].StartedAt,
+			FinishedAt: now, InputArtifact: instances[i].InputArtifact,
+			OutputArtifact: instances[i].OutputArtifact, InputValues: instances[i].InputValues,
+			CreatedAt: now,
+		})
+		healedStep = true
+		break
+	}
+	if !healedStep {
+		return false, nil
+	}
+	childRun.Status = "failed"
+	childRun.UpdatedAt = now
+	if err := wfStore.SaveRun(&childRun); err != nil {
+		return false, err
+	}
+	inst.Status = workflowstore.PlanWPStateFailed
+	inst.UpdatedAt = now
+	if strings.TrimSpace(child.LastError) != "" && inst.Summary == "" {
+		inst.Summary = fmt.Sprintf("child task %s failed: %s", child.ID, strings.TrimSpace(child.LastError))
+	}
+	if err := wfStore.SaveBranchInstance(&inst); err != nil {
+		return false, err
+	}
+	return true, nil
 }

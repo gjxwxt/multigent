@@ -107,7 +107,11 @@ func (s *Server) handleDeployAIContext(w http.ResponseWriter, r *http.Request) {
 	}
 	model := deployAIDefaultModel
 	if agent := s.deployAIProjectAgent(project); agent != "" {
-		if creds, err := s.resolveDesignModelProvider(project, agent, deployAIDefaultModel); err == nil && creds != nil && creds.Model != "" {
+		// Configured layers first (runtime model / provider default); the
+		// bare constant is only a display fallback for unbound agents.
+		if m := s.designResolvedModel(project, agent, ""); m != "" {
+			model = m
+		} else if creds, err := s.resolveDesignModelProvider(project, agent, model); err == nil && creds != nil && creds.Model != "" {
 			model = creds.Model
 		}
 	}
@@ -163,10 +167,11 @@ func (s *Server) handleDeployAIChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	agent := s.deployAIProjectAgent(project)
-	model := deployAIDefaultModel
-	if strings.TrimSpace(body.Model) != "" {
-		model = strings.TrimSpace(body.Model)
-	}
+	// Resolution order mirrors the design gate: explicit request model >
+	// configured model account default (agent runtime model / provider model).
+	// The odDefaultModel constant is the last-resort fallback inside
+	// designModelOrDefault, never a primary choice.
+	model := s.designModelOrDefault(project, agent, body.Model)
 	var creds *designModelCreds
 	if agent != "" {
 		resolved, err := s.resolveDesignModelProvider(project, agent, model)
@@ -216,6 +221,25 @@ func (s *Server) deployAIProjectAgent(project string) string {
 	for _, a := range agents {
 		if a != nil && strings.TrimSpace(a.Name) != "" {
 			return strings.TrimSpace(a.Name)
+		}
+	}
+	return ""
+}
+
+// deployAIProjectAgentModel returns the first agent runtime model in the
+// project (Fusion/* names included). Callers use it to ride the same gateway
+// routing as agent runs instead of a bare default model name.
+func (s *Server) deployAIProjectAgentModel(project string) string {
+	agents, err := s.st.ListAgents(project)
+	if err != nil {
+		return ""
+	}
+	for _, a := range agents {
+		if a == nil || a.Meta == nil {
+			continue
+		}
+		if m := strings.TrimSpace(a.Meta.RuntimeModel); m != "" {
+			return m
 		}
 	}
 	return ""
