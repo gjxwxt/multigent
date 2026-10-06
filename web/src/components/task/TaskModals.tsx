@@ -1228,6 +1228,38 @@ export function WorkflowRuntimePanel({
     }
   }, [isQASignoff, inputValues])
 
+  // Requirement clarification loop (v6): per-question cards replace the free-
+  // text-only quick review. Questions come from THIS instance's open_questions
+  // input (the latest reworked draft), not from historical records.
+  const isRequirementReview = Boolean(step && step.id === 'requirement_review' && step.type === 'human_review')
+  // The loop only exists in template v6+: its requirement_review step declares
+  // open_questions as an input. Runs frozen on an older snapshot (v5 and
+  // earlier, e.g. started before the v6 deploy) never materialize that input,
+  // so there is nothing to converge — the panel falls back to the standard
+  // approve/request_changes pair instead of a freeze gate the run can never
+  // satisfy (caught live: a v5 run showed "已收敛" but only the rework button,
+  // because agentDeclaredClean required a field the v5 edge map never fills).
+  const clarifyLoopActive = isRequirementReview && (step.inputFields ?? []).some((field) => field.name === 'open_questions')
+  const clarifyQuestions = useMemo(() => (clarifyLoopActive ? parseOpenQuestionCards(inputValues['open_questions']) : []), [clarifyLoopActive, inputValues])
+  const agentDeclaredClean = clarifyLoopActive && inputValues['open_questions'] !== undefined && parseOpenQuestionCards(inputValues['open_questions']).length === 0
+  const [clarifyState, setClarifyState] = useState<Record<string, { conclusion: string; deferred: boolean; reason: string }>>({})
+  useEffect(() => {
+    setClarifyState({})
+  }, [step?.id, instance?.id])
+  const pendingClarify = clarifyLoopActive ? pendingClarifyCount(clarifyQuestions, clarifyState) : 0
+  // Freeze gate mirrors the server: approve only when the agent declared
+  // open_questions empty AND every visible question has a conclusion.
+  const canFreezeRequirement = clarifyLoopActive && clarifyQuestions.length === 0 && agentDeclaredClean
+
+  // Open questions from upstream agent steps, pinned above everything so a
+  // reviewer answers them before approving — they used to hide inside the
+  // collapsed "previous outputs" record card and were easy to miss. Suppressed
+  // once requirement_review has ruled: downstream steps don't re-adjudicate.
+  const openQuestions = useMemo(
+    () => (openQuestionsAdjudicated(records) ? null : extractOpenQuestions(records)),
+    [records],
+  )
+
   const highRiskFailedItems = useMemo(() => {
     return qaMatrixItems.filter((item: any) => String(item.risk_level).toLowerCase() === 'high' && String(item.status).toLowerCase() === 'failed')
   }, [qaMatrixItems])
@@ -1249,10 +1281,105 @@ export function WorkflowRuntimePanel({
         </div>
       )}
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
+        {openQuestions && !isRequirementReview && (
+          <div data-testid="open-questions-pinned" className="rounded-lg border border-amber-300 bg-amber-50 p-3 dark:border-amber-500/50 dark:bg-amber-950/40">
+            <div className="flex items-center gap-2">
+              <MessageSquare className="size-4 shrink-0 text-amber-600 dark:text-amber-400" />
+              <p className="text-sm font-semibold text-amber-800 dark:text-amber-200">
+                {t('workflows.review.openQuestionsTitle', { defaultValue: '待澄清问题（请先逐条确认再审核）' })}
+              </p>
+              <span className="ml-auto shrink-0 rounded-full bg-amber-200/70 px-2 py-0.5 text-[11px] font-semibold text-amber-800 dark:bg-amber-900/60 dark:text-amber-200">
+                {t('workflows.review.openQuestionsCount', { count: openQuestions.text.split('\n').length, defaultValue: '{{count}} 条' })}
+              </span>
+            </div>
+            <div className="mt-2 space-y-1.5">
+              {openQuestions.text.split('\n').map((line, idx) => (
+                <p key={idx} className="break-words text-xs leading-relaxed text-amber-900 dark:text-amber-100">
+                  {line}
+                </p>
+              ))}
+            </div>
+            <p className="mt-2 border-t border-amber-200/70 pt-2 text-[11px] text-amber-700 dark:border-amber-500/30 dark:text-amber-300/80">
+              {t('workflows.review.openQuestionsHint', { step: openQuestions.stepTitle, defaultValue: '来自上游步骤 ' + openQuestions.stepTitle + '；可在下方审核意见中逐条给出结论后提交。' })}
+            </p>
+          </div>
+        )}
+        {clarifyLoopActive && (
+          <div
+            data-testid="requirement-clarify-zone"
+            className={
+              clarifyQuestions.length > 0
+                ? 'rounded-lg border border-amber-300 bg-amber-50 p-3 dark:border-amber-500/50 dark:bg-amber-950/40'
+                : // Converged: success green, not warning amber — this state
+                  // means "all questions answered", a pass, not a reminder.
+                  'rounded-lg border border-emerald-300 bg-emerald-50 p-3 dark:border-emerald-500/50 dark:bg-emerald-950/40'
+            }
+          >
+            <div className="flex items-center gap-2">
+              <MessageSquare
+                className={
+                  clarifyQuestions.length > 0
+                    ? 'size-4 shrink-0 text-amber-600 dark:text-amber-400'
+                    : 'size-4 shrink-0 text-emerald-600 dark:text-emerald-400'
+                }
+              />
+              <p
+                className={
+                  clarifyQuestions.length > 0
+                    ? 'text-sm font-semibold text-amber-800 dark:text-amber-200'
+                    : 'text-sm font-semibold text-emerald-800 dark:text-emerald-200'
+                }
+              >
+                {clarifyQuestions.length > 0
+                  ? t('workflows.clarify.zoneTitle', { defaultValue: '待澄清问题 · 逐题写结论' })
+                  : t('workflows.clarify.zoneTitleClean', { defaultValue: '待澄清问题 · 已收敛' })}
+              </p>
+              <span
+                className={
+                  clarifyQuestions.length > 0
+                    ? 'ml-auto shrink-0 rounded-full bg-amber-200/70 px-2 py-0.5 text-[11px] font-semibold text-amber-800 dark:bg-amber-900/60 dark:text-amber-200'
+                    : 'ml-auto shrink-0 rounded-full bg-emerald-200/70 px-2 py-0.5 text-[11px] font-semibold text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-200'
+                }
+              >
+                {clarifyQuestions.length > 0
+                  ? t('workflows.clarify.progress', { done: clarifyQuestions.length - pendingClarify, total: clarifyQuestions.length, defaultValue: '{{done}}/{{total}} 已给出结论' })
+                  : t('workflows.clarify.allClear', { defaultValue: 'open_questions 已清零' })}
+              </span>
+            </div>
+            <p
+              className={
+                clarifyQuestions.length > 0
+                  ? 'mt-1.5 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300/80'
+                  : 'mt-1.5 text-[11px] leading-relaxed text-emerald-700 dark:text-emerald-300/80'
+              }
+            >
+              {clarifyQuestions.length > 0
+                ? t('workflows.clarify.zoneHint', { defaultValue: '每题一个结论输入框，写了就自动计入；个别不方便答的走「本轮不答」。提交后 agent 把结论织回需求正文出下一版。' })
+                : t('workflows.clarify.zoneHintClean', { defaultValue: '上一轮的结论已全部织回需求正文，agent 申报无待澄清问题——确认冻结后进入设计。' })}
+            </p>
+            {clarifyQuestions.length > 0 && (
+              <RequirementClarifyCards
+                questions={clarifyQuestions}
+                clarifications={clarifyState}
+                onChange={(next) => {
+                  setClarifyState(next)
+                  // Mirror into reviewOutputs so the submit path (which merges
+                  // reviewOutputs into the POST body) carries the serialized
+                  // conclusions as the clarifications output without any
+                  // changes to the onSubmitReview signature.
+                  const pending = pendingClarifyCount(clarifyQuestions, next)
+                  onChangeOutput('clarifications', pending > 0 ? '' : serializeClarifications(clarifyQuestions, next))
+                }}
+              />
+            )}
+          </div>
+        )}
         {step.description && (
-          <WorkflowPanelBlock title={t('workflows.detail.goal')}>
-            <p className="text-sm text-neutral-700 dark:text-zinc-300">{step.description}</p>
-          </WorkflowPanelBlock>
+          <WorkflowCollapsibleBlock title={t('workflows.detail.goal')} badge={step.description.length > 80 ? t('workflows.detail.longText', { defaultValue: '长文' }) : undefined}>
+            {/* Template descriptions carry explicit \n\n paragraph breaks and
+                enum runs without natural break points; pre-line honors both. */}
+            <p className="whitespace-pre-line break-words text-sm text-neutral-700 dark:text-zinc-300">{step.description}</p>
+          </WorkflowCollapsibleBlock>
         )}
 
         {hasInput && (
@@ -1263,7 +1390,7 @@ export function WorkflowRuntimePanel({
         )}
 
         {records.length > 0 && (
-          <WorkflowPanelBlock title={t('workflows.detail.previousOutputs')}>
+          <WorkflowCollapsibleBlock title={t('workflows.detail.previousOutputs')} badge={String(records.length)}>
             <div className="space-y-3">
               {records.map((item) => {
                 const itemStep = stepByIDMap.get(item.stepId)
@@ -1281,13 +1408,24 @@ export function WorkflowRuntimePanel({
                 )
               })}
             </div>
-          </WorkflowPanelBlock>
+          </WorkflowCollapsibleBlock>
         )}
 
         {(canReview || showReadonlyOutput) && (
           <WorkflowPanelBlock title={t('workflows.detail.output')}>
             {canReview ? (
               <div className="space-y-3">
+              {clarifyLoopActive && clarifyQuestions.length > 0 ? (
+                /* The per-question cards above replace the free-text comments
+                   box as the primary output surface; the overall note collapses
+                   (低频出口, same contract as the prototype). */
+                <OverallCommentsCollapsible
+                  value={reviewComments}
+                  onChange={onChangeComments}
+                  missing={missingReviewField === 'comments'}
+                />
+              ) : (
+              <>
               {editableOutputFields.length === 0 && (
                 <textarea
                   value={reviewComments}
@@ -1374,6 +1512,8 @@ export function WorkflowRuntimePanel({
                   </label>
                 )
               })}
+              </>
+              )}
               {isQASignoff && highRiskFailedItems.length > 0 && (
                 <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-xs text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300 font-medium">
                   ⚠️ {t('workflows.qa.highRiskFailedAlert', { defaultValue: '存在高风险测试失败项，准入主干已被系统硬阻断。请点击「需要修改」打回修复。' })}
@@ -1423,7 +1563,30 @@ export function WorkflowRuntimePanel({
                 </div>
               )}
               <div className="flex justify-end gap-2">
-                {usesDefaultReviewButtons ? (
+                {clarifyLoopActive ? (
+                  <>
+                    {canFreezeRequirement ? (
+                      <button
+                        type="button"
+                        onClick={() => onSubmitReview('approve')}
+                        disabled={Boolean(reviewBusy)}
+                        className="rounded-lg border border-emerald-600 bg-emerald-600 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50 dark:border-emerald-500 dark:bg-emerald-600 dark:text-white dark:hover:bg-emerald-700"
+                      >
+                        {reviewBusy === 'approve' ? t('forms.working') : t('workflows.clarify.freeze', { defaultValue: '✓ 确认冻结，进入设计' })}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => onSubmitReview('request_changes')}
+                        disabled={Boolean(reviewBusy)}
+                        title={t('workflows.clarify.submitTitle', { defaultValue: '结论回流给 agent，织入需求正文出下一版；全部收敛后才出现「确认冻结」' })}
+                        className="rounded-lg border border-sky-600 bg-sky-600 px-3 py-2 text-sm font-semibold text-white hover:bg-sky-700 disabled:opacity-50 dark:border-sky-500 dark:bg-sky-600 dark:text-white dark:hover:bg-sky-700"
+                      >
+                        {reviewBusy === 'request_changes' ? t('forms.working') : t('workflows.clarify.submitRound', { defaultValue: '↻ 提交结论，回流重梳' })}
+                      </button>
+                    )}
+                  </>
+                ) : usesDefaultReviewButtons ? (
                   <>
                     <button type="button" onClick={() => onSubmitReview('request_changes')} disabled={Boolean(reviewBusy)} className="rounded-lg border border-neutral-300 bg-white px-3 py-2 text-sm font-medium text-neutral-600 hover:bg-neutral-50 disabled:opacity-50 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800">
                       {reviewBusy === 'request_changes' ? t('forms.working') : t('workflows.review.requestChanges')}
@@ -1444,14 +1607,25 @@ export function WorkflowRuntimePanel({
                   </button>
                 )}
               </div>
+              {clarifyLoopActive && !canFreezeRequirement && (
+                <p className="text-[11px] leading-relaxed text-neutral-400 dark:text-zinc-500">
+                  {t('workflows.clarify.hintLoop', { defaultValue: '提交后 agent 把结论织进需求正文产出下一版；下一版不再有待澄清问题时，这里才出现「确认冻结」。' })}
+                </p>
+              )}
               </div>
             ) : (
-              <>
+              /* Read-only output display: default-collapsed like Goal/Previous
+                 outputs — the step already finished, so the full dump is
+                 reference material, not the reviewer's working set. */
+              <WorkflowCollapsibleBlock
+                title={t('workflows.detail.outputValues', { defaultValue: '输出值' })}
+                badge={String(Object.keys(outputValues).length || '')}
+              >
                 <WorkflowFieldList fields={step.outputFields ?? []} values={outputValues} project={project} taskID={taskID} />
                 {Object.keys(outputValues).length > 0
                   ? null
                   : <WorkflowValuesOrArtifact values={instance?.outputValues} fields={step.outputFields} artifact={instance?.outputArtifact || instance?.summary} />}
-              </>
+              </WorkflowCollapsibleBlock>
             )}
           </WorkflowPanelBlock>
         )}
@@ -1974,7 +2148,7 @@ function WorkflowValueMap({ values, fields = [], compact = false }: { values: Re
               ) : key === 'test_report' ? (
                 <QATestReportViewer json={String(value)} />
               ) : (
-                <WorkflowValueText value={String(value)} />
+                <CollapsibleFieldValue value={String(value)} />
               )}
             </div>
           </div>
@@ -1989,6 +2163,311 @@ function WorkflowPanelBlock({ title, children }: { title: string; children: Reac
     <section>
       <h5 className="mb-2 text-xs font-semibold uppercase tracking-wider text-neutral-400 dark:text-zinc-500">{title}</h5>
       {children}
+    </section>
+  )
+}
+
+/**
+ * Extracts open questions from upstream step records so a pending human review
+ * shows them pinned at the top of the panel instead of burying them inside a
+ * collapsed record card. Returns empty string when the upstream produced none
+ * (or only a header line with no question rows).
+ */
+function extractOpenQuestions(records: WorkflowRecord[]): { text: string; stepTitle: string } | null {
+  for (let i = records.length - 1; i >= 0; i--) {
+    const record = records[i]
+    const values = hasWorkflowValues(record.outputValues) ? record.outputValues! : parseWorkflowArtifact(record.outputArtifact || record.summary || '')
+    const raw = String(values?.['open_questions'] ?? '').trim()
+    if (!raw) continue
+    const body = raw
+      .split('\n')
+      .filter((line) => /^\s*O\d+/.test(line) || /^[A-Z]\d+[【\[(]/.test(line))
+      .join('\n')
+      .trim()
+    if (body) return { text: body, stepTitle: record.stepId }
+  }
+  return null
+}
+
+/**
+ * The pinned open-questions banner is only meaningful while the questions are
+ * still AWAITING a human ruling. Once a requirement_review instance has
+ * completed with a decision, those questions were adjudicated (approved as-is
+ * or answered via the clarification loop) — pinning them on downstream steps
+ * (design review, implementation…) made the run look unreviewed when it
+ * wasn't (caught live: o85w50's design_review showed the requirement_draft
+ * O1-O7 banner after the quick review had already approved).
+ */
+function openQuestionsAdjudicated(records: WorkflowRecord[]): boolean {
+  return records.some(
+    (record) =>
+      record.stepId === 'requirement_review' &&
+      record.status === 'completed' &&
+      String((record.outputValues ?? {})['decision'] ?? '').trim() !== '',
+  )
+}
+
+/** One parsed open-question row for the per-question clarification cards. */
+export type ClarifyQuestion = {
+  id: string
+  text: string
+  raw: string
+}
+
+const OPEN_QUESTION_ROW = /^\s*[-*•]?\s*([A-Za-z]\d+)[【\[(：:]?\s*(.*)$/
+
+/**
+ * Parses an open_questions value into question rows. Accepts the agent's JSON
+ * array shape ([{id, priority, question, ...}]) and falls back to the
+ * line-based contract ("O1【高·技术栈】question text" per line). Returns []
+ * for cleared/none values so the freeze gate treats "[]" as converged.
+ */
+export function parseOpenQuestionCards(raw?: string | null): ClarifyQuestion[] {
+  const text = String(raw ?? '').trim()
+  if (!text || text === '[]' || text.toLowerCase() === 'none' || text === '无') return []
+  if (text.startsWith('[')) {
+    try {
+      const parsed: unknown = JSON.parse(text)
+      if (Array.isArray(parsed)) {
+        return parsed
+          .map((entry, index): ClarifyQuestion | null => {
+            if (typeof entry === 'string') {
+              const question = entry.trim()
+              return question ? { id: `Q${index + 1}`, text: question, raw: question } : null
+            }
+            if (entry && typeof entry === 'object') {
+              const record = entry as Record<string, unknown>
+              const question = String(record.question ?? record.text ?? record.description ?? '').trim()
+              if (!question) return null
+              const id = String(record.id ?? '').trim() || `Q${index + 1}`
+              const priority = String(record.priority ?? '').trim()
+              const reason = String(record.blocking_reason ?? '').trim()
+              const parts = [priority ? `【${priority}】` : '', question, reason ? `（${reason}）` : '']
+              return { id, text: question, raw: parts.filter(Boolean).join(' ') }
+            }
+            return null
+          })
+          .filter((card): card is ClarifyQuestion => card !== null)
+      }
+    } catch {
+      // Not valid JSON — fall through to line-based parsing.
+    }
+  }
+  const cards: ClarifyQuestion[] = []
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    const match = OPEN_QUESTION_ROW.exec(trimmed)
+    if (match && match[2].trim()) {
+      cards.push({ id: match[1], text: match[2].trim(), raw: trimmed })
+    } else if (trimmed) {
+      // No id prefix — still a question row; give it a stable positional id.
+      cards.push({ id: `Q${cards.length + 1}`, text: trimmed, raw: trimmed })
+    }
+  }
+  return cards
+}
+
+/** Priority tag extracted from a question line's 【高/中/低】 prefix, if any. */
+function clarifyPriorityLabel(text: string): { label: string; cls: string } | null {
+  const m = /[【\[(]\s*(高|中|低|high|mid|medium|low)\s*[/·|]?/i.exec(text)
+  if (!m) return null
+  const key = m[1].toLowerCase()
+  if (key === '高' || key === 'high') return { label: '高', cls: 'border-red-200 bg-red-50 text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300' }
+  if (key === '中' || key === 'mid' || key === 'medium') return { label: '中', cls: 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300' }
+  return { label: '低', cls: 'border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-300' }
+}
+
+/**
+ * Per-question clarification cards for the requirement quick-review step
+ * (requirement clarification loop). One default action per question — write a
+ * conclusion; a low-frequency "defer with reason" link collapses per card.
+ * State is derived from content, never from buttons. The serialized
+ * conclusions live in reviewOutputs.clarifications as a JSON array.
+ */
+function RequirementClarifyCards({
+  questions,
+  clarifications,
+  onChange,
+}: {
+  questions: ClarifyQuestion[]
+  clarifications: Record<string, { conclusion: string; deferred: boolean; reason: string }>
+  onChange: (next: Record<string, { conclusion: string; deferred: boolean; reason: string }>) => void
+}) {
+  const { t } = useTranslation()
+
+  const update = (id: string, patch: Partial<{ conclusion: string; deferred: boolean; reason: string }>) => {
+    const current = clarifications[id] || { conclusion: '', deferred: false, reason: '' }
+    const next = { ...clarifications, [id]: { ...current, ...patch } }
+    // Writing a conclusion clears the deferred state — a question is either
+    // answered or deferred, never both (same contract as the prototype).
+    if (patch.conclusion !== undefined && patch.conclusion.trim()) {
+      next[id] = { conclusion: patch.conclusion, deferred: false, reason: '' }
+    }
+    onChange(next)
+  }
+
+  return (
+    <div className="mt-2 space-y-2">
+      {questions.map((q) => {
+        const state = clarifications[q.id] || { conclusion: '', deferred: false, reason: '' }
+        const answered = state.conclusion.trim().length > 0
+        const deferred = state.deferred && state.reason.trim().length > 0 && !answered
+        const pri = clarifyPriorityLabel(q.text)
+        return (
+          <div
+            key={q.id}
+            data-testid={`clarify-card-${q.id}`}
+            className={cn(
+              'rounded-lg border bg-white p-2.5 dark:bg-zinc-950',
+              answered || deferred
+                ? 'border-emerald-200 dark:border-emerald-900/60'
+                : 'border-amber-300 dark:border-amber-500/50',
+            )}
+          >
+            <div className="flex items-center gap-1.5">
+              <span className="rounded border border-neutral-200 bg-neutral-50 px-1.5 py-0.5 font-mono text-[10px] font-bold text-neutral-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400">{q.id}</span>
+              {pri && <span className={cn('rounded-full border px-1.5 py-0.5 text-[10px] font-semibold', pri.cls)}>{pri.label}</span>}
+              <span
+                className={cn(
+                  'ml-auto rounded-full px-1.5 py-0.5 text-[10px] font-semibold',
+                  answered
+                    ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300'
+                    : deferred
+                      ? 'bg-violet-100 text-violet-700 dark:bg-violet-900/50 dark:text-violet-300'
+                      : 'bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300',
+                )}
+              >
+                {answered
+                  ? t('workflows.clarify.answered', { defaultValue: '已答复' })
+                  : deferred
+                    ? t('workflows.clarify.deferred', { defaultValue: '本轮不答' })
+                    : t('workflows.clarify.pending', { defaultValue: '待澄清' })}
+              </span>
+            </div>
+            <p className="mt-1.5 break-words text-xs leading-relaxed text-neutral-800 dark:text-zinc-200">{q.text}</p>
+            {!state.deferred && (
+              <textarea
+                value={state.conclusion}
+                onChange={(e) => update(q.id, { conclusion: e.target.value })}
+                rows={2}
+                placeholder={t('workflows.clarify.conclusionPlaceholder', { defaultValue: '给出明确结论，agent 将按此重梳需求…' })}
+                className={cn(reviewCardInputClass, 'mt-1.5 resize-y')}
+              />
+            )}
+            {state.deferred && (
+              <input
+                type="text"
+                value={state.reason}
+                onChange={(e) => update(q.id, { reason: e.target.value })}
+                placeholder={t('workflows.clarify.reasonPlaceholder', { defaultValue: '本轮不答的原因（必填，随澄清记录留痕）…' })}
+                className={cn(reviewCardInputClass, 'mt-1.5')}
+              />
+            )}
+            <div className="mt-1 text-right">
+              {state.deferred ? (
+                <button type="button" onClick={() => update(q.id, { deferred: false, reason: '' })} className="text-[11px] text-neutral-400 underline underline-offset-2 hover:text-neutral-600 dark:text-zinc-500 dark:hover:text-zinc-400">
+                  {t('workflows.clarify.answerInstead', { defaultValue: '改为作答' })}
+                </button>
+              ) : (
+                <button type="button" onClick={() => update(q.id, { deferred: true })} className="text-[11px] text-neutral-400 underline underline-offset-2 hover:text-neutral-600 dark:text-zinc-500 dark:hover:text-zinc-400">
+                  {t('workflows.clarify.deferLink', { defaultValue: '本轮不答（需留原因）' })}
+                </button>
+              )}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+const reviewCardInputClass =
+  'w-full rounded-md border border-neutral-300 bg-white px-2.5 py-1.5 text-xs text-neutral-900 outline-none focus:border-sky-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100'
+
+/** Collapsible overall-comment box (requirement quick review only): the
+    per-question conclusions are the primary output, the overall note is a
+    low-frequency extra — collapsed by default, content survives folding. */
+function OverallCommentsCollapsible({ value, onChange, missing }: { value: string; onChange: (value: string) => void; missing?: boolean }) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+  return (
+    <div>
+      <button type="button" onClick={() => setOpen((v) => !v)} className="flex items-center gap-2 text-xs text-neutral-500 hover:text-neutral-700 dark:text-zinc-500 dark:hover:text-zinc-300" aria-expanded={open}>
+        <span className={cn('font-bold', open && 'text-neutral-600 dark:text-zinc-300')}>{open ? '−' : '+'}</span>
+        {t('workflows.clarify.overallToggle', { defaultValue: '补充意见（总评，选填，随结论一并回流）' })}
+        {!open && value.trim() && (
+          <span className="rounded-full border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[10px] font-medium text-sky-600 dark:border-sky-800 dark:bg-sky-950/60 dark:text-sky-300">
+            {t('workflows.clarify.filled', { defaultValue: '已填写' })}
+          </span>
+        )}
+      </button>
+      {open && (
+        <textarea
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          rows={3}
+          placeholder={t('workflows.clarify.overallPlaceholder', { defaultValue: '范围性、优先级层面的意见；逐题结论写在上面的卡片里…' })}
+          className={cn('mt-2 w-full rounded-lg border bg-white px-3 py-2 text-sm text-neutral-900 outline-none resize-y dark:bg-zinc-900 dark:text-zinc-100', missing ? 'border-red-400 focus:border-red-500 dark:border-red-500' : 'border-neutral-300 focus:border-sky-400 dark:border-zinc-700')}
+        />
+      )}
+    </div>
+  )
+}
+
+/** Serializes per-question card state into the clarifications JSON output. */
+function serializeClarifications(
+  questions: ClarifyQuestion[],
+  clarifications: Record<string, { conclusion: string; deferred: boolean; reason: string }>,
+): string {
+  const rows = questions.map((q) => {
+    const state = clarifications[q.id] || { conclusion: '', deferred: false, reason: '' }
+    const answered = state.conclusion.trim().length > 0
+    const deferred = state.deferred && state.reason.trim().length > 0 && !answered
+    return {
+      id: q.id,
+      question: q.text,
+      status: answered ? 'answered' : deferred ? 'deferred' : 'pending',
+      conclusion: answered ? state.conclusion.trim() : null,
+      deferred_reason: deferred ? state.reason.trim() : null,
+    }
+  })
+  return JSON.stringify(rows)
+}
+
+/** Pending = no conclusion and no valid deferral. */
+function pendingClarifyCount(
+  questions: ClarifyQuestion[],
+  clarifications: Record<string, { conclusion: string; deferred: boolean; reason: string }>,
+): number {
+  return questions.filter((q) => {
+    const state = clarifications[q.id] || { conclusion: '', deferred: false, reason: '' }
+    return !(state.conclusion.trim() || (state.deferred && state.reason.trim()))
+  }).length
+}
+
+/** Collapsible section used for low-priority context (goal, upstream records). */
+function WorkflowCollapsibleBlock({ title, badge, defaultOpen = false, children }: { title: string; badge?: string; defaultOpen?: boolean; children: ReactNode }) {
+  const [open, setOpen] = useState(defaultOpen)
+  return (
+    <section className="overflow-hidden rounded-lg border border-neutral-100 bg-neutral-50/60 dark:border-zinc-800 dark:bg-zinc-900/40">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-neutral-100/70 dark:hover:bg-zinc-800/60"
+      >
+        <span className={cn('inline-flex size-4 shrink-0 items-center justify-center rounded text-xs font-semibold text-neutral-400 dark:text-zinc-500', open && 'text-neutral-600 dark:text-zinc-300')}>
+          {open ? '−' : '+'}
+        </span>
+        <h5 className="min-w-0 flex-1 truncate text-xs font-semibold uppercase tracking-wider text-neutral-400 dark:text-zinc-500">{title}</h5>
+        {badge && (
+          <span className="shrink-0 rounded-full border border-neutral-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-neutral-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400">
+            {badge}
+          </span>
+        )}
+      </button>
+      {open && <div className="px-3 pb-3">{children}</div>}
     </section>
   )
 }
@@ -2050,7 +2529,7 @@ function WorkflowFieldList({
                 ) : field.name === 'test_report' ? (
                   <QATestReportViewer json={val} />
                 ) : (
-                  <WorkflowValueText value={val} />
+                  <CollapsibleFieldValue value={val} />
                 )}
               </div>
             )}
@@ -2128,6 +2607,60 @@ let docPreviewZIndexCounter = 90
 function nextDocPreviewZIndex() {
   docPreviewZIndexCounter += 1
   return docPreviewZIndexCounter
+}
+
+/**
+ * Long field values (structured JSON arrays, woven requirement docs) render
+ * collapsed by default with a summary line + expand toggle; short values
+ * render directly. The right rail used to run multiple screens tall because
+ * every field dumped its full value inline.
+ */
+const COLLAPSIBLE_VALUE_THRESHOLD = 600
+
+function CollapsibleFieldValue({ value }: { value: string }) {
+  const { t } = useTranslation()
+  const text = String(value ?? '')
+  const structured = parseWorkflowStructuredValue(text)
+  // Arrays carry a natural item count for the summary badge; objects/text
+  // fall back to a byte-size estimate.
+  const itemCount = Array.isArray(structured) ? structured.length : null
+  const sizeLabel = itemCount !== null
+    ? t('workflows.detail.items', { count: itemCount, defaultValue: '{{count}} 项' })
+    : `${Math.max(1, Math.round(new Blob([text]).size / 1024))} KB`
+  const long = itemCount !== null
+    // Every structured array entry renders as a full card (id/source/text
+    // blocks) — even 3 entries run a screen tall, so collapse anything past
+    // two. The requirement-anchors array the reviewers flagged has 3-6.
+    ? itemCount > 2
+    : text.length > COLLAPSIBLE_VALUE_THRESHOLD
+  if (!long) return <WorkflowValueText value={text} />
+  return <CollapsibleLongValue text={text} summary={sizeLabel} />
+}
+
+function CollapsibleLongValue({ text, summary }: { text: string; summary: string }) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-1.5 text-left text-xs font-semibold text-sky-600 hover:text-sky-700 dark:text-sky-400 dark:hover:text-sky-300"
+      >
+        <span className={cn('inline-flex size-4 shrink-0 items-center justify-center rounded text-xs', open && 'text-neutral-500 dark:text-zinc-400')}>
+          {open ? '−' : '+'}
+        </span>
+        <span>{open ? t('workflows.detail.collapse', { defaultValue: '收起' }) : t('workflows.detail.expand', { defaultValue: '展开' })}</span>
+        <span className="rounded-full border border-neutral-200 bg-neutral-50 px-1.5 py-0.5 text-[10px] font-medium text-neutral-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400">{summary}</span>
+      </button>
+      {open && (
+        <div className="mt-2">
+          <WorkflowValueText value={text} />
+        </div>
+      )}
+    </div>
+  )
 }
 
 function WorkflowValueText({ value }: { value: string }) {

@@ -464,7 +464,12 @@ function ProjectChatOpsChannel({ projectId }: { projectId: string }) {
     silentStatuses: [404],
     keepPreviousDataOnReload: true,
   })
-  const channels = state.status === 'ok' ? (state.data.channels ?? []) : []
+  // Older servers serialize a link with zero bindings as `"bindings": null`
+  // (Go nil slice); normalize here so the render below can keep treating it
+  // as an array — same nil-array family as the 2ef9a165 preplan crash.
+  const channels = state.status === 'ok'
+    ? (state.data.channels ?? []).map((chan) => ({ ...chan, bindings: chan.bindings ?? [] }))
+    : []
 
   async function handleRetrySync(item: ProjectChannelListItem) {
     setRetrying(true)

@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { ChevronDown, ChevronUp, Plus, Trash2 } from 'lucide-react'
+import { ChevronDown, ChevronUp, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { cn } from '../../lib/cn'
 
 // Editor for a DeliveryPlan DRAFT (large-requirement wizard stage 1+2).
@@ -98,12 +98,15 @@ type Props = {
   plan: DeliveryPlanDraft
   onChange: (plan: DeliveryPlanDraft) => void
   agentNames: string[]
+  onRegenerate?: () => void
+  regenerateDisabled?: boolean
 }
 
-export function DeliveryPlanEditor({ plan, onChange, agentNames }: Props) {
+export function DeliveryPlanEditor({ plan, onChange, agentNames, onRegenerate, regenerateDisabled }: Props) {
   const { t } = useTranslation()
   const [expanded, setExpanded] = useState<string | null>(plan.workPackages[0]?.id ?? null)
   const [showContracts, setShowContracts] = useState(false)
+  const [showAnchors, setShowAnchors] = useState(false)
 
   const waves = useMemo(() => planWaves(plan.workPackages), [plan.workPackages])
   const waveIndex = useMemo(() => {
@@ -138,15 +141,54 @@ export function DeliveryPlanEditor({ plan, onChange, agentNames }: Props) {
     <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-3 dark:border-zinc-700 dark:bg-zinc-950/40">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="text-sm font-medium text-neutral-700 dark:text-zinc-300">{t('tasks.preplan.editorTitle')}</span>
-        <span className="text-xs text-neutral-500 dark:text-zinc-400">
-          {t('tasks.preplan.waveSummary', { waves: waves.length, wps: plan.workPackages.length })}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-neutral-500 dark:text-zinc-400">
+            {t('tasks.preplan.waveSummary', { waves: waves.length, wps: plan.workPackages.length })}
+          </span>
+          {onRegenerate && (
+            <button
+              type="button"
+              onClick={onRegenerate}
+              disabled={regenerateDisabled}
+              className="inline-flex items-center gap-1 rounded-md border border-neutral-300 px-2 py-1 text-xs text-neutral-600 hover:border-violet-400 hover:text-violet-700 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:border-violet-600"
+              title={t('tasks.preplan.regenerate')}
+            >
+              <RefreshCw className={cn('size-3', regenerateDisabled && 'animate-spin')} />
+              {t('tasks.preplan.regenerate')}
+            </button>
+          )}
+        </div>
       </div>
 
       {(plan.requirementItems?.length ?? 0) > 0 && (
         <p className="mt-1 text-xs text-neutral-500 dark:text-zinc-400">
-          {t('tasks.preplan.reqItemCount', { count: plan.requirementItems!.length })}
+          <button
+            type="button"
+            onClick={() => setShowAnchors(!showAnchors)}
+            className="underline decoration-dotted underline-offset-2 hover:text-neutral-700 dark:hover:text-zinc-200"
+          >
+            {t('tasks.preplan.reqItemCount', { count: plan.requirementItems!.length })}
+          </button>
         </p>
+      )}
+      {showAnchors && (
+        <ul className="mt-1 max-h-56 space-y-1 overflow-y-auto rounded-md bg-neutral-100 p-2 text-xs text-neutral-600 dark:bg-zinc-900 dark:text-zinc-300">
+          {plan.requirementItems!.map((req) => {
+            // Which packages reference this anchor?
+            const usedBy = plan.workPackages.filter((wp) => (wp.acceptanceCriteria ?? []).includes(req.id)).map((wp) => wp.id)
+            return (
+              <li key={req.id} className="leading-relaxed">
+                <span className="font-mono text-sky-700 dark:text-sky-400">{req.id}</span>
+                <span className="mx-1">·</span>
+                {req.text}
+                {req.source ? <span className="ml-1 text-neutral-400 dark:text-zinc-500">（{req.source}）</span> : null}
+                {usedBy.length > 0 && (
+                  <span className="ml-1 font-mono text-neutral-400 dark:text-zinc-500">[{usedBy.join(',')}]</span>
+                )}
+              </li>
+            )
+          })}
+        </ul>
       )}
 
       {errors.length > 0 && (
@@ -173,7 +215,12 @@ export function DeliveryPlanEditor({ plan, onChange, agentNames }: Props) {
                   <span className="font-mono text-xs text-neutral-400 dark:text-zinc-500">{wp.id}</span>
                   <span className="min-w-0 truncate text-sm text-neutral-800 dark:text-zinc-200">{wp.title || t('tasks.preplan.untitled')}</span>
                   {(wp.dependsOn ?? []).length > 0 && (
-                    <span className="shrink-0 text-[11px] text-neutral-400 dark:text-zinc-500">← {(wp.dependsOn ?? []).join(', ')}</span>
+                    <span
+                      className="max-w-[40%] shrink-0 truncate text-[11px] text-neutral-400 dark:text-zinc-500"
+                      title={`← ${(wp.dependsOn ?? []).join(', ')}`}
+                    >
+                      ← {(wp.dependsOn ?? []).join(', ')}
+                    </span>
                   )}
                 </button>
                 <span className="shrink-0 rounded bg-sky-50 px-1.5 py-0.5 text-[11px] font-medium text-sky-700 dark:bg-sky-950/60 dark:text-sky-400">
@@ -196,12 +243,15 @@ export function DeliveryPlanEditor({ plan, onChange, agentNames }: Props) {
                   </div>
                   <div className="grid grid-cols-[92px_minmax(0,1fr)] items-center gap-2">
                     <span className="text-xs text-neutral-500 dark:text-zinc-400">{t('tasks.preplan.wpAgent')}</span>
-                    <select value={wp.agentBinding ?? ''} onChange={(e) => update(wp.id, { agentBinding: e.target.value })} className={inputCls}>
-                      <option value="">{t('tasks.preplan.wpAgentEmpty')}</option>
-                      {agentNames.map((name) => (
-                        <option key={name} value={name}>{name}</option>
-                      ))}
-                    </select>
+                    <div>
+                      <select value={wp.agentBinding ?? ''} onChange={(e) => update(wp.id, { agentBinding: e.target.value })} className={inputCls}>
+                        <option value="">{t('tasks.preplan.wpAgentEmpty')}</option>
+                        {agentNames.map((name) => (
+                          <option key={name} value={name}>{name}</option>
+                        ))}
+                      </select>
+                      <p className="mt-0.5 text-[11px] text-neutral-400 dark:text-zinc-500">{t('tasks.preplan.wpAgentHint')}</p>
+                    </div>
                   </div>
                   <div className="grid grid-cols-[92px_minmax(0,1fr)] items-start gap-2">
                     <span className="pt-1.5 text-xs text-neutral-500 dark:text-zinc-400">{t('tasks.preplan.wpAC')}</span>
@@ -302,6 +352,7 @@ export function DeliveryPlanEditor({ plan, onChange, agentNames }: Props) {
         <button
           type="button"
           onClick={addPackage}
+          title={t('tasks.preplan.addWpHint')}
           className="inline-flex items-center gap-1 rounded-md border border-dashed border-neutral-300 px-2 py-1 text-xs text-neutral-600 hover:border-sky-400 hover:text-sky-700 dark:border-zinc-600 dark:text-zinc-300 dark:hover:border-sky-600"
         >
           <Plus className="size-3" />

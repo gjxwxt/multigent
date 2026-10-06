@@ -169,6 +169,7 @@ type Props = {
   run?: WorkflowRun
   instances?: WorkflowStepInstance[]
   branches?: WorkflowBranchInstance[]
+  childTasks?: { id: string; status: string }[]
   compact?: boolean
   fill?: boolean
   editable?: boolean
@@ -193,6 +194,7 @@ type WorkflowNodeData = {
   connectingSource?: boolean
   connectingTarget?: boolean
   branchInstances?: WorkflowBranchInstance[]
+  childTaskStatuses?: Record<string, string>
   onSelect?: (nodeID: string) => void
 }
 
@@ -826,9 +828,10 @@ function WorkflowStepNode({ data }: NodeProps<WorkflowNode>) {
 
 function ParallelSubflowPreviewNode({ data }: NodeProps<WorkflowNode>) {
   const { t } = useTranslation()
-  const { step, branchInstances = [] } = data
+  const { step, branchInstances = [], childTaskStatuses } = data
   const branches = step.branches ?? []
   const instanceByBranch = useMemo(() => new Map(branchInstances.map((inst) => [inst.branchId, inst])), [branchInstances])
+  const taskStatusById = useMemo(() => new Map(Object.entries(childTaskStatuses ?? {})), [childTaskStatuses])
   const joinPolicy = step.joinPolicy === 'any' || step.config?.joinPolicy === 'any' ? 'any' : 'all'
   const previewHeight = Math.max(160, 70 + Math.max(1, branches.length) * PARALLEL_PREVIEW_ROW_HEIGHT)
 
@@ -869,19 +872,25 @@ function ParallelSubflowPreviewNode({ data }: NodeProps<WorkflowNode>) {
             const status = inst?.status || 'pending'
             const steps = compactWorkflowPreviewSteps(branch)
             const hasHiddenSteps = workflowPreviewSteps(branch).length > steps.length
+            const childStatus = inst?.childTaskId
+              ? taskStatusById.get(inst.childTaskId) ?? undefined
+              : undefined
             return (
               <div key={branch.id} className="rounded-xl border border-neutral-200 bg-neutral-50/70 p-3 dark:border-zinc-800 dark:bg-zinc-900/70">
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0">
                     <p className="truncate text-sm font-semibold text-neutral-900 dark:text-zinc-100">{branch.title || branch.id}</p>
                     <p className="mt-0.5 truncate text-xs text-neutral-500 dark:text-zinc-400">
-                      {branch.actorRole || workflowFirstStep(branch.workflow)?.actorRole || 'agent'}
+                      {branch.actorRole || workflowFirstStep(branch.workflow)?.actorRole || inst?.actorId || 'agent'}
                     </p>
                   </div>
                   <span className={cn('shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium', statusClass[status] ?? statusClass.pending)}>
                     {t(`workflows.stepStatus.${status}`, { defaultValue: status })}
                   </span>
                 </div>
+                {childStatus === 'in_progress' && inst?.childTaskId ? (
+                  <p className="mt-1 font-mono text-[11px] text-sky-600 dark:text-sky-400">{inst.childTaskId}</p>
+                ) : null}
                 <div className="mt-3 flex min-w-0 items-center gap-2 overflow-hidden">
                   {steps.map((branchStep, index) => (
                     <div key={`${branch.id}-${branchStep.id}-${index}`} className="flex min-w-0 items-center gap-2">
@@ -914,6 +923,7 @@ export function WorkflowBoard({
   run,
   instances = EMPTY_INSTANCES,
   branches = EMPTY_BRANCH_INSTANCES,
+  childTasks,
   compact = false,
   fill = false,
   editable = false,
@@ -941,6 +951,10 @@ export function WorkflowBoard({
     [instances],
   )
   const instanceByStep = useMemo(() => new Map(instances.map((inst) => [inst.stepId, inst])), [instancesKey])
+  const childTasksById = useMemo(
+    () => new Map((childTasks ?? []).map((task) => [task.id, task.status])),
+    [childTasks],
+  )
   const branchesKey = useMemo(
     () => branches.map((branch) => [
       branch.stepId,
@@ -998,6 +1012,14 @@ export function WorkflowBoard({
     setSelectedNodeIds([nodeID])
   }, [])
 
+  const childTaskStatuses = useMemo(() => {
+    const map: Record<string, string> = {}
+    for (const inst of branches) {
+      if (inst.childTaskId) map[inst.childTaskId] = childTasksById.get(inst.childTaskId) ?? ''
+    }
+    return map
+  }, [branches, childTasksById])
+
   const initialNodes = useMemo<WorkflowNode[]>(
     () => {
       const baseNodes: WorkflowNode[] = definition.steps.map((step) => {
@@ -1034,6 +1056,7 @@ export function WorkflowBoard({
             status: selectedInst?.status,
             active: false,
             branchInstances: selectedBranches,
+            childTaskStatuses,
           },
           selectable: false,
           draggable: true,
@@ -1884,7 +1907,7 @@ export function WorkflowBoard({
                       label={t('workflows.detail.joinPolicy')}
                       value={selected.joinPolicy === 'any' || selected.config?.joinPolicy === 'any' ? t('workflows.detail.joinPolicyAny') : t('workflows.detail.joinPolicyAll')}
                     />
-                    <BranchSummary branches={selected.branches ?? []} instances={selectedBranches} />
+                    <BranchSummary branches={selected.branches ?? []} instances={selectedBranches} childTaskStatuses={childTaskStatuses} />
                   </>
                 ) : null}
               </div>
@@ -2189,7 +2212,7 @@ function BranchTable({
   )
 }
 
-function BranchSummary({ branches, instances }: { branches: WorkflowBranch[]; instances: WorkflowBranchInstance[] }) {
+function BranchSummary({ branches, instances, childTaskStatuses }: { branches: WorkflowBranch[]; instances: WorkflowBranchInstance[]; childTaskStatuses?: Record<string, string> }) {
   const { t } = useTranslation()
   const instanceByBranch = useMemo(() => new Map(instances.map((inst) => [inst.branchId, inst])), [instances])
   if (branches.length === 0) {
@@ -2202,6 +2225,7 @@ function BranchSummary({ branches, instances }: { branches: WorkflowBranch[]; in
         {branches.map((branch) => {
           const inst = instanceByBranch.get(branch.id)
           const status = inst?.status || 'pending'
+          const childStatus = inst?.childTaskId ? childTaskStatuses?.[inst.childTaskId] ?? undefined : undefined
           return (
             <div key={branch.id} className="rounded-lg border border-neutral-200 bg-neutral-50/70 p-2 dark:border-zinc-700 dark:bg-zinc-800/50">
               <div className="flex items-center justify-between gap-2">
@@ -2211,7 +2235,12 @@ function BranchSummary({ branches, instances }: { branches: WorkflowBranch[]; in
                 </span>
               </div>
               <p className="mt-1 truncate text-xs text-neutral-500 dark:text-zinc-400">{branch.actorRole || inst?.actorId || 'agent'}</p>
-              {inst?.childTaskId ? <p className="mt-1 font-mono text-[11px] text-neutral-400 dark:text-zinc-500">{inst.childTaskId}</p> : null}
+              {inst?.childTaskId ? (
+                <p className={cn('mt-1 font-mono text-[11px]', childStatus === 'in_progress' ? 'text-sky-600 dark:text-sky-400' : 'text-neutral-400 dark:text-zinc-500')}>
+                  {inst.childTaskId}
+                  {childStatus ? ` · ${t(`workflows.stepStatus.${childStatus}`, { defaultValue: childStatus })}` : ''}
+                </p>
+              ) : null}
             </div>
           )
         })}
@@ -2378,7 +2407,7 @@ function FieldSummary({ label, fields, fallback }: { label: string; fields: Work
         {fields.map((field, index) => (
           <div key={`${field.name}-${index}`} className="border-b border-neutral-200 px-3 py-2 last:border-b-0 dark:border-zinc-700">
             <span className="block truncate text-sm font-medium text-neutral-700 dark:text-zinc-300">{field.name || '-'}</span>
-            {field.description ? <p className="mt-1 text-xs text-neutral-500 dark:text-zinc-500">{field.description}</p> : null}
+            {field.description ? <p className="mt-1 whitespace-pre-line break-words text-xs text-neutral-500 dark:text-zinc-500">{field.description}</p> : null}
           </div>
         ))}
       </div>

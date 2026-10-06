@@ -149,6 +149,9 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
   // library assets), the preplan LLM draft, and its busy/error state.
   const [batchText, setBatchText] = useState('')
   const [batchAssetIds, setBatchAssetIds] = useState<string[]>([])
+  // Preplan rides the selected agent's model routing (Fusion/* fast path);
+  // empty = first project agent, same as the backend fallback.
+  const [batchAgent, setBatchAgent] = useState('')
   const [preplanBusy, setPreplanBusy] = useState(false)
   const [preplanErr, setPreplanErr] = useState<string | null>(null)
   const [preplanHint, setPreplanHint] = useState<{ scaleHint: string; reason: string } | null>(null)
@@ -490,6 +493,7 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
       const body = hasText
         ? { source: 'text', text: batchText }
         : { source: 'assets', fileIds: batchAssetIds }
+      if (batchAgent.trim()) (body as Record<string, unknown>).agent = batchAgent.trim()
       const resp = await apiPost<{ scaleHint: string; reason?: string; plan?: DeliveryPlanDraft | null; planError?: string; model?: string }>(
         `/api/v1/projects/${encodeURIComponent(selectedProject)}/delivery/preplan`,
         body,
@@ -517,6 +521,12 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
     } finally {
       setPreplanBusy(false)
     }
+  }
+
+  // Regeneration overwrites the current draft including manual edits; confirm first.
+  function regeneratePlan() {
+    if (batchPlan && !window.confirm(t('tasks.preplan.regenerateConfirm'))) return
+    void runPreplan()
   }
 
   const parentChoices = useMemo(() => {
@@ -667,9 +677,15 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
             prompt: batchPromptParts.join('\n\n'),
             type: 'feature',
             priority,
-            ...(assignee ? { assignee } : {}),
+            ...(assignee ? { assignee: assignee } : {}),
             workflowDefinitionId: GREENFIELD_PIPELINE_ID,
             workflowActorBindings: workflowDefinitionId ? actorBindings : {},
+            // Branch isolation must ride the batch request too: without it the
+            // backend skips the worktree path entirely (write.go requires at
+            // least one branch field) and the root task works directly on the
+            // workspace's main checkout.
+            ...(baseBranch.trim() ? { baseBranch: baseBranch.trim() } : {}),
+            ...(branchName.trim() ? { branchName: branchName.trim() } : {}),
             ...(batchPlan ? { vars: { delivery_plan_draft: JSON.stringify(batchPlan) } } : {}),
             ...(batchAssetBindings.length > 0 ? { assets: batchAssetBindings } : {}),
           },
@@ -926,15 +942,31 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
                       })}
                     </div>
                   )}
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => void runPreplan()}
-                      disabled={preplanBusy || (!batchText.trim() && batchAssetIds.length === 0)}
-                      className="rounded-lg bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50"
+                  <label className="block text-sm">
+                    <span className="text-neutral-600 dark:text-zinc-400">{t('tasks.preplan.agentLabel')}</span>
+                    <select
+                      value={batchAgent}
+                      onChange={(e) => { setBatchAgent(e.target.value); clearFieldError('batch') }}
+                      className={fieldCls}
                     >
-                      {preplanBusy ? t('tasks.preplan.running') : t('tasks.preplan.run')}
-                    </button>
+                      <option value="">{t('tasks.preplan.agentAuto')}</option>
+                      {currentAgentActors.map((a) => (
+                        <option key={a.name} value={a.name}>{a.name}</option>
+                      ))}
+                    </select>
+                    <p className="mt-1 text-xs text-neutral-400 dark:text-zinc-500">{t('tasks.preplan.agentHint')}</p>
+                  </label>
+                  <div className="flex items-center gap-2">
+                    {!batchPlan && (
+                      <button
+                        type="button"
+                        onClick={() => void runPreplan()}
+                        disabled={preplanBusy || (!batchText.trim() && batchAssetIds.length === 0)}
+                        className="rounded-lg bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50"
+                      >
+                        {preplanBusy ? t('tasks.preplan.running') : t('tasks.preplan.run')}
+                      </button>
+                    )}
                     {preplanHint && (
                       <span className="text-xs text-neutral-500 dark:text-zinc-400">
                         {t('tasks.preplan.hint', { hint: preplanHint.scaleHint })}
@@ -969,6 +1001,8 @@ export function CreateTaskDialog({ projectId: defaultProjectId, agents: defaultA
                       plan={batchPlan}
                       onChange={setBatchPlan}
                       agentNames={currentAgentActors.map((a) => a.name)}
+                      onRegenerate={regeneratePlan}
+                      regenerateDisabled={preplanBusy || (!batchText.trim() && batchAssetIds.length === 0)}
                     />
                   )}
                 </div>

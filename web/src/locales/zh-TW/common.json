@@ -677,7 +677,32 @@
       "approve": "通過",
       "requestChanges": "打回修改",
       "selectDecision": "選擇決策",
-      "submit": "提交"
+      "submit": "提交",
+      "openQuestionsTitle": "待澄清問題（請先逐條確認再審核）",
+      "openQuestionsCount": "{{count}} 條",
+      "openQuestionsHint": "來自上游步驟 {{step}}；可在下方審核意見中逐條給出結論後提交。"
+    },
+    "clarify": {
+      "zoneTitle": "待釐清問題 · 逐題寫結論",
+      "zoneTitleClean": "待釐清問題 · 已收斂",
+      "zoneHint": "每題一個結論輸入框，寫了就自動計入；個別不方便答的走「本輪不答」。提交後 agent 把結論織回需求正文出下一版。",
+      "zoneHintClean": "上一輪的結論已全部織回需求正文，agent 申報無待釐清問題——確認凍結後進入設計。",
+      "progress": "{{done}}/{{total}} 已給出結論",
+      "allClear": "open_questions 已清零",
+      "pending": "待釐清",
+      "answered": "已答覆",
+      "deferred": "本輪不答",
+      "conclusionPlaceholder": "給出明確結論，agent 將按此重梳需求…",
+      "reasonPlaceholder": "本輪不答的原因（必填，隨釐清記錄留痕）…",
+      "deferLink": "本輪不答（需留原因）",
+      "answerInstead": "改為作答",
+      "submitRound": "↻ 提交結論，回流重梳",
+      "submitTitle": "結論回流給 agent，織入需求正文出下一版；全部收斂後才出現「確認凍結」",
+      "freeze": "✓ 確認凍結，進入設計",
+      "hintLoop": "提交後 agent 把結論織進需求正文產出下一版；下一版不再有待釐清問題時，這裡才出現「確認凍結」。",
+      "overallToggle": "補充意見（總評，選填，隨結論一併回流）",
+      "overallPlaceholder": "範圍性、優先級層面的意見；逐題結論寫在上面的卡片裡…",
+      "filled": "已填寫"
     },
     "detail": {
       "actor": "執行者",
@@ -761,7 +786,12 @@
       "notifyChannelMattermost": "Mattermost",
       "assigneeNotification": "負責人通知",
       "assigneeNotificationEnabled": "已啟用 · {{channel}}",
-      "assigneeNotificationDisabled": "未啟用"
+      "assigneeNotificationDisabled": "未啟用",
+      "longText": "長文",
+      "outputValues": "輸出值",
+      "items": "{{count}} 項",
+      "collapse": "收起",
+      "expand": "展開"
     },
     "colors": {
       "neutral": "中性",

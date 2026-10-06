@@ -678,7 +678,32 @@
       "approve": "承認",
       "requestChanges": "修正依頼",
       "selectDecision": "判断を選択",
-      "submit": "送信"
+      "submit": "送信",
+      "openQuestionsTitle": "未解決の質問（レビュー前に各項目を確認してください）",
+      "openQuestionsCount": "{{count}} 件",
+      "openQuestionsHint": "上流ステップ {{step}} からの質問。下のレビューコメントで各項目に回答してから提出してください。"
+    },
+    "clarify": {
+      "zoneTitle": "未解消の質問 · 各項目に結論を記入",
+      "zoneTitleClean": "未解消の質問 · 収束済み",
+      "zoneHint": "各質問に結論入力欄が1つあり、書けば自動的に反映されます。回答が難しい項目は「回答保留」をご利用ください。提出すると結論が agent に返され、要件本文に織り込まれた次版が作られます。",
+      "zoneHintClean": "前ラウンドの結論はすべて要件本文に織り込まれ、agent は未解消の質問がないと申告しています——凍結を確認すると設計に進みます。",
+      "progress": "{{done}}/{{total}} 件が結論済み",
+      "allClear": "open_questions クリア済み",
+      "pending": "未解消",
+      "answered": "回答済み",
+      "deferred": "回答保留",
+      "conclusionPlaceholder": "明確な結論を記入してください。agent はこれに基づき要件を再構成します…",
+      "reasonPlaceholder": "このラウンドで回答しない理由（必須、澄清記録に残ります）…",
+      "deferLink": "回答保留（理由が必要）",
+      "answerInstead": "回答に切り替える",
+      "submitRound": "↻ 結論を提出して差し戻す",
+      "submitTitle": "結論は agent に返され、要件本文に織り込まれます。完全に収束してから「凍結確認」が表示されます",
+      "freeze": "✓ 凍結を確認して設計へ",
+      "hintLoop": "提出後、agent が結論を要件本文に織り込んで次版を作成します。次版に未解消の質問がなくなったとき、ここに「凍結確認」が表示されます。",
+      "overallToggle": "補足意見（総評、任意、結論とともに返送）",
+      "overallPlaceholder": "スコープや優先度に関する意見。各項目の結論は上のカードに記入してください…",
+      "filled": "入力済み"
     },
     "detail": {
       "actor": "担当",
@@ -762,7 +787,12 @@
       "notifyChannelMattermost": "Mattermost",
       "assigneeNotification": "担当者通知",
       "assigneeNotificationEnabled": "有効 · {{channel}}",
-      "assigneeNotificationDisabled": "無効"
+      "assigneeNotificationDisabled": "無効",
+      "longText": "長文",
+      "outputValues": "出力値",
+      "items": "{{count}} 件",
+      "collapse": "折りたたむ",
+      "expand": "展開"
     },
     "colors": {
       "neutral": "ニュートラル",

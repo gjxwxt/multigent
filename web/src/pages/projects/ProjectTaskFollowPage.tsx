@@ -40,6 +40,9 @@ const silentNotFound = [404]
 const silentForbidden = [403]
 const staticSilentForbiddenOptions = { silentStatuses: silentForbidden }
 const FOLLOW_POLL_MS = 3500
+// Slow poll for steps that are waiting on a human: catches run advances made
+// outside this browser tab (ChatOps, REST, another operator).
+const FOLLOW_IDLE_POLL_MS = 10000
 
 export default function ProjectTaskFollowPage() {
   const { t } = useTranslation()
@@ -135,6 +138,12 @@ export default function ProjectTaskFollowPage() {
   const visibleWorkflowData = useMemo(
     () => withIdleAgentStepPending(workflowData, displayTask, projectId, Boolean(activeRunRunning)),
     [activeRunRunning, displayTask, projectId, workflowData],
+  )
+  // Statuses of all tasks in the project, keyed by id — feeds the canvas
+  // parallel-preview rows (branch instance → child task live status).
+  const childTaskStatuses = useMemo(
+    () => (tasksState.status === 'ok' ? (tasksState.data ?? []).map((item) => ({ id: item.id, status: item.status })) : []),
+    [tasksState],
   )
   const visibleActiveInstance = visibleWorkflowData ? activeWorkflowStepInstance(visibleWorkflowData) : undefined
   const visibleWorkflowRecords = visibleWorkflowData ? workflowHistoryRecords(visibleWorkflowData) : []
@@ -238,6 +247,22 @@ export default function ProjectTaskFollowPage() {
     const timer = window.setInterval(pollRefresh, FOLLOW_POLL_MS)
     return () => window.clearInterval(timer)
   }, [pollRefresh, shouldPollActiveRun])
+
+  // The active-run poller above only fires while an AGENT step runs. A human
+  // review step idles otherwise — but the run can still advance underneath
+  // this page (ChatOps/IM submit, REST probe, another operator's browser),
+  // and the panel then shows a stale frame (caught live: the follow page kept
+  // showing the requirement-review decision UI after the freeze had already
+  // advanced the run to design_review). A slow background poll keeps the
+  // step panel truthful without competing with the fast agent-run poller.
+  const shouldPollIdleStep = Boolean(
+    !shouldPollActiveRun && projectId && taskId && !isTerminal(displayTask?.status || ''),
+  )
+  useEffect(() => {
+    if (!shouldPollIdleStep) return
+    const timer = window.setInterval(pollRefresh, FOLLOW_IDLE_POLL_MS)
+    return () => window.clearInterval(timer)
+  }, [pollRefresh, shouldPollIdleStep])
 
   useEffect(() => {
     activeStepRef.current = null
@@ -580,7 +605,7 @@ export default function ProjectTaskFollowPage() {
       <main className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_420px] gap-0 overflow-hidden">
         <section className="min-w-0 border-r border-neutral-200/80 bg-white dark:border-zinc-800 dark:bg-zinc-950">
           {visibleWorkflowData ? (
-            <WorkflowBoard key={`${visibleWorkflowData.run.id}:${visibleWorkflowData.run.activeStepId || ''}`} definition={visibleWorkflowData.definition} run={visibleWorkflowData.run} instances={visibleWorkflowData.steps} branches={visibleWorkflowData.branches} focusActive fill hideInspector />
+            <WorkflowBoard key={`${visibleWorkflowData.run.id}:${visibleWorkflowData.run.activeStepId || ''}`} definition={visibleWorkflowData.definition} run={visibleWorkflowData.run} instances={visibleWorkflowData.steps} branches={visibleWorkflowData.branches} childTasks={childTaskStatuses} focusActive fill hideInspector />
           ) : workflowState.status === 'loading' ? (
             <CenteredLoading label={t('tasks.followLoadingWorkflow')} />
           ) : (
@@ -678,7 +703,7 @@ export default function ProjectTaskFollowPage() {
               )}
               {isDesignGate && (
                 <section className="mx-4 mb-4 rounded-xl border border-neutral-200 bg-white px-4 py-4 dark:border-zinc-700 dark:bg-zinc-950">
-                  <p className="text-sm text-neutral-700 dark:text-zinc-300">{activeStep?.description}</p>
+                  <p className="whitespace-pre-line break-words text-sm text-neutral-700 dark:text-zinc-300">{activeStep?.description}</p>
                   <p className="mt-1 text-xs text-neutral-500 dark:text-zinc-400">
                     {t('designGate.openHint', { defaultValue: '打开设计来源选择弹窗；在弹窗内确认前不会流转。' })}
                   </p>
