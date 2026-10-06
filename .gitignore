@@ -66,3 +66,24 @@ HANDOFF*.md
 !internal/projecttemplate/files/react_go_fullstack/server/webui/
 !internal/projecttemplate/files/react_go_fullstack/server/webui/dist/
 !internal/projecttemplate/files/react_go_fullstack/server/webui/dist/placeholder.txt
+
+# AOCI 认知层运行资产（工具生成，不入公开仓）
+aoci.txt
+aoci.meta.txt
+aoci.code.txt
+.aoci/
+.pi/
+
+# ZCode 会话工作区
+.zcode/
+.zcodeignore
+
+# 本地运行时数据 / 临时产物
+outputs/
+projects/
+teams/
+p14ctl*.db
+asset-inventory.db
+
+# 备份文件
+*.backup.*
