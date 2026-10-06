@@ -379,6 +379,11 @@ func checkHealthPath(repoDir string, add func(string, string, string)) {
 		add("health_path", StatusSkip, "deploy/compose.yml not found")
 		return
 	}
+	ciRaw, err := os.ReadFile(filepath.Join(repoDir, ".gitlab-ci.yml"))
+	if err != nil {
+		add("health_path", StatusSkip, ".gitlab-ci.yml not found")
+		return
+	}
 	var runtime struct {
 		Backend struct {
 			HealthPath string `json:"healthPath"`
@@ -388,11 +393,55 @@ func checkHealthPath(repoDir string, add func(string, string, string)) {
 		add("health_path", StatusSkip, "no backend healthPath declared")
 		return
 	}
-	if strings.Contains(string(composeRaw), runtime.Backend.HealthPath) {
+	contract := runtime.Backend.HealthPath
+	// dep-0440f517 (2026-10-06): the probe paths now resolve through the
+	// API_BASE variable, so a literal-contains check against the declared
+	// contract can no longer see them. Accept EITHER the literal contract
+	// path (unparameterized delivery, pre-template-update repos) OR the
+	// parameterized "${API_BASE}/health" spelling. A literal probe on a
+	// DIFFERENT path (/api/health when the repo declares API_BASE /api/v1)
+	// is exactly the dep-0440f517 shape and must fail even though the
+	// contract path happens to be a prefix of it.
+	parameterized := "${API_BASE}/health"
+	okCompose := strings.Contains(string(composeRaw), parameterized) || containsLiteralPath(string(composeRaw), contract)
+	okCI := strings.Contains(string(ciRaw), parameterized) || containsLiteralPath(string(ciRaw), contract)
+	if okCompose && okCI {
 		add("health_path", StatusPass, "")
-	} else {
-		add("health_path", StatusFail, "deploy/compose.yml healthcheck does not probe the runtime contract path "+runtime.Backend.HealthPath)
+		return
 	}
+	if okCompose && !okCI {
+		add("health_path", StatusFail, ".gitlab-ci.yml deploy probe does not hit the runtime contract path "+contract+" (probe ${API_BASE}/health or the literal contract path)")
+		return
+	}
+	if okCI && !okCompose {
+		add("health_path", StatusFail, "deploy/compose.yml healthcheck does not probe the runtime contract path "+contract)
+		return
+	}
+	add("health_path", StatusFail, "neither the CI deploy probe nor deploy/compose.yml healthcheck hits the runtime contract path "+contract)
+}
+
+// containsLiteralPath reports whether raw references path as a complete URL
+// path segment: the match must be followed by end-of-line, whitespace, a
+// quote, or a `$` (variable interpolation boundary) — not by another path
+// character. A probe on /api/health/v2 must not count as a hit for the
+// /api/health contract, and a hit inside a comment line still counts (the
+// cost of a false pass there is lower than re-parsing YAML shell blocks).
+func containsLiteralPath(raw, path string) bool {
+	if path == "" {
+		return false
+	}
+	for idx := strings.Index(raw, path); idx >= 0; idx = strings.Index(raw[idx+1:], path) {
+		idx += strings.Index(raw[idx:], path)
+		end := idx + len(path)
+		if end >= len(raw) {
+			return true
+		}
+		switch raw[end] {
+		case ' ', '\t', '\n', '\r', '"', '\'', ')', '$':
+			return true
+		}
+	}
+	return false
 }
 
 func checkPrerequisites(repoDir string, add func(string, string, string)) {

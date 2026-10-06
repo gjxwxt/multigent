@@ -322,3 +322,91 @@ func TestProbeBuildDependencies(t *testing.T) {
 		}
 	})
 }
+
+// dep-0440f517 (2026-10-06): probes resolve through API_BASE, so the
+// health_path check must accept the parameterized spelling AND still catch a
+// repo where one of the two probe sites never references the contract path —
+// the exact shape that failed dep-0440f517ada4bd68 (probe /api/health vs app
+// /api/v1/health).
+func TestCheckHealthPathParameterizedProbes(t *testing.T) {
+	newRepo := func(t *testing.T, ciYAML, composeYAML string) string {
+		t.Helper()
+		root := writeFixtureRepo(t)
+		if err := os.WriteFile(filepath.Join(root, ".gitlab-ci.yml"), []byte(ciYAML), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(root, "deploy"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "deploy", "compose.yml"), []byte(composeYAML), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return root
+	}
+	// Minimal CI whose deploy job probes ${API_BASE}/health with the
+	// /api/v1 default declared, mirroring the batch-test2 fix (f5c6958).
+	ciParameterized := `
+variables:
+  API_BASE: "/api/v1"
+stages: [deploy]
+deploy:
+  stage: deploy
+  script:
+    - if wget -q -O /dev/null "http://${PROBE_HOST}:${APP_PORT}${API_BASE}/health"; then ok=1; fi
+`
+	composeParameterized := `services:
+  app:
+    environment:
+      API_BASE: ${API_BASE:-/api/v1}
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -q -O - http://127.0.0.1:8080$${API_BASE}/health"]
+`
+	root := newRepo(t, ciParameterized, composeParameterized)
+	report := Verify(root)
+	// Contract path is /api/health (writeFixtureRepo); probes hit
+	// ${API_BASE}/health — the parameterized contract spelling must pass,
+	// NOT fail merely because the literal /api/health is absent.
+	if got := findCheck(t, report, "health_path"); got.Status != StatusPass {
+		t.Fatalf("parameterized probes must pass: %#v", got)
+	}
+
+	// The dep-0440f517 shape: the runtime contract is /api/v1/health but
+	// the CI probe hits the template-default literal /api/health. Overwrite
+	// the fixture contract so the two genuinely diverge (the stock fixture
+	// declares /api/health, which would make the drifted probe a literal
+	// hit and pass for the wrong reason).
+	runtimeV1 := `{"version":1,"backend":{"directory":"server","command":"go run .","port":8080,"healthPath":"/api/v1/health"}}`
+	ciDrifted := strings.Replace(ciParameterized, "${API_BASE}/health", "/api/health", 1)
+	root = newRepo(t, ciDrifted, composeParameterized)
+	if err := os.WriteFile(filepath.Join(root, ".multigent", "runtime.json"), []byte(runtimeV1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	report = Verify(root)
+	if got := findCheck(t, report, "health_path"); got.Status != StatusFail {
+		t.Fatalf("CI probe on a foreign literal must fail: %#v", got)
+	}
+	if !strings.Contains(findCheck(t, report, "health_path").Detail, "deploy probe") {
+		t.Fatalf("failure must name the CI probe: %#v", findCheck(t, report, "health_path"))
+	}
+
+	// Mirror shape: CI probes the contract but compose drifts. Same
+	// contract override as above so /api/health is genuinely foreign.
+	composeDrifted := strings.Replace(composeParameterized, "$${API_BASE}/health", "/api/health", 1)
+	root = newRepo(t, ciParameterized, composeDrifted)
+	if err := os.WriteFile(filepath.Join(root, ".multigent", "runtime.json"), []byte(runtimeV1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	report = Verify(root)
+	if got := findCheck(t, report, "health_path"); got.Status != StatusFail {
+		t.Fatalf("compose healthcheck on a foreign literal must fail: %#v", got)
+	}
+
+	// Literal contract in both sites (pre-parameterization repos) passes.
+	ciLiteral := strings.Replace(ciParameterized, "${API_BASE}/health", "/api/health", 1)
+	composeLiteral := strings.Replace(composeParameterized, "$${API_BASE}/health", "/api/health", 1)
+	root = newRepo(t, ciLiteral, composeLiteral)
+	report = Verify(root)
+	if got := findCheck(t, report, "health_path"); got.Status != StatusPass {
+		t.Fatalf("literal contract probes must keep passing: %#v", got)
+	}
+}

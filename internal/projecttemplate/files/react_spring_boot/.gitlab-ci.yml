@@ -33,6 +33,9 @@ default:
 
 variables:
   APP_PORT: "8088"
+  # 全局 API 前缀：后端路由、前端 fetch、CI 探测共用同一约定。
+  # 交付如采用 /api/v1 类前缀，在 GitLab 项目级 CI/CD 变量覆盖 API_BASE 即可。
+  API_BASE: "/api"
   GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
 
 stages:
@@ -165,7 +168,7 @@ deploy:
       PROBE_HOST="${MULTIGENT_DEPLOY_HOST:-host.docker.internal}"
       ok=0
       for i in $(seq 1 30); do
-        if wget -q -O /dev/null "http://${PROBE_HOST}:${APP_PORT}/api/health"; then ok=1; echo "health OK after ${i} attempts"; break; fi
+        if wget -q -O /dev/null "http://${PROBE_HOST}:${APP_PORT}${API_BASE}/health"; then ok=1; echo "health OK after ${i} attempts"; break; fi
         sleep 2
       done
       [ "$ok" = "1" ] || { echo "health check timed out (~60s)"; docker compose -f deploy/compose.yml ps; exit 1; }

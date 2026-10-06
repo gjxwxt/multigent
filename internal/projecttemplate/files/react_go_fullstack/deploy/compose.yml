@@ -8,8 +8,12 @@ services:
     ports:
       - "${APP_PORT:-8088}:8080"
     restart: unless-stopped
+    environment:
+      # 与 CI 探测同源的全局 API 前缀（healthcheck 进程读不到 CI variables，
+      # compose up 会把宿主侧 API_BASE 注入容器 environment）。
+      API_BASE: ${API_BASE:-/api}
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/api/health"]
+      test: ["CMD", "sh", "-c", "wget -q -O - http://127.0.0.1:8080$${API_BASE}/health"]
       interval: 10s
       timeout: 3s
       retries: 5

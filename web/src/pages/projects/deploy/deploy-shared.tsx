@@ -39,6 +39,7 @@ export type PipelineSummary = {
 export type DeployAggregate = {
   deployPort: number
   deployHostConfigured: boolean
+  deployHost?: string
   lastDeployed: DeployRequest | null
   inflight: DeployRequest | null
   health: DeployHealth | null

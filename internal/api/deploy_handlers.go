@@ -121,13 +121,20 @@ func (s *Server) handleGetDeployAggregate(w http.ResponseWriter, r *http.Request
 	// list (the frontend renders "—" rather than an error banner).
 	pipelines := s.deployPipelineSummaries(r.Context(), project, 10)
 
-	deployHostConfigured := strings.TrimSpace(os.Getenv(deployHostEnv)) != ""
-
 	w.Header().Set("Content-Type", "application/json")
+	// deployHost is the actual deploy-target host (MULTIGENT_DEPLOY_HOST).
+	// DeployHeader used to build the app link from window.location.hostname —
+	// correct only when console and deploy host share a machine. On the
+	// OrbStack split topology the console runs on the VM (…231) while
+	// containers publish on the deploy host (…3), so the button pointed at a
+	// port nobody listens on (user-reported 2026-10-06). Surface the real
+	// host and let the frontend prefer it.
+	deployHost := strings.TrimSpace(os.Getenv(deployHostEnv))
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"project":              project,
 		"deployPort":           p.DeployPort,
-		"deployHostConfigured": deployHostConfigured,
+		"deployHostConfigured": deployHost != "",
+		"deployHost":           deployHost,
 		"lastDeployed":         lastDeployed,
 		"inflight":             inflight,
 		"health":               health,
@@ -457,14 +464,31 @@ func (s *Server) consoleReachableURL(r *http.Request) string {
 	return scheme + "://" + r.Host
 }
 
+// deployedAppHealthPath resolves the deployed app's health path. The
+// platform-side probe must hit the SAME path the repo's CI probe and compose
+// healthcheck hit — dep-0440f517 (2026-10-06) failed exactly this contract:
+// the app served /api/v1/health while every probe defaulted to /api/health.
+// Resolution order: the deploy request's own vars (the operator already
+// expresses per-delivery overrides there), then the env-wide default
+// (MULTIGENT_DEPLOY_HEALTH_PATH), then the template contract /api/health.
+func deployedAppHealthPath(vars map[string]string) string {
+	if v := strings.TrimSpace(vars["healthPath"]); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(os.Getenv("MULTIGENT_DEPLOY_HEALTH_PATH")); v != "" {
+		return v
+	}
+	return "/api/health"
+}
+
 // deployedAppHealthURL builds the health endpoint of the deployed app on the
 // deploy host, or ("", false) when the deployment has no probe target.
-func deployedAppHealthURL(deployPort int) (string, bool) {
+func deployedAppHealthURL(vars map[string]string, deployPort int) (string, bool) {
 	host := strings.TrimSpace(os.Getenv(deployHostEnv))
 	if host == "" || deployPort <= 0 {
 		return "", false
 	}
-	return fmt.Sprintf("http://%s:%d/api/health", host, deployPort), true
+	return fmt.Sprintf("http://%s:%d%s", host, deployPort, deployedAppHealthPath(vars)), true
 }
 
 // probeDeployedAppHealth live-probes the deployed app when a finished
@@ -475,7 +499,7 @@ func (s *Server) probeDeployedAppHealth(p *entity.Project, lastDeployed *control
 	if lastDeployed == nil {
 		return nil
 	}
-	url, ok := deployedAppHealthURL(p.DeployPort)
+	url, ok := deployedAppHealthURL(lastDeployed.Vars, p.DeployPort)
 	if !ok {
 		return map[string]any{"status": "unknown", "reason": "deploy host not configured"}
 	}
@@ -845,7 +869,11 @@ func (s *Server) finishDeployWatch(ctx context.Context, host *codehost.GitLabHos
 		}
 		health := map[string]any{"status": "unknown", "reason": "deploy host not configured"}
 		if p != nil {
-			if url, ok := deployedAppHealthURL(p.DeployPort); ok {
+			var probeVars map[string]string
+			if req, found, reqErr := s.controlDB.DeployRequestFor(workspaceID, requestID); reqErr == nil && found && req != nil {
+				probeVars = req.Vars
+			}
+			if url, ok := deployedAppHealthURL(probeVars, p.DeployPort); ok {
 				client := &http.Client{Timeout: 3 * time.Second}
 				start := time.Now()
 				resp, probeErr := client.Get(url)

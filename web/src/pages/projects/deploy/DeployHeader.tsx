@@ -19,8 +19,12 @@ export function DeployHeader({
   const up = health?.status === 'up'
   const down = health?.status === 'down'
   const unknown = !up && !down
-  // 访问应用：部署端口经宿主发布，与控制台同主机可达（部署拓扑实测口径）。
-  const appUrl = agg?.deployHostConfigured && agg.deployPort ? `http://${window.location.hostname}:${agg.deployPort}` : null
+  // 访问应用：部署端口经部署宿主发布。优先用 aggregate 下发的 deployHost
+  // （MULTIGENT_DEPLOY_HOST，容器真实发布所在）；仅当未配置时回退
+  // window.location.hostname（控制台与部署宿主同机的旧口径——拆分拓扑下
+  // 控制台在 VM、容器在部署宿主，旧口径会把按钮指到没人监听的地址）。
+  const appHost = agg?.deployHost || window.location.hostname
+  const appUrl = agg?.deployHostConfigured && agg.deployPort ? `http://${appHost}:${agg.deployPort}` : null
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-3">
