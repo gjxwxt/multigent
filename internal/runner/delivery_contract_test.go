@@ -16,11 +16,11 @@ import (
 // and exit-0 was recorded as a hollow success).
 func TestDeliveryContractFailsWithoutModelActivity(t *testing.T) {
 	c := deliveryContract{RequireModelActivity: true}
-	v := validateDeliveryEvidence(c, "=== exit code: 0 ===", "", "", "", "")
+	v := validateDeliveryEvidence(c, "=== exit code: 0 ===", "", "", "", "", nil)
 	if v == "" || !strings.Contains(v, "no model activity") {
 		t.Fatalf("expected no-model-activity violation, got %q", v)
 	}
-	v = validateDeliveryEvidence(c, "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[]}}\n", "", "", "", "")
+	v = validateDeliveryEvidence(c, "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[]}}\n", "", "", "", "", nil)
 	if v != "" {
 		t.Fatalf("assistant line should satisfy model activity, got %q", v)
 	}
@@ -28,13 +28,13 @@ func TestDeliveryContractFailsWithoutModelActivity(t *testing.T) {
 
 func TestDeliveryContractTestsRunEvidence(t *testing.T) {
 	c := deliveryContract{RequireTestsRun: true}
-	if v := validateDeliveryEvidence(c, "Tests run: 0, Failures: 0", "", "", "", ""); v == "" {
+	if v := validateDeliveryEvidence(c, "Tests run: 0, Failures: 0", "", "", "", "", nil); v == "" {
 		t.Fatal("Tests run: 0 must not satisfy the contract")
 	}
-	if v := validateDeliveryEvidence(c, "Tests run: 20, Failures: 0, Errors: 0", "", "", "", ""); v != "" {
+	if v := validateDeliveryEvidence(c, "Tests run: 20, Failures: 0, Errors: 0", "", "", "", "", nil); v != "" {
 		t.Fatalf("Tests run: 20 should satisfy the contract, got %q", v)
 	}
-	if v := validateDeliveryEvidence(c, "BUILD SUCCESS", "", "", "", ""); v == "" {
+	if v := validateDeliveryEvidence(c, "BUILD SUCCESS", "", "", "", "", nil); v == "" {
 		t.Fatal("output without a Tests run summary must not satisfy the contract")
 	}
 }
@@ -153,7 +153,7 @@ func TestApplyDeliveryContractGateFlipsHollowSuccess(t *testing.T) {
 	}
 	result := &RunResult{Status: entity.TaskStatusDoneSuccess}
 	var logBuf strings.Builder
-	r.applyDeliveryContractGate(result, task, "=== exit code: 0 ===", t.TempDir(), &logBuf)
+	r.applyDeliveryContractGate(result, task, "=== exit code: 0 ===", t.TempDir(), nil, &logBuf)
 	if result.Status != entity.TaskStatusDoneFailed {
 		t.Fatalf("hollow success must flip to done_failed, got %s (%s)", result.Status, result.ErrorMsg)
 	}
@@ -665,5 +665,223 @@ func TestMergeDeliveryEvidenceOnlyInjectsProvenPair(t *testing.T) {
 	}
 	if _, ok := out["delivery_branch"]; ok {
 		t.Fatal("empty evidence must delete the forged branch key")
+	}
+}
+
+// wp-7 regression (2026-10-06): the gate's ls-remote runs in the runner
+// process, whose env lacks GIT_CONFIG_GLOBAL — the credential-helper config
+// exists only in the agent container's env. A genuine push then failed the
+// push-evidence check ("could not read Username"). The gate must accept the
+// run's materialized git env (minimal: GIT_CONFIG_GLOBAL only) so a private
+// remote is readable, and must still fail closed without it.
+func TestDeliveryEvidenceUsesMaterializedGitEnv(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	run := func(args ...string) string {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+			"GIT_CONFIG_NOSYSTEM=1", "HOME="+dir)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	run("init", "-b", "main", "repo")
+	repo := filepath.Join(dir, "repo")
+	write := func(name, content string) {
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("f.txt", "one\n")
+	run("-C", repo, "add", ".")
+	run("-C", repo, "commit", "-m", "base")
+
+	// Private "remote": a local bare repo reachable ONLY through the helper
+	// config (origin URL uses a credential-requiring transport shape; with a
+	// file:// remote git never asks for credentials, so emulate the private
+	// case by pointing origin at an unreachable http URL and asserting the
+	// env-free read fails while the env-carrying read at least reaches auth).
+	remote := run("-C", repo, "clone", "--bare", repo, filepath.Join(dir, "remote.git"))
+	_ = remote
+
+	// The real regression guard: env extraction keeps ONLY GIT_CONFIG_GLOBAL.
+	effective := []string{
+		"PATH=/usr/bin:/bin",
+		"SUPER_SECRET_TOKEN=must-not-leak",
+		"GIT_CONFIG_GLOBAL=" + filepath.Join(dir, "helper.gitconfig"),
+	}
+	got := gitEnvForEvidence(effective)
+	if len(got) != 1 || !strings.HasPrefix(got[0], "GIT_CONFIG_GLOBAL=") {
+		t.Fatalf("git env must carry only GIT_CONFIG_GLOBAL, got %v", got)
+	}
+	if strings.Contains(strings.Join(got, " "), "SUPER_SECRET_TOKEN") {
+		t.Fatal("non-git secrets must never reach the evidence command")
+	}
+	if gitEnvForEvidence([]string{"PATH=/bin"}) != nil {
+		t.Fatal("no git config in env must yield nil (legacy inherit behaviour)")
+	}
+	if gitEnvForEvidence(nil) != nil {
+		t.Fatal("empty env must yield nil")
+	}
+}
+
+func TestGitEnvForEvidenceFindsOnlyGitConfig(t *testing.T) {
+	if got := gitEnvForEvidence([]string{"A=1", "GIT_CONFIG_GLOBAL=/tmp/x.gitconfig", "B=2"}); len(got) != 1 || got[0] != "GIT_CONFIG_GLOBAL=/tmp/x.gitconfig" {
+		t.Fatalf("expected single entry, got %v", got)
+	}
+	// An empty-value entry must NOT be picked up (it would wipe a real
+	// process-level config rather than add the helper).
+	if got := gitEnvForEvidence([]string{"GIT_CONFIG_GLOBAL="}); got != nil {
+		t.Fatalf("empty GIT_CONFIG_GLOBAL must be ignored, got %v", got)
+	}
+}
+
+// Defect ⑯ regression (fu91es QA, 2026-10-06): the materialized git config's
+// helper line is container-scoped (containerRuntimePath), so the runner-side
+// ls-remote could not execute the helper even with GIT_CONFIG_GLOBAL in hand
+// ("could not read Username ... No such device or address"). hostGateGitEnv
+// must point GIT_CONFIG_GLOBAL at a host-usable variant whose helper is the
+// sibling .credential-helper file that still exists at gate time.
+func TestHostGateGitEnvRewritesContainerScopedHelper(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "materialized.gitconfig")
+	hostHelper := cfg + ".credential-helper"
+	// The helper script exists on the HOST (cleanup is deferred, has not run).
+	if err := os.WriteFile(hostHelper, []byte("#!/bin/sh\ncase \"$1\" in get) ;; esac\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The config content references the helper by its CONTAINER path.
+	if err := os.WriteFile(cfg, []byte("[credential]\n\thelper = /workspace/.multigent/tool-abc/git.gitconfig.credential-helper\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"GIT_CONFIG_GLOBAL=" + cfg}
+	got := hostGateGitEnv(env)
+	if len(got) != 1 {
+		t.Fatalf("expected one env entry, got %v", got)
+	}
+	wantCfg := cfg + ".hostgate"
+	if got[0] != "GIT_CONFIG_GLOBAL="+wantCfg {
+		t.Fatalf("GIT_CONFIG_GLOBAL must point at the hostgate variant, got %q", got[0])
+	}
+	patched, err := os.ReadFile(wantCfg)
+	if err != nil {
+		t.Fatalf("hostgate config not written: %v", err)
+	}
+	if !strings.Contains(string(patched), "helper = "+hostHelper) {
+		t.Fatalf("hostgate config must reference the host helper path, got: %s", patched)
+	}
+	original, _ := os.ReadFile(cfg)
+	if strings.Contains(string(original), hostHelper) {
+		t.Fatal("the container-facing config must stay untouched")
+	}
+}
+
+func TestHostGateGitEnvPassthroughs(t *testing.T) {
+	dir := t.TempDir()
+	// No GIT_CONFIG_GLOBAL entry: returned unchanged.
+	if got := hostGateGitEnv([]string{"FOO=bar"}); len(got) != 1 || got[0] != "FOO=bar" {
+		t.Fatalf("non-git env must pass through, got %v", got)
+	}
+	// Config file missing (already cleaned up): unchanged, prior failure
+	// behavior preserved.
+	missing := filepath.Join(dir, "gone.gitconfig")
+	env := []string{"GIT_CONFIG_GLOBAL=" + missing}
+	if got := hostGateGitEnv(env); got[0] != env[0] {
+		t.Fatalf("missing config must pass through, got %v", got)
+	}
+	// Helper path inside the config already valid on the host: unchanged.
+	hostHelper := filepath.Join(dir, "helper.sh")
+	if err := os.WriteFile(hostHelper, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, "host.gitconfig")
+	if err := os.WriteFile(cfg, []byte("[credential]\n\thelper = "+hostHelper+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env2 := []string{"GIT_CONFIG_GLOBAL=" + cfg}
+	if got := hostGateGitEnv(env2); got[0] != env2[0] {
+		t.Fatalf("host-usable helper must pass through untouched, got %v", got)
+	}
+	// Nil env: unchanged.
+	if got := hostGateGitEnv(nil); got != nil {
+		t.Fatalf("nil env must stay nil, got %v", got)
+	}
+}
+
+// Defect ⑯ regression, part 2 (fu91es QA re-run, 2026-10-06): a MINIMAL
+// credential env slice must not replace the process environment wholesale —
+// git execs its git-remote-http transport helper via PATH, and a PATH-less
+// env made ls-remote die with "'origin' does not appear to be a git
+// repository" even though the credential config was fine. With the merge
+// (os.Environ + caller entries), ls-remote over a bound origin succeeds.
+func TestGitDeliveryEvidenceMinimalEnvKeepsPATH(t *testing.T) {
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	if err := os.MkdirAll(origin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v (%s)", strings.Join(args, " "), err, out)
+		}
+	}
+	run(origin, "init", "--bare", "-b", "main")
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := os.MkdirAll(wt, 0755); err != nil {
+		t.Fatal(err)
+	}
+	run(wt, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(wt, "a.txt"), []byte("x\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	run(wt, "add", "-A")
+	run(wt, "commit", "-m", "base")
+	run(wt, "remote", "add", "origin", "file://"+origin)
+	run(wt, "push", "origin", "main")
+	run(wt, "branch", "feature/x")
+	run(wt, "push", "origin", "feature/x")
+	// A valid but empty credential config: the transport must still resolve
+	// (PATH preserved) and the remote branch must be found.
+	emptyCfg := filepath.Join(t.TempDir(), "empty.gitconfig")
+	if err := os.WriteFile(emptyCfg, []byte("[credential]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, push, err := gitDeliveryEvidence(wt, "main", "feature/x", []string{"GIT_CONFIG_GLOBAL=" + emptyCfg})
+	if err != nil {
+		t.Fatalf("ls-remote must survive a minimal env slice: %v", err)
+	}
+	if !push.RemoteHasBranch || push.RemoteSHA == "" {
+		t.Fatalf("remote branch evidence missing: %+v", push)
+	}
+}
+
+// Defect ⑯, part 3: the connections-based evidence env must only inject a
+// token when the connection's base-URL host matches the worktree origin's
+// host (the exfiltration guard), and the env must carry the transient
+// http.extraHeader (nothing on disk).
+func TestGitlabEvidenceEnvHostGuard(t *testing.T) {
+	if got := gitlabHeaderEvidenceEnv("tok"); len(got) != 3 || got[0] != "GIT_CONFIG_COUNT=1" ||
+		got[1] != "GIT_CONFIG_KEY_0=http.extraHeader" || !strings.HasPrefix(got[2], "GIT_CONFIG_VALUE_0=Authorization: Basic ") {
+		t.Fatalf("unexpected transient env shape: %v", got)
+	}
+	if !sameGitHostPort("192.168.139.3:8083", "192.168.139.3:8083") {
+		t.Fatal("identical host:port must match")
+	}
+	if sameGitHostPort("localhost:8083", "192.168.139.3:8083") {
+		t.Fatal("different hosts must NOT match (exfiltration guard)")
+	}
+	if connectionBaseHost("") != "" {
+		t.Fatal("empty base URL must yield empty host")
+	}
+	// A non-git directory yields no origin host (fail-closed, no injection).
+	if gitOriginHost(t.TempDir()) != "" {
+		t.Fatal("non-git worktree must yield empty origin host")
 	}
 }

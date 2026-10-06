@@ -126,6 +126,15 @@ type Runner struct {
 	agentMetaOverrides map[string]*entity.AgentMeta
 	ClearSession       func(project, agent string)
 	SuppressStdout     bool
+	// EvidenceEnv resolves a TRANSIENT credential environment for the
+	// delivery-evidence gate's ls-remote (defect ⑯ final form, 2026-10-06).
+	// The runner's materialized git config does not carry credentials usable
+	// on the host in every deployment (helper host list vs the origin URL
+	// spelling; or a [user]-only config), so an embedder owning the verified
+	// connection can inject the token for this one read-only command. The
+	// in-runner connections resolver runs first; this callback is the second
+	// opinion. nil keeps the resolver + gitEnv-only behavior.
+	EvidenceEnv func(worktreeDir string) []string
 }
 
 // New creates a Runner. root is the workspace root.
@@ -883,7 +892,7 @@ func (r *Runner) RunTaskWithContext(ctx context.Context, project, agentName stri
 	}
 
 	result.Status = entity.TaskStatusDoneSuccess
-	r.applyDeliveryContractGate(result, task, outBuf.String(), execAgentDir, redactedLogFile)
+	r.applyDeliveryContractGate(result, task, outBuf.String(), execAgentDir, gitEnvForEvidence(effectiveEnv), redactedLogFile)
 	r.recordAgentRun(telemetry.KindTask, project, agentName, task.ID, task.Title, string(model), sandboxLabel,
 		apiModel, apiBaseURL,
 		runStarted, runFinished, result.Status, &ec, result.SessionID, result.ErrorMsg,
@@ -2053,7 +2062,7 @@ func (r *Runner) runTaskHTTP(project, agentName, agentDir string, meta *entity.A
 	// 2): pass an empty workspace so git evidence requirements fail with the
 	// explicit "requires a git workspace" message instead of reading the
 	// agent home's unrelated git state.
-	r.applyDeliveryContractGate(result, task, output, "", logFile)
+	r.applyDeliveryContractGate(result, task, output, "", nil, logFile)
 	r.recordAgentRun(telemetry.KindTask, project, agentName, task.ID, task.Title, modelNorm, sandboxLabel,
 		"", "",
 		runStarted, runFinished, result.Status, nil, result.SessionID, result.ErrorMsg,
@@ -4182,6 +4191,29 @@ func mergeEnv(base []string, override map[string]string) []string {
 		}
 	}
 	return out
+}
+
+// gitEnvForEvidence extracts only the git-credential-bearing variables from
+// the run's effective environment for the delivery-contract evidence read.
+// The gate's ls-remote runs in the runner process (which lacks GIT_CONFIG_GLOBAL
+// — the credential-helper config lives only in the agent's container env), so
+// without this the push-evidence check fails closed on private remotes even
+// after a genuine push. Passing a MINIMAL env (instead of the full effective
+// environment) keeps every non-git secret out of the evidence command; the
+// credential never reaches disk, repo config, or the remote URL — it lives in
+// the child process env of one read-only ls-remote, same surface as the
+// workspace clone path.
+func gitEnvForEvidence(effectiveEnv []string) []string {
+	if len(effectiveEnv) == 0 {
+		return nil
+	}
+	const prefix = "GIT_CONFIG_GLOBAL="
+	for _, entry := range effectiveEnv {
+		if strings.HasPrefix(entry, prefix) && len(entry) > len(prefix) {
+			return []string{entry}
+		}
+	}
+	return nil
 }
 
 func cloneStringMap(in map[string]string) map[string]string {

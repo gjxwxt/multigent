@@ -14,7 +14,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/multigent/multigent/internal/entity"
 	"github.com/multigent/multigent/internal/gitworktree"
 )
 
@@ -94,6 +96,18 @@ type qaBaselineSurface struct {
 	// The linear QA checkpoint keeps the whitelist: QA edits a business
 	// file "to write a regression test" must keep failing.
 	deliveryDelta bool
+	// anchorCommit marks a QA checkpoint that runs ON TOP of an
+	// already-recorded delivery (defect ⑮ fix, 2026-10-06): the measurement
+	// surface is the worktree delta against the delivery anchor (the
+	// implementation step's delivery_sha), not the task-creation baseline.
+	// Measuring against the creation baseline folds the WHOLE delivery into
+	// the QA delta, where Direction 1 (declare everything) and Direction 3
+	// (test artifacts only) are mutually unsatisfiable — an honest QA run on
+	// a business-code delivery could never complete. Direction 3 stays
+	// ACTIVE here: the anchor delta is the QA agent's own work, and a QA
+	// agent editing business files on top of the delivery is still exactly
+	// the drift the whitelist exists to catch.
+	anchorCommit string
 }
 
 // resolveQABaselineSurface decides the measurement surface for a gate run.
@@ -126,8 +140,13 @@ func resolveQABaselineSurface(worktreeDir string, lookup gitworktree.QABaselineL
 }
 
 // realDelta returns the gate's measurement surface for one gate invocation:
-// baseline delta when a trusted baseline exists, absolute status otherwise.
+// delivery-anchor delta when the run recorded a delivery the QA step sits on
+// top of, baseline delta when a trusted baseline exists, absolute status
+// otherwise.
 func (surf qaBaselineSurface) realDelta(worktreeDir string) ([]string, error) {
+	if surf.anchorCommit != "" {
+		return gitworktree.WorktreeDeltaSinceCommit(worktreeDir, surf.anchorCommit)
+	}
 	if surf.baseline != nil {
 		return gitworktree.QABaselineWorktreeDelta(worktreeDir, *surf.baseline)
 	}
@@ -260,4 +279,49 @@ func worktreeObservable(worktreeDir string) bool {
 // semantics (absolute status, both directions, test-artifact whitelist).
 func verifyQATouchedPathsAgainstWorktree(declared, worktreeDir string) error {
 	return verifyWorktreeDeltaAgainstDeclaration(declared, worktreeDir, qaBaselineSurface{})
+}
+
+// latestDeliveryAnchor returns the delivery anchor (delivery_sha) recorded
+// for the run: the value carried by the most recently FINISHED step instance
+// that has one (output first, then wired input). ListStepInstances orders by
+// step ID alphabetically, so recency must come from FinishedAt — never from
+// slice position. Empty string = the run recorded no delivery, and the QA
+// checkpoint keeps its baseline/absolute surface.
+//
+// Only hex commit-shaped values count; a placeholder like "none" or a
+// description string is ignored rather than fed to git as a revision.
+func latestDeliveryAnchor(instances []entity.WorkflowStepInstance) string {
+	best := ""
+	var bestFinished time.Time
+	for _, inst := range instances {
+		if inst.Status != "completed" {
+			continue
+		}
+		for _, values := range []map[string]string{inst.OutputValues, inst.InputValues} {
+			v := strings.TrimSpace(values["delivery_sha"])
+			if !isCommitSHAShape(v) {
+				continue
+			}
+			finished := inst.FinishedAt
+			if best == "" || finished.After(bestFinished) {
+				best, bestFinished = v, finished
+			}
+			break
+		}
+	}
+	return best
+}
+
+// isCommitSHAShape reports whether s looks like a git commit SHA (7-64 hex
+// characters, matching short and full SHA-1/SHA-256 spellings).
+func isCommitSHAShape(s string) bool {
+	if len(s) < 7 || len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+			return false
+		}
+	}
+	return true
 }

@@ -50,6 +50,36 @@ func TestNormalizeWorkflowOutputValuesAllowsDesignAuditFieldsForPersistedOldGate
 	}
 }
 
+func TestNormalizeWorkflowOutputValuesPreservesFrozenDesignHTMLBytes(t *testing.T) {
+	// Same-source freeze contract: approved_design_html is the byte-exact
+	// frozen copy of the audited prototype (its sha256 is validated against
+	// design_delta_decisions.htmlSha256 before persistence). Trailing
+	// whitespace is significant — normalization must not strip it.
+	step := entity.WorkflowStep{
+		ID:    "design_review",
+		Title: "设计确认",
+		Config: map[string]string{
+			"designGate": "true",
+		},
+		OutputFields: []entity.WorkflowField{
+			{Name: "decision"},
+			{Name: "approved_design_html", Optional: true},
+			{Name: "approved_design_snapshot_path", Optional: true},
+		},
+	}
+	frozen := "<html>\n<body>…</body>\n</html>\n"
+	values, err := normalizeWorkflowOutputValues(step, map[string]string{
+		"decision":             "approve",
+		"approved_design_html": frozen,
+	}, "", "", false)
+	if err != nil {
+		t.Fatalf("frozen html should pass validation: %v", err)
+	}
+	if values["approved_design_html"] != frozen {
+		t.Fatalf("approved_design_html lost bytes in normalization: got %d bytes, want %d", len(values["approved_design_html"]), len(frozen))
+	}
+}
+
 func TestNormalizeWorkflowOutputValuesSkipsRequiredCheckForOptionalFields(t *testing.T) {
 	step := entity.WorkflowStep{
 		Title: "人工代码审核",

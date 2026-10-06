@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -56,9 +57,11 @@ var testsRunRe = regexp.MustCompile(`Tests run:\s*(\d+)`)
 // baseline SHA (takes precedence over baseBranch when set — review round 3
 // item 1: the increment must be measured against the exact commit the task
 // was created from, not a branch ref that can move); baseBranch is the
-// fallback. Returned string explains the first unmet requirement; empty
-// means all requirements are met.
-func validateDeliveryEvidence(c deliveryContract, transcript, workspaceDir, baseCommit, baseBranch, branchName string) string {
+// fallback. gitEnv is the run's materialized git environment for the
+// ls-remote evidence read (see applyDeliveryContractGate); nil inherits the
+// process env (legacy behaviour). Returned string explains the first unmet
+// requirement; empty means all requirements are met.
+func validateDeliveryEvidence(c deliveryContract, transcript, workspaceDir, baseCommit, baseBranch, branchName string, gitEnv []string) string {
 	fail := func(what, hint string) string {
 		return fmt.Sprintf("delivery contract unmet: %s (%s)", what, hint)
 	}
@@ -75,7 +78,7 @@ func validateDeliveryEvidence(c deliveryContract, transcript, workspaceDir, base
 		}
 	}
 	if c.RequireGitCommit || c.RequirePush {
-		if violation, _ := ValidateGitDeliveryEvidence(c, workspaceDir, baseCommit, baseBranch, branchName, nil); violation != "" {
+		if violation, _ := ValidateGitDeliveryEvidence(c, workspaceDir, baseCommit, baseBranch, branchName, gitEnv); violation != "" {
 			return violation
 		}
 	}
@@ -268,7 +271,16 @@ func ParseDeliveryContract(raw string) (deliveryContract, error) {
 // contract var it is a no-op; otherwise an unmet requirement flips the result
 // to done_failed with the violation as ErrorMsg and mirrors it into the
 // redacted run log for the user-visible record.
-func (r *Runner) applyDeliveryContractGate(result *RunResult, task *entity.Task, transcript, execAgentDir string, redactedLog io.Writer) {
+//
+// gitEnv carries the run's materialized git environment (GIT_CONFIG_GLOBAL
+// pointing at the connection's credential-helper config). The gate's
+// ls-remote runs in the runner process AFTER the agent exited, and the runner
+// process env does not carry that variable — without it the push-evidence
+// check hits a private remote with no credentials and fails closed even when
+// the agent genuinely pushed (wp-7, 2026-10-06). The helper files still
+// exist at this point: the runtime-files cleanup is a deferred call that has
+// not run yet.
+func (r *Runner) applyDeliveryContractGate(result *RunResult, task *entity.Task, transcript, execAgentDir string, gitEnv []string, redactedLog io.Writer) {
 	if result == nil || task == nil || len(task.Vars) == 0 {
 		return
 	}
@@ -285,7 +297,26 @@ func (r *Runner) applyDeliveryContractGate(result *RunResult, task *entity.Task,
 		}
 		return
 	}
-	violation := validateDeliveryEvidence(contract, transcript, execAgentDir, task.BaseCommit, task.BaseBranch, task.BranchName)
+	// Credential resolution order (defect ⑯, final form): the in-runner
+	// connections resolver (origin-host matched, transient header) first —
+	// the run's materialized git env can be present yet credential-less
+	// (a [user]-only config, or a helper whose host list does not cover the
+	// origin URL spelling). The API-injected EvidenceEnv callback is the
+	// second opinion when wired, and the materialized env stays as the last
+	// fallback for deployments without either. All candidates pass through
+	// hostGateGitEnv, which upgrades a container-scoped helper path to its
+	// host-side file when present.
+	if r != nil && task != nil {
+		if env := r.evidenceEnvForTask(task); len(env) > 0 {
+			gitEnv = env
+		} else if r.EvidenceEnv != nil {
+			if env := r.EvidenceEnv(task.WorktreeDir); len(env) > 0 {
+				gitEnv = env
+			}
+		}
+	}
+	gitEnv = hostGateGitEnv(gitEnv)
+	violation := validateDeliveryEvidence(contract, transcript, execAgentDir, task.BaseCommit, task.BaseBranch, task.BranchName, gitEnv)
 	if violation == "" {
 		return
 	}
@@ -294,4 +325,79 @@ func (r *Runner) applyDeliveryContractGate(result *RunResult, task *entity.Task,
 	if redactedLog != nil {
 		fmt.Fprintf(redactedLog, "\n=== delivery contract violated ===\n%s\n", violation)
 	}
+}
+
+// hostGateGitEnv rewrites the container-scoped credential helper path inside
+// the run's materialized git config into its HOST-side location, so the
+// gate's ls-remote can actually execute the helper from the runner process.
+//
+// Defect ⑯ (fu91es QA, 2026-10-06): materializeGitLabConfig writes the
+// config's `helper = ` line as containerRuntimePath(helperPath, agentDir) —
+// a path that resolves inside the sandbox (/workspace/...) but not on the
+// host. The wp-7 round fixed the ENV EXTRACTION (GIT_CONFIG_GLOBAL now
+// reaches the gate), but the config CONTENT was still container-scoped: the
+// runner-side ls-remote could not execute the helper, git fell back to
+// interactive auth and failed with "could not read Username ... No such
+// device or address" even though the agent had genuinely pushed from inside
+// the container (where the same absolute config resolves through the
+// workspace mount). The helper script itself is written next to the config
+// at <cfg>.credential-helper and still exists at gate time (the runtime-file
+// cleanup is a deferred call that has not run yet), so the gate materializes
+// a host-usable variant at <cfg>.hostgate and points GIT_CONFIG_GLOBAL at
+// it. No new credential surface is created — the helper script and its token
+// are the run's own already-materialized files; the variant carries only a
+// path.
+func hostGateGitEnv(gitEnv []string) []string {
+	if len(gitEnv) == 0 {
+		return gitEnv
+	}
+	const prefix = "GIT_CONFIG_GLOBAL="
+	for i, entry := range gitEnv {
+		if !strings.HasPrefix(entry, prefix) || len(entry) <= len(prefix) {
+			continue
+		}
+		cfgPath := entry[len(prefix):]
+		data, err := os.ReadFile(cfgPath)
+		if err != nil {
+			// Config already cleaned up or unreadable: keep the previous
+			// behavior (the gate fails closed downstream with its own
+			// message) instead of inventing a different failure here.
+			return gitEnv
+		}
+		hostHelper := cfgPath + ".credential-helper"
+		if _, err := os.Stat(hostHelper); err != nil {
+			return gitEnv
+		}
+		patched, changed := rewriteGitHelperPath(string(data), hostHelper)
+		if !changed {
+			return gitEnv // helper path already valid on the host
+		}
+		hostCfg := cfgPath + ".hostgate"
+		if err := os.WriteFile(hostCfg, []byte(patched), 0o600); err != nil {
+			return gitEnv
+		}
+		out := append([]string(nil), gitEnv...)
+		out[i] = prefix + hostCfg
+		return out
+	}
+	return gitEnv
+}
+
+// rewriteGitHelperPath points every `helper = <path>` line of a git config
+// at hostHelper. changed is false when the config contains no helper line
+// (nothing to rewrite — the caller passes the original through).
+func rewriteGitHelperPath(config, hostHelper string) (string, bool) {
+	lines := strings.Split(config, "\n")
+	changed := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "helper") && strings.Contains(trimmed, "=") {
+			lines[i] = "\thelper = " + hostHelper
+			changed = true
+		}
+	}
+	if !changed {
+		return config, false
+	}
+	return strings.Join(lines, "\n"), true
 }

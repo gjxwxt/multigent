@@ -3163,10 +3163,33 @@ func (s *Store) completeAndAdvanceWithExtras(project, taskID, summary, output st
 			// without a baseline keep the strict absolute surface; a lost or
 			// tampered baseline fails closed (resolveQABaselineSurface).
 			if worktreeDir != "" {
-				surf, surfErr := resolveQABaselineSurface(worktreeDir, s.QABaselineLookup, run.Project, run.TaskID)
-				if surfErr != nil {
-					s.releaseWorkflowTransitionClaim(&run, claimID)
-					return result, fmt.Errorf("workflow step %q output rejected: touched_paths checkpoint baseline unavailable for task %s: %w", currentStep.Title, run.TaskID, surfErr)
+				// Surface selection (defect ⑮ fix, 2026-10-06): when the run
+				// has already recorded a delivery (an implementation step
+				// completed with delivery_sha) THIS qa step sits on top of
+				// it — the QA agent's own delta is measured against the
+				// delivery anchor, not the task-creation baseline. Against
+				// the creation baseline the whole delivery counts as the QA
+				// delta, making Direction 1 (declare every changed path) and
+				// Direction 3 (test artifacts only) mutually unsatisfiable:
+				// an honest QA run on a business-code delivery could never
+				// complete (fu91es: 184 delivery files vs a test-artifact
+				// whitelist, exhaustive no-win). The anchor comes from the
+				// control plane's step instances, which agents cannot forge.
+				// WorktreeDeltaSinceCommit fails closed on a stale anchor
+				// (not an ancestor of HEAD) — the completion is rejected
+				// with that reason instead of silently degrading surfaces.
+				// Runs without a recorded delivery keep the baseline /
+				// absolute surfaces and their fail-closed trust model.
+				var surf qaBaselineSurface
+				if anchor := latestDeliveryAnchor(instances); anchor != "" {
+					surf = qaBaselineSurface{anchorCommit: anchor}
+				} else {
+					resolved, resolveErr := resolveQABaselineSurface(worktreeDir, s.QABaselineLookup, run.Project, run.TaskID)
+					if resolveErr != nil {
+						s.releaseWorkflowTransitionClaim(&run, claimID)
+						return result, fmt.Errorf("workflow step %q output rejected: touched_paths checkpoint baseline unavailable for task %s: %w", currentStep.Title, run.TaskID, resolveErr)
+					}
+					surf = resolved
 				}
 				if err := verifyWorktreeDeltaAgainstDeclaration(values["touched_paths"], worktreeDir, surf); err != nil {
 					s.releaseWorkflowTransitionClaim(&run, claimID)
@@ -3374,6 +3397,15 @@ func normalizeWorkflowOutputValues(step entity.WorkflowStep, values map[string]s
 			continue
 		}
 		out[key] = strings.TrimSpace(value)
+	}
+	// The frozen design HTML is a byte-exact freeze of the audited artifact:
+	// the same-source gate (design_delta_stale check) validates its sha256
+	// against the audit's capture BEFORE persistence, so a generic TrimSpace
+	// here would strip the trailing newline and break every downstream
+	// hash re-verification (design_delta_decisions.htmlSha256 vs
+	// approved_design_html). Restore the raw bytes after normalization.
+	if raw, ok := values["approved_design_html"]; ok {
+		out["approved_design_html"] = raw
 	}
 	if step.Type == "parallel_stage" || len(step.OutputFields) == 0 {
 		if strings.TrimSpace(output) != "" {

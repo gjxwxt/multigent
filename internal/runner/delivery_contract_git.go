@@ -2,6 +2,7 @@ package runner
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -152,8 +153,18 @@ func gitDeliveryEvidence(dir, baseRef, branchName string, env []string) (commitB
 	// exactly like the workspace clone path does). nil keeps the previous
 	// behaviour (inherit the process env) for the sandbox runner, whose run
 	// environment already carries GIT_CONFIG_GLOBAL.
+	//
+	// Defect ⑯ live finding (fu91es QA re-run, 2026-10-06): a MINIMAL env
+	// slice (["GIT_CONFIG_GLOBAL=..."], the runner's materialized-helper
+	// extraction) must NOT replace the environment wholesale — git's HTTP
+	// transport execs its git-remote-http helper binary via PATH, and with
+	// PATH gone ls-remote dies with "'origin' does not appear to be a git
+	// repository" even though the credential config itself is fine. Merge
+	// over the process environ instead: caller entries win on duplicate
+	// keys (os/exec last-value-wins), the API's transient-token env keeps
+	// its overrides, and the runner's minimal env gains PATH/HOME.
 	if env != nil {
-		lsRemote.Env = env
+		lsRemote.Env = append(os.Environ(), env...)
 	}
 	ls, err := lsRemote.CombinedOutput()
 	if err != nil {

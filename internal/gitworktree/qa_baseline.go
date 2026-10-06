@@ -528,6 +528,79 @@ func QABaselineWorktreeDelta(worktreeDir string, baseline QABaseline) ([]string,
 // ErrNoQABaseline marks a worktree without a usable baseline document.
 var ErrNoQABaseline = fmt.Errorf("no qa baseline recorded for this worktree")
 
+// WorktreeDeltaSinceCommit returns the worktree's real delta against an
+// explicit anchor commit: every tracked path whose working-tree content
+// differs from the anchor (committed, staged, and unstaged changes in one
+// diff) plus every untracked path. This is the measurement surface for a QA
+// checkpoint that runs ON TOP of an already-recorded delivery (the anchor is
+// the delivery_sha): the delivery itself is not the QA agent's delta — only
+// what the QA run added on top of it is. Measuring against the task-creation
+// baseline instead folds the entire delivery into the QA delta, where the
+// test-artifact whitelist structurally rejects it (fu91es QA, 2026-10-06:
+// 184 delivery files + a whitelist that only admits test files = an
+// unsatisfiable gate).
+//
+// Fail-closed: when the anchor is not an ancestor of HEAD (stale SHA,
+// rewritten history, diverged branch) the delta is undefined and an error is
+// returned — never a silently wrong surface. Platform runtime dirs
+// (.multigent) are excluded, matching the absolute-status surface.
+func WorktreeDeltaSinceCommit(worktreeDir, anchor string) ([]string, error) {
+	anchor = strings.TrimSpace(anchor)
+	if anchor == "" {
+		return nil, fmt.Errorf("empty delivery anchor")
+	}
+	{
+		cmd, cancel := gitLocal(worktreeDir, "merge-base", "--is-ancestor", anchor, "HEAD")
+		if err := cmd.Run(); err != nil {
+			cancel()
+			return nil, fmt.Errorf("delivery anchor %s is not an ancestor of HEAD in %s: %w", anchor, worktreeDir, err)
+		}
+		cancel()
+	}
+	cmd, cancel := gitLocal(worktreeDir, "diff", "--name-only", "-z", anchor)
+	out, err := cmd.Output()
+	cancel()
+	if err != nil {
+		return nil, fmt.Errorf("git diff against anchor %s: %w", anchor, err)
+	}
+	delta := map[string]bool{}
+	for _, p := range strings.Split(string(out), "\x00") {
+		p = strings.TrimSpace(p)
+		if p == "" || strings.HasPrefix(p, ".multigent") {
+			continue
+		}
+		delta[filepath.ToSlash(p)] = true
+	}
+	// Untracked files are invisible to `git diff <commit>`; take them from
+	// the raw -z status surface (only the "??" class — everything tracked is
+	// already covered by the anchor diff).
+	statusCmd, statusCancel := gitLocal(worktreeDir, "status", "--porcelain", "-z", "--untracked-files=all")
+	statusRaw, err := statusCmd.Output()
+	statusCancel()
+	if err != nil {
+		return nil, fmt.Errorf("git status in %s: %w", worktreeDir, err)
+	}
+	for _, entry := range strings.Split(string(statusRaw), "\x00") {
+		if len(entry) < 4 || entry[0] != '?' || entry[1] != '?' {
+			continue
+		}
+		p := entry[3:]
+		if strings.HasPrefix(p, ".multigent") {
+			continue
+		}
+		if strings.HasPrefix(p, `"`) && strings.HasSuffix(p, `"`) {
+			p = unquoteGitPath(p)
+		}
+		delta[filepath.ToSlash(p)] = true
+	}
+	out2 := make([]string, 0, len(delta))
+	for p := range delta {
+		out2 = append(out2, p)
+	}
+	sort.Strings(out2)
+	return out2, nil
+}
+
 // gitQuiet runs a local git command and returns trimmed stdout. Only safe
 // for outputs whose leading/trailing bytes carry no field structure (e.g.
 // rev-parse); NEVER use it for -z porcelain output (see worktreeListAllFiles).
