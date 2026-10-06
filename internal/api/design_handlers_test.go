@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -83,6 +85,16 @@ func (f *fakeODClient) GetProjectFile(_ context.Context, _, path string) ([]byte
 	return nil, &odAPIError{Status: 404, Detail: "not found"}
 }
 
+func (f *fakeODClient) ListProjectConversations(_ context.Context, _ string) ([]ODConversation, error) {
+	// Default fake: no conversation read-back (source classification
+	// degrades to uncertain — the fail-closed path).
+	return nil, nil
+}
+
+func (f *fakeODClient) GetConversationMessages(_ context.Context, _, _ string) ([]ODConversationMessage, error) {
+	return nil, nil
+}
+
 func seedDesignTask(t *testing.T, status entity.TaskStatus) (*Server, string, *entity.Task) {
 	t.Helper()
 	s, workspaceID, task, _ := seedResourceProject(t, status)
@@ -146,6 +158,32 @@ func seedODConnection(t *testing.T, s *Server) {
 		ConnectionName: "default", OwnerType: ConnectionOwnerUser, OwnerID: "admin",
 		AuthType: ConnectionAuthAPIKey, Status: "active",
 		ProfileJSON: `{"baseUrl":"http://127.0.0.1:7456"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	secret, err := sealConnectionSecret(map[string]string{"apiKey": "od-test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret.ConnectionID = "conn-od"
+	if err := s.controlDB.UpsertConnectionSecret(secret); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seedODConnectionAt is seedODConnection with an explicit upstream baseUrl
+// (tests that stand in a fake OD daemon point it at the httptest server).
+func seedODConnectionAt(t *testing.T, s *Server, baseURL string) {
+	t.Helper()
+	workspaceID, err := s.currentWorkspaceID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.controlDB.UpsertConnection(controldb.Connection{
+		ID: "conn-od", WorkspaceID: workspaceID, Provider: "opendesign",
+		ConnectionName: "default", OwnerType: ConnectionOwnerUser, OwnerID: "admin",
+		AuthType: ConnectionAuthAPIKey, Status: "active",
+		ProfileJSON: `{"baseUrl":"` + baseURL + `"}`,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -573,4 +611,184 @@ func TestDesignRootProjectFallsThroughForConsolePaths(t *testing.T) {
 	if s.handleDesignRootProject(w, req) {
 		t.Fatal("console project path must fall through to the console SPA")
 	}
+}
+
+// A failed chat/multi-turn run on a design project must not poison the design
+// gate status: the prototype an earlier generation run produced (or any
+// deliverable file on the project) keeps the gate usable. Live case
+// 2026-10-05: prototype present and previewing fine, badge showed
+// 生成失败 and the confirm button was disabled because the latest run was a
+// failed chat turn.
+func TestDesignStatusFailedChatRunDoesNotPoisonGeneratedDesign(t *testing.T) {
+	s, _, task := seedDesignTask(t, entity.TaskStatusAwaitingConfirmation)
+
+	// odRunsOD: latest run failed (chat turn), earlier generation run
+	// succeeded; project carries the generated artifact.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/runs":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"runs":[{"id":"run-chat-latest","status":"failed"},{"id":"run-gen-first","status":"succeeded"}]}`))
+		case r.URL.Path == "/api/projects/proj_mg_"+task.ID+"/files":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"files":[{"path":"index.html","kind":"html","size":1024}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	seedODConnectionAt(t, s, srv.URL)
+
+	task.DesignProjectID = "proj_mg_" + task.ID
+	if err := s.ts.UpdateTask("resproj", taskAgentFromAssignee(task), task); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/resproj/tasks/"+task.ID+"/design/status", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxUserKey, "admin"))
+	req.SetPathValue("name", "resproj")
+	req.SetPathValue("taskId", task.ID)
+	w := httptest.NewRecorder()
+	s.handleDesignStatus(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"runStatus":"succeeded"`) {
+		t.Fatalf("failed chat run poisoned the design status: %s", w.Body.String())
+	}
+}
+
+// With no successful run and no files at all, a failed latest run must stay
+// failed (fail-closed: the gate should show 生成失败 for a genuinely empty
+// project).
+func TestDesignStatusStaysFailedWithoutArtifact(t *testing.T) {
+	s, _, task := seedDesignTask(t, entity.TaskStatusAwaitingConfirmation)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/runs":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"runs":[{"id":"run-chat-latest","status":"failed"}]}`))
+		case r.URL.Path == "/api/projects/proj_mg_"+task.ID+"/files":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"files":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	seedODConnectionAt(t, s, srv.URL)
+
+	task.DesignProjectID = "proj_mg_" + task.ID
+	if err := s.ts.UpdateTask("resproj", taskAgentFromAssignee(task), task); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/resproj/tasks/"+task.ID+"/design/status", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxUserKey, "admin"))
+	req.SetPathValue("name", "resproj")
+	req.SetPathValue("taskId", task.ID)
+	w := httptest.NewRecorder()
+	s.handleDesignStatus(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"runStatus":"failed"`) {
+		t.Fatalf("empty project must stay failed: %s", w.Body.String())
+	}
+}
+
+// 续聊式打回（proposal §5.3.1): POST design/rework resolves the most recently
+// updated design conversation server-side and posts the completion message to
+// the SAME conversation via POST /api/runs (continuation = conversationId).
+// Regression for the v2.6 gap: the modal advertised 打回补齐 but nothing sent
+// anything to OD.
+func TestDesignReworkSendsToSameConversation(t *testing.T) {
+	s, _, task := seedDesignTask(t, entity.TaskStatusAwaitingConfirmation)
+
+	var gotRunsBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/projects/proj_mg_"+task.ID+"/conversations":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"conversations":[{"id":"conv-old","updatedAt":100},{"id":"conv-design","updatedAt":900,"sessionMode":"design"}]}`))
+		case r.URL.Path == "/api/runs":
+			_ = json.Unmarshal(mustReadAll(r), &gotRunsBody)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"conversationId":"conv-design","runId":"run-rework-1"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	seedODConnectionAt(t, s, srv.URL)
+
+	task.DesignProjectID = "proj_mg_" + task.ID
+	if err := s.ts.UpdateTask("resproj", taskAgentFromAssignee(task), task); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/resproj/tasks/"+task.ID+"/design/rework",
+		strings.NewReader(`{"message":"请在原型中补齐：1. 修改管理员密码（补充要求：入口放右上角）"}`))
+	req = req.WithContext(context.WithValue(req.Context(), ctxUserKey, "admin"))
+	req.SetPathValue("name", "resproj")
+	req.SetPathValue("taskId", task.ID)
+	w := httptest.NewRecorder()
+	s.handleDesignRework(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("rework: %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"conversationId":"conv-design"`) {
+		t.Fatalf("rework must target the latest conversation: %s", w.Body.String())
+	}
+	if got := gotRunsBody["conversationId"]; got != "conv-design" {
+		t.Fatalf("OD continuation must carry conversationId=conv-design, got %v", got)
+	}
+	if msg, _ := gotRunsBody["message"].(string); !strings.Contains(msg, "修改管理员密码") {
+		t.Fatalf("completion message lost the rework ask: %v", msg)
+	}
+	// byokProvider must ride along or the OD chat fails to reach the model.
+	if _, ok := gotRunsBody["byokProvider"]; !ok {
+		t.Fatal("rework run missing byokProvider creds")
+	}
+}
+
+// An empty rework message is refused (nothing to send), and a task without a
+// design project is a conflict.
+func TestDesignReworkGuards(t *testing.T) {
+	s, _, task := seedDesignTask(t, entity.TaskStatusAwaitingConfirmation)
+
+	task.DesignProjectID = "proj_mg_" + task.ID
+	if err := s.ts.UpdateTask("resproj", taskAgentFromAssignee(task), task); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/resproj/tasks/"+task.ID+"/design/rework",
+		strings.NewReader(`{"message":"  "}`))
+	req = req.WithContext(context.WithValue(req.Context(), ctxUserKey, "admin"))
+	req.SetPathValue("name", "resproj")
+	req.SetPathValue("taskId", task.ID)
+	w := httptest.NewRecorder()
+	s.handleDesignRework(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("empty message: %d", w.Code)
+	}
+
+	// No design project at all → conflict before any upstream call.
+	s2, _, task2 := seedDesignTask(t, entity.TaskStatusAwaitingConfirmation)
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/projects/resproj/tasks/"+task2.ID+"/design/rework",
+		strings.NewReader(`{"message":"fix it"}`))
+	req2 = req2.WithContext(context.WithValue(req2.Context(), ctxUserKey, "admin"))
+	req2.SetPathValue("name", "resproj")
+	req2.SetPathValue("taskId", task2.ID)
+	w2 := httptest.NewRecorder()
+	s2.handleDesignRework(w2, req2)
+	if w2.Code != http.StatusConflict {
+		t.Fatalf("no design project: %d", w2.Code)
+	}
+}
+
+func mustReadAll(r *http.Request) []byte {
+	raw, _ := io.ReadAll(r.Body)
+	return raw
 }

@@ -144,6 +144,14 @@ type odClientAPI interface {
 	// retroactively change what downstream steps see.
 	ListProjectFiles(ctx context.Context, projectID string) ([]ODProjectFile, error)
 	GetProjectFile(ctx context.Context, projectID, path string) ([]byte, error)
+	// Conversation read-back (benchmark B of the delta audit, live-probed
+	// 2026-10-04 against OD v0.21.1: both endpoints answer 200):
+	//   GET /api/projects/{id}/conversations
+	//   GET /api/projects/{id}/conversations/{convId}/messages
+	// Human turns carry role "user"; the platform-injected gate prompt is the
+	// first user message and callers must exclude it from intent analysis.
+	ListProjectConversations(ctx context.Context, projectID string) ([]ODConversation, error)
+	GetConversationMessages(ctx context.Context, projectID, conversationID string) ([]ODConversationMessage, error)
 }
 
 type odClient struct {
@@ -357,7 +365,30 @@ func (c *odClient) LatestRunStatus(ctx context.Context, projectID string) (strin
 	if len(out.Runs) == 0 {
 		return "", "none", nil
 	}
-	return out.Runs[0].ID, out.Runs[0].Status, nil
+	latestID, latest := out.Runs[0].ID, out.Runs[0].Status
+	if latest == "succeeded" || latest == "done" || latest == "running" {
+		return latestID, latest, nil
+	}
+	// The latest run is not a success. The project may still be usable: later
+	// chat/multi-turn runs share the project and their failure must not poison
+	// the design artifact that an earlier generation run already produced
+	// (live case 2026-10-05: prototype present and previewing fine, badge
+	// showed 生成失败 because a follow-up chat run died). Two mitigations:
+	// a successful non-latest run, or any deliverable file on the project.
+	for _, r := range out.Runs {
+		if r.Status == "succeeded" || r.Status == "done" {
+			return r.ID, "succeeded", nil
+		}
+	}
+	files, err := c.ListProjectFiles(ctx, projectID)
+	if err == nil {
+		for _, f := range files {
+			if strings.TrimSpace(f.Path) != "" {
+				return latestID, "succeeded", nil
+			}
+		}
+	}
+	return latestID, latest, nil
 }
 
 func (c *odClient) DeleteProject(ctx context.Context, projectID string) error {
@@ -416,4 +447,45 @@ func pathEscapeSegment(path string) string {
 		parts[i] = url.PathEscape(p)
 	}
 	return strings.Join(parts, "/")
+}
+
+// ODConversation is one design session on an OD project (live probe
+// 2026-10-04: GET /api/projects/{id}/conversations).
+type ODConversation struct {
+	ID           string `json:"id"`
+	ProjectID    string `json:"projectId"`
+	Title        string `json:"title"`
+	SessionMode  string `json:"sessionMode"`
+	MessageCount int    `json:"messageCount"`
+	CreatedAt    int64  `json:"createdAt"`
+	UpdatedAt    int64  `json:"updatedAt"`
+}
+
+// ODConversationMessage is one chat turn (role user/assistant, full content).
+type ODConversationMessage struct {
+	ID        string `json:"id"`
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	CreatedAt int64  `json:"createdAt"`
+}
+
+func (c *odClient) ListProjectConversations(ctx context.Context, projectID string) ([]ODConversation, error) {
+	var out struct {
+		Conversations []ODConversation `json:"conversations"`
+	}
+	if err := c.s.odDo(ctx, http.MethodGet, "/api/projects/"+projectID+"/conversations", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Conversations, nil
+}
+
+func (c *odClient) GetConversationMessages(ctx context.Context, projectID, conversationID string) ([]ODConversationMessage, error) {
+	var out struct {
+		Messages []ODConversationMessage `json:"messages"`
+	}
+	path := "/api/projects/" + projectID + "/conversations/" + pathEscapeSegment(conversationID) + "/messages"
+	if err := c.s.odDo(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Messages, nil
 }

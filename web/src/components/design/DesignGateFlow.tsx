@@ -1,9 +1,11 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { AlertTriangle } from 'lucide-react'
-import { apiPost } from '../../lib/api'
+import { apiFetch, apiPost } from '../../lib/api'
 import { DesignSourceChoiceModal } from './DesignSourceChoiceModal'
 import { DesignReviewModal } from './DesignReviewModal'
+import { DesignDeltaAuditModal } from './DesignDeltaAuditModal'
+import { loadStagedDecisions, stageDecisions, type DesignDeltaDecision } from './designDelta'
 
 type StartResponse = {
   projectId: string
@@ -51,6 +53,11 @@ export function DesignGateFlow({
   const [waiverPrompt, setWaiverPrompt] = useState<WaiverPrompt | null>(null)
   const [waiverReason, setWaiverReason] = useState('')
   const [session, setSession] = useState<StartResponse | null>(null)
+  // Two-phase confirm (docs design-gate-delta-audit-proposal v2.6): the OD
+  // modal's confirm opens the delta adjudication modal; the workflow review
+  // submit happens only when THAT modal confirms, carrying the adjudication
+  // bundle (same-source HTML + sha256) in the outputs.
+  const [deltaModal, setDeltaModal] = useState(false)
   const { t } = useTranslation()
 
   const designBase = `/api/v1/projects/${encodeURIComponent(project)}/tasks/${encodeURIComponent(taskID)}/design`
@@ -71,6 +78,21 @@ export function DesignGateFlow({
       setBusyLocal(false)
     }
   }, [designBase])
+
+  // The review stage also opens directly (follow-page canvas shortcut and
+  // page refresh): there is no start response in this React session, so
+  // bootstrap projectId from design/status. Without it confirmGenerated's
+  // session guard silently swallowed the 确认并流转 click.
+  useEffect(() => {
+    if (stage !== 'review' || session?.projectId) return
+    let alive = true
+    apiFetch<{ projectId?: string }>(`${designBase}/status`, { silentStatuses: [401, 403, 404, 500, 502, 503, 504] })
+      .then((data) => {
+        if (alive && data?.projectId) setSession({ projectId: data.projectId, proxyUrl: '', launchUrl: '', studioUrl: '' })
+      })
+      .catch(() => { /* best-effort; error surfaces on submit */ })
+    return () => { alive = false }
+  }, [stage, session?.projectId, designBase])
 
   async function confirmExisting(odProjectId: string, projectName?: string) {
     setBusyLocal(true)
@@ -103,19 +125,26 @@ export function DesignGateFlow({
 
   async function confirmGenerated() {
     if (!session?.projectId) return
+    // Two-phase: open the delta adjudication modal instead of submitting
+    // directly. The submit (with the audit bundle) happens from that modal.
+    setDeltaModal(true)
+  }
+
+  async function submitGeneratedWithDeltas(deltaPayload: string | null) {
+    if (!session?.projectId) return
     setBusyLocal(true)
     setError(null)
     try {
-      await submitReview(
-        {
-          approved_design_source: 'generated',
-          approved_design_project_id: session.projectId,
-          comments: t('designGate.autoComments.generated', {
-            defaultValue: '确认 OD 生成的设计，进入实现编码。',
-          }),
-        },
-        'approve',
-      )
+      const outputs: Record<string, string> = {
+        approved_design_source: 'generated',
+        approved_design_project_id: session.projectId,
+        comments: t('designGate.autoComments.generated', {
+          defaultValue: '确认 OD 生成的设计，进入实现编码。',
+        }),
+      }
+      if (deltaPayload) outputs.design_delta_decisions = deltaPayload
+      await submitReview(outputs, 'approve')
+      setDeltaModal(false)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       setError(msg)
@@ -126,6 +155,30 @@ export function DesignGateFlow({
           errorMsg: msg,
         })
       }
+      setBusyLocal(false)
+    }
+  }
+
+  async function submitDeltaAdjudication(deltaPayload: string) {
+    await submitGeneratedWithDeltas(deltaPayload)
+  }
+
+  // 续聊式打回 (proposal §5.3.1, live 2026-10-05): the adjudication modal's
+  // rework send. Post the completion message to the SAME OD conversation via
+  // the platform rework endpoint, stage the surviving verdicts in
+  // sessionStorage for the next audit's differential context, then close the
+  // modal — the task stays at the design gate; the user reopens the canvas
+  // (or the modal) after the OD agent amends the prototype.
+  async function reworkDesign(message: string, staged: DesignDeltaDecision[]) {
+    setBusyLocal(true)
+    setError(null)
+    try {
+      await apiPost(`${designBase}/rework`, { message }, { suppressToast: true })
+      stageDecisions(project, taskID, staged)
+      setDeltaModal(false)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
       setBusyLocal(false)
     }
   }
@@ -218,6 +271,18 @@ export function DesignGateFlow({
           onConfirm={() => void confirmGenerated()}
           onRework={() => void rework()}
           onClose={onClose}
+        />
+      )}
+
+      {deltaModal && (
+        <DesignDeltaAuditModal
+          project={project}
+          taskID={taskID}
+          taskTitle={taskTitle}
+          prevDecisions={loadStagedDecisions(project, taskID)}
+          onSubmit={(payload) => submitDeltaAdjudication(payload)}
+          onRework={(message, staged) => reworkDesign(message, staged)}
+          onClose={() => setDeltaModal(false)}
         />
       )}
 

@@ -16,6 +16,7 @@ import (
 
 	controldb "github.com/multigent/multigent/internal/db"
 	"github.com/multigent/multigent/internal/entity"
+	"github.com/multigent/multigent/internal/store"
 	workflowstore "github.com/multigent/multigent/internal/workflow"
 )
 
@@ -271,12 +272,13 @@ func (s *Server) handleDesignStart(w http.ResponseWriter, r *http.Request) {
 	// ccr-qwen), not the OD connection: byokProvider is the model endpoint OD
 	// forwards to opencode. Sending the OD daemon's own URL made opencode
 	// POST to OD itself (live incident 2026-09-02).
-	creds, err := s.resolveDesignModelProvider(project, agent, designModelOrDefault(body.Model))
+	resolvedModel := s.designModelOrDefault(project, agent, body.Model)
+	creds, err := s.resolveDesignModelProvider(project, agent, resolvedModel)
 	if err != nil {
 		s.writeDesignUpstreamError(w, err)
 		return
 	}
-	conversationID, err := client.StartRun(r.Context(), projID, finalPrompt, body.DesignSystemID, body.Model, creds)
+	conversationID, err := client.StartRun(r.Context(), projID, finalPrompt, body.DesignSystemID, resolvedModel, creds)
 	if err != nil {
 		s.writeDesignUpstreamError(w, err)
 		return
@@ -454,7 +456,8 @@ func (s *Server) handleDesignChat(w http.ResponseWriter, r *http.Request) {
 	// ccr-qwen); the OD connection itself is only used for the API call the
 	// proxy pass performs below.
 	agent := taskAgentFromAssignee(task)
-	creds, err := s.resolveDesignModelProvider(project, agent, designModelOrDefault(body.Model))
+	resolvedModel := s.designModelOrDefault(project, agent, body.Model)
+	creds, err := s.resolveDesignModelProvider(project, agent, resolvedModel)
 	if err != nil {
 		s.writeDesignUpstreamError(w, err)
 		return
@@ -464,12 +467,12 @@ func (s *Server) handleDesignChat(w http.ResponseWriter, r *http.Request) {
 		"agentId":     odAgentID,
 		"message":     body.Message,
 		"sessionMode": "design",
-		"model":       designModelOrDefault(body.Model),
+		"model":       resolvedModel,
 		"byokProvider": odByokProvider{
 			Protocol: creds.Protocol,
 			APIKey:   creds.APIKey,
 			BaseURL:  creds.BaseURL,
-			Model:    designModelOrDefault(body.Model),
+			Model:    resolvedModel,
 		},
 	}
 	if body.ConversationID != "" {
@@ -975,11 +978,42 @@ func designPendingPrompt(task *entity.Task) string {
 	return task.Description
 }
 
-func designModelOrDefault(m string) string {
-	if strings.TrimSpace(m) == "" {
-		return odDefaultModel
+// designResolvedModel resolves the model for an OD design-gate call without
+// a hard-coded gateway name. Resolution order:
+//  1. explicit request model (the caller's choice)
+//  2. the task agent's runtime model (agent_workers.runtime_model — the same
+//     Fusion/* fast path its runs use)
+//  3. the default model configured on the agent's bound model account
+//     (model_providers.model — editable in the UI, survives gateway migration)
+//
+// Empty return means "fall back to odDefaultModel at the call site".
+func (s *Server) designResolvedModel(project, agent, explicit string) string {
+	if m := strings.TrimSpace(explicit); m != "" {
+		return m
 	}
-	return m
+	if meta := s.designAgentMeta(project, agent); meta != nil {
+		if m := strings.TrimSpace(meta.RuntimeModel); m != "" {
+			return m
+		}
+		if strings.TrimSpace(meta.Provider) != "" {
+			if prov, err := store.NewProviderStoreWithDB(s.root, s.controlDB).Get(meta.Provider); err == nil && prov != nil {
+				if m := strings.TrimSpace(prov.Model); m != "" {
+					return m
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// designModelOrDefault returns the design-gate model for project/agent,
+// falling back to odDefaultModel only when no configured layer resolves.
+// Never hard-code a new default at call sites; extend designResolvedModel.
+func (s *Server) designModelOrDefault(project, agent, explicit string) string {
+	if m := s.designResolvedModel(project, agent, explicit); m != "" {
+		return m
+	}
+	return odDefaultModel
 }
 
 func (s *Server) writeDesignUpstreamError(w http.ResponseWriter, err error) {
