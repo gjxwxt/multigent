@@ -4334,3 +4334,17 @@ REQUIRE_ENCRYPTED_SECRETS 硬门控逐字节兼容；TestLegacySealedValuesRemai
   npm run check:locales` 对账 39/39 + OK → 决策 G 批（后端端点平移，约 208 个端点，
   建议按 connections→auth→workbench 依赖序切片）或先行为级验收 F6 前端
   （`./dist/multigent start` 后逐页走查——注意 G 批未接通前这些页面会 404）。
+
+## 第五十一至五十五轮（2026-10-07）F 批前端回收全量收官
+
+- **F1 地基**（12 commits）：Vite 工程自写+38 纯自有平移 diff=0+基建 17 件重写（api/auth 权限判定 23 行为测试）+路由壳；三轮相似度自纠（clipboard 定界回 copy/recent-visits root=上游/ConfirmDialog 二次重写）。
+- **F2 locales**：524 key 重建，5,571 上游 JSON 行清偿归零；check-locales 工具+4 测试钉住。
+- **F3 deploy 前端**：12 文件 2,127 行零上游复验+15 路由契约对照逐字段一致+真路由挂载。
+- **F4 任务域**（9 commits）：TaskModals 3,299 行 18 导出冻结+FollowPage/CreateTaskDialog/RunsPage 重写；**后端缺口 59 端点**列 manifest §11.3；TaskTable/MessageDetail/AgentChannel 三件首稿超限自纠。
+- **F5 workflow 画布+agents**（5 commits）：完整交互画布（Position/Handle 红线：拖动回写整数+连线锚点，契约测试 5 件钉住）+apiPostSSE+agents 三页；ChatPage 首稿 0.844→二次拆解 0.672；agents 缺口 ~50 端点。
+- **F6 settings/kb/workbench**（10 commits）：Connections/Settings 九 section/Account/Login 完整版/ProjectSettings/ContextCenter/Files/Skills/Workbench 十件重写全部 ≤0.80；缺口 ~99 端点；members 路由补账。
+- **F 批终态**：新仓 75 commits，前端 97 源文件；纯自有 38 文件 10,253 行 diff=0；重写件旧蓝图约 3.7 万行全部相似度 ≤0.80；locales en=zh=1,964 key；四闸（tsc/vitest 39/build/check-locales）全绿。
+- **主控逐组实地复核**：每组 build+vitest+check:locales+作者唯一+相似度抽验（TaskTable 0.42 与申报一致/画布契约注释与实现在位）。
+- **G 批输入**：后端缺口累计约 208 端点（F4 59+F5 50+F6 99），manifest §11.3/§12.4/§13.5 明细；建议依赖序切片 connections→auth→workbench→tasks→agents→kb。
+- 新仓遗留已清理：误拷贝的 HANDOFF.md 副本已删（台账在 docs/BATCH-LOG.md）。
+- **总进度：S0-B-C-D-E-F 全收官，仅剩 G（后端端点平移+双轨切换+部署验收）**。
