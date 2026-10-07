@@ -4292,3 +4292,45 @@ REQUIRE_ENCRYPTED_SECRETS 硬门控逐字节兼容；TestLegacySealedValuesRemai
 - **晨起建议**：读新仓 manifest §12 + BATCH-LOG F5 节 → `cd web && npx vitest run &&
   npm run check:locales` 对账 39/39 + 1367/1367 → 裁决 G 批（后端端点平移，§11.3
   59 + §12.4 50 合计约 109 个）或 F6（workbench/messages/people 域页面）。
+
+---
+
+## 第 55 轮（2026-10-07 深夜→晨）：overnight-runner F6 批 — settings/connections + 知识库/文件/技能域 + 工作台/登录/账户（F 批收官）
+
+执行者：F6 overnight-runner（延续第 54 轮 F5）。新仓 8 commits（41afc33 / f40b344 /
+7f5d450 / f0d1d10 / a9a6c70 / 3b52150 / 9091343 / d801068，另 docs 2：5a8b26e manifest
+§13、e0f8112 BATCH-LOG）。本轮只写本文件，旧仓源码零改动。
+
+- **交付范围**：connections 组（ConnectionsPage 1,880 行 + SettingsPage 3,486 行 +
+  AccountPage 680 行）+ 登录/账户/成员补全（LoginPage 完整版 277 行替换 F1 脚手架、
+  ProjectMembersPage 431 行 + members 列表路由——F5 偏差 2 补账）+ 项目设置
+  （ProjectSettingsPage 2,169 行，混合文件 219 上游行整文件洁净室处理）+ kb 组
+  （ContextCenterPage 243 / FilesPage 786 / SkillsPage 1,132）+ 工作台 P0
+  （WorkbenchPage 1,457 行）。ProjectAssetsPage 复验 diff=0 跳过（F1 纯自有）。
+- **逐文件处置 10 重写文件全部实测相似度 ≤0.80**（0.214–0.693，明细 manifest §13.1）；
+  两处首稿超限自纠：SettingsPage OAuth guide 段 0.864 → OAUTH_GUIDE_PROVIDERS 数据表
+  重构 → 0.077（全文件 0.511）；ProjectMembersPage 0.859 → MemberCard 拆解 → 0.505。
+- **路由挂载 9 条**：workbench/context/files/connections/skills/settings/account 顶层
+  + projects/:projectId/{settings,members}；audit 保持占位（不在 F6 范围）。
+- **locales**：F6 十页收割 674 静态 key，缺口 597/bundle 清偿——569 沿旧仓 bundle +
+  28 新写（旧仓 bundle 亦缺，B 类规则：zh 沿 inline defaultValue、en 新写）；终态
+  **en=zh=1,964，check:locales OK: every referenced key exists in both bundles**。
+- **四闸全绿**：tsc -b 零错 + vitest 39/39 + vite build + check:locales OK。每 commit
+  前独立过闸。
+- **后端缺口（G 批输入新增）**：connections 22 + settings 26+ + 项目设置 12 +
+  kb/files/skills 20 + workbench/messages 12 + auth 7 ≈ **99 个**端点前端已按旧仓
+  handler JSON 形状实现（明细 manifest §13.5）。累计 G 批待接通约 59+50+99 ≈ 208 个。
+- **红线遵守**：本仓本轮仅改本文件；未 push；node_modules 未入库；HEAD 9f24d5d6 起
+  未动（本轮 append 前 git log 确认）。
+- **F 批收官统计**：F1 地基 + F2 locales + F3 deploy + F4 任务域 + F5 workflow/agents
+  + F6 本轮，前端 P0 页面覆盖率（trim-list 裁定口径）：connections ✅ / providers ✅
+  （SettingsPage Providers+OAuth+device 流）/ knowledge-base+docs ✅（ContextCenter +
+  Skills；docs 域组件在 F4/F5 已随消费方平移）/ auth+users+client-tokens ✅（LoginPage
+  完整版 + SettingsPage Users/AccessControl + AccountPage client tokens）/ workbench ✅
+  / scheduler ✅（AgentsPage schedule 编辑，F5）/ envvars ✅（SettingsPage Secrets 区）
+  / files ✅ / teams/roles 二期（trim-list 裁定废止 okrs+milestones；teams/roles 延后）
+  / audit 未迁移（非 P0）。前端累计 73 commits、vitest 39/39、locales 1,964/bundle。
+- **晨起建议**：读新仓 manifest §13 + BATCH-LOG F6 节 → `cd web && npx vitest run &&
+  npm run check:locales` 对账 39/39 + OK → 决策 G 批（后端端点平移，约 208 个端点，
+  建议按 connections→auth→workbench 依赖序切片）或先行为级验收 F6 前端
+  （`./dist/multigent start` 后逐页走查——注意 G 批未接通前这些页面会 404）。
