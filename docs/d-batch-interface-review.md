@@ -74,6 +74,8 @@ workflow 包 17,749 行（自有 15,044 / 上游 2,705 plain 口径，-M -C -C �
 - `unifiedDeliveryPipelineTemplate`（主体自有 94%）与 `hotfixDeployPipelineTemplate`（97%）：**平移**，各余 6 行上游辅助闭包（normalizeTemplateLocale/localizedTemplateText/field）重写。
 - `SeedDefaults`（上游 134 行）、`softwareDeliveryText`（上游 156 行）、5 个 legacy 模板（上游 389 行）：**不平移**。legacy 模板多数引用已裁剪域（OKR/里程碑，B2 裁决）本已是死内容；新仓默认种子 = 自有 authored 的 greenfield 流水线模板族（17 步 unified-delivery-pipeline 等），minimal re-author 的默认文案随实现走。旧仓已实例化的 workflow run 是冻结快照，A2 已裁决不带历史，无兼容负担。
 
+**STOP 级裁决①（2026-10-07，用户）：✅ 选 A——平移函数内的上游行必须零残留**。D 批相似度审计实锤"申报重写实为函数粒度平移"（98 函数带入 1,275 上游行：实质 ≈778 + 语法 ≈507），用户裁决对含上游行的函数执行真正语义重写（clean-room：读旧实现理解语义 → 全新实现 → 相似度检查复核 <50% 行同 → 31 测试文件全绿不删断言）。纯自有函数的逐字节平移不受影响（自有代码复制合法）。验收 = 上游行残留对账归零 + 逐函数相似度报告落 provenance-manifest。
+
 ## 6. 对评审者的反驳（2 条，附证据）
 
 - **声明 4**（"12 方法大部分调用点在上游行，先冻结=固化旧设计债"）：33 调用点逐行 blame 实测上游 15/33=45%，未过半；其中 13 处是定义/运行 CRUD 薄层（语义稳定），plan_store/qa_baseline_store 调用点全自有。接口以"实测调用面"定稿不等于固化设计债——D 批后续由 30 个净土测试文件锁定行为，接口演化有安全网。
