@@ -4129,3 +4129,96 @@ REQUIRE_ENCRYPTED_SECRETS 硬门控逐字节兼容；TestLegacySealedValuesRemai
 - **切片验收（v3 §7.1）**：部署申请→审批（REST CAS+IM 卡片）→执行→确定性验证以测试链跑通；未起真实 server/IM（任务书边界）。
 - **偏差 6+3 条**（chatops workflow 卡片分支不迁/最小 auth 闸 ~60 行/最小 createProjectTaskFromBody 等）全记录 BATCH-LOG E 批节；遗留决策：chatops 卡片分支+完整 auth 栈归属批次（随后续切片）。
 - 进度：S0-B3-C1-C1.5-D-D2-E 全收官 → F 前端回收（37,000+ 上游行重写，按 trim-list 倒推）→ G 切换。
+
+## 第五十一轮（2026-10-07）F1 批：前端基建层重写 + 纯自有平移（overnight-runner）
+
+- **F1 交付**（新仓 7 commits a1daee3…16d923e，累计 32）：
+  ① web/ 工程 scaffold（Vite+React+TS+Tailwind4+vitest，配置自写）；② **纯自有 38 文件
+  10,253 行纯复制平移**（audit-full.json 口径 up=0，提交后逐文件 diff=0 机器复验）；
+  ③ **洁净室重写 17 件**：api.ts(192 up)/auth.tsx(241 全上游)/use-api.ts/workspace-access.tsx/
+  Toast/ConfirmDialog/Pagination/PlaceholderCard/cn/button-styles/clipboard/format-datetime/
+  task-duration/page-tabs/quick-links/recent-visits/ThemeProvider——读旧实现理解契约后全新写作；
+  ④ 路由壳（App/main/i18n/AppShell/Login）重写 + P0 占位路由（trim-list draft §0 一期页面）。
+- **三闸验收**：npm run build 零错误；npm run dev :27891 curl 200；vitest **26/26 绿**
+  （api 错误契约 13 + auth 权限判定 10 + utils 3）。api.test.ts 在重写过程中捕获自引入
+  bug（apiFetch 丢 header）并修复——行为测试有效性实证。
+- **行为契约锚点**：重写件导出面按 38 平移件的实测 import 面冻结（api 5 符号+2 options/
+  auth 2/showToast/confirmDialog/overlayDismissProps/cn/useApiJson），平移后一次编译通过；
+  isSystemAdmin/canOperateAgent 等权限判定语义逐条等价旧仓（后端 RBAC 阶梯对齐）。
+- **locales 过渡态（F2 必办）**：en+zh-CN common.json 暂存旧仓上游 JSON（构建需要，
+  已在 manifest §9.4 申报过渡态与版权归属）；zh-TW/ja 未搬，supportedLngs 收窄。
+- **偏差 4+1 条**：useApiLazy 不存在（任务书笔误）；index.css 缩编（checkbox/hljs/
+  react-flow 段随组件批次）；旧壳 401 行上游占多数整壳留 F 批；vite8 rolldown darwin-arm64
+  需手动补 binding（环境项）。详见新仓 docs/provenance-manifest.md §9.7 + BATCH-LOG F1 节。
+- **红线遵守**：旧仓本轮仅改本文件；未 push；作者唯一 gaojiaxiang（新仓 32 commits）；
+  平移件 diff=0；重写件无逐行平移；测试断言零删改（新写测试为纯新增）。
+- **待用户晨起确认（非阻塞）**：①locales 过渡态口径（manifest §9.4）是否接受，
+  或 F2 前需要一次 interim 清理；②F2 页面批开工前按 routing 树复核 trim-list draft
+  （§3 边界声明）。
+- **建议第一件事**：读新仓 docs/provenance-manifest.md §9 + 跑 `cd web && npm test`
+  对账 26/26，然后裁决 F2 批次范围（页面顺序：deploy 域全自有可先验收 / workflows /
+  projects 域）。
+
+## 第五十一轮增补（同夜）F1 相似度机器复核与二次修正
+
+- **复核发现 5 件不合格**（落实 D2 教训"重写申报必须写作时自证"）：clipboard.ts
+  相似度 1.00（gaojiaxiang 亲笔纯自有，被误作重写件原样复制）；recent-visits.ts 0.88 /
+  quick-links.ts 0.81（**blame root 27/50 行——root≡初始导入按冻结口径为上游，
+  不在 38 纯自有清单**，初版重写残留上游结构）；ConfirmDialog 0.82 / i18n 0.85（结构残留）。
+- **处置**：5 件全部推倒真重写（新仓 commits 8902ee6/6edcafd），复测 min 0.14 /
+  median 0.57 / max 0.80；≥0.74 残余逐件核对均为编译期契约面（props 类型/i18next
+  配置词表/单条 class 常量），无实质逻辑行残留。任务书"纯自有 copy"名单勘误 4 件
+  （quick-links/recent-visits/cn=root、button-styles=chenhg5）。
+- **修正后三闸复跑**：build 零错误 / dev 200 / vitest 26/26 绿。
+- F1 最终规模：新仓 10 commits（a1daee3…ab9180d，含 2 次修正 + 2 docs）；
+  manifest §9.8 + BATCH-LOG 增补落盘可复现（相似度脚本含于 manifest 文内）。
+
+## 第五十一轮终笔：clipboard 定界与 F1 收口
+
+- clipboard.ts 三审定界：误作重写（相似度1.00暴露）→ 真重写 0.14 → 发现其属
+  38 纯自有清单（gaojiaxiang 亲笔），纯自有纪律是 diff=0，重写越界 → 恢复逐字节
+  复制（新仓 commit f1d6466），申报回 copy。
+- F1 最终口径（manifest §9.9）：**38 纯自有平移 diff=0**（含 clipboard）；
+  洁净室重写 20 件 + 壳 5 件 + index.css；上游行对账：重写面约 2,566 行消解
+  （相似度全表 min 0.14/median 0.57/max 0.80，残余为契约面），locales 过渡态
+  en+zh-CN 5,571 上游行 F2 清偿。
+- 终验：build 零错误 / dev :27891 HTTP 200 / vitest 26/26。新仓 F1 共 12 commits
+  （a1daee3…760d4f5）。本仓本轮仅动 HANDOFF.md。
+- 晨起建议不变：读 manifest §9（+9.8/9.9 修正记录）→ npm test 对账 26/26 →
+  裁决 F2 批次范围与 locales 过渡态口径。
+
+## 第五十二轮（2026-10-07 深夜）F2+F3 批：locales 重建清偿 + deploy 前端组平移（overnight-runner）
+
+- **F2 交付**（新仓 commit 1aa2cb0）：locales 从"上游 JSON 过渡态"重建为按实际
+  引用 key 的自有清单——脚本盘点 web/src 全部 t() 引用（静态 500 + 动态模板枚举
+  展开 24）得 **524 key**；值来源三分类：A 类 384 条短 UI 短语沿用（≤200 字符，
+  含 2 条嵌套→扁平重映射）、B 类 139 条取 F1 自有代码 inline defaultValue
+  （**en 侧 134 条新写英文**，3 条 JS 模板串归一化为 i18next 插值）、C 类 1 条
+  无后缀 key 沿用；**唯一 >200 字符长段落 projectDeploy.aiEmptyBody 双语改写**。
+  结构：16 域嵌套单文件，t() 调用零改动。
+- **F2 对账：F1 过渡态 en 2,786 + zh-CN 2,785 = 5,571 上游行全部清偿，剩余 0**
+  （重建后两文件各 617 行，逐条来源决策记录于新仓 manifest §10.1）。
+- **F2 配套**：web/scripts/check-locales.mjs（npm run check:locales，缺 key 报告
+  不阻塞构建）+ locales.test.ts 4 测试（en/zh 键集合一致 / 20 高频 key 抽查 /
+  非空值 / 插值占位符跨语言一致）。vitest 26→**30/30**。
+- **F3 交付**（新仓 commit f0591dc）：App.tsx `projects/:projectId/*` 挂真路由
+  `deploy`。**12 文件（ProjectDeployPage + deploy/ 11 件）亲验**：git blame
+  --porcelain 全 gaojiaxiang 亲笔合计 2,127 行零上游（与 audit-full.json 一致，
+  非转抄）；diff 旧仓 12/12 逐字节一致（纯复制申报成立；文件本体 F1 c68afaf
+  已入库，本批为复验+契约对照+挂路由，无第二次复制——任务书时序交叠见偏差 2）。
+- **E 批契约对照**：15 条 withDeployTokenAuth 路由 vs 前端 12 处调用点逐字段核对
+  （DeployAggregate/DeployRequest/CommitSpanEntry/DeployHealth/PipelineSummary/
+  BranchInfo/DeployAIContext/DeployAIFinding/verification 三端点/创建 body），
+  **前端零改动**。对照表落新仓 BATCH-LOG F3 节 + manifest §10.2。
+- **三闸验收**：build 零错误 / vitest 30/30 / check:locales 524/524 双语齐全。
+- **偏差 4 条**（全文 manifest §10.3）：① GET /api/v1/users 不在 E 批面，
+  DeployConsole 审批人下拉降级为"不指定"（fail-open 到后端任意可审批成员模型，
+  不阻断），待 auth/RBAC 切片补端点；② F3"平移"实为 F1 已含，本批复验；③ step id
+  动态域无静态全集，check-locales 如实标注 unchecked；④ F2 中间稿自纠一枚
+  （删除虚构 undeclared.title/.body 子键，避免 [object Object] 渲染）。
+- **红线遵守**：旧仓本轮仅改本文件；未 push；新仓作者唯一 gaojiaxiang（累计 35
+  commits，含 docs e1ed6c9）；平移件 diff=0；重写申报与实测一致（B 类 en 新写
+  逐条可溯）。
+- **晨起建议**：读新仓 docs/provenance-manifest.md §10 + `cd web && npm test &&
+  npm run check:locales` 对账 30/30 + 524/524；然后裁决下一批次（建议 workflows
+  或 projects 域页面组——deploy 全链路已通，可作为页面平移的模板流程）。
