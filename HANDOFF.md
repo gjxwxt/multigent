@@ -3933,3 +3933,12 @@ commit `f0dfb872`（dev），VM 部署 SHA `57998e5d…`（备份 `multigent.bak
 **明早用户需要拍板的 STOP 项**：A1（ias-auth-center/RoomFlow 只读降级方式）、A2（迁移器 or 不带历史）、B2 裁剪清单（对着 endpoint-crosswalk.md 四档底稿逐项裁决）。
 
 **建议第一件事**：读 work/license-audit-20261006/deviations.md（2 分钟），然后拍 A1/A2（v3 §12 步骤 3/4 已挂账本周）。
+
+## 第四十三轮（2026-10-07）A1/A2/B2 三裁决收官 + 页面重建优先级方案
+
+- **A1 归零**：ias-auth-center/RoomFlow 纯本机测试无真实业务 → 无需降级，随旧仓封存（施工图 A 批两 STOP 清零，b6ea5792）。
+- **A2**：新仓不带历史、无迁移器，G 批省一整批次，C2 schema 解除存量兼容约束。
+- **B2 裁剪**：用户页面级裁决 → 端点机械投影 work/license-audit-20261006/trim-list-draft.md；P0 约 290 端点/二期协作+消息/去除 OKR(两层)+里程碑。
+- **优先级方案 docs/rebuild-page-priority-plan.md**（99b7449b，待用户终审）：四条判断标准（链路阻塞/使用频率/内网必要性/数据密度）+ P0/P1/P2 三档 + 消息页面专题。
+- **消息页面实测（VM multigent.db）**：40,042 条消息中 97.5% 是 heartbeat:wakeup 机器信令，人读仅 ~584 条（1.5%）；attention_signals 592 条才是真实"待人处理"流。方案：不做独立消息中心，改"待办中心（Attention Inbox）+ 信令下沉管道"，原站内信发送能力去留待用户确认。
+- **分支**：license-remediation/batch-execution（未 push）；下一批 C1 净土 5 包平移无阻塞可开工。
