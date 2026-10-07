@@ -3987,3 +3987,56 @@ projecttemplate 唯一外部依赖 gopkg.in/yaml.v3（仅测试）；ciready 组
 
 **建议第一件事**：验收 multigent-v2（对照本节数字跑 git log --format='%an %ae' | sort -u
 与 go test ./...），然后按第 43 轮清单拍 B2 裁剪执行与 D 批（旧仓残留包处置）排期。
+
+## 第四十五轮（2026-10-07 夜间）C1.5 批次：准净土 6 包处置（kvfacade 门面 + secretbox 重写）
+
+执行者：overnight-runner（授权长程执行，C1.5 批次）。旧仓本轮唯一写操作 = 本节追加；
+六包源文件零改动。施工在新仓 multigent-v2（HEAD 74e5f38 基础上），门面 B3
+（internal/store/kvfacade，827+423 行，本仓 f8ece14d~9e0947fd 期间的自有代码）先行平移。
+
+**新仓 commit 清单**（C1.5 部分，git log --oneline）：
+- 086e218 move(license-clean): kvfacade storage facade from multigent@9e0947fd
+- c4312ae rewrite(license-clean): secretbox behavior-compatible reimplementation
+- 69a3bed move(license-clean): assets with kvfacade contract
+- a7d1a9d move(license-clean): fixturesandbox with kvfacade contract
+- 0891aba move(license-clean): changerun with kvfacade contract
+- 5211426 move(license-clean): previewreceipt with kvfacade contract
+- 4b176db docs: C1.5 batch log（新仓 docs/BATCH-LOG.md C1.5 节）
+
+**处置方式**：五包纯逻辑平移，controldb 依赖收拢为各包本地最小接口（assets
+TaskAttachmentSource 1 方法 / fixturesandbox RecordStore 5 方法 / changerun
+ProposalStore 7 方法 / previewreceipt ReceiptStore 3 方法），全部由 kvfacade.Facade
+原生满足（编译期断言），Facade 本体零改动零缺口。assets 另有包侧适配层
+sqlstore.go（asset_blobs/asset_files/asset_attachments 三表 DDL+查询，Raw() 实现）。
+
+**secretbox 重写**（本批唯一重写件）：3 文件全新实现，公开契约冻结（6 函数+EnvKey，
+全仓调用面 grep 确认无 Box/版本常量外泄）。密封格式/env-v1 算法/trim 语义/
+REQUIRE_ENCRYPTED_SECRETS 硬门控逐字节兼容；TestLegacySealedValuesRemainOpenable
+用旧算法生成的三版本固定向量（含 NUL/非法 UTF-8）钉死"旧数据可解"硬闸。
+旧 8 测试断言级迁来（无一弱化）+ 向量测试 + roundtrip 属性扫描。
+
+**验证数字**（-count=1 实跑，双侧交叉）：
+- 新仓六包：kvfacade 1.051s / secretbox 1.844s / assets 0.407s / fixturesandbox
+  0.863s / changerun 4.988s / previewreceipt 12.749s —— 全 ok
+- 旧仓同五包原始实现（行为等价基准）：assets 0.680s / fixturesandbox 2.231s /
+  changerun 4.556s / previewreceipt 11.935s / secretbox 2.359s —— 全 ok
+- leaf-pass 数：fixturesandbox 25=25 / changerun 27=27 / previewreceipt 38=38
+  （1:1，无删改断言）；assets 7 vs 5、secretbox 16 vs 8 为新增覆盖（env 链、
+  manifest 路径、兼容向量、roundtrip 属性），明细在新仓 BATCH-LOG C1.5 节
+- 新仓全量：go build ./... OK；go vet ./... OK；go test -count=1 ./... 11/11 包 ok
+
+**偏差清单**（3 条）：
+1. **brownfield 未平移**：预扫漏了它对 internal/preview 的依赖（RuntimeSpec 三类型
+   + 测试用 LoadRuntimeSpec 做符合性校验；SynthesizeRuntimeSpec 构造/校验整个
+   spec），sandbox 两常量只是依赖的一半。preview 不在本批清单且 v3 审计自注
+   "brownfield 押后至 preview 重建"，按夜间纪律刹车跳过。留待 preview 处置批次，
+   届时随 preview.RuntimeSpec 的归属一并解决。旧仓 brownfield 零改动。
+2. **基线勘误**：任务书"旧仓 HEAD = dbb22145"实为第 43 轮 commit；实际 HEAD =
+   9e0947fd（其后仅两个 docs commit，六包与 kvfacade 源码无差异）。commit 引用已用
+   9e0947fd。
+3. 无其他偏差：未扩大平移面、未动 internal/db、未 push、作者唯一
+   （gaojiaxiang <gaojiaxiang2018@gmail.com>）。
+
+**建议第一件事**：验收 multigent-v2 C1.5（对照新仓 docs/BATCH-LOG.md C1.5 节数字
+跑 go test -count=1 ./...），然后拍板 brownfield 的归属批次（preview 处置时一并，
+或单独为 RuntimeSpec 建类型包——两种路径成本已实测记录在本节偏差 1）。
