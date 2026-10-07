@@ -3942,3 +3942,48 @@ commit `f0dfb872`（dev），VM 部署 SHA `57998e5d…`（备份 `multigent.bak
 - **优先级方案 docs/rebuild-page-priority-plan.md**（99b7449b，待用户终审）：四条判断标准（链路阻塞/使用频率/内网必要性/数据密度）+ P0/P1/P2 三档 + 消息页面专题。
 - **消息页面实测（VM multigent.db）**：40,042 条消息中 97.5% 是 heartbeat:wakeup 机器信令，人读仅 ~584 条（1.5%）；attention_signals 592 条才是真实"待人处理"流。方案：不做独立消息中心，改"待办中心（Attention Inbox）+ 信令下沉管道"，原站内信发送能力去留待用户确认。
 - **分支**：license-remediation/batch-execution（未 push）；下一批 C1 净土 5 包平移无阻塞可开工。
+
+## 第四十四轮（2026-10-07 夜间）C1 批次：净土 5 包平移到 multigent-v2
+
+执行者：overnight-runner（授权长程执行，C1 批次）。旧仓本轮唯一写操作 = 本节追加；
+5 包源文件零改动。新仓 /Users/imac/Documents/code/github/multigent-v2，单 monorepo
+形态（用户裁决），module = github.com/multigent/multigent-v2，纯文件复制平移，无 git 历史导入。
+
+**新仓 commit 清单**（git log --oneline，HEAD=74e5f38）：
+- f1130b8 chore: init monorepo（go.mod + .gitignore）
+- d440b8d move(license-clean): gitworktree（9 文件）
+- 736b500 move(license-clean): codehost（7 文件）
+- 271efef move(license-clean): projecttemplate（2 Go + files/ 资产）
+- 98bb49a move(license-clean): doctor（2 文件）
+- 02a5374 move(license-clean): ciready（2 文件）
+- d3202ed docs: template assets inventory
+- 74e5f38 docs: C1 batch log
+
+**依赖分析（go list 实测）**：与审计一致，零意外——gitworktree/codehost/doctor 纯标准库；
+projecttemplate 唯一外部依赖 gopkg.in/yaml.v3（仅测试）；ciready 组内依赖 projecttemplate。
+平移面未扩大，无 5 包之外 internal 依赖。
+
+**diff 验证数字**：任务书原式 `diff -r | grep -v "multigent/internal" | wc -l` 有度量缺陷
+（新路径 multigent-v2/internal 不含子串 multigent/internal，ciready 误报 4 行）。改用双重验证：
+(1) diff -r 过滤新旧两条路径行后逐包差异 = 0；(2) 严格归一化——旧仓包复制到临时目录施加
+同一 sed 规则后与新仓 diff，逐包 = 0 行（逐字节一致）。5 包全部通过。
+
+**验证三道闸**：
+1. 内容一致性：见上，5 包归一化 diff 全 0。
+2. 新仓全量：go build ./... OK；go vet ./... OK；go test -count=1 ./... 5/5 ok
+   （ciready 0.275s / codehost 0.398s / doctor 4.389s / gitworktree 9.297s / projecttemplate 29.065s）。
+3. 行为等价：旧仓同 5 包 -count=1 全绿（7.201s / 2.346s / 28.938s / 4.938s / 1.369s）。
+   代码相同仅 import 路径变化，双侧全绿 = 等价。无任何测试被跳过/删改。
+
+**模板资产盘点**（blame 覆盖外，v3 单独盘点要求，落新仓 docs/template-assets-inventory.md）：
+87 文件 / 8106 行；react_go_fullstack 33 文件/2558 行，react_spring_boot 54 文件/5548 行；
+二进制 gradle-wrapper.jar 43,504 bytes（Gradle 官方分发物）。
+
+**git 卫生**：新仓作者唯一 gaojiaxiang <gaojiaxiang2018@gmail.com>（8 commits 全部）；
+无 remote、未 push；首个 commit 即本仓初始化。
+
+**偏差清单**：仅 1 条度量修正（上述 grep 模式缺陷），无平移偏差。另注：新仓 BATCH-LOG
+在新仓 docs/BATCH-LOG.md（74e5f38）。
+
+**建议第一件事**：验收 multigent-v2（对照本节数字跑 git log --format='%an %ae' | sort -u
+与 go test ./...），然后按第 43 轮清单拍 B2 裁剪执行与 D 批（旧仓残留包处置）排期。
