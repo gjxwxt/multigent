@@ -64,11 +64,15 @@ workflow 包 17,749 行（自有 15,044 / 上游 2,705 plain 口径，-M -C -C �
 
 **夜间/子 agent 边界**：同 v1——只做第 1-3 步，第 4 步起等人审。
 
-## 5. 评审问题（v2：三问原样保留，口径已按对码结果修订）
+## 5. 评审问题（✅ 三问已定案 2026-10-07，用户委托按推荐执行）
 
-1. `WorkflowStore` 13 方法 + 6 类型 + 双哨兵接口集是否认可？
-2. entity 15 项"后端 ∪ 前端契约 ∪ 资产"重定义口径 + drop-list ADR + 金样往返测试是否认可？（v2 关键补充：Position/Handle 等纯前端契约字段必须保留）
-3. 测试移植"自有函数粒度 + 30 净土文件背书状态机"的等价方案是否认可？（v2 修订：v1 的"上游段不迁风险大"判断被实测推翻——状态机自有覆盖充分）
+1. ✅ **定案**：`WorkflowStore` 13 方法 + 6 签名类型 + `ErrNotFound`/`ErrClaimLost` 双哨兵接口集——按推荐（方案 A 窄接口）执行。
+2. ✅ **定案**：entity 15 项按"后端 ∪ 前端契约 ∪ 资产"口径重定义 + drop-list ADR + 金样往返测试——按推荐执行。Position/SourceHandle/TargetHandle 等前端契约字段 JSON tag 必须逐字节保持。
+3. ✅ **定案**：测试按自有函数粒度移植（plain 口径冻结后计数）+ 30 个净土测试文件为状态机等价背书主承担者——按推荐执行。
+
+**附带产品决策（评审新发现，同日定案）**：store.go 上游行中的模板/文案内容处置——
+- `unifiedDeliveryPipelineTemplate`（主体自有 94%）与 `hotfixDeployPipelineTemplate`（97%）：**平移**，各余 6 行上游辅助闭包（normalizeTemplateLocale/localizedTemplateText/field）重写。
+- `SeedDefaults`（上游 134 行）、`softwareDeliveryText`（上游 156 行）、5 个 legacy 模板（上游 389 行）：**不平移**。legacy 模板多数引用已裁剪域（OKR/里程碑，B2 裁决）本已是死内容；新仓默认种子 = 自有 authored 的 greenfield 流水线模板族（17 步 unified-delivery-pipeline 等），minimal re-author 的默认文案随实现走。旧仓已实例化的 workflow run 是冻结快照，A2 已裁决不带历史，无兼容负担。
 
 ## 6. 对评审者的反驳（2 条，附证据）
 
