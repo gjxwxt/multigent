@@ -4120,3 +4120,12 @@ REQUIRE_ENCRYPTED_SECRETS 硬门控逐字节兼容；TestLegacySealedValuesRemai
 - **建议第一件事**：读新仓 docs/provenance-manifest.md §8 + docs/BATCH-LOG.md E 批节，
   跑 `go test -count=1 ./...` 对账 16/16，然后裁决上述 ②（剩余批次 F 前端 / G 切换
   的排期依赖该归属）。
+
+## 第五十轮（2026-10-07）E 批：部署中心验证切片收官
+
+- **D2 关闭**（e9b02dd9）：用户确认四类不可消除面口径（契约签名 58/Go 惯用法 204/结构体形状 31/路由词表 5），D 批+D2 全案关闭。
+- **E 批交付**（新仓 4 commits b8fa676…536196e）：18 文件 7,240 行部署中心切片平移（预扫全零上游，纯复制+接线）。deployrequests 存储域（金样 JSON 格式钉住）+ imbridge/deploycard 子包（6 类型断裂处置+方法重定向 9 处）+ api deploy handlers 族 11 文件 + controlplane/projectstore/taskstore 窄面 + entity.Task 扩展 16 字段。
+- **主控实地复核**：16/16 包 -count=1 全绿、api 59/59 测试零 FAIL、金样 TestDeployRequestGoldenJSON PASS、作者唯一、manifest §8 逐文件来源 SHA 可回溯。
+- **切片验收（v3 §7.1）**：部署申请→审批（REST CAS+IM 卡片）→执行→确定性验证以测试链跑通；未起真实 server/IM（任务书边界）。
+- **偏差 6+3 条**（chatops workflow 卡片分支不迁/最小 auth 闸 ~60 行/最小 createProjectTaskFromBody 等）全记录 BATCH-LOG E 批节；遗留决策：chatops 卡片分支+完整 auth 栈归属批次（随后续切片）。
+- 进度：S0-B3-C1-C1.5-D-D2-E 全收官 → F 前端回收（37,000+ 上游行重写，按 trim-list 倒推）→ G 切换。
