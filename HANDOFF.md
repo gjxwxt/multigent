@@ -4056,3 +4056,12 @@ REQUIRE_ENCRYPTED_SECRETS 硬门控逐字节兼容；TestLegacySealedValuesRemai
 - **文档修正 4 处**：12→13 方法（AgentWorkerByID 经 store.go:2471 参数逃逸，grep s.db. 不可见）；kvfacade 早已实现全部 13 方法（v1"需补"错误，只欠两方法测试）；类型面 +entity.Task(8字段)+PlaybookObjectProvenance；ErrTransitionClaimLost→ErrClaimLost 映射+6 签名类型。
 - **反驳 2 条**：调用点上游占比实测 45% 未过半（评审称"大部分"）；"6 个纯自有测试含移动代码"-M vs plain 交叉实测 0。
 - d-batch-interface-review.md 升 v2；execution-plan §0.5 双闸修订。三评审问题口径修订后原样保留待用户拍板。
+
+## 第四十八轮（2026-10-07 夜间）D 批执行完成（overnight-runner）
+
+- **D 批全链交付（新仓 7 commits 至 619dec9）**：contract.go 窄接口（a02a02a，13 方法 + 6 类型 + ErrClaimLost 双哨兵，编译期锚定 kvfacade.Facade）→ kvfacade 两方法补测（961d691）→ entity workflow 域重定义 + 金样往返闸 + drop-list ADR（aec24bf）→ workflow 引擎平移 54 文件 16,477 行（bb7a0bc）→ 逐函数处置账本（6eb517f）→ provenance 审计修正（619dec9）→ BATCH-LOG D 批节。旧仓本轮仅改本文件。
+- **验收数字（新仓，-count=1 fresh）**：go build/vet 全仓 OK；go test **13/13 包 ok**（workflow 9.945s / entity 2.236s / kvfacade 6.170s 等）；git log 22 commits 作者唯一 gaojiaxiang；无 remote 未 push。
+- **⚠ 重大自我纠错（内容闸实测）**：执行中曾把 store.go 处置申报为"洁净室重写"，验收相似度机器检查实测推翻——真实处置是**函数粒度平移**（87 函数逐字节 + 13 近似 + 9 新写），旧 store.go 的 1,980 上游行中 **1,275 行**随 98 个平移函数进入新仓（679 行随 legacy 体裁剪放弃、26 行在头部/空隙）。账本与 manifest 已按实测口径修正（619dec9）。全部平移行为由 31 个测试文件钉住（13 包测试全绿）。
+- **⏸ 待用户裁决（晨起第一优先）**：①平移函数内的上游行（≈778 实质行）按许可证口径是否要求零残留——若要求，需对 98 个平移函数做真正语义重写（估 2-3 个批次）或取得上游授权；若"行为等价 + 申报透明"足够，D 批即终态。②金样测试/30 净土套件是否足以作为行为等价基线的正式确认。
+- **偏差 4 条**：见新仓 docs/BATCH-LOG.md D 批节（重写申报偏差、2 个测试红修复无断言删改、SeedDefaults 语义收缩、上游 helper 不迁）。
+- **建议第一件事**：读新仓 docs/provenance-manifest.md §5 + docs/store-rewrite-ledger.md 头部修正块，然后裁决上述 ①。
