@@ -4258,3 +4258,37 @@ REQUIRE_ENCRYPTED_SECRETS 硬门控逐字节兼容；TestLegacySealedValuesRemai
   npm run check:locales` 对账 30/30 + 911/911/911 → 裁决 G 批（后端端点平移，
   清单 §11.3 即输入）或 F5（workbench/messages/people 域页面）。G 批接通后
   FollowPage 双速轮询与预览三态才能行为级验证。
+
+## 第五十四轮（2026-10-07 深夜）F5 批：workflow 画布 + agents 域前端（overnight-runner）
+
+新仓 multigent-v2 累计 47 commits（本轮 +4：5c08488 / e935947 / de750b2 / 0e7feee，
+另 docs commit 074289a）。本轮只写本文件，旧仓源码零改动。
+
+- **交付范围**：workflow 组（WorkflowsPage 1,674 行 + WorkflowCanvas 完整交互画布
+  1,033 行——独立文件，未覆盖 FollowPage 的最小替代件 WorkflowBoard）+ agents 组
+  （AgentsPage 1,511 行 / AgentDetailPage 104 行 / ProjectAgentChatPage 2,062 行 /
+  ProjectAgentDetailPage 3,717 行）+ apiPostSSE（POST SSE helper + 4 单测）+
+  路由挂载（/workflows ×2、/agents ×2 带 canAdmin 门、members/:agentName(+chat)）。
+- **逐文件处置 7 文件全部实测相似度 ≤0.80**（0.465–0.753，明细 manifest §12.1）；
+  ChatPage 首稿 0.844 超限 → 二次拆解（resetStreamAndHistoryState 共享回调 +
+  SessionEditorPanel + CenteredHint）→ 0.672/0.748。DetailPage 3,717 行一次达标
+  0.637/0.652（新文件 4,897 行系 JSX 逐属性行排版，非内容膨胀）。
+- **契约红线验证**：workflow-types.ts 形状不改；Canvas 对 step.position（平铺
+  {x,y}）、edge.sourceHandle/targetHandle（锚点 id）读写表达式逐点核对，零改名；
+  workflows-page.contract.test 5 tests 覆盖导入导出序列化往返；tsc 钉住字段存在性。
+- **SSE 契约**：后端 `data: %s\n\n` 帧 + chat_event/chat_done/chat_error 三事件；
+  apiPostSSE 返回原始 Response 供 reader 解析，401→expireSession、403→reportForbidden。
+- **locales**：F5 新增 367 key（A 类 334 逐字收割 + B 类 33 新写）+ 前置 112 key；
+  终态 **en=zh=1367，check:locales 0 MISSING**；34 条 present-but-unreferenced 均
+  为动态枚举域（status_*/trigger_*/sessionStatus_* 等），旧仓 refs 全覆盖比对非死 key。
+- **三闸全绿**：tsc -b 零错（strict）+ vitest 39/39 + vite build（2247 modules）+
+  check:locales。每 commit 前独立过闸。
+- **后端缺口（G 批输入新增）**：agents 域 **44 个**端点 + workflow 域 **6 个**
+  （静态引用去重，明细 manifest §12.4）。v2 internal/api 现仅 deploy 切片 15 路由。
+- **事故自纠**：locale 收割脚本一次误以旧仓为 cwd 运行触碰旧仓 locales——当场
+  `git checkout -- web/src/locales/` 恢复，验证 HEAD bc247ab0 未变；此后一律绝对
+  路径运行。其余无越界。
+- **红线遵守**：本仓本轮仅改本文件；未 push；node_modules 未入库。
+- **晨起建议**：读新仓 manifest §12 + BATCH-LOG F5 节 → `cd web && npx vitest run &&
+  npm run check:locales` 对账 39/39 + 1367/1367 → 裁决 G 批（后端端点平移，§11.3
+  59 + §12.4 50 合计约 109 个）或 F6（workbench/messages/people 域页面）。
