@@ -4348,3 +4348,11 @@ REQUIRE_ENCRYPTED_SECRETS 硬门控逐字节兼容；TestLegacySealedValuesRemai
 - **G 批输入**：后端缺口累计约 208 端点（F4 59+F5 50+F6 99），manifest §11.3/§12.4/§13.5 明细；建议依赖序切片 connections→auth→workbench→tasks→agents→kb。
 - 新仓遗留已清理：误拷贝的 HANDOFF.md 副本已删（台账在 docs/BATCH-LOG.md）。
 - **总进度：S0-B-C-D-E-F 全收官，仅剩 G（后端端点平移+双轨切换+部署验收）**。
+
+## 第五十七轮（2026-10-08）G2 部署实弹：v2 双轨上线 + 浏览器验收启动
+
+- **构建**：web/dist（vite 453ms）→ go embed → 本机冒烟三点全通 → linux/amd64 交叉编译 sha256 e97796fe…（scp 后远端 hash 一致）。
+- **双轨部署**：/opt/multigent-v2 独立目录+独立数据根，VM 27992 端口起服（旧仓 27892 服务不碰）。坑：新骨架无 admin-token 子命令，admin 引导=auth_store 种子用户（admin/admin123，空库时自动建，role=admin）。
+- **API 实弹（curl）**：login role=admin ✓ / projects 空列表 ✓ / 创建项目 acceptance-demo ✓ / 项目详情（defaultRepo 指向 v2 数据根）✓ / tasks 空 ✓ / connections 空 ✓ / **deploy aggregate（GET /deploy，非 /deploy/aggregate）**✓ / files 空 ✓ / kb sources 空 ✓。
+- **发现的命名坑**：前端注释里"aggregate"是端点别名，真实路由 GET /api/v1/projects/{name}/deploy——首查 404 是查错路径，非缺陷。
+- **浏览器验收**：SSH 隧道 28091→27992，11 项功能清单（登录/工作台/项目/任务/部署中心/工作流/智能体/设置/知识库/连接/路由守卫）交后台 agent 走查中。
