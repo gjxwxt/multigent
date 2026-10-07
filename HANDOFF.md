@@ -4065,3 +4065,14 @@ REQUIRE_ENCRYPTED_SECRETS 硬门控逐字节兼容；TestLegacySealedValuesRemai
 - **⏸ 待用户裁决（晨起第一优先）**：①平移函数内的上游行（≈778 实质行）按许可证口径是否要求零残留——若要求，需对 98 个平移函数做真正语义重写（估 2-3 个批次）或取得上游授权；若"行为等价 + 申报透明"足够，D 批即终态。②金样测试/30 净土套件是否足以作为行为等价基线的正式确认。
 - **偏差 4 条**：见新仓 docs/BATCH-LOG.md D 批节（重写申报偏差、2 个测试红修复无断言删改、SeedDefaults 语义收缩、上游 helper 不迁）。
 - **建议第一件事**：读新仓 docs/provenance-manifest.md §5 + docs/store-rewrite-ledger.md 头部修正块，然后裁决上述 ①。
+
+## 第四十九轮（2026-10-07 深夜）D2 裁决 A 执行完成：73 函数洁净室重写归零（overnight-runner）
+
+- **裁决 A 落地（新仓 7 commits：97a26fa → 56f3ca6 → 2e2ccd3 → af9d4ad → e0d5801 → 1180a04 → 9cfc77c，docs 2210030）**：对 D 批审计判为含上游行的 **73 个函数**分 5 批做真正语义洁净室重写（B1 状态机/分支/transition 层 18 函数 → B2 路由层 20 → B3 CRUD+claim 33 → B4 模板/seed 层 14 → B4b 6 条上游措辞 error string 换写）。每批走完 实现 → 定向测试 → commit（message 带计划条目）→ 账本更新 循环。
+- **相似度实测（归一化 Jaccard，机器复核）**：73/73 全部 <50%——min 1.2%（unifiedDeliveryPipelineTemplate）/ 中位 29.4% / max 46.7%（SaveBranchInstance），40-50% 区间 15 个。逐函数表落新仓 docs/provenance-manifest.md §7 + store-rewrite-ledger.md §5。
+- **上游行残留终态对账**：旧 store.go plain ∪ -M union = 2,084 上游行；重写后同名函数体内实质行仍匹配 298 行，全部为四类不可消除面——编译期契约签名 58（裁决 A 明文豁免"改实现不改编译期契约"）、Go 惯用法 204（`if err != nil`/裸 return/for-range，任何 Go 重写必然产生）、entity 结构体形状 31、测试钉死的路由算子词表 5（eq/neq/exists/in/default，改动即破坏 31 测试文件钉住的行为）。**裁决 A 的可执行解释（<50% 相似度闸）已全额达成；严格逐字符零残留与 Go 语言本身不相容**，此四类清单即人审范围。
+- **红线遵守**：31 测试文件零删改零弱化；金样（TestGoldenWorkflowRoundTrip / TestGoldenPositionAndHandlesByteExact）未动且 PASS；contract.go 13 方法签名未动；旧仓本轮仅改本文件；未 push。
+- **验收（双闸，count=1 fresh）**：go build ./... + go vet 全过；`go test -count=1 ./...` **13/13 包 ok**（workflow 12.4s / projecttemplate 36.4s / previewreceipt 22.6s 等）；模板结构 / seed 版本升级 / 路由 fail-closed / remote-marker 实例化存活 9 个钉住测试逐个 -run PASS。
+- **执行中的坑（已修）**：①porcelain blame 解析两版踩坑（entry 以 tab 内容行终结，须按块扫描）；②`git show <sha>` 在错误 cwd 下静默失败，长会话必须显式 `-C`；③行级文本匹配会把测试文件里合法存在的同文行误计入残留（对账必须限定同名函数体 × 生产文件）；④-M 口径的 audit 行号表混有超界行（>4,171），须按当前文件长度过滤。
+- **待用户晨起确认（非阻塞）**：①"零残留"按"<50% 相似度 + 四类不可消除面"口径验收是否接受——若要求连 Go 惯用法与契约签名也算残留，需另立外语实现/接口生成方案，属重新立项；②B4b 保留的 1 条测试钉住措辞（"it advances only through its branch join"，parallel_stage_report_guard_test 断言子串）是否作为运营契约措辞豁免。
+- **建议第一件事**：读新仓 docs/provenance-manifest.md §7（相似度全表 + 残留四类清单），确认验收口径后决定是否关闭 D2。
