@@ -76,8 +76,8 @@ A2 interim 只读降级（⏸ STOP 后执行，最紧急）
 
 ## 5. C 批 — 阶段 1：净土平移 + 实体重定义
 
-- **C1 严格净土 5 包平移**（gitworktree / codehost / projecttemplate / doctor / ciready，9,031 行）：新仓逐包迁入，`verify-clean` 逐包过闸（判据：blame 上游行=0）。
-- **C1.5 准净土 6 包跟进**（12,013 行）：吃 B3 门面；secretbox 先清 6 行残留；**brownfield 押后**至 preview 重建（v3 §3 弱环标注）。
+- **C1 严格净土 5 包平移**（gitworktree / codehost / projecttemplate / doctor / ciready，9,031 行）：✅ **完成（2026-10-07，新仓 8 commits 至 74e5f38）**，三道闸实地复核全过（作者纯净/build/vet/test 5包/diff=0）；模板资产盘点 87 文件/8,106 行。
+- **C1.5 准净土 6 包跟进**（12,013 行）：✅ **完成（2026-10-07，新仓 6 commits 至 4b176db）**——kvfacade 平移 + secretbox 行为兼容重写（旧格式向量可解）+ assets/fixturesandbox/changerun/previewreceipt 四包最小接口契约接门面；**brownfield 押后**至 preview 重建（实锤其依赖 preview.RuntimeSpec 三类型，v3 §3 弱环标注一致，随 preview 路径处置）。
 - **C2 领域实体重定义**：entity 87.3% 非自有 → 新仓按真实使用面重定义（"抛弃冗余字段"裁决成立）；A2 已裁决不带历史，schema 无存量兼容约束，可放手按真实使用面设计。
 - **验收**：C 批全部文件 verify-clean 绿 + 新仓构建绿 + 模板资产（.json/.yaml）单独盘点报告（v3 §3 尾注）。
 
