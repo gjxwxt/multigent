@@ -4076,3 +4076,47 @@ REQUIRE_ENCRYPTED_SECRETS 硬门控逐字节兼容；TestLegacySealedValuesRemai
 - **执行中的坑（已修）**：①porcelain blame 解析两版踩坑（entry 以 tab 内容行终结，须按块扫描）；②`git show <sha>` 在错误 cwd 下静默失败，长会话必须显式 `-C`；③行级文本匹配会把测试文件里合法存在的同文行误计入残留（对账必须限定同名函数体 × 生产文件）；④-M 口径的 audit 行号表混有超界行（>4,171），须按当前文件长度过滤。
 - **待用户晨起确认（非阻塞）**：①"零残留"按"<50% 相似度 + 四类不可消除面"口径验收是否接受——若要求连 Go 惯用法与契约签名也算残留，需另立外语实现/接口生成方案，属重新立项；②B4b 保留的 1 条测试钉住措辞（"it advances only through its branch join"，parallel_stage_report_guard_test 断言子串）是否作为运营契约措辞豁免。
 - **建议第一件事**：读新仓 docs/provenance-manifest.md §7（相似度全表 + 残留四类清单），确认验收口径后决定是否关闭 D2。
+
+## 第五十轮（2026-10-07 深夜）E 批执行完成：部署中心验证切片平移（overnight-runner）
+
+- **E 批全链交付（新仓 3 个新 commits：b8fa676 → f0ce83c → 536196e）**：
+  step 1 deployrequests 存储域（internal/db/deploy_requests.go 386 行 + test 437 行 →
+  internal/store/deployrequests，金样 JSON 存储格式测试随文件迁入）→
+  step 2 imbridge/deploycard 子包（imbridge 3 deploy 文件 + 测试）→
+  step 3 api deploy handlers 族（11 文件平移 + controlplane 控制面存储域 + projectstore/
+  taskstore 窄面 + entity 重定义族 + 测试 5 文件 2,234 行迁移）→
+  step 4 双闸验收 + provenance-manifest.md §8 + BATCH-LOG E 批节。旧仓本轮仅改本文件。
+- **预扫对账**：任务书 18 文件（11 api + 2 db + 3 imbridge + 2 测试口径差）全部平移完毕，
+  blame 全 gaojiaxiang（零上游），方式为纯复制平移 + 接线（import/类型归属/方法重定向）。
+  类型重定义 7 组（AgentMeta/AgentModel/APIProvider/TaskStatus/TaskType/Project/Task 扩展）
+  逐字段对照旧仓 JSON/YAML tag，表在新仓 docs/provenance-manifest.md §8.2。
+- **验收数字（新仓，-count=1 fresh）**：go build ./... + go vet 全仓 OK；
+  `go test -count=1 ./...` **16/16 包 ok**，internal/api **59/59 测试通过**。
+  切片验收（v3 §7.1）以测试形式跑通：Task 转派（deploy AI 发现项）→ 部署申请（审批钉人/
+  敏感变量掩码/短 SHA 拒绝）→ 审批双通道（REST CAS + IM 卡片回调全链：token HMAC→channel
+  校验→MM 用户验证→nonce 防重放→身份边界→部署侧 RBAC→Status CAS）→ 部署执行（触发 CAS/
+  恢复对账）→ 确定性验证（主机红线/方法白名单/危险头剥离/deploy-verify 终态重入放行）。
+- **chatops 分支裁剪（预判确认）**：handleMattermostActionCallback 只迁 deploy 分支 +
+  共享验证链（~330/1180 行）；dialog/reissue/submitTaskWorkflowReview 闭包拖 workflow 引擎，
+  不迁，记偏差 1。expired-token 对 deploy 动作回控制台指引（fail-closed 不变）。
+- **偏差 6 条 + 预扫外发现 3 条**：详见新仓 docs/BATCH-LOG.md E 批节。要点：
+  ①workflow 审核卡片分支留旧仓；②providerByID 本切片返回 nil（env override 路径覆盖，
+  无 provider 请求 502 fail-closed 与旧仓一致）；③createProjectTaskFromBody 最小实现
+  （校验面 + 201 契约保留，worktree/workflow 分支不迁）；④Handler() 附带最小 auth 闸
+  withDeployTokenAuth（迁移测试 2 个走 s.Handler() 断言 401 契约，~60 行洁净室，
+  完整 identity-provider 栈留后续切片——"server.go 注册面不在本批"的边界澄清）；
+  ⑤projectstore.Project 空名错误措辞对齐旧仓 "not found"；⑥newUserStore 补
+  ensureInitialized（旧仓 admin 账号恒存在语义）。预扫外：deploycard 补
+  IMInstanceByID/ListConnections、kvfacade AgentWorker 补 6 runtime 列、entity.Task
+  就地扩展 E 批字段（均逐字段对照旧 migrations.go）。
+- **红线遵守**：测试断言零删改（5 个迁移测试文件 = 旧仓等价基线）；金样未动且 PASS；
+  旧仓本轮仅改本文件；未 push；作者唯一 gaojiaxiang <gaojiaxiang2018@gmail.com>
+  （新仓累计 25 commits）；密钥零入文件（连接密钥经 deploycard.SealSecret plain-dev 回退，
+  与 step 2 口径一致）。
+- **待用户晨起确认（非阻塞，沿用 D2 裁决口径）**：①E 批的接线层（server.go/controlplane
+  workspaces-users-audit 段/task_create/测试组合）按洁净室重写申报，若需逐函数相似度
+  机器复核可跑 manifest §8.3 清单对照；②chatops workflow 卡片分支与完整 auth 栈的
+  归属批次（随 workflow 引擎后续切片或独立批）。
+- **建议第一件事**：读新仓 docs/provenance-manifest.md §8 + docs/BATCH-LOG.md E 批节，
+  跑 `go test -count=1 ./...` 对账 16/16，然后裁决上述 ②（剩余批次 F 前端 / G 切换
+  的排期依赖该归属）。
