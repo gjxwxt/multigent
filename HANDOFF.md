@@ -4048,3 +4048,11 @@ REQUIRE_ENCRYPTED_SECRETS 硬门控逐字节兼容；TestLegacySealedValuesRemai
 - **实地复核（本方执行，非 agent 自报）**：新仓作者唯一 gaojaixiang/build/vet 过/go test -count=1 11/11 包全绿；secretbox 兼容向量 10 测试 PASS；assets BlobStoreRoot env 链等价测试 PASS。
 - **新仓进度**：11 包（净土5+门面+准净土4+重写1），约 21,000 行自有代码。剩余大件：entity 重定义（C2）→ workflow 窄接口（D）→ 部署中心切片（E）→ 前端（F）→ 切换（G）。
 - 分支 license-remediation/batch-execution（未 push）。
+
+## 第四十七轮（2026-10-07）外部评审意见消化（评审响应轮）
+
+- 外部评审 agent 对 D 批接口评审材料提 9+2 条声明 → plan-critic 逐条对码：**5 属实/3 部分属实/1 不属实**。裁决全文 work/license-audit-20261006/review-verdicts.md。
+- **最有价值两条**：①Position/SourceHandle 等字段后端零读取但前端画布 54 处依赖（JSON 层，编译器兜不住）——纯后端 grep 裁字段必然画布塌陷，C2 口径改为"后端 ∪ 前端契约 ∪ 资产"+金样往返测试；②verify-clean 读目标仓自身 blame，对新仓（无上游历史）恒真=同义反复，堵死改名式平移检测——验证门升级双闸（+provenance manifest 内容级对账）。
+- **文档修正 4 处**：12→13 方法（AgentWorkerByID 经 store.go:2471 参数逃逸，grep s.db. 不可见）；kvfacade 早已实现全部 13 方法（v1"需补"错误，只欠两方法测试）；类型面 +entity.Task(8字段)+PlaybookObjectProvenance；ErrTransitionClaimLost→ErrClaimLost 映射+6 签名类型。
+- **反驳 2 条**：调用点上游占比实测 45% 未过半（评审称"大部分"）；"6 个纯自有测试含移动代码"-M vs plain 交叉实测 0。
+- d-batch-interface-review.md 升 v2；execution-plan §0.5 双闸修订。三评审问题口径修订后原样保留待用户拍板。
