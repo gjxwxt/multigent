@@ -4040,3 +4040,11 @@ REQUIRE_ENCRYPTED_SECRETS 硬门控逐字节兼容；TestLegacySealedValuesRemai
 **建议第一件事**：验收 multigent-v2 C1.5（对照新仓 docs/BATCH-LOG.md C1.5 节数字
 跑 go test -count=1 ./...），然后拍板 brownfield 的归属批次（preview 处置时一并，
 或单独为 RuntimeSpec 建类型包——两种路径成本已实测记录在本节偏差 1）。
+
+## 第四十六轮（2026-10-07）C1.5 收官 + Verification 实地复核
+
+- **C1.5 交付（agent 执行，6 commits 至新仓 4b176db）**：kvfacade 平移 → secretbox 行为兼容重写（AES-256-GCM，LegacySealed 向量测试证明旧格式逐字节可解）→ assets/fixturesandbox/changerun/previewreceipt 四包以最小接口契约接 B3 门面（TaskAttachmentSource/RecordStore/ProposalStore/ReceiptStore）。**kvfacade 本体零改动**——B3 预判的方法集全部够用。
+- **brownfield 押后确认**：agent 预扫发现其除 sandbox 两常量外还依赖 preview 的 RuntimeSpec 三类型，按纪律刹车（与 v3"押后至 preview 重建"一致）。拍板：随 preview 重建路径走，不单独建类型包。
+- **实地复核（本方执行，非 agent 自报）**：新仓作者唯一 gaojaixiang/build/vet 过/go test -count=1 11/11 包全绿；secretbox 兼容向量 10 测试 PASS；assets BlobStoreRoot env 链等价测试 PASS。
+- **新仓进度**：11 包（净土5+门面+准净土4+重写1），约 21,000 行自有代码。剩余大件：entity 重定义（C2）→ workflow 窄接口（D）→ 部署中心切片（E）→ 前端（F）→ 切换（G）。
+- 分支 license-remediation/batch-execution（未 push）。
