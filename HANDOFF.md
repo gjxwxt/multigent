@@ -4222,3 +4222,39 @@ REQUIRE_ENCRYPTED_SECRETS 硬门控逐字节兼容；TestLegacySealedValuesRemai
 - **晨起建议**：读新仓 docs/provenance-manifest.md §10 + `cd web && npm test &&
   npm run check:locales` 对账 30/30 + 524/524；然后裁决下一批次（建议 workflows
   或 projects 域页面组——deploy 全链路已通，可作为页面平移的模板流程）。
+
+## 第五十三轮（2026-10-07 深夜）F4 批：任务域前端页面 P0 核心（overnight-runner）
+
+- **交付 7 commits**（新仓 main，作者唯一 gaojiaxiang，累计 42）：96423fd 任务组件 6
+  （TaskModals 3,299 行契约枢纽重写，18 项导出冻结 + TaskTable/Kanban/StatusFilter/Label
+  + workflow-types.ts 类型缝）→ fac1af5 ProjectTasksPage+CreateTaskDialog → 610f959
+  ProjectTaskFollowPage+ConversationLog/WorkflowBoard 最小替代件 → 303543a
+  ProjectRunsPage → 76e879e 次级对话框 4（RunAgent/CreateMessage/MessageDetail/
+  AgentChannel）→ b58125a 路由 5 条挂载 → 7ecb0c7 locales 387 key 清偿
+  （+2 docs commits：e24f007 / manifest 收口 commit）。
+- **逐文件处置 16 文件全部实测相似度 ≤0.80**（0.04–0.80，明细表 manifest §11.1）；
+  三件首稿超限自纠拆解重写：TaskTable 0.88→0.43、MessageDetailModal 0.89→0.43、
+  AgentChannelPanel 0.86→0.22。纯自有件（PreviewDrawer 2,253 行、DesignGateFlow 家族
+  7 件、AssetMentionPopover 等）blame+diff 双验 diff=0，未重复平移。
+- **深度耦合回退**：ConversationLog（1,333 行）/WorkflowBoard（2,416 行）不在 F4
+  清单但 FollowPage 硬依赖——props 契约对齐的洁净室最小替代（0.09/0.04），完整重写
+  留待后续批次（偏差 §11.4-2）。
+- **HireAgentDialog 不迁移**：HEAD 零消费方，按裁剪清单 §1.5.3 死代码废弃（偏差 1）。
+- **后端缺口**：约 **59 个端点**前端已按旧 handler JSON 形状实现（tasks ~23/
+  workflows ~14/agent channels ~11/runs ~6/messages ~4/run 1，静态引用去重口径，
+  manifest §11.3），G 批后端平移后行为级验证。
+- **locales 终态 911/911/911**：F4 新增 387 key = A 类 355 沿用旧 JSON 短语
+  （3 条 >200 字符长段 en 改写：preplan.modeIntro / clarify.zoneHint /
+  release.emptyOutputsPointers）+ B 类 32 新写（IM 实例边界/designGate/docs meta/
+  QA 门禁；en 侧 CJK 泄漏审计 0）。插值占位符跨语言全等。
+- **三闸验收全绿**：tsc -b 零错误（strict）+ vitest 30/30 + vite build OK +
+  check:locales OK。每 commit 前独立过闸。
+- **偏差 6 条**（全文新仓 manifest §11.4/§11.6）：死代码 1、最小替代件 2、预扫
+  行数口径 3、超限自纠 4、全局 admin /runs 有意缓办（WorkbenchPage 等导航消费方
+  未平移，挂了即死页面）5、（无 6 号，5 条实际）。
+- **红线遵守**：本仓本轮仅改本文件；未 push；node_modules 未入库；重写申报与
+  实测一致（相似度逐文件可溯）。
+- **晨起建议**：读新仓 manifest §11 + BATCH-LOG F4 节 → `cd web && npm test &&
+  npm run check:locales` 对账 30/30 + 911/911/911 → 裁决 G 批（后端端点平移，
+  清单 §11.3 即输入）或 F5（workbench/messages/people 域页面）。G 批接通后
+  FollowPage 双速轮询与预览三态才能行为级验证。
