@@ -106,6 +106,8 @@ func TestFreezeConsumesApprovedPlanNotRefinedOutput(t *testing.T) {
 // deliberately emitting NO plan output (the blind-approval residue shape).
 func driveToContractReviewNoPlan(t *testing.T, s *Server, workspaceID, taskID string) {
 	t.Helper()
+	// v7 head: preflight agent step + preflight_review human gate approve.
+	drivePastPreflightHead(t, workflowstore.NewStore(s.controlDB, workspaceID), "sample", taskID)
 	rec := postBranchStepComplete(t, s, workspaceID, taskID, map[string]string{
 		"requirement_draft": "The console must clear local session state on expiry and export audit logs.",
 		"open_questions": "[]",

@@ -70,6 +70,8 @@ func TestBatchCPilotGreenfieldVNextOverRealRepo(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// v7 head: preflight agent step + preflight_review human gate.
+	drivePastPreflightHead(t, wfStore, "resproj", task.ID)
 	advance := func(step string, outputs map[string]string) {
 		t.Helper()
 		if _, err := wfStore.CompleteAndAdvance("resproj", task.ID, step+" done", "", outputs, "completed"); err != nil {

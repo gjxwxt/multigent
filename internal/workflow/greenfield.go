@@ -53,18 +53,26 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 	locale = normalizeTemplateLocale(locale)
 	text := localizedTemplateText(locale, map[string]string{
 		"name":             "New Project Delivery (Design Gate)",
-		"description":      "First-delivery pipeline for brand-new projects: requirement clarification, a visual design gate powered by OpenDesign, then implementation, agent self-review, human code review, PR merge, first release, and go-live confirmation.",
+		"description":      "First-delivery pipeline for brand-new projects: a preflight readiness gate with per-question clarification, requirement clarification, a visual design gate powered by OpenDesign, then implementation, agent self-review, human code review, PR merge, first release, and go-live confirmation.",
 		"approved":         "approved",
 		"changesRequested": "changes requested",
 
-		"reqDraftTitle":  "Requirement Clarification",
-		"reqDraftDesc":   "An agent turns the initial request into a structured requirement: problem, goal, scope, non-goals, risks, and open questions. When clarifications is present this is a clarification-round rework entry: weave every answered conclusion into its corresponding section (the answers are decisions, not suggestions), keep only genuinely pending items as open_questions (each noting why it blocks), and output the revised requirement_draft. When there are no open questions left, output open_questions exactly as the single token [] — the platform surfaces the freeze button to the reviewer only on that declaration.",
-		"reqReviewTitle": "Requirement Quick Review",
-		"reqReviewDesc":  "Per-question requirement clarification gate. Each open question gets exactly one default action: write a conclusion (a low-frequency \"defer with reason\" link is collapsed per card). Submitting is the ONLY exit of a round: the conclusions flow back to the agent, which weaves them into the requirement body and produces the next version. The approve/freeze button appears only after a reworked draft reports open_questions empty — a requirement with holes can never reach design or implementation.",
+		"preflightTitle":               "Preflight Check",
+		"preflightDesc":                "Pre-flight readiness check before any requirement work: verify the repository is initialized (a .multigent/runtime.json contract exists, dependency lockfiles are committed, a git baseline exists), the machine/sandbox environment is ready (mirror the project-initialization-v1 template's ready/sync/ci_ready checks), and the request can start as-is. Write the structured check conclusions to preflight_report. When something is missing or risky, ask the user per question via open_questions (e.g. \"the project is not initialized yet — run the project initialization flow (project-initialization-v1) first?\", \"lockfiles are missing — may the agent generate and commit them?\"); when everything is ready output open_questions exactly as the single token [] — the platform surfaces the freeze button to the reviewer only on that declaration. When clarifications is present this is a rework entry: apply every conclusion, re-check, and re-emit the report.",
+		"preflightReviewTitle":         "Preflight Review",
+		"preflightReviewDesc":          "Per-question preflight clarification gate (same interaction as the requirement quick review). Each open question gets exactly one default action: write a conclusion (a low-frequency \"defer with reason\" link is collapsed per card). Submitting is the ONLY exit of a round: the conclusions flow back to the preflight agent, which applies them and re-emits the report. The approve/freeze button appears only after a re-run reports open_questions empty — an environment with unresolved blockers can never reach requirement clarification.",
+		"preflightReportField":         "Structured preflight check conclusions: repo initialization state (.multigent/runtime.json contract, lockfiles, git baseline), machine/sandbox readiness (project-initialization-v1 ready/sync/ci_ready mirror), and whether the request can start as-is.",
+		"preflightClarificationsField": "Structured per-question conclusions (JSON array): [{id, priority, category, question, status (answered|deferred), conclusion, deferred_reason}]. Submitted each round; the agent MUST apply every answered conclusion and re-emit the report keeping only genuinely pending items as open_questions.",
+		"openQuestionsField":           "JSON array of the questions still pending a human ruling, one entry per question (id/priority/category/question/blocking_reason). Output the single token [] exactly when nothing is pending.",
+
+		"reqDraftTitle":          "Requirement Clarification",
+		"reqDraftDesc":           "An agent turns the initial request into a structured requirement: problem, goal, scope, non-goals, risks, and open questions. When clarifications is present this is a clarification-round rework entry: weave every answered conclusion into its corresponding section (the answers are decisions, not suggestions), keep only genuinely pending items as open_questions (each noting why it blocks), and output the revised requirement_draft. When there are no open questions left, output open_questions exactly as the single token [] — the platform surfaces the freeze button to the reviewer only on that declaration.",
+		"reqReviewTitle":         "Requirement Quick Review",
+		"reqReviewDesc":          "Per-question requirement clarification gate. Each open question gets exactly one default action: write a conclusion (a low-frequency \"defer with reason\" link is collapsed per card). Submitting is the ONLY exit of a round: the conclusions flow back to the agent, which weaves them into the requirement body and produces the next version. The approve/freeze button appears only after a reworked draft reports open_questions empty — a requirement with holes can never reach design or implementation.",
 		"reqClarificationsField": "Structured per-question conclusions (JSON array): [{id, priority, category, question, status (answered|deferred), conclusion, deferred_reason}]. Submitted each round; the agent MUST weave every answered conclusion into the corresponding requirement section and keep only genuinely open items as open_questions.",
 		"reviewRoundsField":      "Clarification round counter, incremented by the platform on each rework entry (capped). Context only — do not modify.",
-		"designTitle":    "Design Confirmation",
-		"designDesc":     "Review the visual prototype produced in OpenDesign (or pick an existing design). Confirm the direction, request changes, or generate a new variant before implementation begins.",
+		"designTitle":            "Design Confirmation",
+		"designDesc":             "Review the visual prototype produced in OpenDesign (or pick an existing design). Confirm the direction, request changes, or generate a new variant before implementation begins.",
 
 		"scaleGateTitle":        "Delivery Scale Gate",
 		"scaleGateDesc":         "Classify the approved requirement into a delivery shape. Output scale_verdict: linear (single coherent implementation pass — small/medium change, low intra-requirement independence) or batched (large requirement decomposed into parallel workstreams). When batched, also output batch_plan: the workstream list (id, title, cohesive domain rationale, expected UC set) plus the SHARED CONTRACT list (database schema, error codes, API skeleton) that must be committed to the baseline before any workstream starts. The verdict is advisory — the requirement reviewer confirms it; branch editing happens on the canvas before the run reaches the parallel stage.",
@@ -141,18 +149,26 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		"designConformanceField": "Reviewer agent's structured assessment of implementation visual and interaction fidelity against the design prototype.",
 	}, map[string]string{
 		"name":             "新项目交付流水线（设计确认闸门）",
-		"description":      "新项目首次交付专用流水线：需求澄清后先经 OpenDesign 设计确认闸门，再实现编码、Agent 初审、人工代码审核、开 PR 合并、首版发布与上线确认。",
+		"description":      "新项目首次交付专用流水线：开工前检查后先经逐题澄清，再经 OpenDesign 设计确认闸门，然后实现编码、Agent 初审、人工代码审核、开 PR 合并、首版发布与上线确认。",
 		"approved":         "通过",
 		"changesRequested": "需要修改",
 
-		"reqDraftTitle":  "需求澄清",
-		"reqDraftDesc":   "Agent 把初始请求整理成结构化需求：问题、目标、范围、非目标、风险与待澄清问题。当 clarifications 存在时，本次是澄清轮返工进入：把每条已答复结论织进对应章节（结论是裁决，不是建议），只保留真正待定项为 open_questions（每项注明阻塞原因），产出修订后的 requirement_draft。待澄清问题清零时，open_questions 必须精确输出单词元 []——平台只有在收到该申报后才会向审核人展示「确认冻结」按钮。",
-		"reqReviewTitle": "需求快审",
-		"reqReviewDesc":  "逐题需求澄清闸门。每个待澄清问题只有一个默认动作：写结论（低频出口「本轮不答」折叠在卡片角落，需留原因）。提交是每一轮的唯一出口：结论回流给 agent，agent 把结论织进需求正文产出下一版。只有当重梳后的草稿申报 open_questions 已清零时，才会出现「确认冻结」按钮——带洞的需求永远到不了设计与实现。",
+		"preflightTitle":               "开工前检查",
+		"preflightDesc":                "进入需求工作前的开工前就绪检查：核对仓库是否已初始化（是否存在 .multigent/runtime.json 契约、依赖锁文件是否已提交、Git 基线是否存在）、机器/沙箱环境是否满足（参照项目初始化模板 project-initialization-v1 的 ready/sync/ci_ready 内容）、用户需求是否可直接开工。结构化检查结论写入 preflight_report。发现缺失或风险时，通过 open_questions 逐题向用户提问（如「项目尚未初始化，是否先执行项目初始化流程（project-initialization-v1）？」「仓库缺少锁文件，允许 agent 生成并提交吗？」）；一切就绪时 open_questions 必须精确输出单词元 []——平台只有在收到该申报后才会向审核人展示「确认冻结」按钮。当 clarifications 存在时，本次是返工进入：应用每条结论后重新检查并重新提交报告。",
+		"preflightReviewTitle":         "开工前审核",
+		"preflightReviewDesc":          "逐题开工前澄清闸门（与需求快审同一交互模型）。每个待澄清问题只有一个默认动作：写结论（低频出口「本轮不答」折叠在卡片角落，需留原因）。提交是每一轮的唯一出口：结论回流给开工前检查 agent，agent 应用结论并重新提交报告。只有当重跑后申报 open_questions 已清零时，才会出现「确认冻结」按钮——带未决阻塞的环境永远到不了需求澄清。",
+		"preflightReportField":         "结构化开工前检查结论：仓库初始化状态（.multigent/runtime.json 契约、锁文件、Git 基线）、机器/沙箱就绪情况（对照 project-initialization-v1 的 ready/sync/ci_ready）、以及需求是否可直接开工。",
+		"preflightClarificationsField": "逐题结论结构化数组（JSON）：[{id, priority, category, question, status（answered|deferred）, conclusion, deferred_reason}]。每轮提交；agent 必须应用每条已答复结论并重新提交报告，只保留真正待定项为 open_questions。",
+		"openQuestionsField":           "仍待人工裁决的问题 JSON 数组，每题一项（id/priority/category/question/blocking_reason）。无待定项时必须精确输出单词元 []。",
+
+		"reqDraftTitle":          "需求澄清",
+		"reqDraftDesc":           "Agent 把初始请求整理成结构化需求：问题、目标、范围、非目标、风险与待澄清问题。当 clarifications 存在时，本次是澄清轮返工进入：把每条已答复结论织进对应章节（结论是裁决，不是建议），只保留真正待定项为 open_questions（每项注明阻塞原因），产出修订后的 requirement_draft。待澄清问题清零时，open_questions 必须精确输出单词元 []——平台只有在收到该申报后才会向审核人展示「确认冻结」按钮。",
+		"reqReviewTitle":         "需求快审",
+		"reqReviewDesc":          "逐题需求澄清闸门。每个待澄清问题只有一个默认动作：写结论（低频出口「本轮不答」折叠在卡片角落，需留原因）。提交是每一轮的唯一出口：结论回流给 agent，agent 把结论织进需求正文产出下一版。只有当重梳后的草稿申报 open_questions 已清零时，才会出现「确认冻结」按钮——带洞的需求永远到不了设计与实现。",
 		"reqClarificationsField": "逐题结论结构化数组（JSON）：[{id, priority, category, question, status（answered|deferred）, conclusion, deferred_reason}]。每轮提交；agent 必须把每条已答复结论织进对应需求章节，只保留真正待定项为 open_questions。",
 		"reviewRoundsField":      "澄清轮次计数，由平台在每次返工进入时递增（有上限）。仅作上下文——不要修改。",
-		"designTitle":    "设计确认",
-		"designDesc":     "审阅 OpenDesign 生成的可视化原型（或选择已有设计），确认方向、打回修改或重新生成，然后再进入实现。",
+		"designTitle":            "设计确认",
+		"designDesc":             "审阅 OpenDesign 生成的可视化原型（或选择已有设计），确认方向、打回修改或重新生成，然后再进入实现。",
 
 		"scaleGateTitle":        "交付规模裁决",
 		"scaleGateDesc":         "把已批准的需求归类为交付形态。输出 scale_verdict：linear（单条实现线——中小型变更、需求内部独立性低）或 batched（大需求分解为并行工作流）。batched 时同时输出 batch_plan：工作流清单（branch_id、标题、内聚域依据、预期 UC 集合）以及必须在任何工作流开工前提交到基线的共享契约清单（数据库 schema、错误码、API 骨架）。裁决是建议性的——需求审核人最终拍板；run 到达并行阶段前可在画布上编辑分支。",
@@ -237,7 +253,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		return f
 	}
 
-	designStep := tmplStep("design_review", "human_review", text["designTitle"], text["designDesc"], "product-owner", "violet", 640,
+	designStep := tmplStep("design_review", "human_review", text["designTitle"], text["designDesc"], "product-owner", "violet", 1200,
 		[]entity.WorkflowField{
 			field("approved_requirement", "requestField"),
 			optionalField("requirement_draft", "requestField"),
@@ -268,7 +284,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 	// deterministic cond() edges route on the verdict; the default edge falls
 	// back to linear so an undecided verdict can never silently fan out
 	// (fail-safe toward the historical single-track path).
-	scaleGateStep := tmplStep("scale_gate", "agent_task", text["scaleGateTitle"], text["scaleGateDesc"], "pm-agent", "cyan", 920,
+	scaleGateStep := tmplStep("scale_gate", "agent_task", text["scaleGateTitle"], text["scaleGateDesc"], "pm-agent", "cyan", 1480,
 		[]entity.WorkflowField{
 			field("approved_requirement", "requestField"),
 			optionalField("requirement_draft", "requestField"),
@@ -287,7 +303,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 	// The contract MUST land on the integration baseline before branches fork
 	// (large-requirement module DM5): parallel branches cannot see each
 	// other's code, so the committed contract is their only shared surface.
-	contractBatchStep := tmplStep("contract_batch", "agent_task", text["contractBatchTitle"], text["contractBatchDesc"], "developer-agent", "violet", 1200,
+	contractBatchStep := tmplStep("contract_batch", "agent_task", text["contractBatchTitle"], text["contractBatchDesc"], "developer-agent", "violet", 1760,
 		[]entity.WorkflowField{
 			field("approved_requirement", "requestField"),
 			optionalField("delivery_plan", "deliveryPlanField"),
@@ -316,7 +332,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			optionalField("requirement_items", "requirementItemsField"),
 		})
 
-	contractReviewStep := tmplStep("contract_review", "human_review", text["contractReviewTitle"], text["contractReviewDesc"], "owner-engineer", "amber", 1480,
+	contractReviewStep := tmplStep("contract_review", "human_review", text["contractReviewTitle"], text["contractReviewDesc"], "owner-engineer", "amber", 2040,
 		[]entity.WorkflowField{
 			field("contract_artifacts", "contractArtifactsField"),
 			optionalField("delivery_plan", "deliveryPlanField"),
@@ -339,7 +355,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 	// roles, descriptions and input fields on the canvas following the
 	// batch_plan BEFORE the run reaches this step. Engine-side, each branch
 	// spawns a child task + sub-run and must carry an agent actor binding.
-	parallelStep := tmplStep("parallel_workstreams", "parallel_stage", "Parallel Workstreams", "Fan-out of the decomposed workstreams. Branches are derived from the FROZEN delivery plan approved at the contract review (one branch per work package, dependency order); no canvas editing is required. The static branches below are the legacy fallback for runs without a frozen plan.", "", "violet", 1760,
+	parallelStep := tmplStep("parallel_workstreams", "parallel_stage", "Parallel Workstreams", "Fan-out of the decomposed workstreams. Branches are derived from the FROZEN delivery plan approved at the contract review (one branch per work package, dependency order); no canvas editing is required. The static branches below are the legacy fallback for runs without a frozen plan.", "", "violet", 2320,
 		[]entity.WorkflowField{
 			field("contract_artifacts", "contractArtifactsField"),
 			optionalField("approved_requirement", "requestField"),
@@ -375,7 +391,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 		},
 	}
 
-	integrationReviewStep := tmplStep("integration_review", "human_review", text["integrationReviewTitle"], text["integrationReviewDesc"], "owner-engineer", "amber", 2040,
+	integrationReviewStep := tmplStep("integration_review", "human_review", text["integrationReviewTitle"], text["integrationReviewDesc"], "owner-engineer", "amber", 2600,
 		[]entity.WorkflowField{
 			field("contract_artifacts", "contractArtifactsField"),
 			optionalField("approved_requirement", "requestField"),
@@ -392,7 +408,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			field("comments", "commentsField"),
 		})
 
-	acceptanceTestDesignStep := tmplStep("acceptance_test_design", "agent_task", text["atdTitle"], text["atdDesc"], "qa-agent", "rose", 2320,
+	acceptanceTestDesignStep := tmplStep("acceptance_test_design", "agent_task", text["atdTitle"], text["atdDesc"], "qa-agent", "rose", 2880,
 		[]entity.WorkflowField{
 			field("approved_requirement", "requestField"),
 			optionalField("approved_design_source", "designSourceField"),
@@ -417,16 +433,41 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 	// version lets EnsureGreenfieldDefinition upgrade already-seeded copies
 	// in place (positions are canvas metadata only; runs resolve steps from
 	// the stored definition, and no runtime semantics changed).
-	tmpl := templateFromParts("greenfield-delivery-pipeline", text["name"], text["description"], locale, "requirement_draft",
+	// v7: the preflight clarify gate heads the pipeline (see the Version bump
+	// comment at the bottom of this function for the full contract).
+	tmpl := templateFromParts("greenfield-delivery-pipeline", text["name"], text["description"], locale, "preflight",
 		[]entity.WorkflowStep{
-			tmplStep("requirement_draft", "agent_task", text["reqDraftTitle"], text["reqDraftDesc"], "pm-agent", "sky", 80,
+			tmplStep("preflight", "agent_task", text["preflightTitle"], text["preflightDesc"], "pm-agent", "emerald", 80,
+				// request/context come from the task creation inputs (this is
+				// now the start step); clarifications/review_comments arrive
+				// from the preflight_review rework edge.
+				[]entity.WorkflowField{field("request", "requestField"), field("context", "contextField"), optionalField("clarifications", "preflightClarificationsField"), optionalField("review_comments", "reviewCommentsField")},
+				[]entity.WorkflowField{field("preflight_report", "preflightReportField"), field("open_questions", "openQuestionsField")}),
+			tmplStep("preflight_review", "human_review", text["preflightReviewTitle"], text["preflightReviewDesc"], "product-owner", "amber", 360,
+				// open_questions is declared as an input so the per-question
+				// clarification cards have a declared source (the edge mapping
+				// forwards it regardless, but a declared input surfaces it in
+				// "expected input fields" for the reviewer) — the same
+				// declaration activates the clarify loop UI and the server-side
+				// freeze gate for this step. request/context are declared AND
+				// forwarded by the inbound edge mapping so the approve edge can
+				// re-emit them into requirement_draft ($input resolves from
+				// THIS instance's materialized inputs).
+				[]entity.WorkflowField{field("request", "requestField"), field("context", "contextField"), field("preflight_report", "preflightReportField"), field("open_questions", "openQuestionsField")},
+				// clarifications is the structured per-question conclusion log
+				// (optional: legacy panels and ChatOps submits may only carry
+				// free-text comments — the loop still works, the rework prompt
+				// just falls back to review_comments). decision/comments stay
+				// for the platform routing + summary.
+				[]entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("clarifications", "preflightClarificationsField")}),
+			tmplStep("requirement_draft", "agent_task", text["reqDraftTitle"], text["reqDraftDesc"], "pm-agent", "sky", 640,
 				// clarifications/previous_draft/open_questions arrive from the
 				// clarification-loop rework edge; review_rounds is the
 				// platform-counted clarification round (the rework edge
 				// increments it, clamped at the escalation cap).
 				[]entity.WorkflowField{field("request", "requestField"), field("context", "contextField"), optionalField("delivery_plan_draft", "preplanDraftField"), optionalField("clarifications", "reqClarificationsField"), optionalField("previous_draft", "requestField"), optionalField("open_questions", "contextField"), optionalField("review_comments", "reviewCommentsField"), optionalField("review_rounds", "reviewRoundsField")},
 				[]entity.WorkflowField{field("requirement_draft", "requestField"), field("open_questions", "contextField"), optionalField("requirement_items", "requirementItemsField")}),
-			tmplStep("requirement_review", "human_review", text["reqReviewTitle"], text["reqReviewDesc"], "product-owner", "amber", 360,
+			tmplStep("requirement_review", "human_review", text["reqReviewTitle"], text["reqReviewDesc"], "product-owner", "amber", 920,
 				// open_questions is declared as an input so the per-question
 				// clarification cards have a declared source (the edge mapping
 				// forwards it regardless, but a declared input surfaces it in
@@ -447,7 +488,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 			parallelStep,
 			integrationReviewStep,
 			acceptanceTestDesignStep,
-			tmplStep("implementation", "agent_task", text["implTitle"], text["implDesc"], "developer-agent", "emerald", 2600,
+			tmplStep("implementation", "agent_task", text["implTitle"], text["implDesc"], "developer-agent", "emerald", 3160,
 				[]entity.WorkflowField{
 					field("approved_requirement", "requestField"),
 					optionalField("approved_design_source", "designSourceField"),
@@ -464,7 +505,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 					optionalField("qa_rework_items", "qaReworkItemsField"),
 				},
 				[]entity.WorkflowField{field("pr", "prField"), field("tests_run", "testsField"), field("risks", "risksField"), field("test_implementation_evidence", "testReportField"), optionalField("delivery_sha", "deliveryShaField"), optionalField("delivery_branch", "deliveryBranchField")}),
-			tmplStep("self_review", "agent_task", text["selfReviewTitle"], text["selfReviewDesc"], "reviewer-agent", "rose", 2880,
+			tmplStep("self_review", "agent_task", text["selfReviewTitle"], text["selfReviewDesc"], "reviewer-agent", "rose", 3440,
 				[]entity.WorkflowField{
 					field("pr", "prField"),
 					// The threaded machine anchor is part of the declared input
@@ -492,7 +533,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 					field("review_comments", "reviewCommentsField"),
 					optionalField("design_conformance", "designConformanceField"),
 				}),
-			tmplStep("code_review", "human_review", text["codeReviewTitle"], text["codeReviewDesc"], "owner-engineer", "amber", 3160,
+			tmplStep("code_review", "human_review", text["codeReviewTitle"], text["codeReviewDesc"], "owner-engineer", "amber", 3720,
 				[]entity.WorkflowField{
 					field("pr", "prField"),
 					// The threaded machine anchor: the human gate sees exactly
@@ -511,7 +552,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 					optionalField("test_implementation_evidence", "testReportField"),
 				},
 				[]entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField"), optionalField("approved_change", "prField")}),
-			tmplStep("qa", "agent_task", text["qaTitle"], text["qaDesc"], "qa-agent", "rose", 3440,
+			tmplStep("qa", "agent_task", text["qaTitle"], text["qaDesc"], "qa-agent", "rose", 4000,
 				[]entity.WorkflowField{
 					field("pr", "prField"),
 					field("approved_change", "prField"),
@@ -539,7 +580,7 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 					// reconciled — qa_signoff and rework read it from here.
 					optionalField("test_implementation_evidence", "testReportField"),
 				}),
-			tmplStep("qa_signoff", "human_review", text["qaSignoffTitle"], text["qaSignoffDesc"], "qa-owner", "amber", 3720,
+			tmplStep("qa_signoff", "human_review", text["qaSignoffTitle"], text["qaSignoffDesc"], "qa-owner", "amber", 4280,
 				[]entity.WorkflowField{
 					field("risk_coverage_matrix", "riskMatrixField"),
 					field("test_report", "testReportField"),
@@ -569,17 +610,55 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 					// instead of only free-text comments.
 					optionalField("qa_rework_items", "qaReworkItemsField"),
 				}),
-			withStepConfig(tmplStep("pr_open_and_merge", "agent_task", text["prMergeTitle"], text["prMergeDesc"], "developer-agent", "violet", 4000,
+			withStepConfig(tmplStep("pr_open_and_merge", "agent_task", text["prMergeTitle"], text["prMergeDesc"], "developer-agent", "violet", 4560,
 				[]entity.WorkflowField{field("approved_change", "prField"), field("pr", "prField")},
 				[]entity.WorkflowField{field("merged_sha", "mergedField"), field("pr_url", "prURLField")}), map[string]string{StepConfigRequiresRemote: "true"}),
-			withStepConfig(tmplStep("release", "agent_task", text["releaseTitle"], text["releaseDesc"], "release-agent", "emerald", 4280,
+			withStepConfig(tmplStep("release", "agent_task", text["releaseTitle"], text["releaseDesc"], "release-agent", "emerald", 4840,
 				[]entity.WorkflowField{field("merged_sha", "mergedField")},
 				[]entity.WorkflowField{field("tag", "tagField"), field("deployed_version", "deployedField"), field("health_status", "healthField")}), map[string]string{StepConfigRequiresRemote: "true"}),
-			tmplStep("go_live_confirm", "human_review", text["goLiveTitle"], text["goLiveDesc"], "product-owner", "amber", 4560,
+			tmplStep("go_live_confirm", "human_review", text["goLiveTitle"], text["goLiveDesc"], "product-owner", "amber", 5120,
 				[]entity.WorkflowField{field("tag", "tagField"), field("deployed_version", "deployedField"), field("health_status", "healthField")},
 				[]entity.WorkflowField{field("decision", "decisionField"), field("comments", "commentsField")}),
 		},
 		[]entity.WorkflowEdge{
+			// Preflight clarify loop (v7): the pipeline now opens with a
+			// preflight readiness check and a per-question human gate, reusing
+			// the exact requirement_review clarification mechanics. Submitting
+			// a round is the only non-freeze exit: the conclusions flow back to
+			// the preflight agent (clarifications structured + review_comments
+			// fallback), which applies them and re-emits the report. The freeze
+			// edge keys on approve AND the server rejects approving while
+			// open_questions is non-empty for this step (same gate family as
+			// requirement_review — isRequirementReviewStep now matches any
+			// human_review step declaring open_questions, so the loop cannot be
+			// bypassed via REST/ChatOps either).
+			edge("e-preflight-review-rework", "preflight_review", "preflight", text["changesRequested"], cond("decision", "eq", "request_changes"), map[string]string{
+				"request":         "$input.request",
+				"context":         "$input.context",
+				"review_comments": "$output.comments",
+				"clarifications":  "$output.clarifications",
+			}, false),
+			// Preflight freeze edge: on approve (open_questions cleared) the
+			// run enters requirement_draft. request/context are forwarded
+			// explicitly ($input = the preflight_review instance's materialized
+			// inputs — which include the values the start step received) so the
+			// former start step keeps receiving the task's original request
+			// even though it is no longer the entry point.
+			edge("e-preflightreview-reqdraft", "preflight_review", "requirement_draft", text["approved"], cond("decision", "eq", "approve"), map[string]string{
+				"request": "$input.request",
+				"context": "$input.context",
+			}, false),
+			// Preflight forward edge: request/context AND the agent's outputs
+			// (preflight_report + open_questions) materialize into the review
+			// step's instance inputs — $input.request on the approve edge
+			// below resolves from this instance, so the mapping here is what
+			// keeps the original request flowing into requirement_draft.
+			edge("e-preflight-review", "preflight", "preflight_review", "", nil, map[string]string{
+				"request":          "$input.request",
+				"context":          "$input.context",
+				"preflight_report": "$output.preflight_report",
+				"open_questions":   "$output.open_questions",
+			}, true),
 			edge("e-req-draft-review", "requirement_draft", "requirement_review", "", nil, nil, true),
 			// Requirement clarification loop: submitting a round is the ONLY
 			// exit of the review step, and every submit maps back to
@@ -958,5 +1037,22 @@ func greenfieldDeliveryTemplate(locale string) entity.WorkflowTemplate {
 	// cap). Steps/edges changed → runtime semantics changed, hence the bump
 	// so EnsureGreenfieldDefinition upgrades stored copies in place.
 	tmpl.Version = 6
+	// v7: preflight clarify gate (开工前检查). Two steps are inserted at the
+	// head of the pipeline and every legacy step shifts +560px on the canvas:
+	// preflight (agent_task, the new start step) runs a readiness check —
+	// repo initialized (.multigent/runtime.json contract, dependency lockfiles,
+	// git baseline), machine/sandbox environment ready (mirroring the
+	// project-initialization-v1 template's ready/sync/ci_ready), request
+	// startable as-is — emitting preflight_report + open_questions, and
+	// preflight_review (human_review) is a per-question clarify gate reusing
+	// the requirement_review mechanics (the open_questions input declaration
+	// activates the UI clarify cards and the server-side freeze gate). Approve
+	// forwards request/context into requirement_draft via explicit input
+	// mapping (it is no longer the start step, so it no longer receives the
+	// task vars directly); request_changes loops back to preflight. Only
+	// existing step types are used; steps/edges changed → runtime semantics
+	// changed, hence the bump so EnsureGreenfieldDefinition upgrades stored
+	// copies in place.
+	tmpl.Version = 7
 	return tmpl
 }

@@ -264,7 +264,9 @@ func TestRuntimeWorkflowSeam_GreenfieldVNextPromptAndStepDone(t *testing.T) {
 		return cur
 	}
 
-	// ── Fast-forward requirement_draft, requirement_review, design_review ──
+	// ── Fast-forward the v7 preflight head, then requirement_draft, ──
+	// requirement_review, design_review ──
+	drivePastPreflightHead(t, wfStore, "resproj", task.ID)
 	advanceDirect("requirement_draft", "drafted", map[string]string{
 		"requirement_draft": "AC-1: POST /api/v1/auth/revoke revokes token; AC-2: 401 on revoked token",
 		"open_questions": "[]",

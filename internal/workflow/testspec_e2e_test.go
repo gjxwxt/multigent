@@ -79,6 +79,7 @@ func TestGreenfieldE2EWithAcceptanceTestDesign(t *testing.T) {
 	store, taskID := newGreenfieldRunStore(t)
 	const project = "project"
 
+	drivePastPreflight(t, store, project, taskID)
 	// 1. requirement_draft completes.
 	if _, err := store.CompleteAndAdvance(project, taskID, "drafted", "", map[string]string{
 		"requirement_draft": "Structured requirement with AC-1/AC-2",
@@ -220,4 +221,24 @@ func TestGreenfieldE2EWithAcceptanceTestDesign(t *testing.T) {
 		t.Fatalf("reworked implementation lost the failed-item context: %q", inst.InputValues["review_comments"])
 	}
 	_ = signoffOutputs
+}
+
+// drivePastPreflight completes the v7 head pair (preflight agent step +
+// preflight_review human clarify gate) with everything cleared, leaving the
+// run at requirement_draft. Tests that only exercise the pre-existing spine
+// call this instead of replaying the two steps inline.
+func drivePastPreflight(t *testing.T, store *Store, project, taskID string) {
+	t.Helper()
+	if _, err := store.CompleteAndAdvance(project, taskID, "preflighted", "", map[string]string{
+		"preflight_report": `{"repo":"initialized","env":"ready","request":"startable"}`,
+		"open_questions":   "[]",
+	}, "completed"); err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	if _, err := store.CompleteAndAdvance(project, taskID, "preflight ok", "", map[string]string{
+		"decision": "approve",
+		"comments": "environment ready",
+	}, "completed"); err != nil {
+		t.Fatalf("preflight review: %v", err)
+	}
 }

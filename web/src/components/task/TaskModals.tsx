@@ -1233,7 +1233,12 @@ export function WorkflowRuntimePanel({
   // Requirement clarification loop (v6): per-question cards replace the free-
   // text-only quick review. Questions come from THIS instance's open_questions
   // input (the latest reworked draft), not from historical records.
-  const isRequirementReview = Boolean(step && step.id === 'requirement_review' && step.type === 'human_review')
+  // Matched by DECLARATION (any human_review step whose open_questions input
+  // declaration activates the loop via clarifyLoopActive below), not by the
+  // hard-coded requirement_review step id: since greenfield v7 / brownfield
+  // v2 the preflight_review head step reuses the exact same per-question
+  // clarify mechanics and must activate the same cards and freeze gate.
+  const isRequirementReview = Boolean(step && step.type === 'human_review')
   // The loop only exists in template v6+: its requirement_review step declares
   // open_questions as an input. Runs frozen on an older snapshot (v5 and
   // earlier, e.g. started before the v6 deploy) never materialize that input,
@@ -1356,8 +1361,8 @@ export function WorkflowRuntimePanel({
               }
             >
               {clarifyQuestions.length > 0
-                ? t('workflows.clarify.zoneHint', { defaultValue: '每题一个结论输入框，写了就自动计入；个别不方便答的走「本轮不答」。提交后 agent 把结论织回需求正文出下一版。' })
-                : t('workflows.clarify.zoneHintClean', { defaultValue: '上一轮的结论已全部织回需求正文，agent 申报无待澄清问题——确认冻结后进入设计。' })}
+                ? t('workflows.clarify.zoneHint', { defaultValue: '每题一个结论输入框，写了就自动计入；个别不方便答的走「本轮不答」。提交后 agent 把结论织回上游产出，出下一版。' })
+                : t('workflows.clarify.zoneHintClean', { defaultValue: '上一轮的结论已全部被 agent 吸收，申报无待澄清问题——确认冻结后进入下一阶段。' })}
             </p>
             {clarifyQuestions.length > 0 && (
               <RequirementClarifyCards
@@ -1574,14 +1579,14 @@ export function WorkflowRuntimePanel({
                         disabled={Boolean(reviewBusy)}
                         className="rounded-lg border border-emerald-600 bg-emerald-600 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50 dark:border-emerald-500 dark:bg-emerald-600 dark:text-white dark:hover:bg-emerald-700"
                       >
-                        {reviewBusy === 'approve' ? t('forms.working') : t('workflows.clarify.freeze', { defaultValue: '✓ 确认冻结，进入设计' })}
+                        {reviewBusy === 'approve' ? t('forms.working') : t('workflows.clarify.freeze', { defaultValue: '✓ 确认冻结，进入下一步' })}
                       </button>
                     ) : (
                       <button
                         type="button"
                         onClick={() => onSubmitReview('request_changes')}
                         disabled={Boolean(reviewBusy)}
-                        title={t('workflows.clarify.submitTitle', { defaultValue: '结论回流给 agent，织入需求正文出下一版；全部收敛后才出现「确认冻结」' })}
+                        title={t('workflows.clarify.submitTitle', { defaultValue: '结论回流给 agent，吸收后出下一版；全部收敛后才出现「确认冻结」' })}
                         className="rounded-lg border border-sky-600 bg-sky-600 px-3 py-2 text-sm font-semibold text-white hover:bg-sky-700 disabled:opacity-50 dark:border-sky-500 dark:bg-sky-600 dark:text-white dark:hover:bg-sky-700"
                       >
                         {reviewBusy === 'request_changes' ? t('forms.working') : t('workflows.clarify.submitRound', { defaultValue: '↻ 提交结论，回流重梳' })}
@@ -1611,7 +1616,7 @@ export function WorkflowRuntimePanel({
               </div>
               {clarifyLoopActive && !canFreezeRequirement && (
                 <p className="text-[11px] leading-relaxed text-neutral-400 dark:text-zinc-500">
-                  {t('workflows.clarify.hintLoop', { defaultValue: '提交后 agent 把结论织进需求正文产出下一版；下一版不再有待澄清问题时，这里才出现「确认冻结」。' })}
+                  {t('workflows.clarify.hintLoop', { defaultValue: '提交后 agent 把结论吸收进上游产出下一版；下一版不再有待澄清问题时，这里才出现「确认冻结」。' })}
                 </p>
               )}
               </div>

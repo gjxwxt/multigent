@@ -32,11 +32,11 @@ func TestBrownfieldOnboardingDefinitionStructure(t *testing.T) {
 	if def.ID != BrownfieldOnboardingWorkflowID {
 		t.Fatalf("expected definition id %s, got %s", BrownfieldOnboardingWorkflowID, def.ID)
 	}
-	if def.StartStepID != "readonly_scan" {
-		t.Fatalf("expected start step readonly_scan, got %s", def.StartStepID)
+	if def.StartStepID != "preflight" {
+		t.Fatalf("expected start step preflight, got %s", def.StartStepID)
 	}
 
-	expectedSteps := []string{"readonly_scan", "baseline_pin", "verify_build", "evaluate_readiness", "human_signoff", "materialize_contract"}
+	expectedSteps := []string{"preflight", "preflight_review", "readonly_scan", "baseline_pin", "verify_build", "evaluate_readiness", "human_signoff", "materialize_contract"}
 	if len(def.Steps) != len(expectedSteps) {
 		t.Fatalf("expected %d steps, got %d", len(expectedSteps), len(def.Steps))
 	}
@@ -51,12 +51,12 @@ func TestBrownfieldOnboardingDefinitionStructure(t *testing.T) {
 		if !found {
 			t.Fatalf("missing step %s", expectedID)
 		}
-		if expectedID == "human_signoff" {
+		if expectedID == "preflight_review" || expectedID == "human_signoff" {
 			if s.Type != "human_review" {
-				t.Fatalf("expected human_signoff to be human_review, got %s", s.Type)
+				t.Fatalf("expected %s to be human_review, got %s", expectedID, s.Type)
 			}
 			if s.ActorRole != "owner-engineer" {
-				t.Fatalf("expected human_signoff to have actor role owner-engineer, got %s", s.ActorRole)
+				t.Fatalf("expected %s to have actor role owner-engineer, got %s", expectedID, s.ActorRole)
 			}
 		} else {
 			if s.Type != "agent_task" {
@@ -66,6 +66,33 @@ func TestBrownfieldOnboardingDefinitionStructure(t *testing.T) {
 				t.Fatalf("expected step %s to have actor role project-initializer, got %s", expectedID, s.ActorRole)
 			}
 		}
+	}
+
+	// Preflight clarify gate (v2): the human preflight_review step must
+	// declare open_questions as an input (activates the per-question cards
+	// and the server-side freeze gate) and the approve edge must forward the
+	// original request into readonly_scan as onboarding_request.
+	declaresOpenQuestions := false
+	for _, f := range stepMap["preflight_review"].InputFields {
+		if f.Name == "open_questions" {
+			declaresOpenQuestions = true
+		}
+	}
+	if !declaresOpenQuestions {
+		t.Fatal("preflight_review must declare open_questions as an input (clarify loop contract)")
+	}
+	approveToScan := false
+	for _, e := range def.Edges {
+		if e.From == "preflight_review" && e.To == "readonly_scan" && e.Condition != nil &&
+			e.Condition.Field == "decision" && e.Condition.Value == "approve" {
+			if e.InputMapping["onboarding_request"] != "$input.request" {
+				t.Fatalf("preflight approve edge must forward request as onboarding_request, mapping=%v", e.InputMapping)
+			}
+			approveToScan = true
+		}
+	}
+	if !approveToScan {
+		t.Fatal("missing preflight_review -> readonly_scan approve edge")
 	}
 
 	// Verify template catalog contains brownfield template
@@ -110,12 +137,36 @@ func TestBrownfieldOnboardingLifecycle_ApprovalAndRework(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartRun: %v", err)
 	}
-	if len(steps) == 0 || steps[0].StepID != "readonly_scan" {
-		t.Fatalf("expected initial step readonly_scan, got %+v", steps)
+	if len(steps) == 0 || steps[0].StepID != "preflight" {
+		t.Fatalf("expected initial step preflight, got %+v", steps)
+	}
+
+	// 0. preflight -> preflight_review (agent emits report, questions cleared)
+	res, err := store.CompleteAndAdvance(project, taskID, "preflight done", "", map[string]string{
+		"preflight_report": `{"repo":"existing","runtimeJson":false,"targetBranch":"main"}`,
+		"open_questions":   "[]",
+	}, "completed")
+	if err != nil {
+		t.Fatalf("advance preflight: %v", err)
+	}
+	if res.Next == nil || res.Next.ID != "preflight_review" {
+		t.Fatalf("expected next step preflight_review, got %+v", res.Next)
+	}
+
+	// 0b. preflight_review approve -> readonly_scan (request forwarded)
+	res, err = store.CompleteAndAdvance(project, taskID, "preflight approved", "", map[string]string{
+		"decision": "approve",
+		"comments": "parameters confirmed",
+	}, "completed")
+	if err != nil {
+		t.Fatalf("advance preflight_review: %v", err)
+	}
+	if res.Next == nil || res.Next.ID != "readonly_scan" {
+		t.Fatalf("expected next step readonly_scan, got %+v", res.Next)
 	}
 
 	// 1. readonly_scan -> baseline_pin
-	res, err := store.CompleteAndAdvance(project, taskID, "readonly_scan", "step done", map[string]string{
+	res, err = store.CompleteAndAdvance(project, taskID, "readonly_scan", "step done", map[string]string{
 		"scan_report": `{"techStacks":["node"],"services":[{"name":"frontend","directory":"web","techStack":"node","hasLockfile":true}]}`,
 	}, "completed")
 	if err != nil {

@@ -724,17 +724,21 @@ func (s *Server) submitTaskWorkflowReview(r *http.Request, workspaceID, project,
 	summary := formatWorkflowReviewFields(outputs)
 
 	// Requirement-freeze gate (requirement clarification loop): the greenfield
-	// requirement_review step has exactly two outgoing edges — a rework edge
-	// (request_changes → requirement_draft) and a freeze edge (approve →
-	// design_review). The freeze is only legitimate after the agent's reworked
-	// draft declared open_questions empty (the UI only surfaces the freeze
-	// button on that declaration). The server enforces the same gate
-	// deterministically so a stale panel, a ChatOps approve, or an IM callback
-	// can never push a requirement with unresolved questions into design —
-	// fail-closed with an actionable message instead of silently freezing.
-	// Runs frozen on pre-v6 definition snapshots keep the legacy free review:
-	// their requirement_review step doesn't declare open_questions as an
-	// input, so there is nothing to converge and the gate steps aside.
+	// requirement_review step — and, since greenfield v7 / brownfield v2, the
+	// preflight_review head step of both pipelines — has exactly two outgoing
+	// edges: a rework edge (request_changes → the upstream agent step) and a
+	// freeze edge (approve → the next stage). The freeze is only legitimate
+	// after the agent's latest output declared open_questions empty (the UI
+	// only surfaces the freeze button on that declaration). The server
+	// enforces the same gate deterministically so a stale panel, a ChatOps
+	// approve, or an IM callback can never push unresolved questions into the
+	// next stage — fail-closed with an actionable message instead of silently
+	// freezing. isRequirementReviewStep matches by DECLARATION (human_review
+	// step declaring open_questions as an input), so the preflight gate gets
+	// the same protection without a new step type. Runs frozen on pre-v6
+	// definition snapshots keep the legacy free review: their review step
+	// doesn't declare open_questions as an input, so there is nothing to
+	// converge and the gate steps aside.
 	if runFound && defFound && isRequirementReviewStep(currentStep) && isApprovalDecision(outputs["decision"]) &&
 		requirementReviewDeclaresOpenQuestions(runDef, run.ActiveStepID) {
 		if open, err := requirementReviewOpenQuestions(wfStore, run); err != nil {
@@ -1004,13 +1008,27 @@ func isDesignGateStep(step entity.WorkflowStep) bool {
 	return workflowstore.IsDesignGateStep(step)
 }
 
-// isRequirementReviewStep reports whether the step is the requirement
-// clarification review (the greenfield pipeline's per-question clarification
-// gate). Matched by the template's stable step ID: the greenfield template is
-// the only definition that carries the clarification loop, and its
-// requirement_review step is fixed by the built-in template contract.
+// isRequirementReviewStep reports whether the step participates in a
+// per-question clarification loop — i.e. it is a human_review step that
+// carries open_questions (a clarify gate). Matched by declaration, not by a
+// hard-coded step ID: the greenfield template introduced the pattern on its
+// requirement_review step (v6) and the preflight/preflight_review head pair
+// (greenfield v7, brownfield v2) reuses the exact same mechanics, so the
+// approve freeze gate must cover every human_review step that declares
+// open_questions. Steps without the declaration (every other review gate)
+// fall through to the plain approve path — the declaration is what makes the
+// loop real, and requirementReviewDeclaresOpenQuestions enforces the same
+// predicate against the run's own definition before the gate fires.
 func isRequirementReviewStep(step entity.WorkflowStep) bool {
-	return strings.TrimSpace(step.ID) == "requirement_review" && strings.EqualFold(strings.TrimSpace(step.Type), "human_review")
+	if !strings.EqualFold(strings.TrimSpace(step.Type), "human_review") {
+		return false
+	}
+	for _, field := range step.InputFields {
+		if strings.TrimSpace(field.Name) == "open_questions" {
+			return true
+		}
+	}
+	return false
 }
 
 // requirementReviewOpenQuestions returns the open_questions value the reviewer

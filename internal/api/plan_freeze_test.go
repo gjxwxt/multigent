@@ -93,6 +93,9 @@ func requirementItemsJSON() string {
 // design_review → scale_gate → contract_batch.
 func driveToContractReview(t *testing.T, s *Server, workspaceID, taskID, planJSON string) {
 	t.Helper()
+	// v7 head: preflight agent step + preflight_review human gate approve,
+	// before the requirement_draft completion below.
+	drivePastPreflightHead(t, workflowstore.NewStore(s.controlDB, workspaceID), "sample", taskID)
 	rec := postBranchStepComplete(t, s, workspaceID, taskID, map[string]string{
 		"requirement_draft": "The console must clear local session state on expiry and export audit logs.",
 		// The freeze gate requires the agent's converged declaration; "none"
@@ -172,6 +175,8 @@ func TestContractBatchReworkRepairsRequirementAnchors(t *testing.T) {
 	s.worktreeMgr = gitworktreeManagerForTest()
 	_, baseCommit := buildFanoutGitWorkspace(t, s)
 	seedGreenfieldRunTask(t, s, workspaceID, "task-anchor-rework", baseCommit)
+	// v7 head: preflight agent step + preflight_review human gate approve.
+	drivePastPreflightHead(t, workflowstore.NewStore(s.controlDB, workspaceID), "sample", "task-anchor-rework")
 
 	// Walk the chain with a MALFORMED requirement snapshot (bare string
 	// array — what the run4 agent actually produced): the task2 prompt shape.

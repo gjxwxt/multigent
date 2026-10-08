@@ -150,7 +150,9 @@ func TestGreenfieldBatchedPathFanOutAndConverge(t *testing.T) {
 	}
 	const project = "project"
 
-	// Walk to the scale gate: requirement draft → review → design approve.
+	// Walk to the scale gate: preflight head → requirement draft → review →
+	// design approve.
+	drivePastPreflight(t, store, project, "task-batched")
 	if _, err := store.CompleteAndAdvance(project, "task-batched", "drafted", "", map[string]string{
 		"requirement_draft": "Large requirement",
 		"open_questions":    "none",

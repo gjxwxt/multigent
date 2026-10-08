@@ -38,12 +38,15 @@ func TestPilotGreenfieldDeliveryPipelineFullLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start run: %v", err)
 	}
-	if run.ActiveStepID != "requirement_draft" {
-		t.Fatalf("expected active step requirement_draft, got %s", run.ActiveStepID)
+	if run.ActiveStepID != "preflight" {
+		t.Fatalf("expected active step preflight (v7 head), got %s", run.ActiveStepID)
 	}
 	if run.Status != "active" {
 		t.Fatalf("expected run status active, got %s", run.Status)
 	}
+
+	// Step 0 (v7 head): preflight agent step + preflight_review human gate.
+	drivePastPreflightHead(t, wfStore, "resproj", task.ID)
 
 	// 3. Step 1: requirement_draft (PM agent task) completes. The draft
 	// declares open_questions cleared (the freeze gate's converged contract —

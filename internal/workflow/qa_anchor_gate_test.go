@@ -59,7 +59,9 @@ func TestQAGateOnDeliveryAnchor(t *testing.T) {
 	store.WorktreeResolver = func(project, taskID string) string { return wt }
 	const project = "project"
 
-	// Walk to the qa step exactly like the acceptance-spec e2e (linear path).
+	// Walk to the qa step exactly like the acceptance-spec e2e (linear path),
+	// after the v7 preflight head pair.
+	drivePastPreflight(t, store, project, taskID)
 	if _, err := store.CompleteAndAdvance(project, taskID, "drafted", "", map[string]string{
 		"requirement_draft": "Structured requirement",
 		"open_questions":    "none",

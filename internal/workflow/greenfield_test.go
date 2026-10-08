@@ -125,10 +125,10 @@ func TestGreenfieldTemplateShape(t *testing.T) {
 	if !ok {
 		t.Fatal("greenfield template not registered")
 	}
-	if len(tmpl.Steps) != 17 {
-		t.Fatalf("expected 17 steps (12 original + scale_gate/contract_batch/contract_review/parallel_workstreams/integration_review), got %d", len(tmpl.Steps))
+	if len(tmpl.Steps) != 19 {
+		t.Fatalf("expected 19 steps (12 original + scale_gate/contract_batch/contract_review/parallel_workstreams/integration_review + v7 preflight/preflight_review), got %d", len(tmpl.Steps))
 	}
-	if tmpl.StartStepID != "requirement_draft" {
+	if tmpl.StartStepID != "preflight" {
 		t.Fatalf("start step = %q", tmpl.StartStepID)
 	}
 	var design *struct{}
@@ -481,5 +481,174 @@ func TestGreenfieldTemplateLayoutNoOverlap(t *testing.T) {
 		if gap := xs[i] - xs[i-1]; gap < nodeWidth {
 			t.Fatalf("gap between x=%d (%s) and x=%d (%s) is %d < node width %d — nodes will overlap on the canvas", xs[i-1], byX[xs[i-1]], xs[i], byX[xs[i]], gap, nodeWidth)
 		}
+	}
+}
+
+// Preflight clarify gate (v7): the pipeline opens with a preflight agent
+// step and a preflight_review human gate that reuses the requirement_review
+// clarify mechanics — open_questions input declaration, approve-conditioned
+// freeze edge forwarding request/context into requirement_draft, rework edge
+// looping conclusions back to preflight. Only existing step types are used.
+func TestGreenfieldPreflightHead(t *testing.T) {
+	for _, locale := range []string{"en", "zh-CN"} {
+		tmpl, ok := Template("greenfield-delivery-pipeline", locale)
+		if !ok {
+			t.Fatalf("greenfield template not registered (%s)", locale)
+		}
+		if tmpl.Version < 7 {
+			t.Fatalf("template version = %d; must be >= 7 so EnsureGreenfieldDefinition upgrades stored v6 copies", tmpl.Version)
+		}
+		if tmpl.StartStepID != "preflight" {
+			t.Fatalf("start step = %q, want preflight (%s)", tmpl.StartStepID, locale)
+		}
+		var preflight, preflightReview *entity.WorkflowStep
+		for i := range tmpl.Steps {
+			switch tmpl.Steps[i].ID {
+			case "preflight":
+				preflight = &tmpl.Steps[i]
+			case "preflight_review":
+				preflightReview = &tmpl.Steps[i]
+			}
+		}
+		if preflight == nil || preflightReview == nil {
+			t.Fatalf("preflight/preflight_review steps missing (%s)", locale)
+		}
+		if preflight.Type != "agent_task" || preflightReview.Type != "human_review" {
+			t.Fatalf("preflight type=%s preflight_review type=%s (only existing step types allowed)", preflight.Type, preflightReview.Type)
+		}
+		// preflight_review declares open_questions as an input: the same
+		// declaration activates the UI clarify cards and the server-side
+		// freeze gate.
+		declaresOpenQuestions := false
+		for _, f := range preflightReview.InputFields {
+			if f.Name == "open_questions" {
+				declaresOpenQuestions = true
+			}
+		}
+		if !declaresOpenQuestions {
+			t.Fatalf("preflight_review inputs = %v, want open_questions declared", preflightReview.InputFields)
+		}
+		// preflight emits the report + the open_questions loop contract.
+		preflightOutputs := map[string]bool{}
+		for _, f := range preflight.OutputFields {
+			preflightOutputs[f.Name] = true
+		}
+		if !preflightOutputs["preflight_report"] || !preflightOutputs["open_questions"] {
+			t.Fatalf("preflight outputs = %v, want preflight_report + open_questions", preflightOutputs)
+		}
+		// Edge topology from preflight_review: exactly one freeze edge to
+		// requirement_draft (approve, default) carrying request/context, and
+		// one rework edge back to preflight (request_changes).
+		freeze, rework := 0, 0
+		for _, e := range tmpl.Edges {
+			if e.From != "preflight_review" {
+				continue
+			}
+			switch e.To {
+			case "requirement_draft":
+				freeze++
+				if e.Condition == nil || e.Condition.Field != "decision" || e.Condition.Value != "approve" {
+					t.Fatalf("preflight freeze edge condition = %+v, want decision eq approve", e.Condition)
+				}
+				if e.InputMapping["request"] != "$input.request" || e.InputMapping["context"] != "$input.context" {
+					t.Fatalf("preflight freeze edge must forward request/context into requirement_draft, mapping=%v", e.InputMapping)
+				}
+			case "preflight":
+				rework++
+				if e.Condition == nil || e.Condition.Value != "request_changes" {
+					t.Fatalf("preflight rework edge condition = %+v, want decision eq request_changes", e.Condition)
+				}
+			default:
+				t.Fatalf("unexpected edge from preflight_review to %q", e.To)
+			}
+		}
+		if freeze != 1 || rework != 1 {
+			t.Fatalf("preflight_review edges: freeze=%d rework=%d, want 1/1", freeze, rework)
+		}
+		// preflight forwards its report and the request into the review step.
+		var forward *entity.WorkflowEdge
+		for _, e := range tmpl.Edges {
+			if e.From == "preflight" && e.To == "preflight_review" {
+				forward = &e
+			}
+		}
+		if forward == nil {
+			t.Fatal("preflight -> preflight_review edge missing")
+		}
+		if forward.InputMapping["open_questions"] != "$output.open_questions" || forward.InputMapping["request"] != "$input.request" {
+			t.Fatalf("preflight forward edge mapping=%v, want request + open_questions materialized", forward.InputMapping)
+		}
+		// The engine routes the approve decision to requirement_draft even
+		// with no further outputs (the freeze is the default exit).
+		edge, ok := chooseNextEdge(tmpl.Edges, "preflight_review", map[string]string{"decision": "approve"}, "")
+		if !ok || edge.To != "requirement_draft" {
+			t.Fatalf("approve must route preflight_review -> requirement_draft, got %q ok=%v", edge.To, ok)
+		}
+		edge, ok = chooseNextEdge(tmpl.Edges, "preflight_review", map[string]string{"decision": "request_changes"}, "")
+		if !ok || edge.To != "preflight" {
+			t.Fatalf("request_changes must loop preflight_review -> preflight, got %q ok=%v", edge.To, ok)
+		}
+	}
+}
+
+// Brownfield onboarding v2 prepends the same preflight clarify head and
+// points the approve edge at readonly_scan with the request forwarded as
+// onboarding_request (the scan is no longer the start step, so it no longer
+// receives the task's initial inputs directly).
+func TestBrownfieldPreflightHead(t *testing.T) {
+	tmpl, ok := Template("brownfield-onboarding-pipeline", "zh-CN")
+	if !ok {
+		t.Fatal("brownfield template not registered")
+	}
+	if tmpl.StartStepID != "preflight" {
+		t.Fatalf("start step = %q, want preflight", tmpl.StartStepID)
+	}
+	var preflight, preflightReview *entity.WorkflowStep
+	for i := range tmpl.Steps {
+		switch tmpl.Steps[i].ID {
+		case "preflight":
+			preflight = &tmpl.Steps[i]
+		case "preflight_review":
+			preflightReview = &tmpl.Steps[i]
+		}
+	}
+	if preflight == nil || preflightReview == nil {
+		t.Fatal("preflight/preflight_review steps missing")
+	}
+	if preflight.Type != "agent_task" || preflightReview.Type != "human_review" {
+		t.Fatalf("preflight type=%s preflight_review type=%s (only existing step types allowed)", preflight.Type, preflightReview.Type)
+	}
+	declaresOpenQuestions := false
+	for _, f := range preflightReview.InputFields {
+		if f.Name == "open_questions" {
+			declaresOpenQuestions = true
+		}
+	}
+	if !declaresOpenQuestions {
+		t.Fatalf("preflight_review inputs = %v, want open_questions declared", preflightReview.InputFields)
+	}
+	approveToScan, reworkToPreflight := false, false
+	for _, e := range tmpl.Edges {
+		if e.From != "preflight_review" {
+			continue
+		}
+		if e.To == "readonly_scan" {
+			if e.Condition == nil || e.Condition.Value != "approve" {
+				t.Fatalf("preflight approve edge condition = %+v", e.Condition)
+			}
+			if e.InputMapping["onboarding_request"] != "$input.request" {
+				t.Fatalf("preflight approve edge must forward request as onboarding_request, mapping=%v", e.InputMapping)
+			}
+			approveToScan = true
+		}
+		if e.To == "preflight" {
+			if e.Condition == nil || e.Condition.Value != "request_changes" {
+				t.Fatalf("preflight rework edge condition = %+v", e.Condition)
+			}
+			reworkToPreflight = true
+		}
+	}
+	if !approveToScan || !reworkToPreflight {
+		t.Fatalf("preflight_review edges: approveToScan=%v reworkToPreflight=%v", approveToScan, reworkToPreflight)
 	}
 }
