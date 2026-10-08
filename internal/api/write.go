@@ -594,6 +594,15 @@ func (s *Server) createProjectTaskFromBody(w http.ResponseWriter, r *http.Reques
 				return
 			}
 		}
+		// Same fixed-id contract for the brownfield onboarding pipeline: seed
+		// on first use so API task creation works on deployments that never
+		// instantiated the template from the UI.
+		if workflowID == workflowstore.BrownfieldOnboardingWorkflowID || workflowID == "brownfield-onboarding-pipeline" {
+			if err := wfStore.EnsureBrownfieldOnboardingDefinition(); err != nil {
+				s.serverError(w, err)
+				return
+			}
+		}
 		workflowStore = wfStore
 		def, found, err := wfStore.Definition(workflowID)
 		if err != nil {
