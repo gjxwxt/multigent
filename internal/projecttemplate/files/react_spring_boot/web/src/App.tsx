@@ -1,38 +1,39 @@
-import { useEffect, useState } from 'react'
+import { Route, Routes } from 'react-router-dom'
 import { Layout } from './components/Layout'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import { HomePage } from './pages/HomePage'
-import { api } from './services/api'
-import { HealthResponse, Item } from './types'
+import { LazyItemDetailPage, SuspenseFallback } from './pages/lazy'
+import { NotFoundPage } from './pages/NotFoundPage'
+import { useAppData } from './hooks/useAppData'
 
+/*
+ * Route table = the page inventory. Adding a page:
+ *   1. Create src/pages/<Name>Page.tsx
+ *   2. Register a <Route> here. Once the page count grows, switch it to
+ *      React.lazy(() => import(...)) + <Suspense> so each page becomes its
+ *      own chunk (ItemDetailPage below is the working example).
+ * The <BrowserRouter> itself lives in main.tsx so tests can inject a
+ * MemoryRouter around <App /> instead of nesting two routers.
+ */
 export function App() {
-  const [health, setHealth] = useState<HealthResponse | null>(null)
-  const [healthStatus, setHealthStatus] = useState<'ok' | 'error' | 'pending'>('pending')
-  const [items, setItems] = useState<Item[]>([])
-
-  const loadData = async () => {
-    try {
-      const healthData = await api.getHealth()
-      setHealth(healthData)
-      setHealthStatus('ok')
-    } catch {
-      setHealthStatus('error')
-    }
-
-    try {
-      const itemsData = await api.getItems()
-      setItems(itemsData)
-    } catch {
-      // items load error handled gracefully
-    }
-  }
-
-  useEffect(() => {
-    loadData()
-  }, [])
+  const { healthStatus } = useAppData()
 
   return (
-    <Layout healthStatus={healthStatus}>
-      <HomePage health={health} items={items} onRefresh={loadData} />
-    </Layout>
+    <ErrorBoundary>
+      <Layout healthStatus={healthStatus}>
+        <Routes>
+          <Route path="/" element={<HomePage />} />
+          <Route
+            path="/items/:itemId"
+            element={
+              <SuspenseFallback>
+                <LazyItemDetailPage />
+              </SuspenseFallback>
+            }
+          />
+          <Route path="*" element={<NotFoundPage />} />
+        </Routes>
+      </Layout>
+    </ErrorBoundary>
   )
 }

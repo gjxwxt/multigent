@@ -58,7 +58,20 @@
 ## 3. 前端分层约定 (`web/`)
 
 - **`src/types/`**: 所有后端 DTO 对应的 TypeScript interface / type 定义。
-- **`src/services/`**: 封装所有 API 异步交互函数，严禁在 UI 组件直接写原生 fetch。
-- **`src/components/`**: 保持高内聚、低耦合，受控属性通过 props 传入。
-- **`src/pages/`**: 路由对应的页面容器，负责组合组件与触发 service 加载。
+- **`src/services/`**: `http.ts`（fetch 封装）+ `api/<domain>.ts`（按域拆分的端点模块）+ `api.ts`（聚合出口）。严禁在 UI 组件直接写原生 fetch。
+- **`src/hooks/`**: 跨页面复用的数据与状态逻辑。
+- **`src/components/`**: 保持高内聚、低耦合，受控属性通过 props 传入；超过 6 个通用组件时拆 `components/ui/`。
+- **`src/pages/`**: 路由对应的页面容器（react-router），新页面按 `App.tsx` 路由表注册，页面多后转 `React.lazy` 分包。
 - **`src/test/`**: 基于 Vitest 与 React Testing Library 的真实渲染与行为测试。
+
+---
+
+## 4. 持久层升级路径 (Persistence Upgrade Path)
+
+默认形态：in-memory `ConcurrentHashMap` repository（零依赖、CI 快）。需要持久化时**按以下三步走**，禁止临场发明数据库配置：
+
+1. **启用 db profile（已内置，零代码）**：`application-db.yml` 已备好 H2 PostgreSQL 兼容模式 + `V1__init.sql` 基线表。激活：`SPRING_PROFILES_ACTIVE=db ./gradlew bootRun`（或部署环境同名环境变量）。
+2. **引入迁移与访问层**：迁移文件进 `server/src/main/resources/db/migration/V<N>__*.sql`；表结构定稿后同步冻结到 `contract/ddl.md`。当迁移数量增多或需要复杂查询时，引入 Flyway（接管 `db/migration/`）与 MyBatis-Plus/JPA，repository 改为接口 + DB 实现，Service 层不动。
+3. **切生产数据库**：新增 `application-prod.yml`（或部署环境变量）覆盖 datasource 指向 PostgreSQL/MySQL；H2 依赖保持 `runtimeOnly` 不进编译期。repository 实现按 profile 装配（`@Profile("db")` / `@Profile("prod")`）。
+
+切换判据：数据需要跨重启存活（第一秒就该切）、并发写冲突成为正确性问题、或需求明确要求审计/事务——三者任一出现即升级，不要等"数据变多"。

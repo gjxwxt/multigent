@@ -2,7 +2,7 @@
 # tag 流水线追加 package / deploy 两 stage（就地构建不推送），
 # 也支持平台经 GitLab API 触发的分支部署（见下方「分支部署链与审批闸门」）。
 #
-# 本文件遵循平台确定性基线（react_spring_boot 模板 1.1.0）：
+# 本文件遵循平台确定性基线（react_spring_boot 模板 1.2.0）：
 # 1. workflow:rules 去重——feature 分支 push 不建流水线，卡点收敛到 MR；
 #    保留 tag（部署链触发）、默认分支（合并后兜底）、web/api（手动触发调试）。
 # 2. 前端 job 统一 npmmirror 源 + package-lock 键控缓存（web/.npm）。
@@ -12,7 +12,7 @@
 #    禁用 --no-cache，使用宿主卷复用缓存。
 # 6. runner tags 统一指定为 [docker]。
 #
-# ── 分支部署链与审批闸门（react_spring_boot 1.1.0）────────────
+# ── 分支部署链与审批闸门（react_spring_boot 1.2.0）────────────
 # 1. 分支部署链：平台经 GitLab API 以 ref=分支 + variables(MULTIGENT_DEPLOY=1,
 #    MULTIGENT_DEPLOY_TOKEN=HMAC) 触发流水线时，package/deploy 也在分支 SHA 上
 #    执行（workflow:rules 已含 api source，无需另改）。

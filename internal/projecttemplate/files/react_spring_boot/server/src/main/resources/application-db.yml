@@ -1,0 +1,23 @@
+# Optional persistence profile. Activate with:
+#   ./gradlew bootRun --args='--spring.profiles.active=db'
+# or set SPRING_PROFILES_ACTIVE=db in the environment.
+#
+# This is the H2 compat baseline for local runs; swap the prod datasource in
+# application-prod.yml (or env vars) when moving to a real database. The three
+# step upgrade path lives in docs/architecture.md §4.
+spring:
+  datasource:
+    url: jdbc:h2:mem:appdb;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  sql:
+    init:
+      mode: always
+      # V1__init.sql runs automatically on startup; put subsequent migrations
+      # in classpath:db/migration/ and bump the version numbers (or adopt
+      # Flyway/MyBatis-Plus once migrations multiply).
+      schema-locations: classpath:db/migration/V1__init.sql
+  h2:
+    console:
+      enabled: false

@@ -1,4 +1,4 @@
-.PHONY: all dev dev-backend dev-frontend install test test-backend test-frontend lint verify build build-frontend build-backend clean doctor
+.PHONY: all dev dev-backend dev-frontend install test test-backend test-frontend lint verify build build-frontend build-backend docs-check clean doctor
 
 all: build
 
@@ -30,8 +30,13 @@ lint:
 	cd server && ./gradlew --no-daemon check -x test
 	cd web && npm run lint
 
-verify: doctor lint test build-frontend
+verify: doctor docs-check lint test build-frontend
 	@echo "verify: ok"
+
+# Deterministic drift gate: docs/api-spec.md must match the controllers.
+# Run it standalone after any API or doc change; wire into CI as a lint step.
+docs-check:
+	node scripts/docs-check.mjs
 
 build: build-frontend build-backend
 

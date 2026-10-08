@@ -25,8 +25,16 @@ const (
 	// older version keep their files — Seed only fills missing files.
 	ReactGoFullstackVersion = "1.3.0"
 
-	ReactSpringBootID      = "react_spring_boot"
-	ReactSpringBootVersion = "1.1.0"
+	ReactSpringBootID = "react_spring_boot"
+
+	// ReactSpringBootVersion tracks template content: 1.2.0 added the React
+	// Router baseline (+ lazy page chunk, ErrorBoundary, @ alias), the
+	// services/ api domain split (http.ts + api/<domain>.ts), the frozen
+	// contract/ directory, the handoff snapshot protocol, the deterministic
+	// docs-check gate, and the optional H2 db profile upgrade path. Existing
+	// projects seeded from an older version keep their files — Seed only
+	// fills missing files.
+	ReactSpringBootVersion = "1.2.0"
 )
 
 // CI baseline assets shipped with the starter. They are exported separately

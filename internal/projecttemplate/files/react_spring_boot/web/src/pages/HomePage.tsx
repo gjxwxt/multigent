@@ -1,29 +1,25 @@
-import React, { useState } from 'react'
+import { useState } from 'react'
 import { CreateItemModal } from '../components/CreateItemModal'
 import { ItemCard } from '../components/ItemCard'
 import { api } from '../services/api'
-import { CreateItemRequest, HealthResponse, Item } from '../types'
+import { useAppData } from '../hooks/useAppData'
+import { CreateItemRequest } from '../types'
 
-interface HomePageProps {
-  health: HealthResponse | null
-  items: Item[]
-  onRefresh: () => void
-}
-
-export const HomePage: React.FC<HomePageProps> = ({ health, items, onRefresh }) => {
+export const HomePage = () => {
+  const { health, items, loadData } = useAppData()
   const [modalOpen, setModalOpen] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
   const handleCreate = async (req: CreateItemRequest) => {
     await api.createItem(req)
-    onRefresh()
+    loadData()
   }
 
   const handleDelete = async (id: string) => {
     try {
       setDeletingId(id)
       await api.deleteItem(id)
-      onRefresh()
+      loadData()
     } finally {
       setDeletingId(null)
     }
@@ -36,7 +32,7 @@ export const HomePage: React.FC<HomePageProps> = ({ health, items, onRefresh }) 
         <h1>Spring Boot 3.3 + React 18</h1>
         <p className="intro">
           This starter is initialized with a robust layered backend (Java 21, Gradle, JUnit 5 MockMvc tests)
-          and a modular React frontend (Vite, TypeScript, Vitest).
+          and a modular React frontend (Vite, TypeScript, Vitest, React Router).
         </p>
 
         {health && (
@@ -52,7 +48,7 @@ export const HomePage: React.FC<HomePageProps> = ({ health, items, onRefresh }) 
           <div>
             <h2 style={{ margin: 0 }}>Item Management ({items.length})</h2>
             <p style={{ margin: '4px 0 0', fontSize: '13px', color: '#64748b' }}>
-              Full CRUD example backed by thread-safe Spring service and repository
+              Full CRUD example backed by thread-safe Spring service and repository. Click a row title for details.
             </p>
           </div>
           <button className="btn btn-primary" onClick={() => setModalOpen(true)}>
@@ -67,7 +63,7 @@ export const HomePage: React.FC<HomePageProps> = ({ health, items, onRefresh }) 
         ) : (
           <div>
             {items.map((item) => (
-              <ItemCard key={item.id} item={item} onDelete={handleDelete} />
+              <ItemCard key={item.id} item={item} onDelete={handleDelete} deleting={deletingId === item.id} />
             ))}
           </div>
         )}
