@@ -179,8 +179,6 @@ export function TaskTable({
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
 
   const flatRows = useMemo(() => flattenTaskTree(tasks, collapsed), [tasks, collapsed])
-  const hasTree = useMemo(() => flatRows.some((f) => f.rails.length > 0), [flatRows])
-  const waveByWp = useMemo(() => computeWaveByWp(tasks), [tasks])
   // Parents within the current dataset — computed from `tasks` (not the
   // visible rows) so collapse-all also collapses nested parents that are
   // currently hidden behind a collapsed ancestor.
@@ -192,6 +190,13 @@ export function TaskTable({
     }
     return [...ids]
   }, [tasks])
+  // Tree-ness must come from the DATASET (parent relationships), not the
+  // rendered rows: when every parent is collapsed no child row renders and
+  // no visible row has a rail — deriving from flatRows would unmount the
+  // caret column and the header expand-all button, destroying the only
+  // way to expand again.
+  const hasTree = parentIds.length > 0
+  const waveByWp = useMemo(() => computeWaveByWp(tasks), [tasks])
 
   function toggleCollapsed(id: string) {
     setCollapsed((prev) => {
@@ -337,7 +342,7 @@ export function TaskTable({
                         </button>
                       </span>
                     )}
-                    <div className="min-w-0 flex-1">
+                    <div className={cn('min-w-0 flex-1', hasTree && 'pl-2.5')}>
                       <div className="flex flex-wrap items-center gap-2">
                         <span className={cn('text-[11px] font-bold', prio.cls)}>{prio.text}</span>
                         <span className="text-[13px] font-medium text-neutral-900 dark:text-zinc-100">{row.title}</span>
