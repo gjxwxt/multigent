@@ -67,6 +67,17 @@ function flattenTaskTree(tasks: TaskRow[], collapsed: Set<string>): FlatRow[] {
   const out: FlatRow[] = []
   const emitted = new Set<string>()
 
+  // Mark a subtree as accounted-for. Used when a parent is collapsed: its
+  // descendants are INTENTIONALLY hidden, so they must be recorded as emitted
+  // — otherwise the cycle-defense pass below misreads them as cycle victims
+  // and flattens every hidden child back onto the end of the list.
+  // (Does not gate on the row itself: walk() has already emitted it when the
+  // collapse branch calls this, and an early return here would skip the kids.)
+  const emitSubtree = (row: TaskRow) => {
+    if (!emitted.has(row.id)) emitted.add(row.id)
+    for (const kid of kidsByParent.get(row.id) ?? []) emitSubtree(kid)
+  }
+
   // railCount: total 22px columns this row occupies (ancestor columns + its
   // own connector); ancestorCols lists the inherited modes, isLast decides
   // the connector shape. Root rows (railCount 0) hang nothing.
@@ -83,7 +94,10 @@ function flattenTaskTree(tasks: TaskRow[], collapsed: Set<string>): FlatRow[] {
       childCount: kids.length,
       orphan: railCount === 0 && !!row.parentId && row.parentId !== row.id && !present.has(row.parentId),
     })
-    if (isCollapsed) return
+    if (isCollapsed) {
+      emitSubtree(row)
+      return
+    }
     const total = kids.length
     kids.forEach((kid, i) => {
       // My connector column becomes the child's last inherited column: the
