@@ -305,6 +305,30 @@ func sanitizeTaskVars(vars map[string]string) map[string]string {
 	return out
 }
 
+// visibleTaskListVars is the READ-side mirror of reservedTaskVars: task list
+// and detail responses expose ONLY the batch identity the console tree table
+// renders — work package id (wpId), wave index (waveIndex) and the
+// dependency list (wpDepends). Everything else a task carries (scheduler
+// wakeup env, delivery contract, plan digest/version, initialization inputs)
+// stays server-side. "waveIndex" has no writer today (waves are derived from
+// the frozen plan at materialization time); it is whitelisted so a future
+// var write surfaces without another API change.
+func visibleTaskListVars(vars map[string]string) map[string]string {
+	if len(vars) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for _, key := range []string{workflowPlanWPIDVar, "waveIndex", workflowPlanDependsVar} {
+		if v := strings.TrimSpace(vars[key]); v != "" {
+			out[key] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // taskCreateAssetBinding is one project-library file bound to the task at
 // creation time. Bindings ride the creation request itself (not a follow-up
 // call) because all three startup sources fire before the 201 response is

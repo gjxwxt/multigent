@@ -35,6 +35,42 @@ func TestSanitizeTaskVarsDropsReservedWakeupKeys(t *testing.T) {
 	}
 }
 
+// TestVisibleTaskListVarsWhitelist pins the read-side contract of the task
+// list API: the tree table gets exactly the batch identity keys
+// (wpId/waveIndex/wpDepends) and nothing else from a task's internal vars.
+func TestVisibleTaskListVarsWhitelist(t *testing.T) {
+	got := visibleTaskListVars(map[string]string{
+		"wpId":                          "WP-CONTRACT",
+		"waveIndex":                     "2",
+		"wpDepends":                     "WP-A,WP-B",
+		"planId":                        "plan-1",
+		"planVersion":                   "3",
+		"planDigest":                    "sha256:deadbeef",
+		"MULTIGENT_WAKEUP_WORKTREE_DIR": "/tmp/wt",
+		"MULTIGENT_DELIVERY_CONTRACT":   `{"requireGitCommit":true}`,
+		"initialization_repo":           "https://example.invalid/repo",
+		"wpEmpty":                       "",
+	})
+	if got["wpId"] != "WP-CONTRACT" || got["waveIndex"] != "2" || got["wpDepends"] != "WP-A,WP-B" {
+		t.Fatalf("whitelisted batch keys must survive, got %v", got)
+	}
+	for _, leak := range []string{"planId", "planVersion", "planDigest", "MULTIGENT_WAKEUP_WORKTREE_DIR", "MULTIGENT_DELIVERY_CONTRACT", "initialization_repo", "wpEmpty"} {
+		if _, ok := got[leak]; ok {
+			t.Fatalf("internal var %q must not reach the task list response, got %v", leak, got)
+		}
+	}
+	if len(got) != 3 {
+		t.Fatalf("response vars must carry only the 3 whitelist keys, got %v", got)
+	}
+
+	if got := visibleTaskListVars(nil); got != nil {
+		t.Fatalf("nil vars should yield nil, got %v", got)
+	}
+	if got := visibleTaskListVars(map[string]string{"planId": "plan-1"}); got != nil {
+		t.Fatalf("vars without whitelist keys should yield nil, got %v", got)
+	}
+}
+
 func TestRuntimeTaskControlEnvWakeupKeysNeedWakeupType(t *testing.T) {
 	wakeup := &entity.Task{
 		Type: "wakeup",

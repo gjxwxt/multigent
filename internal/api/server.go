@@ -172,11 +172,11 @@ type Server struct {
 	// fixtureSandbox provisions task-private test databases (V1). Nil when
 	// the control DB or data dir is unavailable — previews then run without
 	// sandbox integration (contract-less projects are unaffected).
-	fixtureSandbox              *fixturesandbox.Provisioner
-	previewMu                   sync.Mutex
-	previewSessions             map[string]*previewChatSession
-	previewChatMu               sync.Mutex
-	previewChatSeen             map[string]*previewChatBucket
+	fixtureSandbox  *fixturesandbox.Provisioner
+	previewMu       sync.Mutex
+	previewSessions map[string]*previewChatSession
+	previewChatMu   sync.Mutex
+	previewChatSeen map[string]*previewChatBucket
 	// deployVerifyMu/deployVerifySeen rate-limit the public deploy gate
 	// callback (GET /api/v1/deploy-verify) per (project, sha) key — the one
 	// deliberate publicMux exemption (see deploy_verify_token.go).
@@ -1986,55 +1986,59 @@ func validAgentName(name string) bool {
 }
 
 type taskRow struct {
-	ID                 string    `json:"id"`
-	Project            string    `json:"project"`
-	Agent              string    `json:"agent"`
-	Title              string    `json:"title"`
-	Type               string    `json:"type,omitempty"`
-	Assignee           string    `json:"assignee,omitempty"`
-	AssigneeType       string    `json:"assigneeType,omitempty"`
-	AssigneeID         string    `json:"assigneeId,omitempty"`
-	AssigneeMemberID   string    `json:"assigneeMembershipId,omitempty"`
-	AssigneeLabel      string    `json:"assigneeLabel,omitempty"`
-	Description        string    `json:"description,omitempty"`
-	Prompt             string    `json:"prompt,omitempty"`
-	Priority           int       `json:"priority"`
-	Status             string    `json:"status"`
-	StatusGroup        string    `json:"statusGroup"`
-	Archived           bool      `json:"archived"`
-	Summary            string    `json:"summary,omitempty"`
-	Labels             []string  `json:"labels"`
-	ParentID           string    `json:"parentId,omitempty"`
-	Position           float64   `json:"position"`
-	CreatedBy          string    `json:"createdBy,omitempty"`
-	CreatedByLabel     string    `json:"createdByLabel,omitempty"`
-	CreatedAt          time.Time `json:"createdAt"`
-	UpdatedAt          time.Time `json:"updatedAt"`
-	StartedAt          string    `json:"startedAt,omitempty"`
-	FinishedAt         string    `json:"finishedAt,omitempty"`
-	DueDate            string    `json:"dueDate,omitempty"`
-	NotBefore          string    `json:"notBefore,omitempty"`
-	EstimateDuration   string    `json:"estimateDuration,omitempty"`
-	HasWorkflow        bool      `json:"hasWorkflow,omitempty"`
-	HasWorktree        bool      `json:"hasWorktree,omitempty"`
-	HasPreview         bool      `json:"hasPreview,omitempty"`
-	ForkSessionID      string    `json:"forkSessionId,omitempty"`
-	BaseBranch         string    `json:"baseBranch,omitempty"`
-	BaseCommit         string    `json:"baseCommit,omitempty"`
-	BranchName         string    `json:"branchName,omitempty"`
-	WorktreeDir        string    `json:"worktreeDir,omitempty"`
-	BaseTaskID         string    `json:"baseTaskId,omitempty"`
-	IntegratedCommit   string    `json:"integratedCommit,omitempty"`
-	RebaseStatus       string    `json:"rebaseStatus,omitempty"`
-	CompletionCommit   string    `json:"completionCommit,omitempty"`
-	RemoteSyncStatus   string    `json:"remoteSyncStatus,omitempty"`
-	RemoteSyncError    string    `json:"remoteSyncError,omitempty"`
-	RemoteSyncCommit   string    `json:"remoteSyncCommit,omitempty"`
-	RemoteSyncAttempts int       `json:"remoteSyncAttempts,omitempty"`
-	RemoteMRIID        string    `json:"remoteMrIid,omitempty"`
-	RemoteMRURL        string    `json:"remoteMrUrl,omitempty"`
-	RemoteMRHeadSHA    string    `json:"remoteMrHeadSha,omitempty"`
-	RemoteMRState      string    `json:"remoteMrState,omitempty"`
+	ID               string   `json:"id"`
+	Project          string   `json:"project"`
+	Agent            string   `json:"agent"`
+	Title            string   `json:"title"`
+	Type             string   `json:"type,omitempty"`
+	Assignee         string   `json:"assignee,omitempty"`
+	AssigneeType     string   `json:"assigneeType,omitempty"`
+	AssigneeID       string   `json:"assigneeId,omitempty"`
+	AssigneeMemberID string   `json:"assigneeMembershipId,omitempty"`
+	AssigneeLabel    string   `json:"assigneeLabel,omitempty"`
+	Description      string   `json:"description,omitempty"`
+	Prompt           string   `json:"prompt,omitempty"`
+	Priority         int      `json:"priority"`
+	Status           string   `json:"status"`
+	StatusGroup      string   `json:"statusGroup"`
+	Archived         bool     `json:"archived"`
+	Summary          string   `json:"summary,omitempty"`
+	Labels           []string `json:"labels"`
+	ParentID         string   `json:"parentId,omitempty"`
+	// Vars exposes ONLY the whitelist keys in taskListVisibleVars (batch id,
+	// wave index, depends). The full scheduler vars map never leaves the
+	// server; this is the read-side mirror of reservedTaskVars' denylist.
+	Vars               map[string]string `json:"vars,omitempty"`
+	Position           float64           `json:"position"`
+	CreatedBy          string            `json:"createdBy,omitempty"`
+	CreatedByLabel     string            `json:"createdByLabel,omitempty"`
+	CreatedAt          time.Time         `json:"createdAt"`
+	UpdatedAt          time.Time         `json:"updatedAt"`
+	StartedAt          string            `json:"startedAt,omitempty"`
+	FinishedAt         string            `json:"finishedAt,omitempty"`
+	DueDate            string            `json:"dueDate,omitempty"`
+	NotBefore          string            `json:"notBefore,omitempty"`
+	EstimateDuration   string            `json:"estimateDuration,omitempty"`
+	HasWorkflow        bool              `json:"hasWorkflow,omitempty"`
+	HasWorktree        bool              `json:"hasWorktree,omitempty"`
+	HasPreview         bool              `json:"hasPreview,omitempty"`
+	ForkSessionID      string            `json:"forkSessionId,omitempty"`
+	BaseBranch         string            `json:"baseBranch,omitempty"`
+	BaseCommit         string            `json:"baseCommit,omitempty"`
+	BranchName         string            `json:"branchName,omitempty"`
+	WorktreeDir        string            `json:"worktreeDir,omitempty"`
+	BaseTaskID         string            `json:"baseTaskId,omitempty"`
+	IntegratedCommit   string            `json:"integratedCommit,omitempty"`
+	RebaseStatus       string            `json:"rebaseStatus,omitempty"`
+	CompletionCommit   string            `json:"completionCommit,omitempty"`
+	RemoteSyncStatus   string            `json:"remoteSyncStatus,omitempty"`
+	RemoteSyncError    string            `json:"remoteSyncError,omitempty"`
+	RemoteSyncCommit   string            `json:"remoteSyncCommit,omitempty"`
+	RemoteSyncAttempts int               `json:"remoteSyncAttempts,omitempty"`
+	RemoteMRIID        string            `json:"remoteMrIid,omitempty"`
+	RemoteMRURL        string            `json:"remoteMrUrl,omitempty"`
+	RemoteMRHeadSHA    string            `json:"remoteMrHeadSha,omitempty"`
+	RemoteMRState      string            `json:"remoteMrState,omitempty"`
 }
 
 func taskToRow(t *entity.Task, project, agent string, archived bool) taskRow {
@@ -2051,6 +2055,7 @@ func taskToRow(t *entity.Task, project, agent string, archived bool) taskRow {
 		StatusGroup: string(t.Status.Group()),
 		Archived:    archived, Summary: t.Summary,
 		Labels: labels, ParentID: t.ParentID, Position: t.Position,
+		Vars:      visibleTaskListVars(t.Vars),
 		CreatedBy: t.CreatedBy,
 		CreatedAt: t.CreatedAt.UTC(), UpdatedAt: t.UpdatedAt.UTC(),
 		EstimateDuration:   t.EstimateDuration,

@@ -39,6 +39,8 @@ export type TaskRow = {
   summary?: string
   labels: string[]
   parentId?: string
+  /** Whitelisted batch identity from the task-list API: wpId / waveIndex / wpDepends. Absent on plain tasks. */
+  vars?: Record<string, string>
   position: number
   createdBy?: string
   createdByLabel?: string
