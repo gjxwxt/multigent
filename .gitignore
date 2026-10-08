@@ -78,10 +78,13 @@ aoci.code.txt
 .zcode/
 .zcodeignore
 
-# 本地运行时数据 / 临时产物
-outputs/
-projects/
-teams/
+# 本地运行时数据 / 临时产物（锚定仓库根：无锚点的 projects/、teams/ 会匹配
+# 任意层级，Tailwind oxide 扫描器按 .gitignore 剪枝时把 web/src/pages/projects/
+# 与 web/src/pages/teams/ 整个子树剔除，其下页面独有的类全部静默丢失——
+# 实锤案例：跟随页右栏 grid-cols-[minmax(0,1fr)_420px] 未生成，两列布局退化单列）
+/outputs/
+/projects/
+/teams/
 p14ctl*.db
 asset-inventory.db
 
