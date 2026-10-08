@@ -4356,3 +4356,459 @@ REQUIRE_ENCRYPTED_SECRETS 硬门控逐字节兼容；TestLegacySealedValuesRemai
 - **API 实弹（curl）**：login role=admin ✓ / projects 空列表 ✓ / 创建项目 acceptance-demo ✓ / 项目详情（defaultRepo 指向 v2 数据根）✓ / tasks 空 ✓ / connections 空 ✓ / **deploy aggregate（GET /deploy，非 /deploy/aggregate）**✓ / files 空 ✓ / kb sources 空 ✓。
 - **发现的命名坑**：前端注释里"aggregate"是端点别名，真实路由 GET /api/v1/projects/{name}/deploy——首查 404 是查错路径，非缺陷。
 - **浏览器验收**：SSH 隧道 28091→27992，11 项功能清单（登录/工作台/项目/任务/部署中心/工作流/智能体/设置/知识库/连接/路由守卫）交后台 agent 走查中。
+
+## 第五十八轮（2026-10-08）浏览器验收 6 FAIL 修复轮：四根因全修，15 页全绿收官
+
+走查结果：11 项中 5 PASS，6 FAIL。逐项排查后归因为**四个根因**（非 6 个独立缺陷），全部修复、测试、部署、复验闭环。
+
+### 四根因与修复
+
+1. **workspace bootstrap 平面缺失**：G1 当时因上游主导跳过 workspace 域，但前端硬依赖 `/api/v1/workspace`、`/api/v1/workspaces`、`POST /api/v1/workspaces/example`。→ multigent-v2 洁净室重写 4 端点（`internal/api/workspace_handlers.go`）：workspaceSummary 13 字段契约 + membership 门禁（admin/RoleAdmin/apikey 直通，否则查 WorkspaceMember，outsider 403）+ example 端点对 anonymous/apikey 返 403、对真实用户播种 WorkspaceRoleOwner membership。5 个新测试全绿（契约/门禁/列表空数组语义/播种/路由注册）。
+2. **projects 父路由挂 PlaceholderPage 无 Outlet**：`/projects/:projectId/*` 下全部子路由被占位组件遮蔽。→ ProjectsListPage（相似度 0.24，首稿 0.92 超限二次重写——换数据获取形态+DOM 重排+文案）+ ProjectLayout（useParams 守卫+Outlet）。
+3. **i18n 裸键**：nav.*（9 键）、projects.*、runs.window.* 双语补齐；全仓动态键命名空间审计（`` t(`runs.window.${k}`) `` 形态）无其他缺漏，en/zh 对称校验过。
+4. **JSON Content-Type 嗅探缺陷（本轮最重大发现，平台级）**：Go `json.NewEncoder(w).Encode()` 在 handler 未设 Content-Type 时，Go 对**空数组**嗅探为 `text/plain`（对空对象则嗅探 JSON——非对称），前端 `readResponse` 只在 content-type 含 application/json 时解析 → 200 响应返回 undefined → `undefined.filter` 崩溃白屏。**重灾区是 workbench 页**（项目列表非空、workbench 任务列表空 → 只有 workbench 白屏）。→ 不逐改约 196 处 handler，mux 边界统一中间件 `withJSONContentType`（`/api/` 前缀统一设 `Content-Type: application/json`），`Handler()` 返回包裹后的 mux。
+
+另补 4 个 console stub 端点消 settings 页红 toast：billing entitlements（unlimited/全 0）、check-update（currentVersion:dev）、RBAC model（空）、assistant status（configured:false）——`internal/api/console_stub_handlers.go`。
+
+### 提交与部署
+
+- multigent-v2 三提交：dc79adf（workspace 4 端点+projects 路由+i18n+stubs）→ d283c1a（withJSONContentType 中间件）→ a7aac5f（runs.window 键）。全仓 go test ./... 绿、web build 绿。
+- 最终部署二进制 sha256 705180d2756eef58…（本地=远端一致），27992 端口起服。
+- 坑（同第 57 轮）：nohup 日志写 /tmp Permission denied → /var/log；pkill 后拉起须 `sudo-rs bash -c 'nohup … </dev/null & disown'`。
+
+### 浏览器复验（终态）
+
+- Content-Type 实弹验证：/api/v1/workspace 返回头 `application/json` ✓。
+- **15 页面全量扫描全渲染**（root innerHTML 长度判据）：workbench 11888 / projects 7232 / workflows 6052 / agents 6333 / context 12096 / files 7804 / connections 78104 / skills 7010 / settings 29357 / account 19936 / 项目五子页 tasks 10351 / runs 9370 / deploy 13741 / settings 14777 / members 6361。
+- 交互链：登录 → /projects 显示 acceptance-demo 卡片（content-type 修复前显示空）→ 点卡片正确跳转 /projects/acceptance-demo/tasks。workbench Tasks tab、settings RBAC 段正常。截图留证。
+
+### 登记项（未修，移交后续）
+
+- runs 页统计端点 404（"404 page not found" 文案显示在页面上，页面本身渲染 OK）——G 批端点缺口。
+- chat POST 与 `/api/v1/run` 返 501（执行链挂 G2 或后续）。
+- skills local 扫描桩、audit 页占位（ph('Audit')）、G 批其余端点缺口（manifest §11.3/§12.4/§13.5）。
+- 两仓均未 push（用户保留 push 决定权）。
+
+## 第五十九轮（2026-10-08）v2 控制台产品化改进轮：六件事全部落地 + 浏览器实弹全绿
+
+用户需求六项，全部完成、部署、验收闭环。
+
+### 落地明细
+
+1. **Settings 去 System Updates 段**：删 SystemUpdatesSection 组件（check-update 整块）+ 渲染行。
+2. **Model Accounts 迁移**：VM 旧仓 model_providers 3 条平移到 v2（id/owner 保留原值，api_key sealed 密文原样搬，零明文接触）。坑：model_providers 主键是 (workspace_id,id) 复合，ON CONFLICT(id) 不匹配 → delete-then-insert。
+3. **常用 agent**：fd（前端）/bd（后端）/qa（测试）/ops（运维），model=claudecode、绑 prov-3le2v6yg（ccr-qwen）、status=available。validAgentName 只拒空名/路径分隔符/控制字符，短名合法。
+4. **Settings 去 External tool OAuth apps 段**：python3 删 592 行（OAuthClientConfig/OAUTH_GUIDE_PROVIDERS/GuideBlock/两个 Dialog 组件等）+ 渲染行。
+5. **Connections 内网对齐**：catalog.go 新增 mattermost（api/v4 posts）/outline（api/search 等）/jenkins（job+build）/nexus（repository custom_credential）4 provider + 3 个实时测试函数；docker_registry guide 补轩辕镜像提示；opendesign.svg 图标补齐；23 个外网 SaaS 目录级置 disabled（feishu/linear/notion/jira/slack/figma/aws/gcloud 等）。坑：SeedDefaultConnectorProviders 保留 existing.Enabled，改 Defaults 后 DB 旧行不自动翻转 → 直接 SQL UPDATE 禁用后重启确认 14 enabled。
+6. **滚动隔离**：AppShell 根容器 h-screen overflow-hidden，aside/nav 自带 overflow-y-auto，header shrink-0，main overflow-y-auto 独立滚动。evaluate 实证 windowScrollable=false、main.scrollTop=600 生效、mainScrollHeight 1716>900。
+
+### 实弹验证
+
+- 连接测试：gitlab（local）200 ✓、opendesign 200 ✓（顺带救活退出的 OD 容器）。
+- 提交 multigent-v2 a472bb6（6 文件 +320/−701），go test ./... 绿、tsc 绿、npm build 480ms。
+- 部署二进制 sha256 5969254dc950c8a2…（本地=VM 一致），带加密 key 起服（v2 plain-dev 时代结束）。
+- 浏览器：settings 无两段+Model Accounts 在 / connections 内网 7 项在+SaaS 5 项隐藏 / agents 四人齐 / 滚动隔离指标全对 / 截图视觉确认 OpenDesign 图标+卡片排版正常。
+
+### 遗留登记
+
+- mattermost/outline/jenkins/nexus 尚未建真实连接（目录就绪，等用户给凭据）。
+- 轩辕镜像用 docker_registry provider 配置（guide 已提示）。
+- OD 容器需开机自启，留意。
+- 两仓均未 push（用户保留 push 决定权）。
+
+## 第六十轮（2026-10-08）Settings 404 修复 + kkrepo(Nexus) 接入 + 组件库实弹
+
+### ①Settings 页一进就 404：根因与修复
+
+Settings 页 Secrets 段调 `GET /api/v1/envvars`、Assistant Account 段调
+`PUT /api/v1/assistant/settings`——两个端点 v2 后端都没实现（G 批缺口），
+页面每次加载各报一个 404。修复（multigent-v2 提交）：
+- `internal/api/envvar_handlers.go`：workspace env-var CRUD 四端点
+  （GET/POST/PUT/DELETE /api/v1/envvars），落 kv_records
+  （workspace_envvars 表），响应契约对齐旧仓（id/key/value/scope/
+  agents/description/createdAt/updatedAt），admin 门禁在 handler 内，
+  审计落 auditLog。空 value 更新保留原值（编辑表单留空语义）。
+- `PUT /api/v1/assistant/settings`：enabled+modelProviderId 存 control
+  settings 表，回显 AssistantStatus 形状（provider 名从 kvfacade 解析）。
+- 测试 3 件（CRUD 往返/坏 scope 400/assistant 往返）+ 全仓绿。
+- 部署 084f078152dfb69b…，浏览器验收：Settings 页零 toast、has404=false、
+  Environment Variables 段在；envvars 实弹 CRUD（建/列/删）全通。
+
+坑：v2 二进制用 flag（-addr/-root）不是旧仓子命令形态；重启时 key 从
+/etc/systemd/system/multigent.service.d/encrypt-key.conf 读取（值不落日志）。
+
+### ②kkrepo 定位与接入（Nexus 兼容 npm 仓库）
+
+- kkrepo 跑在 orb 虚机 ubuntu-node-2 的 docker 里（kkrepo-local-app，
+  镜像 kkrepo:local，MySQL 8 后端）。宿主 19090/19091 端口映射只在
+  node-2 的 docker 网桥生效——VM 主机和外部都连不上（OrbStack 虚机
+  docker publish 不跨虚机）。
+- 解法：node-2 装 socat，`kkrepo-relay.service`（systemd enabled）
+  监听 192.168.139.221:19091 → 转发 192.168.117.2:8080（容器直连 IP），
+  VM 主机经 192.168.139.221:19091 可达。
+- kkrepo 内容：单 hosted 仓库 npm-zjj（npm 格式，ALLOW 写），@cvicse/*
+  五包齐全（react-components 0.4.0/0.4.1-next.0、react-style-base 0.2.0、
+  react-utils 0.1.1、icons 0.1.0、doctor/mcp）；匿名读开启
+  （nx-anonymous 有 nx-repository-view-*-*-read）；admin 本地账号
+  （PBKDF2），已存在一个 NpmToken api_key（npm login 用）。
+- v2 连接：provider=nexus，registryUrl=http://192.168.139.221:19091/
+  repository/npm-zjj/（匿名读），连接测试 200，Connections 页
+  "Nexus Repository 1 connections · Healthy"。
+- 注意：npm-zjj-group 在 kkrepo 里不存在（旧 .npmrc 注释里的 group 仓库
+  是 55.3 老环境的），当前只有 hosted npm-zjj；依赖须分域
+  （@cvicse→kkrepo，@ant-design/antd/react→公网）。
+
+### ③组件库前端接入实弹（Mac 本机）
+
+干净目录 `npm install @cvicse/react-components@0.4.0`：
+- 直接装 404（@ant-design/cssinjs 等依赖不在 hosted 仓库）→ 分域安装
+  （--@cvicse:registry=kkrepo，其余公网）成功，65 包落盘。
+- peer deps（react 18/antd 5/@ant-design/icons 5）先装后装均可。
+- require 加载 37 个导出符号（ProButton/ProCard/ProDialog/ProAlert…），
+  SSR renderToString 实渲染 ProButton 出 antd class 结构——组件库真可用。
+- 组件库源仓在 /Users/imac/Documents/code/react-components（pnpm monorepo，
+  scripts/registry-config.mjs 管registry 分域，CI 走 GitLab 55.3 老环境）。
+
+### 遗留
+
+- multigent-v2 前端尚未实际 import @cvicse/react-components（用户需求是
+  "看下能不能接"，已实证能装能用；真正引入组件替换 UI 是后续轮次）。
+- npm-zjj-group 缺失：若将来要 group（hosted+proxy 缓存公网），需在
+  kkrepo 管理台建 group 仓库并把 npm-zjj 设为成员。
+- kkrepo admin 密码未取得（连接走匿名读够用；要发布/管理再向用户要）。
+- 两仓未 push（用户保留决定权）。
+
+## 第六十一轮（2026-10-08）kkrepo group 仓库创建 + 动态 workflow 判断 + 任务树原型
+
+### ①kkrepo npm-zjj-group 已创建（用户问"没有 group 吗，帮我建"）
+
+- admin 凭据试出：admin/admin123（`/service/rest/v1/security/users` 200）。
+- kkrepo 是 Nexus 兼容实现（klboke/kkrepo），REST 管理面在 `/internal/repositories`
+  （从 jar 反汇编 RepositoriesController 常量池定位；官方 v1 `/repositories` 未实现）。
+- `POST /internal/repositories` 建组成功：npm-zjj-group（recipe npm-group，
+  成员 [npm-zjj]），packument/tarball 双 200；group 路径分域安装实弹通过。
+- v2 连接 registryUrl 已切到 group 路径，重测 200。
+-kkrepo 支持 npm-proxy（recipe 清单里有），将来要缓存公网依赖可在 group 里
+  加 proxy 成员——本轮没建 proxy（无上游凭据需求未确认）。
+
+### ②动态 workflow（现状判断节点）——只给判断，未实现
+
+用户设想：workflow 开头自动加"现状判断"节点（新项目忘初始化→引导初始化；
+存量项目判断依赖/机器环境→有问题经 Mattermost/弹窗问答→按答复决定是否
+初始化；甚至按判断微调 workflow 本身）。判断已给出（见最终回复）：方向理想
+且平台已有全部积木（open_questions 澄清闭环/attention 通知/deferred 语义/
+init_v2 模板），但"动态改 workflow 定义"是危险项应止步于"既有节点参数化"；
+建议落点=模板头部插 preflight 节点+复用问答与初始化模板，勿做自改定义。
+
+### ③大需求任务树 HTML 原型（用户拍板后实现）
+
+- 文件：work/task-tree-prototype.html（老仓 work/ 私有目录，不入库提交）。
+- 形态：树表——U 型 rail 树线（每层一条，last-child 转角，兄弟续线）+
+  批次色 chip（批次1/2/3=蓝/紫/绿，标"并发/收尾"）+ 状态列 + 进度条 +
+  折叠（折叠显示 +N 子任务 chip）+ 依赖注释行。
+- 自检：浏览器实开渲染 14 行/22 rail 段；折叠交互后 12 行+「+2 子任务」
+  chip 显示；截图留证。
+- 实现映射（已取证）：父子=task.ParentID（fanout 派生时已写，
+  runtime_workflow_handlers.go:2305）；批次=plan 物化记录 waveIndex+vars.wpId；
+  依赖=vars.wpDepends（runtime_workflow_handlers.go:2334）；前端 TaskTable
+  现在只显示"↳ {parentId}"文本，无树形——实现即前端聚合渲染+列表 API 回传
+  vars/wave。等用户确认原型后再动 VM 部署仓代码。
+
+## 第六十二轮（2026-10-08）kkrepo 重建事故根治 + npm-public-proxy + group 统一入口实弹
+
+### ①重建 kkrepo 容器踩出两大平台级坑（用户需求"group 也能直接装 antd/react"的前置）
+
+**坑 1：packument/tarball 全 404（数据完好但读不出）**
+- 排查路径：fake-ip DNS 导致 proxy.remoteUrl SSRF 校验拒绝 → DoH 查真实 IP →
+  --add-host 钉 IP 重建容器 → 漏 env 连环（DATASOURCE/两个 SECRET）→ 起服后全 404。
+- 取证闭环（反汇编 + MySQL general log）：repository 查询命中 → asset 表
+  `SELECT * FROM asset_blob WHERE id=18` 命中 → **之后无 blob 内容读取**——
+  FileBlobStorage baseDir 解析为 `/app/blobs`（默认相对路径 `blobs`），容器里
+  不存在 → Files.isRegularFile=false → empty → 404。
+- **根因：旧容器 env 有 `KKREPO_STORAGE_FILE_BASEDIR=/var/lib/kkrepo/blobs`，
+  docker rm 后丢失**（prefix=kkrepo.storage.file，javap FileStorageProperties 定位）。
+- 同时丢失的还有 `KKREPO_SECURITY_ANONYMOUS_READ_ENABLED=true`
+  （application.properties 默认 false）。
+- **教训：docker rm 容器 = env 丢失。重建前必须 `docker inspect` 存下完整 env 清单。**
+- 两个 secret 现持久化在 node-2 虚机 `~/kkrepo-secrets/{payload,credential}`（不再用 /tmp）。
+
+**坑 2：上游回源慢/挂死（npmmirror 真实 IP 直连黑洞）**
+- --add-host 钉真实 IP 后：小包 lodash/axios 成功（250KB/3s），vue 2.1MB 要 49s
+  （≈43KB/s），react 6.8MB 必超时——**钉 IP 走裸网，node-2 出口极慢**。
+- npmmirror 真实 IP + Java httpclient 组合还会整连接黑洞（TCP ESTABLISHED 但零字节）。
+- **正解：去掉 --add-host，让容器解析到 fake-ip（198.19.x/fdfe::x）走宿主代理 TUN，
+  上游用 npmmirror（国内 CDN）**——react 6.8MB 实测 4.5s。
+- npmjs 上游在 node-2 网络下也慢（宿主 curl 60s 拉不完 react packument）。
+
+### ②npm-public-proxy 建成 + group 双成员 + 实弹全绿
+
+- admin/admin123 Basic Auth 建仓失败（403）后走 SQL 直插 repository 表
+  （recipe npm-proxy, upstream https://registry.npmmirror.com, autoBlock）
+  + repository_member 加 group 成员 + cache_version bump catalog:repository 触发热载。
+- 终态三仓：npm-zjj(hosted) / npm-zjj-group(group, members=[npm-zjj, npm-public-proxy])
+  / npm-public-proxy(proxy→npmmirror)。
+- **E2E 实弹**：本机干净目录 .npmrc 只写
+  `registry=http://192.168.139.221:19091/repository/npm-zjj-group/`，
+  `npm install antd@^5 react@^18 react-dom@^18 @cvicse/react-components@0.4.0`
+  一次全绿（137 包 1 分钟），node 运行时加载验证：antd 5.29.3 Button OK、
+  react 18.3.1、@cvicse 37 导出。**用户目标"group 直接装公开包"达成。**
+- 最终容器形态（node-2 虚机 kkrepo-local）：restart=unless-stopped、端口
+  19090(8080 应用)/19091(8081 管理)、卷 kkrepo-local-data:/var/lib/kkrepo、
+  **无 --add-host**、env 清单：SPRING_DATASOURCE_URL/USERNAME/PASSWORD、
+  KKREPO_API_KEY_PAYLOAD_SECRET、KKREPO_CREDENTIAL_SECRET、
+  KKREPO_SECURITY_ANONYMOUS_READ_ENABLED=true、KKREPO_STORAGE_FILE_BASEDIR=/var/lib/kkrepo/blobs、
+  JAVA_OPTS=-Djava.net.preferIPv4Stack=true。
+
+### ③遗留与换血
+
+- **旧 NpmToken 已作废**（api_key 表那条 encrypted_payload 用旧 credential-secret
+  加密，重建换了 secret 解不开）——现在 npm publish 需要重新 `npm login`（admin/admin123）。
+- api_key 表那条 NpmToken 建议重建；admin 密码 admin/admin123 建议用户改掉。
+- group 里 @cvicse 包的 packument 里 tarball URL 域名由请求头推导，多入口
+  （中继 IP/容器 IP）访问均正常。
+- v2 nexus 连接、旧 socat 中继（192.168.139.221:19091→容器 8080）不受影响，沿用。
+
+## 第六十三轮（2026-10-08）preflight 双模板上线 + 树表实装 + brownfield seed 缺陷修复 + 组件库试点
+
+### ①preflight 节点进两模板（用户拍板第六十一轮 §2 建议后实现）
+
+- 子 agent A（commit 92ef6fae）：
+  - greenfield.go v7：19 步，头部插 preflight（agent_task, pm-agent, emerald,
+    x=80）→ preflight_review（human_review, product-owner, amber, x=360）→
+    原步骤顺移 x+=560；approve 边显式 inputMapping 透传 request/context；
+    preflightDesc 引导：发现项目未初始化时经 open_questions 提出「先走
+    project-initialization-v1」。
+  - brownfield.go v2：8 步同构 preflight → preflight_review → readonly_scan…；
+    approve 边以 onboarding_request 名透传。
+  - workflow_handlers.go isRequirementReviewStep 放宽：按声明判定
+    （human_review && InputFields 含 open_questions），不再硬绑
+    id=="requirement_review"——这是 preflight_review 问答卡的服务端前提。
+- **实弹全链（VM，b0c43186d30fe466）**：greenfield 提问→答题→回流→收敛→
+  冻结→推进 requirement_draft 全通；brownfield q1-baseline-branch 答
+  候选 A→冻结→推进 readonly_scan 全通。验收任务事后已 cancel。
+- **实弹抓到真缺陷并修复**（commit 83808a99）：brownfield 任务创建 404
+  "workflow definition not found"——greenfield 在 write.go 任务创建路径
+  auto-seed 而 brownfield 没有。补 EnsureBrownfieldOnboardingDefinition
+  auto-seed 块。**教训：模板 ID（brownfield-onboarding-pipeline，仅 UI
+  实例化产生 wf-* 副本）≠ 固定定义 ID（brownfield-onboarding-v1）；
+  API 直用模板 ID 会 404。**
+- 部署 SOP：交叉编译 → orbctl push → sha256 核对 → install → restart，
+  全程旧仓三 commits 未 push（用户保留 push 决定权）。
+
+### ②任务树表实装（第六十一轮 §3 原型转正）
+
+- 子 agent B（commit b7bd8bc3）：
+  - TaskTable.tsx 重写：树表 flattenTaskTree（孤儿按顶层渲染+环防御）、
+    U 型 rail 树线 22px 四种线段、折叠 caret 28px 热区 + Expand all /
+    Collapse all、批次 chip（wave1 天蓝/wave2 紫/wave3 绿）、依赖注释行、
+    **任务名左侧无 icon（用户明确要求）**、无树数据退化平铺。
+  - write.go/server.go：taskRow 加 Vars，visibleTaskListVars 白名单只透出
+    wpId/waveIndex/wpDepends 三键。
+- 实弹（batch-test1 项目）：DOM 验证 Expand all/Collapse all/父行折叠后
+  "+4 sub-tasks" 计数 chip/批次 chip "Batch 3 · wp-3" 全过；截图双确认
+  rail 对齐与 chip 配色，展开/折叠双态无布局残留。
+
+### ③28091 三端点判定（用户问 tool-bindings/channels/teams 是否有必要加）
+
+v2 前端在调、后端全缺的三个端点（已核实路由表与 handler 面）：
+- `GET /api/v1/agents/{id}/tool-bindings`：AgentRuntimeConnectionsPanel 在
+  workspace 级 agent 详情页调用；项目级同路径端点已存在
+  （server.go:304-306）。判定：**要加（低价值高一致性）**——复用项目级
+  handler 语义、按 kvfacade 存储重定向即可。
+- `GET /api/v1/agents/{id}/channels`：AgentChannelPanel 调用，v2 无 IM
+  bridge 子系统（imbridge 未迁）。判定：**暂不加**——面板会 404 但
+  useApiJson 静默降级为空列表，不白屏；等 IM 域平移时一并做。
+- `GET /api/v1/teams`：AgentsPage 与 ProjectAgentDetailPage 的 agent 表单
+  团队/角色级联下拉在调；v2 store 只有 agents.team TEXT 字段，无 teams 实体
+  （旧仓语义=RBAC 团队管理）。判定：**暂不加**——404 被 catch 吞掉，
+  下拉隐藏（teams.length>0 守卫）；真要做需先裁决 v2 的团队模型，不宜
+  照抄旧仓。
+- 共同结论：三端点 404 都不会炸 UI（catch/useApiJson 降级），紧急度低；
+  tool-bindings 一个值得补齐，其余两个挂账等域平移。
+
+### ④v2 仓组件库试点（用户："可以接入的时候准备接入，测试 MCP 使用效果"）
+
+- cvicse-components MCP 三工具实测全有效：
+  - search_components：精确组件名可查（ProConfigProvider 91 props 全量
+    返回；关键词模糊查询命中率低，"ProDialog"能中，"dialog modal"为空）。
+  - get_recipe：recipe-a-workbench 返回完整 600 行源码 + SHA-256 完整性
+    哈希，ProForm key 重挂/ProTable request 稳定引用等黄金注释直接可抄。
+  - validate_usage：合法代码 0 告警；故意喂 onOk 反模式精准命中
+    （error + 修复建议 + codemod 命令）。
+- 接入试点（v2 commit，HEAD 6784e45 之后）：
+  - web/.npmrc 写 `@cvicse:registry=` kkrepo group 路径（第六十二轮成果
+    首次真实消费）；antd@5.29.3 + @ant-design/icons@5.6.1 +
+    @ant-design/v5-patch-for-react-19 一并装入。
+  - ComponentLibraryProbePage.tsx 挂 /audit 路由（audit 后端已被
+    trim-list 裁决不迁，零产品面风险）；ProConfigProvider 局部包裹，不
+    全局注入。
+  - **验证全绿**：tsc+vite build 过；vitest 39/39；check:locales 524/524；
+    浏览器实弹（本机 dev 27895 + 后端 27893）登录→探针页→ProDialog 打开
+    →提交（onSubmit 自动 loading）→关闭→alert 更新；亮/暗双主题截图，
+    cssinjs 与 Tailwind v4 无可见冲突。
+- 途中踩坑：npm install 重算依赖树后 rolldown（vite 8 内核）的
+  optional native binding（@rolldown/binding-darwin-arm64）丢失——npm
+  已知 bug（npm/cli#4828），报错信息自带修法；`npm i --no-save` 单补
+  该包即恢复，无需删 node_modules。
+- 架构裁决（写进 commit message）：bundle +~2.3MB（antd+echarts 传递
+  依赖），真实页面采用前应 code-split；全面铺开与否留给 F 批页面重建
+  时按页面逐个裁决，本轮只立"能跑、好看、契约对"三事实。
+
+### 遗留
+
+- 旧仓三 commits（92ef6fae/b7bd8bc3/83808a99）未 push；v2 试点 commit 未
+  push——两仓 push 决定权均在用户。
+- npm publish 需重新 login（第六十二轮换血后旧 token 作废）。
+- 三端点中 channels/teams 挂账；tool-bindings 补齐未实施（本轮只判定）。
+
+## 第六十四轮（2026-10-08 下午）：用户报告双 bug 修复 + code-split + 模板方案 + MCP 反馈
+
+### 任务一：任务树表折叠按钮消失（用户报告，修复+实弹验收）
+
+- **症状**：全部折叠后 caret 按钮与表头 Expand all 按钮一起消失，无法再展开；
+  caret 与任务名紧贴无间距。
+- **修复**（commit b8bdd90b，TaskTable.tsx）：
+  - hasTree 改从数据集 parentIds 推导（原来从渲染行 flatRows 推导——全部折叠后
+    无子行无 rail，hasTree 变 false，caret 列与表头按钮整个卸载，折叠操作消灭
+    了自己的撤销入口）；
+  - 任务名容器加 `pl-2.5`（hasTree 时 10px 间距）。
+- **第一次部署踩坑（重要教训）**：commit 后直接交叉编译部署，浏览器复验发现
+  修复没生效——**交叉编译前忘了重跑 `npm run build`**，go:embed 打包的是
+  15:54 的旧 web/dist（修复 18:09 才落盘）。用 bundle 特征串
+  （`some(e=>e.rails.length>0)` 旧推导仍在产物里）实锤后重建前端→重编译
+  →重部署（sha 52192f4c...）。
+- **浏览器实弹全绿**：全部折叠→Expand all 存活；4 个 caret 全部可展开
+  （含藏在折叠祖先后面的嵌套父任务）；Expand all 一键恢复；pl-2.5 实测
+  10px 生效。
+
+### 任务二：跟随页右栏掉到底部（用户报告，根因深挖+修复+实弹验收）
+
+- **症状**：跟随页右侧"当前节点/负责人/状态"竖条跑到页面底部。
+- **定性**：回归 bug，不是用户要求的设计改动。
+- **根因（两层，比较深）**：
+  1. 跟随页 main 是 `grid-cols-[minmax(0,1fr)_420px]` 两列，但编译产物 CSS
+     里 420px 零命中 → grid 退化单列 → aside 掉到底部；
+  2. 该类所在文件的所有"独有类"（max-h-[calc(100dvh-25rem)]、min-h-72）都
+     丢失，而别的文件的同类任意值（96px/24rem/auto）都在 → 整个文件被
+     Tailwind 扫描器跳过；
+  3. **真凶在根 .gitignore**：`projects/`、`teams/` 无锚点目录模式匹配任意
+     层级，把 web/src/pages/projects/ 与 web/src/pages/teams/ 整个子树
+     剪枝（@tailwindcss/oxide Scanner 尊重 .gitignore）。这两个目录下
+     所有页面独有的类全部静默丢失——不止跟随页一个受害者（teams 页、
+     ProjectAgentDetailPage 的 md:grid-cols-[..._auto] 同样丢）。
+- **修复**（commit a65e6bec）：.gitignore 锚定仓库根 `/outputs/`、`/projects/`、
+  `/teams/`（本地运行时数据目录语义不变），附根因注释。
+- **验证**：oxide Scanner 重扫 27 文件回来了；重建后 420px/auto/25rem 全进
+  产物；重编译部署（sha 926be25d...）；浏览器实弹：跟随页 aside
+  left:859/width:420，grid-template-columns: 859px 420px 生效。
+- **v2 仓排查结论**：v2 的 .gitignore 干净无此病（产物里 420px 规则齐全），
+  这是旧仓独有回归。
+
+### 任务三：v2 bundle code-split（用户已同意，落地）
+
+- 探针页（antd 全家桶唯一入口）React.lazy 化（commit b8845d4）：
+  主 chunk 2.26MB → 2.0MB，探针页拆为 305kB 独立 chunk 仅 /audit 访问时加载；
+  tsc 0 错、vitest 39/39 绿。
+
+### 任务四：react_spring_boot 模板完善方案（用户要求"出一方案"）
+
+- 考察对象：batch-test2 workspace（VM）main（模板初始态）vs
+  feature/t-20261004-fu91es（真实交付态 215 文件）。
+- 核心判定：模板"单薄"的本质是**组织规则缺位**——路由（AI 被迫手写切页）、
+  api 分域（单文件 269 行）、组件增长规则、后端 in-memory→DB 升级路径、
+  contract/ 契约冻结（fu91es 自己发明了 wp-0 共享契约）、handoff 搭建规则、
+  文档漂移自检（make docs-check 确定性校验）。
+- 产出：`docs/react-spring-boot-template-evolution-plan.md`（B1 结构补强 /
+  B2 契约+文档防腐 / B3 组件判据，明确不做与风险，模板 1.1.0→1.2.0 路径）。
+  待用户审后实施。
+
+### 任务五：MCP 使用问题反馈（用户要转交组件库团队）
+
+- 产出：`work/cvicse-components-mcp-feedback.md`（不入公开 docs/，交付时手动转发）。
+- 8 项问题按 P1/P2/P3 分级：search 意图查询命中率低（P1）、无兼容约束查询
+  （P1）、recipe 无法发现+覆盖少（P1）、validate_usage 不支持文件扫描（P2）、
+  codemod 建议无可执行工具（P2）、search 缺最小示例（P2）、响应无版本戳（P3）、
+  locale 覆盖不可查（P3）；另列 3 项做得好的（get_recipe 哈希、validate_usage
+  反模式精度、三工具分工）。
+
+### 遗留
+
+- 旧仓本轮 2 commits（b8bdd90b/a65e6bec）+ 方案文档未提交/未 push；v2
+  b8845d4 未 push——push 决定权在用户。
+- docs/react-spring-boot-template-evolution-plan.md 待用户审后按 B1→B2→B3 实施。
+- work/cvicse-components-mcp-feedback.md 需要用户手动转发给组件库团队。
+- 树表折叠与跟随页修复已部署 VM（sha 926be25d，active）并实弹验收，无需回滚。
+
+---
+
+## 第六十五轮（2026-10-08 晚）：模板 1.2.0 实施 + MCP 评审 + 整改方案
+
+### 任务一（承接）：树表折叠不隐藏子任务 bug
+
+- 根因：flattenTaskTree 的 emitSubtree 顶部 `if (emitted.has(row.id)) return`
+  被 walk 已 add 自身 id 短路，折叠父的子孙未标记 emitted，环防御循环把
+  隐藏行平铺回来。修：emitSubtree 改为 `if (!emitted.has(...)) add`（285749e1）。
+- 部署 VM sha 157b0160，实弹：全部折叠 20→9 行、Expand all 恢复、单 caret
+  精确隐藏 4 子任务。
+
+### 任务二：react-components MCP 改动评审（用户转请，/Users/imac/Documents/code/react-components）
+
+- 改动面：search_components 加同义词/意图打分+minimumExample、新工具
+  get_compatibility（peer 范围 vs 测试矩阵双轨判定）、cli.ts 修复 npm bin
+  启动、manifest 生成器强制 searchTerms/minimumExample 契约、README 更新、
+  3 个 changeset、doctor 依赖从 workspace:* 改 registry 版本。
+- 验证：MCP 包 22/22 测试过（vitest）、manifest 校验脚本过、两份
+  manifest（etc 与 mcp generated）逐字节同步、lockfile 链核实（本地仍
+  workspace 链接，发布时 0.2.0-next.0 需已推 registry——本机不在内网未验）。
+- 对照 8 项反馈：P1-1 同义词✅（打分制，it.each 四组场景词全过）、P1-2
+  兼容性✅（设计克制：区分声明范围与已测矩阵，notValidated 显式披露）、
+  P2-6 最小示例✅（生成器 fail-fast 契约）、P3-7 版本戳✅（响应带
+  componentLibraryVersion）；未动：P1-3 recipe 发现机制、P2-4 文件扫描、
+  P2-5 codemod 可执行、P3-8 locale 清单。
+- 质量判定：通过。亮点=诚实边界（testMatrixSemantics 声明"非实时测试
+  结果"）；遗留 nit=mcp-discovery-tools changeset 未登记进 pre.json（下次
+  version 会以正式版发布，与 pre 模式不一致）、.spec/ 未 ignore。
+- 结论已在本轮回复中交付用户；react-components 仓改动未提交（待团队走
+  自己的流程）。
+
+### 任务三（用户授权"去做吧"）：react_spring_boot 模板 1.1.0→1.2.0
+
+- B1 结构：react-router-dom 6.30.6（唯一新 runtime 依赖）+ lazy
+  ItemDetailPage（实测独立 chunk 1.15kB）+ 根部 ErrorBoundary + @ alias
+  （vite resolve+tsconfig paths+@types/node）；services 拆 http.ts +
+  api/{health,items}.ts + api.ts 聚合桶；application-db.yml（H2
+  MODE=PostgreSQL）+ V1__init.sql + runtimeOnly h2 依赖。
+- B2 协作：contract/{README,api-skeleton,error-codes,ddl}.md（变更控制
+  规则）；docs/handoff/TEMPLATE.md（一任务一文件、终态即冻结）；scripts/
+  docs-check.mjs（api-spec 路径集合 vs @RestController 注解集合，确定性
+  比对）接进 make verify。
+- 文档防腐：AGENTS.md 新增 §2 文档所有权（api-spec 机器可查/architecture
+  禁类名清单/README 只写跑起来）+ §3 handoff 规则 + §5 增长判据（组件库
+  ≥8 页或第二处重复模式才引入+主 chunk>800kB 拆分/ui 组件>6 拆目录/
+  依赖最小化）+ §7 安全交付清单强化；CLAUDE.md 收口为命令速查（AGENTS.md
+  唯一事实源）。
+- 实弹验证：临时目录 npm ci → vitest 11/11 绿、tsc -b 0 错、vite build
+  成（lazy 分包生效）；gradle test 4 绿；SPRING_PROFILES_ACTIVE=db
+  bootRun 实弹 curl /api/health UP + POST items 落 H2 成功；docs-check
+  三态（基线 5 路由 ok/故意加假路由 fail/还原 ok）。
+- 提交 eb707c38（36 文件 +865/-178）；.gitlab-ci.yml 版本注释同步 1.2.0。
+
+### 任务四（用户问"流水线哪一环能拦住这些问题"）：整改方案
+
+- 产出 docs/pipeline-remediation-batch-test2.md（8f15408d）：三断裂链
+  逐一映射到流水线环节（编码 prompt 约束缺失/评审无安全清单/测试全 mock
+  无持久化断言/拆分后跨模块契约不物化），四层防线——①模板层（1.2.0
+  已落）②评审闸门层（secret 正则/持久化三问/docs-check 推广/端到端证据
+  四张清单，落点是 reviewer prompt+CI job，不动引擎）③验收证据层（测试
+  构成披露+make test 原文贴评论）④CI 基线补种推广（batch-test3 校准后）。
+
+### 遗留
+
+- 未 push（用户保留决定权）：旧仓 4 commits（b8bdd90b/a65e6bec/285749e1/
+  eb707c38 + 8f15408d）；v2 b8845d4；react-components 仓全部改动。
+- react-components：mcp-discovery-tools changeset 未登记 pre.json、.spec/
+  未 ignore——已告知团队（评审结论内），不代改。
+- 整改方案第二层（评审 prompt 注入四清单）待 batch-test3 实跑校准，
+  尚未实施。
+- 模板 1.2.0 未部署 VM（模板经 go:embed 打进二进制，下次部署随行生效）；
+  存量 batch-test2 workspace 不回填（Seed 只补缺不覆盖，by design）。
